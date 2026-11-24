@@ -295,6 +295,7 @@ async fn host_shutdown_still_clears_retained_recovered_child() {
     let connection = Arc::new(tokio::sync::Mutex::new(ConnectionContext::new(false)));
     let cancellation = tokio_util::sync::CancellationToken::new();
     let mut closing_sessions = std::collections::BTreeMap::new();
+    let progress = crate::host::shutdown::ShutdownProgress::new();
     let report = crate::host::shutdown::shutdown_host(
         &mut task_owner,
         mcp_owner.as_mut(),
@@ -305,6 +306,7 @@ async fn host_shutdown_still_clears_retained_recovered_child() {
         &connection,
         &cancellation,
         &mut closing_sessions,
+        &progress,
     )
     .await;
 

@@ -11,6 +11,15 @@ use peri_acp_types::ports::McpPoolShutdownReport;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use futures::StreamExt;
+
+/// 单个 pool 内并行关闭的上限。
+///
+/// service / process 两张表互不共享锁，单项关闭都有 5s 上限；并行收口把「逐项累加」
+/// 压成「取最大」，同时避免一次拉起过多收尾任务。builtin 监督者不适用此闸门：每项
+/// 移交给独立 task（见 `close_builtin_tasks`），实例数由配置决定。
+pub(super) const MAX_PARALLEL_CLOSES: usize = 8;
+
 pub(super) enum ServiceShutdownState {
     Idle,
     Running {
@@ -29,9 +38,18 @@ async fn close_services(
     mut settled_services: usize,
     mut failed_services: usize,
 ) -> (McpPoolShutdownReport, Vec<(String, McpServiceWrapper)>) {
+    // 各 service 的 close 互不依赖：并行收口，单项 5s 上限不再逐项累加。
+    let results: Vec<_> = futures::stream::iter(services)
+        .map(|(server_name, mut service)| async move {
+            let outcome = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+            (server_name, service, outcome)
+        })
+        .buffer_unordered(MAX_PARALLEL_CLOSES)
+        .collect()
+        .await;
     let mut remaining = Vec::new();
-    for (server_name, mut service) in services {
-        match service.close_with_timeout(SHUTDOWN_TIMEOUT).await {
+    for (server_name, service, outcome) in results {
+        match outcome {
             Ok(Some(_reason)) => settled_services += 1,
             Ok(None) => {
                 tracing::warn!(server = %server_name, "MCP service cleanup remained unfinished");
@@ -44,6 +62,8 @@ async fn close_services(
             }
         }
     }
+    // 并行完成的顺序不稳定：重试队列按 server 名排序，保持报告与重试顺序确定。
+    remaining.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     let unfinished_services = remaining.len();
     let report = if unfinished_services == 0 {
         McpPoolShutdownReport::Complete {
@@ -136,13 +156,16 @@ impl McpClientPool {
 
     async fn close_shared_services(&self) -> usize {
         let services = self.shared_services.lock().clone();
-        for service in services {
-            let _ = peri_time::timeout(
-                SHUTDOWN_TIMEOUT,
-                service.close_with_timeout(SHUTDOWN_TIMEOUT),
-            )
+        // 共享 service 彼此独立：并行收口，不把每项 5s 上限累加。
+        futures::stream::iter(services)
+            .for_each_concurrent(MAX_PARALLEL_CLOSES, |service| async move {
+                let _ = peri_time::timeout(
+                    SHUTDOWN_TIMEOUT,
+                    service.close_with_timeout(SHUTDOWN_TIMEOUT),
+                )
+                .await;
+            })
             .await;
-        }
         let mut services = self.shared_services.lock();
         services.retain(|service| !service.is_stopped());
         services.len()
@@ -566,10 +589,19 @@ impl McpClientPool {
         };
         // builtin 实例：client service 已关闭（上面的 transaction），server 半边 task
         // 随之按「有界等待 → 未收敛才 abort」收口。非 builtin pool 这里是空操作。
-        self.close_builtin_tasks().await;
-        let unfinished_shared = self.close_shared_services().await;
+        // 三张表（builtin supervisors / shared services / processes）互不共享锁，
+        // 收口并行进行；单项上限不再逐组逐项累加。
         #[cfg(not(target_os = "emscripten"))]
-        let unfinished_processes = self.close_processes().await + unfinished_shared;
+        let (_, unfinished_shared, process_unfinished) = tokio::join!(
+            self.close_builtin_tasks(),
+            self.close_shared_services(),
+            self.close_processes()
+        );
+        #[cfg(target_os = "emscripten")]
+        let (_, unfinished_shared) =
+            tokio::join!(self.close_builtin_tasks(), self.close_shared_services());
+        #[cfg(not(target_os = "emscripten"))]
+        let unfinished_processes = unfinished_shared + process_unfinished;
         #[cfg(target_os = "emscripten")]
         let unfinished_processes = unfinished_shared;
         let report = match (report, unfinished_processes) {
@@ -640,9 +672,30 @@ impl McpClientPool {
     pub(crate) async fn close_builtin_tasks(&self) -> Vec<String> {
         let supervisors: Vec<(String, BuiltinInstanceSupervisor)> =
             self.builtin_server_tasks.lock().drain().collect();
+        // 实例之间互不依赖：并行做「有界等待 → 未收敛才 abort」。
+        //
+        // 每项 close 先移交给独立 task：宿主墙钟预算到期会丢弃本 future，而 supervisor
+        // 已从表里摘除；若随 future 一起 drop，server task 只会被 detach（不 abort）。
+        // 所有权转移后，收尾仍会走完 `BUILTIN_CONVERGE_TIMEOUT` 内的「等待 → abort」。
+        // builtin 实例数由配置决定、量级很小，不需要额外的并发闸门。
+        let closes: Vec<(String, tokio::task::JoinHandle<BuiltinCloseOutcome>)> = supervisors
+            .into_iter()
+            .map(|(server_name, supervisor)| {
+                (
+                    server_name,
+                    tokio::spawn(supervisor.close(BUILTIN_CONVERGE_TIMEOUT)),
+                )
+            })
+            .collect();
         let mut aborted = Vec::new();
-        for (server_name, supervisor) in supervisors {
-            let outcome = supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
+        for (server_name, handle) in closes {
+            let outcome = match handle.await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::warn!(server = %server_name, %error, "builtin close task failed");
+                    continue;
+                }
+            };
             if matches!(outcome.tick, TickCloseOutcome::AbortedAfterTimeout)
                 || matches!(outcome.server, BuiltinServerExit::AbortedAfterTimeout)
             {

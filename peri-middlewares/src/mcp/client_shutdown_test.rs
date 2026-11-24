@@ -7,6 +7,99 @@ use crate::mcp::client::SHUTDOWN_TIMEOUT;
 use peri_acp_types::ports::McpPoolShutdownReport;
 
 #[tokio::test]
+async fn test_service_close_runs_in_parallel_across_services() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let pool = Arc::new(McpClientPool::new_empty());
+    let close_count = Arc::new(AtomicUsize::new(0));
+    let mut entered = Vec::new();
+    let mut releases = Vec::new();
+    for index in 0..3 {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        pool.services.lock().insert(
+            format!("service-{index}"),
+            super::controlled_service(entered_tx, Arc::clone(&release), Arc::clone(&close_count)),
+        );
+        entered.push(entered_rx);
+        releases.push(release);
+    }
+
+    // Controlled service 的 close 没有超时：串行实现会卡死在第一个 service 上，
+    // 后续 entered 永远不会到达。并行实现三项先后进入等待，测试即可统一放行。
+    let shutdown = tokio::spawn(async move { pool.shutdown().await });
+    for (index, entered_rx) in entered.into_iter().enumerate() {
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap_or_else(|_| panic!("service {index} close did not start in parallel"))
+            .expect("controlled service must signal entry");
+    }
+    for release in releases {
+        release.notify_one();
+    }
+    let report = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("parallel close must converge")
+        .expect("shutdown task must not panic");
+
+    assert_eq!(close_count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        report,
+        McpPoolShutdownReport::Complete {
+            settled_services: 3,
+            failed_services: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_abandoned_builtin_close_still_aborts_server_task() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let pool = Arc::new(McpClientPool::new_empty());
+    let dropped = Arc::new(AtomicBool::new(false));
+    struct Probe(Arc<AtomicBool>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let probe = Probe(Arc::clone(&dropped));
+    let handle = tokio::spawn(async move {
+        let _probe = probe;
+        std::future::pending::<()>().await;
+        crate::mcp::builtin::runtime::BuiltinServerExit::NotStarted("unreachable".into())
+    });
+    pool.builtin_server_tasks.lock().insert(
+        "cron".to_string(),
+        crate::mcp::builtin::runtime::BuiltinInstanceSupervisor::new_for_test(
+            "cron".to_string(),
+            handle,
+        ),
+    );
+
+    // 宿主预算到期：关闭 future 被丢弃，此时 supervisor 已从表里摘除。
+    tokio::time::timeout(Duration::from_millis(20), pool.close_builtin_tasks())
+        .await
+        .expect_err("server task 不会自行收敛，关闭 future 必须还在等");
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "关闭 future 被丢弃时 server task 仍应存活（收尾交给独立 task）"
+    );
+
+    // 独立收尾任务必须仍走完「有界等待 → abort」，不能把 task 留在 detach 状态。
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("丢弃的关闭 future 不得让 builtin server task 变成无人 abort 的 orphan");
+}
+
+#[tokio::test]
 async fn test_shutdown_drops_pending_oauth_callbacks() {
     let pool = McpClientPool::new_empty();
     assert_eq!(

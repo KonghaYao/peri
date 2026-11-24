@@ -147,6 +147,41 @@ async fn test_scope_zero_grace_aborts_and_drains_pending_task() {
 }
 
 #[tokio::test]
+async fn test_abort_pending_aborts_within_short_budget_not_full_grace() {
+    // 默认 grace 5s：预算（3s）到期时 `shutdown` 还没走到 abort 阶段。
+    let (owner, spawner) = HostTaskOwner::new();
+    let (dropped_tx, mut dropped_rx) = oneshot::channel();
+    struct Probe(Option<oneshot::Sender<()>>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+    let probe = Probe(Some(dropped_tx));
+    spawner
+        .spawn(HostTaskOwnerKind::Host, HostTaskKind::Prompt, async move {
+            let _probe = probe;
+            std::future::pending::<()>().await;
+        })
+        .unwrap();
+
+    owner.begin_shutdown();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut dropped_rx)
+            .await
+            .is_err(),
+        "协作式 cancel 不得让无限等待的任务自行退出"
+    );
+    owner.abort_pending();
+    tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+        .await
+        .expect("预算到期必须请求 abort，不能等满 cooperative grace")
+        .expect("probe 必须随任务 abort 释放");
+}
+
+#[tokio::test]
 async fn test_scope_shutdown_is_idempotent() {
     let (mut owner, _spawner) = HostTaskOwner::new();
     assert_eq!(owner.shutdown().await, HostShutdownReport::Complete);

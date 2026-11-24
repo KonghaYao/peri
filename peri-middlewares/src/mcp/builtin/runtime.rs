@@ -273,6 +273,19 @@ impl BuiltinInstanceSupervisor {
         }
     }
 
+    /// 测试专用：用给定 server task 句柄组装一代监督者（无 tick）。
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        instance: String,
+        handle: tokio::task::JoinHandle<BuiltinServerExit>,
+    ) -> Self {
+        Self::new(
+            instance.clone(),
+            BuiltinServerTask { instance, handle },
+            None,
+        )
+    }
+
     /// 有界关闭：①`tick.take()` → [`TickGuard::shutdown`] ②server task `converge`。
     ///
     /// 两侧结论同时返回。任一侧落到 `*AbortedAfterTimeout` 时告警——`abort` **不是**正常

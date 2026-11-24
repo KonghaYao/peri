@@ -8,11 +8,19 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::connection::ConnectionContext;
+use super::shutdown::ShutdownProgress;
 use super::task_scope::HostTaskOwner;
 use super::task_scope::HostTerminalShutdownReport;
 use super::AcpServerConfig;
 use super::PromptLocks;
 use super::SharedSessions;
+
+/// 资源排空的墙钟预算。
+///
+/// 各子阶段自身已有 5s/10s 上限；正常路径远低于此值。预算只约束「任务/会话/pool
+/// 排空」，不覆盖其后的会话存储关闭（存储必须走自己的有界结清路径）。到期即报告
+/// `Incomplete`，不把未完成的关闭伪装成成功。
+const HOST_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpHostShutdownReport {
@@ -142,7 +150,8 @@ pub(super) struct HostExitContext {
     >,
     pub(super) connection: Arc<tokio::sync::Mutex<ConnectionContext>>,
     pub(super) connection_cancellation: CancellationToken,
-    pub(super) closing_sessions: std::collections::BTreeMap<String, crate::session::AcpSession>,
+    pub(super) closing_sessions:
+        std::collections::BTreeMap<String, Arc<crate::session::AcpSession>>,
 }
 
 struct ExitRound {
@@ -152,6 +161,9 @@ struct ExitRound {
 
 impl HostExitContext {
     /// 会话任务排空之后关闭会话存储：这是唯一持有部署关闭权的时点。
+    ///
+    /// 唯一例外是 `finish` 的预算到期分支：退出已决定，存储也必须显式关闭一次
+    /// （端口自己先停写并有界结清在途写入），而不是把数据面留给进程退出。
     ///
     /// 返回 `Err(())` 表示关闭**未确认**（在途写入未结清、未决持久化仍在，或取消）。
     /// 事实已在实现内部判定并记录，这里只按未完成上报——不重试、不把未确认当成功；
@@ -170,22 +182,39 @@ impl HostExitContext {
     }
 
     async fn finish(mut self) -> ExitRound {
-        let resources = super::shutdown::shutdown_host(
-            &mut self.task_owner,
-            self.mcp_task_owner.as_mut(),
-            &self.cfg,
-            &self.sessions,
-            &self.prompt_locks,
-            &mut self.cont_tx,
-            &self.connection,
-            &self.connection_cancellation,
-            &mut self.closing_sessions,
+        let progress = ShutdownProgress::new();
+        let budgeted = peri_time::timeout(
+            HOST_SHUTDOWN_BUDGET,
+            super::shutdown::shutdown_host(
+                &mut self.task_owner,
+                self.mcp_task_owner.as_mut(),
+                &self.cfg,
+                &self.sessions,
+                &self.prompt_locks,
+                &mut self.cont_tx,
+                &self.connection,
+                &self.connection_cancellation,
+                &mut self.closing_sessions,
+                &progress,
+            ),
         )
         .await;
+        let resources = match budgeted {
+            Ok(report) => Some(report),
+            Err(_) => {
+                // 预算短于 host owner 的 cooperative grace：不在这里显式 abort，
+                // 非协作任务会在每轮重试里重新等满 grace，永远进不到 abort 阶段。
+                self.task_owner.abort_pending();
+                progress.warn_budget_expired();
+                None
+            }
+        };
         let report = match resources {
-            HostTerminalShutdownReport::Incomplete { .. } => AcpHostShutdownReport::Incomplete,
+            Some(HostTerminalShutdownReport::Incomplete { .. }) => {
+                AcpHostShutdownReport::Incomplete
+            }
             // 排空完成才轮得到部署关闭：还有任何未完成的任务时保留存储原样。
-            HostTerminalShutdownReport::Complete { .. } => {
+            Some(HostTerminalShutdownReport::Complete { .. }) => {
                 if self.shutdown_session_store().await.is_err() {
                     AcpHostShutdownReport::Incomplete
                 } else if let Some(owner) = self.cfg.langfuse_shutdown_owner.as_ref() {
@@ -196,6 +225,20 @@ impl HostExitContext {
                 } else {
                     AcpHostShutdownReport::Complete
                 }
+            }
+            // 预算到期：资源排空未确认，但退出已决定。会话存储仍走一次显式关闭
+            // （端口自己先停写并有界结清在途写入），报告保持 Incomplete——不把
+            // 预算超时伪装成 Complete，也不跳过存储关闭。
+            None => {
+                tracing::warn!(
+                    "ACP host shutdown budget expired; closing session store before reporting Incomplete"
+                );
+                if self.shutdown_session_store().await.is_err() {
+                    tracing::warn!(
+                        "session store close was not confirmed after shutdown budget expiry"
+                    );
+                }
+                AcpHostShutdownReport::Incomplete
             }
         };
         if !report.is_complete() {

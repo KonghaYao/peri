@@ -298,6 +298,7 @@ async fn lifecycle_state_matrix() {
     let connection_cancellation = tokio_util::sync::CancellationToken::new();
     let mut cont_tx = None;
     let mut closing_sessions = std::collections::BTreeMap::new();
+    let progress = crate::host::shutdown::ShutdownProgress::new();
     let report = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         crate::host::shutdown::shutdown_host(
@@ -310,6 +311,7 @@ async fn lifecycle_state_matrix() {
             &connection,
             &connection_cancellation,
             &mut closing_sessions,
+            &progress,
         ),
     )
     .await
