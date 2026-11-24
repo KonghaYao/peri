@@ -8,7 +8,7 @@
 >
 > 版本范围：本文件只覆盖 v4 的 part-1。part-1 解决 MCP 实例划分、启动准入、工具注入和 middleware 归属；具体迁移批次、实现提交和现场验收不得回填到本文件，另以对应 issue 或验收记录为准。
 >
-> **v5 取代关系（2026-11-15，Issue #409）**：builtin MCP 的长期目标已改为单出口 `peri`，见 [MCP v5：builtin 单出口目标设计](mcp-v5-single-exit.md)。本文件关于「隔离单位是 builtin MCP 实例」、逐实例 transport/client pool 与六实例目标形态的条款由 v5 取代；迁移期 v4 六实例仍是兼容期与回滚路径，不是目标设计。外部 MCP（stdio/HTTP/ACP）与本文其余启动依赖、工具注入和隔离规则继续有效。v5 尚未实现，现行行为仍以代码与契约测试为准；进度与验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
+> **v5 取代关系（2026-11-15，Issue #409）**：builtin MCP 的长期目标已改为单出口 `peri`，见 [MCP v5：builtin 单出口目标设计](mcp-v5-single-exit.md)。本文件关于「隔离单位是 builtin MCP 实例」、逐实例 transport/client pool 与六实例目标形态的条款由 v5 取代；迁移期 v4 六实例仍是兼容期与回滚路径，不是目标设计。外部 MCP（stdio/HTTP/ACP）与本文其余启动依赖、工具注入和隔离规则继续有效。v5 `peri` 已是宿主默认装配；workspace 代理及其余验收的覆盖与限制见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
 >
 > 完整性口径：下表只统计具体 `impl Middleware for ...` 类型，不统计 `ChainSlot`、目录名、目标包分组或 builtin MCP 实例（`BUILTIN_MCP_INSTANCES`）；已删除类型不再列入。
 

@@ -12,7 +12,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 - **宿主拥有 agent 执行权**：LLM 调用、工具执行、权限与审批由 Peri 侧完成；
 - **引擎拥有编排权**：agent 之间的并行、流水线与阶段推进由脚本与 `workflow-engine` 决定。
 
-能力以 builtin MCP 实例 `workflow` 接入会话；实例 handler 背后的唯一控制面是领域接口 `WorkflowRuntime`（`peri-workflow`），Node wire 是该接口的实现细节（[workflow-mcp.md](workflow-mcp.md) §3）。
+能力以 builtin MCP 接入会话：默认单出口 `peri`，legacy 独立实例 `workflow` 仅作回滚；实例 handler 背后的唯一控制面是领域接口 `WorkflowRuntime`（`peri-workflow`），Node wire 是该接口的实现细节（[workflow-mcp.md](workflow-mcp.md) §3）。
 
 ### 1.1 脚本与核心原语
 
@@ -28,7 +28,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 | `workflow(nameOrScriptPath, args?)` | 运行子 workflow（一层嵌套上限；按名解析 `.claude/workflows/`） |
 | `tool(name, args?)` | 确定性 MCP 工具调用；effective 名，`structuredContent` 优先，失败抛可 `try/catch` 的类型化 `WorkflowToolError` |
 
-参数契约（含 `scriptPath`）与用法校验归 `WorkflowRuntime` 的 `params` 单一权威；`strictPreflight` 恒拒绝——workflow 原语与调用图不可静态验证。面向模型的手册是 builtin skill `ultracode`（多 agent 编排）与 `codemode`（确定性工具管线，见 §13）。
+参数契约（含 `scriptPath`）与用法校验归 `WorkflowRuntime` 的 `params` 单一权威；`strictPreflight:true` 显式拒绝，未传或 `false` 不要求预检——workflow 原语与调用图不可静态验证。面向模型的手册是 builtin skill `ultracode`（多 agent 编排）与 `codemode`（确定性工具管线，见 §13）。
 
 ### 1.2 设计目标
 
@@ -46,7 +46,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 
 ```
 模型面（peri-agent）
-  mcp__workflow__{Workflow,WorkflowStatus,WorkflowKill}（deferred 桥接）
+  mcp__peri__{Workflow,WorkflowStatus,WorkflowKill}（默认 deferred；legacy 前缀 mcp__workflow__）
 宿主面（peri-acp host）
   ACP workflow/* handler（经池调用实例）· WorkflowTaskConsumer · WorkflowProjection · 会话装配
 实例面（peri-mcp-workflow）
@@ -61,7 +61,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 
 依赖方向自下而上：引擎与传输面不感知会话；领域面不依赖 ACP 与 middlewares；实例面只做协议映射；宿主面负责会话装配与资源消费。
 
-**端口归属**：`WorkflowRuntime` 由会话装配创建（`peri-acp/src/host/workflow_agent.rs` 的 `create_session_workflow_chain`），经实例槽位绑定给 builtin `workflow` 实例（`peri-mcp-workflow` 的 `WorkflowInstanceInput`）；MCP 面与宿主消费者共享同一份状态，绑定首次为准，跨实例冲突是可观察的装配错误。
+**端口归属**：`WorkflowRuntime` 由会话装配创建（`peri-acp/src/host/session_workflow_chain.rs` 的 `create_session_workflow_chain`），经 `peri-mcp-workflow` 的 `WorkflowInstanceInput` 绑定给 builtin workflow 能力（默认单出口 `peri`，legacy 独立 `workflow`）；MCP 面与宿主消费者共享同一份状态，绑定首次为准，跨实例冲突是可观察的装配错误。
 
 **通信协议**：宿主 ←→ 引擎经 stdin/stdout 双向 JSON-RPC 2.0（NDJSON，每行一条完整消息）。通用 framing、pending 登记与进程停止语义在 `peri-js-runtime`；workflow 特有 method 语义在 `peri-workflow/src/protocol.rs` 与 `runner/message_loop.rs`。
 

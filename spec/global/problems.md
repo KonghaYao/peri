@@ -1,6 +1,6 @@
 # 历史问题检索
 
-本文件只提供历史检索路由，不保存逐 issue 摘要、实施日志或事故副本。当前行为始终以代码、契约测试、`docs/standards/`、模块 `CLAUDE.md` 和 `docs/design/` 为准；未关闭工作见 `spec/issues/`。
+本文件只提供历史检索路由，不保存逐 issue 摘要、实施日志或事故副本。当前行为始终以代码、契约测试、[工程规范](../../docs/standards/index.md)、[代码索引](../../docs/code-index/) 和 [权威设计](../../docs/design/README.md) 为准；未关闭工作见 `spec/issues/`。
 
 ## 按月检索已完成记录
 
@@ -18,13 +18,13 @@ git show <删除提交>^:spec/issues/2026-09-17-p0-workspace-validation-blocks-i
 
 | 主题 | 当前事实源 | Git 中的旧归档路径 |
 | --- | --- | --- |
-| Agent loop、Compact、session runtime | `peri-agent/CLAUDE.md`、`docs/code-index/peri-agent.md` | `spec/archive-issues/agent-core/` |
-| ACP、事件、transport、session | `peri-acp/CLAUDE.md`、`docs/code-index/peri-acp.md`、`docs/standards/architecture-contracts.md` | `spec/archive-issues/acp-protocol/`、`spec/archive-issues/architecture/` |
-| Middleware、工具、SubAgent、MCP | `peri-middlewares/CLAUDE.md`、`docs/code-index/peri-middlewares.md`、`docs/design/tool-system.md` | `spec/archive-issues/tools/`、`spec/archive-issues/subagent/` |
+| Agent loop、Compact、session runtime | [Agent 索引](../../docs/code-index/peri-agent.md)、[Compact](../../docs/design/micro-compact.md) | `spec/archive-issues/agent-core/` |
+| ACP、事件、transport、session | [ACP 索引](../../docs/code-index/peri-acp.md)、[跨层契约](../../docs/standards/architecture-contracts.md) | `spec/archive-issues/acp-protocol/`、`spec/archive-issues/architecture/` |
+| Middleware、工具、SubAgent、MCP | [Middleware 索引](../../docs/code-index/peri-middlewares.md)、[工具系统](../../docs/design/tool-system.md) | `spec/archive-issues/tools/`、`spec/archive-issues/subagent/` |
 | Workflow 与 JavaScript host | `docs/code-index/peri-workflow.md`、`docs/code-index/peri-js-runtime.md`、`docs/design/workflow.md`、`npm-packages/@peri-workflow/` | `spec/archive-issues/workflow/` |
 | Controller、Runtime、取消与会话工作区 | `docs/standards/architecture-contracts.md`、`docs/code-index/peri-controller.md`、`docs/code-index/peri-runtime.md`、`docs/code-index/peri-resources.md`、`docs/code-index/peri-process.md` | `spec/archive-issues/architecture/` |
 | Model provider 与 prompt cache | `docs/code-index/peri-model.md`、`docs/design/model-adapters.md`、`docs/design/system-prompt.md` | `spec/archive-issues/llm-provider/` |
-| TUI 渲染、输入、面板、交互 | `peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md`、`docs/design/tui-acp-data-flow.md`、`docs/design/user-input-queue.md` | `spec/archive-issues/tui-*/` |
+| TUI 渲染、输入、面板、交互 | [TUI 索引](../../docs/code-index/peri-tui.md)、[数据流](../../docs/design/tui-acp-data-flow.md)、[输入队列](../../docs/design/user-input-queue.md) | `spec/archive-issues/tui-*/` |
 | Langfuse | `docs/reference/langfuse-data-integrity.md`、`docs/code-index/peri-controller.md`、`docs/code-index/langfuse-client.md` | `spec/archive-issues/langfuse/` |
 | 测试、CI 与跨平台证据 | `docs/standards/testing.md`、`KonghaYao/peri-e2e` | `spec/archive-issues/code-quality/`、`spec/reviews/` |
 

@@ -7,7 +7,7 @@
 
 会话 ID、历史消息、配置、frozen/inherited context 与待发送消息持久保存。处理批次、阶段、调用关联、执行预算和运行 ticket 是当前进程运行态，不以完整 WorkState 或替代执行账本持久化；`threads.work_state` 只是粗粒度续跑意图，不携带上述执行状态。待发送消息的结构与恢复边界见 [Thread MQ](thread-mq.md)，MQ 行只表示尚未移交，不表示模型已处理。
 
-RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → MessageQueue`。Receive 是唯一退出判断点；普通 Transcript 写入、压缩和消息 flags/projection 保持。进程退出终止该进程的执行责任：不续接旧进程的模型请求、工具调用、审批、回调或旧发送，也不重放停机期间的外围事件；待发消息保留在 MQ，由进入会话后的新运行消费。`work_state=working` 的 thread（含 async child）只在进入会话时按持久事实建立新运行，见 [Session Durable](session-durability.md)。
+RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → MessageQueue`。Receive 是唯一的常规 MQ 消费入口和正常耗尽判定点；取消、阶段失败或中断也可终止本次循环，不因此丢弃已提交事实。进程退出终止该进程的执行责任：不续接旧进程的模型请求、工具调用、审批、回调或旧发送，也不重放停机期间的外围事件；待发消息保留在 MQ，只有之后建立新运行时才由 Receive 消费（Stop 本身不建立运行）。`work_state=working` 的 thread（含 async child）只在进入会话时按持久事实建立新运行，见 [Session Durable](session-durability.md)。
 
 历史中的 started、未结束工具或子任务只表示历史事实，不是当前执行证据。未知外部副作用不改写为成功、失败或已取消；删除追踪不会自动停止外部任务。新输入不因已撤销的旧检查点被冻结。
 
@@ -35,7 +35,7 @@ Pause/Stop 和输入取回依据当前 runtime/队列裁决；取消与关闭仍
 
 `session/list`、`session/load`、`session/resume`、历史 replay、fork 和手动续聊保留。按 ID 读取历史与元数据，按保存的环境身份验证可执行装配，保留冻结输入及继承快照；不能把当前启动环境覆盖保存环境。
 
-加载创建新的 live runtime，只回放 canonical 内容，不恢复旧执行状态、owner invocation 或 Work 阶段；`work_state=working` 的 child 可按同一路径冷装配为新运行，不复用旧调用身份（见 [Session Durable](session-durability.md)）。History 读取和普通续聊不查询已删除的 Work/control 表。环境缺失时独立历史读取仍可用，不能伪造执行准入。
+可执行的冷进入创建新的 live runtime，只回放 canonical 内容，不恢复旧执行状态、owner invocation 或 Work 阶段；`work_state=working` 的 child 可在恢复范围内冷装配为新运行，不复用旧调用身份（见 [Session Durable](session-durability.md)）。独立历史读取及窗口浏览不建立 live runtime，也不激活恢复；只有历史可读但不可执行时不能伪造准入。History 读取和普通续聊不查询已删除的 Work/control 表。
 
 模型请求使用独立派生视图校验工具调用与结果配对：已有真实结果保持正文与身份，错位的独立结果在请求视图中移到对应调用之后；缺失结果补充明确说明“历史结果缺失，执行状态与外部副作用未知”的协议错误结果。该占位不代表工具执行失败、取消或未执行，不触发重跑，不写入 canonical 历史或数据库。紧随调用的用户消息若以内嵌内容块承载完整真实结果，保留内容；若结果块位于文本等内容之后，仅在请求视图中将结果块前移。其结果不完整或错位时明确报错，避免重复补位。重复调用身份、重复结果、无对应调用的结果以及结果早于调用同属无法安全修补的完整性错误，发送前明确报错并记录。`Raw` 内容在模型桥接处报错，不会形成 Anthropic 请求。普通 Reason、Full 摘要与预算估算共用这一视图，覆盖加载、fork、rewind 和当前进程中断后的续聊。
 

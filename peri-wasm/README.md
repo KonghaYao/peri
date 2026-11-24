@@ -65,20 +65,24 @@ The startup settings use the same injected document as native ACP stdio.
 sessions can recover after a module restart. The JavaScript host supplies
 workspace paths as identities; WASM creates matching empty directories in
 its virtual filesystem so ACP resolves the same configuration scope.
-Workspace file tools require a separately connected remote MCP server.
-Builtin MCP instances are unavailable in this deployment.
+Workspace file tools require an external remote MCP server; native process,
+stdio and local tool MCP packages do not run in WASM. See the [code index](../docs/code-index/peri-wasm.md)
+for the trusted bootstrap credential path.
 
-`@peri-code/sdk` uses this export through `WasmAcpTransport` while retaining
-the existing Agent and Session interfaces. Its HTTP demo is
-`npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`.
+[`@peri-code/sdk/wasm`](../npm-packages/@peri-sdk/README.md#公开入口) exposes
+`startWasmRuntime` and `WasmAcpTransport`; `/wasm-node` adds Node-compatible
+network and DNS adapters. For application chat, use the SDK Chat API with
+`runtime.kind="wasm"` or supply a transport. There is no public in-process
+Agent/Session API. See the [HTTP demo](../npm-packages/@peri-sdk/examples/demo/demo-wasm.ts).
 
 ## Local Cloudflare Workers check
 
 The probe lives in `@peri-code/sdk` and uses its Bun dependencies with
 Wrangler's local `workerd`.
-It starts a real local peri-loom container, a simulated model HTTP endpoint,
-and the existing ACP Host. It checks initialize, session creation, prompt
-completion, model HTTP, session listing, and loading after the Host closes.
+It starts a real local peri-loom container, a simulated model HTTP endpoint
+and the existing ACP Host. The smoke covers the SDK runtime entry
+(`startWasmRuntime` with only `moduleFactory`), queued input delivery, a
+direct `session/prompt` turn and list/load after restarting the Host.
 
 ```bash
 cd npm-packages/@peri-sdk
@@ -89,6 +93,6 @@ bun run smoke:workers
 The probe's `wrangler.toml` enables `nodejs_compat`, keeps the generated ES
 module separate from Wrangler's bundler, and imports the precompiled WASM as
 a module. It supplies `mainScriptUrlOrBlob` to the Emscripten module. This
-check runs locally; deployment to Cloudflare's hosted Workers,
-production Turso/model endpoints, resource limits, and the TypeScript SDK
-entrypoint on Workers still need separate acceptance.
+smoke runs locally. It does not exercise the full SDK Chat API on Workers.
+Hosted Workers deployment, production Store/model endpoints and production
+resource limits still need separate acceptance.

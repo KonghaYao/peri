@@ -1,191 +1,17 @@
 # peri-swarm
 
-本地单机 Agent 网关：HTTP 面 → Rivet actor → 进程内 Peri ACP Host → 远程 workspace
-MCP（Bun 托管的沙箱）→ 两个 Loom 逻辑库。设计边界见
-[Peri Swarm 本地开发宿主](../docs/design/peri-swarm.md)，验收证据见
-[本地开发链路验收](../docs/verification/peri-swarm-local-dev.md)。
+本地单机 Agent 网关：HTTP 客户端 → Rivet actor → 进程内 Peri ACP Host。Hosted 工具经
+Bun 托管的 workspace MCP 执行。Peri 会话和 Swarm 状态各用独立的 Loom 逻辑库；可以
+同属一个 Loom 实例，但不能共用数据库 locator，也没有本地 SQLite 回退。
 
-本文是本地操作手册，不是运行时权威：字段与错误码以 `src/` 与契约测试为准。
+- **接入**：[启动顺序](#启动顺序)、[Node SDK 示例](#node-sdk-同会话追问与续读)。
+- **实现契约**：[Peri Swarm 设计](../docs/design/peri-swarm.md)；[生产拓扑](#生产部署拓扑目标)仅为目标。
+- **验收**：[本地环境](../docs/verification/peri-swarm-local-dev.md)、
+  [追问、空闲回收与宿主中断](../docs/verification/peri-swarm-local-followup-2026-11-23.md)。
 
-## 生产部署拓扑（目标）
-
-下图是生产目标形态，不是当前实现。下文把 `peri-swarm` 进程称为 Peri Swarm Server
-（操作章节沿用「网关」旧称）。仓库内没有对应的编排或验收记录，设计文档把跨机
-调度、生产 TLS、多租户与跨实例接管列为非目标。带前置标注的节点，今天在代码中不存在
-或不可配置；差距见下表。
-
-```mermaid
-flowchart TB
-  subgraph EDGE["边缘"]
-    SDK["远程客户端<br/>OpenAI SDK"]
-    OPS["运维 / 控制面"]
-  end
-
-  subgraph ING["入口层（部署时提供）"]
-    IG["Nginx / API Gateway<br/>TLS 终止 · 统一鉴权 · 配额 · 审计<br/>SSE 不缓冲"]
-  end
-
-  subgraph APP["应用层：Peri Swarm Server 副本组"]
-    subgraph SP1["Server 进程 #1"]
-      subgraph SL1["无状态接口"]
-        P1["axum /v1 · Bearer"]
-      end
-      subgraph AL1["有状态 actor"]
-        A1["SwarmActor<br/>agent/&lt;logicalId&gt;"]
-        H1["ACP Host<br/>Peri 库"]
-        A1 --> H1
-      end
-    end
-    subgraph SPN["Server 进程 #N"]
-      subgraph SLN["无状态接口"]
-        PN["axum /v1 · Bearer"]
-      end
-      subgraph ALN["有状态 actor"]
-        AN["SwarmActor<br/>agent/&lt;logicalId&gt;"]
-        HN["ACP Host<br/>Peri 库"]
-        AN --> HN
-      end
-    end
-  end
-
-  subgraph RIVET["Rivet engine 集群（3+ 实例）"]
-    ELB["入口 LB<br/>6420 · TLS · 1h idle"]
-    E1["engine 实例 A"]
-    E2["engine 实例 B"]
-    ELB --> E1
-    ELB --> E2
-    E1 <--> E2
-  end
-
-  subgraph SANDBOX["沙箱主机池（需放开 loopback 校验）"]
-    BUN["Bun 桥（peri-sandbox）"]
-    subgraph SRT["SRT 沙箱"]
-      PX["peri mcp-start<br/>Peri 可执行进程"]
-    end
-    BUN --> PX
-  end
-
-  subgraph LOOM["Loom 部署（Docker，独立主机）"]
-    S1[("会话库<br/>demo/main")]
-    S2[("Swarm 状态库<br/>swarm/main")]
-  end
-
-  MODEL["模型供应商<br/>HTTPS"]
-
-  SDK -->|"HTTPS"| IG
-  OPS --> IG
-  IG -->|"HTTP"| P1
-  IG --> PN
-  P1 <-->|"typed action"| ELB
-  PN <--> ELB
-  ELB <-->|"route"| A1
-  ELB <--> AN
-  P1 -.->|"前置读"| S2
-  PN -.-> S2
-  A1 -->|"写"| S2
-  AN --> S2
-  H1 -->|"Hrana"| S1
-  HN --> S1
-  H1 -->|"HTTPS"| MODEL
-  HN --> MODEL
-  H1 -.->|"MCP"| BUN
-  HN -.-> BUN
-
-  classDef stateless fill:#e8f1ff,stroke:#4a7fd8,color:#0b2545
-  classDef stateful fill:#fff0e2,stroke:#d1843a,color:#4a2400
-  class P1,PN stateless
-  class A1,H1,AN,HN stateful
-  style SL1 fill:#e8f1ff,stroke:#4a7fd8
-  style SLN fill:#e8f1ff,stroke:#4a7fd8
-  style AL1 fill:#fff0e2,stroke:#d1843a
-  style ALN fill:#fff0e2,stroke:#d1843a
-```
-
-### 网络分段
-
-- 公网只暴露入口层；Peri Swarm Server、Rivet engine、Loom 全部在私网，客户端不直连
-  `8080`。
-- 入口层只做南北向 HTTP；`agent/<logicalId>` 的 actor 分配由 Rivet engine 负责，
-  Ingress 不需要粘滞会话。
-- 会话库与状态库由两个 locator 分别指向，由 Server 侧直连 Loom，可以落在不同实例，
-  但都必须可写；沙箱不连接 Loom。
-
-### 进程内分层
-
-同一份 `peri-swarm` 二进制里逻辑上分成两部分；当前没有 API-only / actor-only 的 role
-开关，每个副本同时承担两者。
-
-| 维度 | 无状态接口 | 有状态 actor |
-| --- | --- | --- |
-| 入口 | axum `/v1`、Bearer、body limit | `SwarmActor` action、`GET /events` |
-| 职责 | 校验、公开契约投影、SSE 包装 | 会话执行、进程内 ACP Host、事件序列 |
-| 内存状态 | 无会话状态；只有 client 与 store 句柄 | live ACP Host、事件广播、会话视图 |
-| 持久状态 | 少量前置读（`rootSessionId`、404） | 以 Loom 为准写行、items、绑定 |
-| 多副本 | 任意副本处理任意请求 | 一个 `agent/<logicalId>` 同一时刻只在一个副本 |
-| 转发 | 经 Rivet client 发 typed action | 由 engine 定位；副本间不直连 |
-| 失败/重建 | 副本可随时替换 | 只读恢复 + `session/load`；在途 turn 502 |
-| 扩缩容 | 加副本即可 | 由 engine 放置；保留 spare capacity |
-
-请求路径：无状态层解析 → typed action → engine → 承载 actor 的副本；actor 的 `on_start`
-只恢复只读视图。沙箱侧的 `peri mcp-start` 是独立 Peri 进程，属 workspace MCP，不算
-这两层。
-
-### 组件分离条件
-
-| 组件 | 生产位置 | 落地前置（当前差距） |
-| --- | --- | --- |
-| 传统 Gateway（Nginx 等） | 独立边缘层 | 不需要自研；`PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 未开启时 Server 只能 loopback，需同机代理 |
-| Peri Swarm Server（`peri-swarm`） | 可替换副本组（每副本同时是 Rivet node） | 仓库内无多副本编排；副本间共享 engine、namespace、pool 与部署身份；在途 turn 的跨实例接管是设计非目标 |
-| Rivet engine | 3+ 实例 + LB（独立主机组） | endpoint/token/namespace/pool 与 spawn 已可配置；非 loopback 必须 `never`；客户端只接受明文 `http`，TLS/CA 未支持 |
-| `peri-sandbox` | 沙箱主机池 | `validate_bun_url` 只接受 loopback `http`；远程需 HTTPS 与主机认证 |
-| Loom | 独立 Docker 主机 | locator 已接受 `http(s)`；存储 SDK 无法注入 CA，跨机需私网明文 + 网络隔离，或前置终止 TLS 的代理 |
-| 模型供应商 | 公网 | 无 |
-
-### Rivet engine 怎么部署？
-
-这里的 engine 是 Rivet 的 control plane（本地 3.1.1，`:6420`），不是 Peri 进程或 ACP
-Host。Peri 侧的运行单元是 actor 实例：`peri-swarm` 的 `SwarmActor`（key
-`agent/<logicalId>`）。早期试验性 `@peri-code/rivet` 的 `PeriChatActor` 已随适配层移除；
-Peri Swarm 是唯一 actor 主线。control plane 选择承载
-actor 的 node、按需唤醒，并把 HTTP/WebSocket 请求转发给该 node；actor 逻辑跑在连到
-同一 control plane 的 Server 进程里。node 不需要公网地址或 actor 入站端口。
-
-官方生产形态不是「一台 engine」，而是 3+ 个 engine 实例 + 前置 LB（6420/TLS/1h idle），
-每个实例独立块盘并共享启用 versioning 的 bucket；单机只适合开发。所有 Server 副本必须
-使用同一 endpoint、namespace 与 pool，并先创建 pool。endpoint 填**集群入口 LB** 地址，
-不填单个实例；客户端不做集群发现。依据：
-[Architecture](https://rivet.dev/docs/architecture)、[Nodes](https://rivet.dev/docs/nodes)、
-[Control plane production checklist](https://rivet.dev/docs/deploy/self-host/control-plane/production-checklist)。
-
-control plane 是 Rivet 官方组件，Peri 不实现也不设计其内部：本地由 `rivetkit` 下载到
-`~/.rivetkit/engine/v3` 并按需拉起，生产直接部署官方 `rivetdev/engine`。Peri 只负责
-配置面与部署编排（LB、TLS、namespace/pool、凭据、bucket 与磁盘）。
-
-配置面已可外置：endpoint、token、namespace、pool 由环境变量提供，token 只按变量名引用；
-`PERI_SWARM_RIVET_ENGINE_SPAWN=never` 关闭本地拉起，非 loopback endpoint 启动前做 5s
-TCP 预检，不可达直接失败。仍未支持连接安全：只接受明文 `http`，官方生产要求 6420
-前置 TLS 与 1h idle。endpoint 的字面地址必须是环回、RFC1918、ULA 或 link-local；
-域名不做 DNS 解析，由部署保证指向私网。
-
-仅把 engine 搬到另一台机器，不会自动获得生产调度能力。Rivet 已负责 node 放置、唤醒与
-15s 重调度；Peri 侧仍不承诺在途 turn 接管：设计把跨机调度、租约/fencing 与跨实例接管
-列为非目标，`running` 行在重建 actor 上返回 502。扩副本前先固定部署边界。
-
-### 入口层（Ingress）
-
-入口层用现成的传统 Gateway（Nginx、Envoy、云 API Gateway）即可，不需要 Peri 自研：
-它只做 TLS 终止、统一鉴权、配额与审计。Peri Swarm Server 是 Agents API 的应用层
-服务（`/v1`、Bearer、SSE），本身没有这些能力。要求：
-
-- 入口只做 HTTP 负载；副本之间没有点对点 actor 连接（node 不开放 actor 入站端口），
-  action 由 engine 转发到承载 actor 的副本，按 `logicalId` 路由，不依赖粘滞会话。
-- 关闭响应缓冲，SSE 逐帧透传；读超时大于 `PERI_SWARM_SSE_HEARTBEAT_MS` 的心跳间隔。
-- 入口完成 TLS 与统一鉴权；Server 的 Bearer 作为第二道，两处凭据独立轮换。
-- 入口到副本走私网；健康检查用 `GET /healthz`（无鉴权）。
-
-未开 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 时，入口只能与 Server 同机或共享网络命名空间；
-打开后 Server 可监听任意非 loopback 地址（含 `0.0.0.0`），但 Bearer 仍是唯一鉴权，
-TLS 必须由入口终止。
+这是从源码构建的本地开发路径。Agent CLI 的 `agent-v*` 发布资产不分发 Swarm 服务；
+Swarm 的 OpenAI 兼容客户端使用 npm `openai`，不是 `@peri-code/sdk`。本文是操作手册，
+字段和错误码以设计、源码与契约测试为准。
 
 ## 前置
 
@@ -398,13 +224,12 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 普通 SDK 初始化按官方文档；把 `baseURL` 指到 `http://127.0.0.1:8080/v1`，`apiKey` 用
 `PERI_SWARM_API_KEY`。
 
-- **官方**：OpenAI Agents SDK `openai@7.60.0` 与官方 API 的类型、文档约定。
+- **官方**：Node 包 `openai` 的 `beta.agents.sessions` 客户端。下表的契约对照以
+  `7.60.0` 为基线；本地追问和续读还记录了 `7.62.0`，不代表所有官方资源均兼容。
 - **我们**：Peri Swarm 网关的实际行为。
 - 下表只列两者不一致的地方；一致的官方字段和流程不再重复。
 
 定级判据：`P0` 是官方 SDK 默认调用失败或返回错误结果（当前无此类差异）；`P1` 是官方必需字段或文档能力缺失，主流程可走但兼容性不完整；`P2` 是可选能力、扩展或边缘语义差异，不影响官方默认调用。
-
-数据库没有生产数据；表中涉及 schema 或持久化结构的改动不构成阻断，真正的阻断是缺少运行时事实或数据源。
 
 | 优先级 | 项目 | 官方 | 我们 | 不能同步的难点 |
 | --- | --- | --- | --- | --- |
@@ -431,7 +256,18 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
   列表分页用 `after` + `limit`，没有 `cursor` 参数。
 - `prompt_cache_options: {}` 等于官方默认 `{"ttl":"30m"}`；只有 `null` 清空，省略表示保持。
 
+### Node SDK 同会话追问与续读
+
+下面使用已创建的会话 `id`（沿用 create 返回的 id），不为追问新建会话。用收到的最后
+事件游标续读；没有游标只订阅未来事件，因此要观察本轮必须先开流再 POST。断线后可重试
+同一条输入，但应保留原幂等键；新输入使用新键。HTTP 202 是受理回执，不代表已经运行或得到终态。
+
 ```js
+// 实时：先开流再 POST；tail 是上次流收到的最后事件游标，没有游标时省略（Tail 只收实时帧）。
+// 必须三个实参；两实参时 { after } 会被当作 RequestOptions。tail 为 0 时保留 after，回放全部。
+const streamOptions = tail == null ? {} : { after: tail };
+const live = await client.beta.agents.sessions.events.stream(id, streamOptions, {});
+
 // 使用官方 SDK 在同一会话追问。重试同一条输入时复用 inputId。
 const inputId = crypto.randomUUID();
 const response = await client.beta.agents.sessions.events.create(id, {
@@ -442,9 +278,6 @@ const response = await client.beta.agents.sessions.events.create(id, {
   }],
 }).asResponse();
 const ack = await response.json(); // HTTP 202，含 inputId 和 lastItemSeq
-
-// 实时：必须三个实参；两实参时 { after } 会被当作 RequestOptions
-const live = await client.beta.agents.sessions.events.stream(id, { after: tail }, {});
 
 // items：官方 CursorPage 自动翻页可用；直接读 body 时 TS 中 body 是 protected
 const page = await client.beta.agents.sessions.items.list(id, { order: 'asc', after, limit: 50 });
@@ -564,14 +397,198 @@ stateDiagram-v2
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 宿主在 turn 中退出后，历史查询返回已存状态。下一条新用户输入触发原会话恢复；同步中断的旧 turn 记录为失败，Peri 按持久 MQ 恢复待处理工作。
-- 真实双库 Loom 已验证共享环境的引用转交和最后一次删除。旧库迁移、两个副本同时迁移、
-  `json_each` metadata 过滤及删除事务的中途故障仍需专门验收。
+- 真实双库 Loom 已验证 Swarm 共享绑定转交和最后引用删除；这不等于清除 Bun 的
+  工作目录或预留。旧库迁移、双副本并发迁移、真实 Loom 的 metadata 过滤和删除事务的
+  故障边界尚待验收。
 - `turns.usage`/`subagent_id` 恒 `null`；`prompt_cache_options` 只持久化/回显，本地模型链
   是否使用未验证。官方 SDK 的删除已通过本地 Rivet engine，后台 `ctx.destroy` 的完成时机仍待独立观测。
-- 沙箱的后台任务在 Bun 运行期间保活。空闲回收后保留同一 MCP URL，后续工具调用会启动新 run；显式停止的环境须重新预留。
+- 沙箱空闲回收关闭运行实例但保留 MCP URL、sandboxId 和工作区；下一次工具调用
+  唤醒新 run。已跟踪的后台任务在同一 Bun 进程中保活，终态后恢复空闲计时。显式
+  停止的环境须重新预留；不承诺 Bun 重启后恢复在途任务。
+- SDK 探针中的取消在完成边界收到 `completed/end_turn`；真实模型生成中断、
+  跨故障域恢复与无 fencing 条件下的双宿主接管没有验收。
 - `sandbox.state` 在会话投影中固定为 `null`；`sandbox.runId` 只反映预留时 Bun 返回的值，
   不随后续运行更新；实时状态以 Bun 为准。
 - `peri-swarm` 默认只绑定 loopback，非 loopback 需显式开关；只有单 Bearer，自身不做
   TLS，入口依赖外部 Nginx/Gateway。外部 engine 配置面已实现，但未在活体 engine 上验收；
   Bun bridge 仍只接受 loopback；多副本部署、Loom 远端、多租户、跨机调度、1000 Agent
   规模、Linux SRT 与真实第三方 MCP 未验收。
+
+## 生产部署拓扑（目标）
+
+下图用于说明目标部署的组件边界，不是部署步骤。Peri Swarm Server 即上文的网关；
+仓库目前没有对应的生产编排或验收记录。跨机调度、多租户和跨实例接管缺少实现或验收，
+不能套用本地配置推断上线能力；差距见下表。
+
+```mermaid
+flowchart TB
+  subgraph EDGE["边缘"]
+    SDK["远程客户端<br/>OpenAI SDK"]
+    OPS["运维 / 控制面"]
+  end
+
+  subgraph ING["入口层（部署时提供）"]
+    IG["Nginx / API Gateway<br/>TLS 终止 · 统一鉴权 · 配额 · 审计<br/>SSE 不缓冲"]
+  end
+
+  subgraph APP["应用层：Peri Swarm Server 副本组"]
+    subgraph SP1["Server 进程 #1"]
+      subgraph SL1["无状态接口"]
+        P1["axum /v1 · Bearer"]
+      end
+      subgraph AL1["有状态 actor"]
+        A1["SwarmActor<br/>agent/&lt;logicalId&gt;"]
+        H1["ACP Host<br/>Peri 库"]
+        A1 --> H1
+      end
+    end
+    subgraph SPN["Server 进程 #N"]
+      subgraph SLN["无状态接口"]
+        PN["axum /v1 · Bearer"]
+      end
+      subgraph ALN["有状态 actor"]
+        AN["SwarmActor<br/>agent/&lt;logicalId&gt;"]
+        HN["ACP Host<br/>Peri 库"]
+        AN --> HN
+      end
+    end
+  end
+
+  subgraph RIVET["Rivet engine 集群（3+ 实例）"]
+    ELB["入口 LB<br/>6420 · TLS · 1h idle"]
+    E1["engine 实例 A"]
+    E2["engine 实例 B"]
+    ELB --> E1
+    ELB --> E2
+    E1 <--> E2
+  end
+
+  subgraph SANDBOX["沙箱主机池（需放开 loopback 校验）"]
+    BUN["Bun 桥（peri-sandbox）"]
+    subgraph SRT["SRT 沙箱"]
+      PX["peri mcp-start<br/>Peri 可执行进程"]
+    end
+    BUN --> PX
+  end
+
+  subgraph LOOM["Loom 部署（Docker，独立主机）"]
+    S1[("会话库<br/>demo/main")]
+    S2[("Swarm 状态库<br/>swarm/main")]
+  end
+
+  MODEL["模型供应商<br/>HTTPS"]
+
+  SDK -->|"HTTPS"| IG
+  OPS --> IG
+  IG -->|"HTTP"| P1
+  IG --> PN
+  P1 <-->|"typed action"| ELB
+  PN <--> ELB
+  ELB <-->|"route"| A1
+  ELB <--> AN
+  P1 -.->|"前置读"| S2
+  PN -.-> S2
+  A1 -->|"写"| S2
+  AN --> S2
+  H1 -->|"Hrana"| S1
+  HN --> S1
+  H1 -->|"HTTPS"| MODEL
+  HN --> MODEL
+  H1 -.->|"MCP"| BUN
+  HN -.-> BUN
+
+  classDef stateless fill:#e8f1ff,stroke:#4a7fd8,color:#0b2545
+  classDef stateful fill:#fff0e2,stroke:#d1843a,color:#4a2400
+  class P1,PN stateless
+  class A1,H1,AN,HN stateful
+  style SL1 fill:#e8f1ff,stroke:#4a7fd8
+  style SLN fill:#e8f1ff,stroke:#4a7fd8
+  style AL1 fill:#fff0e2,stroke:#d1843a
+  style ALN fill:#fff0e2,stroke:#d1843a
+```
+
+### 网络分段
+
+- 公网只暴露入口层；Peri Swarm Server、Rivet engine、Loom 全部在私网，客户端不直连
+  `8080`。
+- 入口层只做南北向 HTTP；`agent/<logicalId>` 的 actor 分配由 Rivet engine 负责，
+  Ingress 不需要粘滞会话。
+- 会话库与状态库由两个 locator 分别指向，由 Server 侧直连 Loom，可以落在不同实例，
+  但都必须可写；沙箱不连接 Loom。
+
+### 进程内分层
+
+同一份 `peri-swarm` 二进制里逻辑上分成两部分；当前没有 API-only / actor-only 的 role
+开关，每个副本同时承担两者。
+
+| 维度 | 无状态接口 | 有状态 actor |
+| --- | --- | --- |
+| 入口 | axum `/v1`、Bearer、body limit | `SwarmActor` action、`GET /events` |
+| 职责 | 校验、公开契约投影、SSE 包装 | 会话执行、进程内 ACP Host、事件序列 |
+| 内存状态 | 无会话状态；只有 client 与 store 句柄 | live ACP Host、事件广播、会话视图 |
+| 持久状态 | 少量前置读（`rootSessionId`、404） | 以 Loom 为准写行、items、绑定 |
+| 多副本 | 任意副本处理任意请求 | 一个 `agent/<logicalId>` 同一时刻只在一个副本 |
+| 转发 | 经 Rivet client 发 typed action | 由 engine 定位；副本间不直连 |
+| 失败/重建 | 副本可随时替换 | 只读恢复 + `session/load`；在途 turn 502 |
+| 扩缩容 | 加副本即可 | 由 engine 放置；保留 spare capacity |
+
+请求路径：无状态层解析 → typed action → engine → 承载 actor 的副本；actor 的 `on_start`
+只恢复只读视图。沙箱侧的 `peri mcp-start` 是独立 Peri 进程，属 workspace MCP，不算
+这两层。
+
+### 组件分离条件
+
+| 组件 | 生产位置 | 落地前置（当前差距） |
+| --- | --- | --- |
+| 传统 Gateway（Nginx 等） | 独立边缘层 | 不需要自研；`PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 未开启时 Server 只能 loopback，需同机代理 |
+| Peri Swarm Server（`peri-swarm`） | 可替换副本组（每副本同时是 Rivet node） | 仓库内无多副本编排；副本间共享 engine、namespace、pool 与部署身份；在途 turn 的跨实例接管是设计非目标 |
+| Rivet engine | 3+ 实例 + LB（独立主机组） | endpoint/token/namespace/pool 与 spawn 已可配置；非 loopback 必须 `never`；客户端只接受明文 `http`，TLS/CA 未支持 |
+| `peri-sandbox` | 沙箱主机池 | `validate_bun_url` 只接受 loopback `http`；远程需 HTTPS 与主机认证 |
+| Loom | 独立 Docker 主机 | locator 已接受 `http(s)`；存储 SDK 无法注入 CA，跨机需私网明文 + 网络隔离，或前置终止 TLS 的代理 |
+| 模型供应商 | 公网 | 无 |
+
+### Rivet engine 怎么部署？
+
+这里的 engine 是 Rivet 的 control plane（本地 3.1.1，`:6420`），不是 Peri 进程或 ACP
+Host。Peri 侧的运行单元是 actor 实例：`peri-swarm` 的 `SwarmActor`（key
+`agent/<logicalId>`）。早期试验性 `@peri-code/rivet` 的 `PeriChatActor` 已随适配层移除；
+Peri Swarm 是唯一 actor 主线。control plane 选择承载
+actor 的 node、按需唤醒，并把 HTTP/WebSocket 请求转发给该 node；actor 逻辑跑在连到
+同一 control plane 的 Server 进程里。node 不需要公网地址或 actor 入站端口。
+
+官方生产形态不是「一台 engine」，而是 3+ 个 engine 实例 + 前置 LB（6420/TLS/1h idle），
+每个实例独立块盘并共享启用 versioning 的 bucket；单机只适合开发。所有 Server 副本必须
+使用同一 endpoint、namespace 与 pool，并先创建 pool。endpoint 填**集群入口 LB** 地址，
+不填单个实例；客户端不做集群发现。依据：
+[Architecture](https://rivet.dev/docs/architecture)、[Nodes](https://rivet.dev/docs/nodes)、
+[Control plane production checklist](https://rivet.dev/docs/deploy/self-host/control-plane/production-checklist)。
+
+control plane 是 Rivet 官方组件，Peri 不实现也不设计其内部：本地由 `rivetkit` 下载到
+`~/.rivetkit/engine/v3` 并按需拉起，生产直接部署官方 `rivetdev/engine`。Peri 只负责
+配置面与部署编排（LB、TLS、namespace/pool、凭据、bucket 与磁盘）。
+
+配置面已可外置：endpoint、token、namespace、pool 由环境变量提供，token 只按变量名引用；
+`PERI_SWARM_RIVET_ENGINE_SPAWN=never` 关闭本地拉起，非 loopback endpoint 启动前做 5s
+TCP 预检，不可达直接失败。仍未支持连接安全：只接受明文 `http`，官方生产要求 6420
+前置 TLS 与 1h idle。endpoint 的字面地址必须是环回、RFC1918、ULA 或 link-local；
+域名不做 DNS 解析，由部署保证指向私网。
+
+仅把 engine 搬到另一台机器，不会自动获得生产调度能力。Rivet 已负责 node 放置、唤醒与
+15s 重调度；Peri 侧仍不承诺在途 turn 接管：设计把跨机调度、租约/fencing 与跨实例接管
+列为非目标，`running` 行在重建 actor 上返回 502。扩副本前先固定部署边界。
+
+### 入口层（Ingress）
+
+入口层用现成的传统 Gateway（Nginx、Envoy、云 API Gateway）即可，不需要 Peri 自研：
+它只做 TLS 终止、统一鉴权、配额与审计。Peri Swarm Server 是 Agents API 的应用层
+服务（`/v1`、Bearer、SSE），本身没有这些能力。要求：
+
+- 入口只做 HTTP 负载；副本之间没有点对点 actor 连接（node 不开放 actor 入站端口），
+  action 由 engine 转发到承载 actor 的副本，按 `logicalId` 路由，不依赖粘滞会话。
+- 关闭响应缓冲，SSE 逐帧透传；读超时大于 `PERI_SWARM_SSE_HEARTBEAT_MS` 的心跳间隔。
+- 入口完成 TLS 与统一鉴权；Server 的 Bearer 作为第二道，两处凭据独立轮换。
+- 入口到副本走私网；健康检查用 `GET /healthz`（无鉴权）。
+
+未开 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 时，入口只能与 Server 同机或共享网络命名空间；
+打开后 Server 可监听任意非 loopback 地址（含 `0.0.0.0`），但 Bearer 仍是唯一鉴权，
+TLS 必须由入口终止。

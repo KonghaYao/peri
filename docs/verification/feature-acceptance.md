@@ -5,7 +5,7 @@
 
 功能定义与评级只在 [功能目录](../reference/feature-catalog.md)；本表维护当前实现、源码定位和证据缺口。“相关测试”是已定位的候选证据入口，仍须逐断言确认覆盖范围，不能据此声称整行边界已验证。各行“未复验”指本次文档变更未重跑对应运行行为，并非已确认产品缺陷。所有 L1–L4 的场景 ID、关键断言和固定产品/测试 SHA 对账交 [peri-e2e #10](https://github.com/KonghaYao/peri-e2e/issues/10)，不在 Peri 复制测试编排。L5 没有自动新增 E2E 的义务。
 
-已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。#456 尚未合入本盘点基线。
+已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。下表 F-MCP-015/016 已单独按 `b71c5e82` 对齐 #449 合入状态；其余行仍沿用各自注明的证据基线。
 
 | ID | 实现状态 | 契约 | 证据或缺口 | 验证状态 |
 | --- | --- | --- | --- | --- |
@@ -95,8 +95,8 @@
 | F-MCP-012 | 源码存在 | [契约](../design/acp-mcp-control.md) | [源码](../../peri-middlewares/src/mcp)；缺口：动态注册的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-MCP-013 | 源码存在 | [契约](../design/mcp-cache.md) | [源码](../../peri-middlewares/src/mcp)；缺口：MCP 缓存的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-MCP-014 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../peri-middlewares/src/mcp)；缺口：MCP 独立服务的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-MCP-015 | 目标；未合入 | [契约](../design/tool-system.md) | [源码](../../peri-middlewares/src/mcp)；缺口：#449 目标实现与端到端证据；不得以现有动态注册替代 | 未复验 |
-| F-MCP-016 | 目标；未合入 | [契约](../design/tool-system.md) | [源码](../../peri-middlewares/src/mcp)；缺口：#449 目标实现与端到端证据；不得以现有动态注册替代 | 未复验 |
+| F-MCP-015 | 源码存在 | [契约](../design/tool-system.md) | [别名回归](../../peri-middlewares/src/tool_search/execute_tool_test.rs)、[搜索契约](../../peri-middlewares/src/tool_search/search_tool_test.rs)；旧名仅解析兼容，不另注册 schema | 未复验 |
+| F-MCP-016 | 源码存在 | [契约](../design/mcp-v5-single-exit.md) | [Loader](../../peri-middlewares/src/mcp/loader.rs)、[启动不连接断言](../../peri-middlewares/src/mcp/dynamic_initialize_test.rs)；外置 P01 的范围见 [测试规范](../standards/testing.md)，不以 ACP 动态注册替代 | 未复验 |
 | F-WORKSPACE-001 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../mcp-packages/workspace/src)；缺口：文件读取的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-WORKSPACE-002 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../mcp-packages/workspace/src)；缺口：文件写入的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-WORKSPACE-003 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../mcp-packages/workspace/src)；缺口：文件编辑的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |

@@ -9,7 +9,7 @@
 A native Rust coding agent for macOS, Linux, and Windows.<br>
 Bring an Anthropic or OpenAI-compatible endpoint.
 
-[**Get started ↓**](#get-started) · [Documentation](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/konghayao/peri/releases)
+[**Get started ↓**](#get-started) · [User guide (简体中文)](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/KonghaYao/peri/releases)
 
 </div>
 
@@ -93,13 +93,15 @@ Rewind · Fork · Resume<br>
 
 ## Get started
 
+The installers download published `agent-v*` release binaries, not builds of the current branch. Set `PERI_INSTALL_VERSION` to a full tag from [Releases](https://github.com/KonghaYao/peri/releases) to install that version. The scripts verify the release archive against its published SHA-256 checksum.
+
 **macOS / Linux**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh | bash
 ```
 
-中国大陆用户可使用代理安装：
+If direct GitHub downloads fail, this optional mirror supplies both the download and release API endpoints (中国大陆用户可选)：
 
 ```bash
 curl -fsSL https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scripts/install.sh \
@@ -108,7 +110,7 @@ curl -fsSL https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scrip
     bash
 ```
 
-安装完成后，运行 `peri update --use-proxy` 通过同一代理更新。
+For a script-managed install, `peri update --use-proxy` updates through this same mirror. With mise, use mise to manage updates.
 
 **Windows PowerShell**
 
@@ -119,42 +121,42 @@ irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | 
 Also installable with [mise](https://mise.jdx.dev/) through the `github:KonghaYao/peri` tool;
 set `version_prefix = "agent-v"` to strip the release tag prefix.
 
-Follow the installer's PATH instructions, then run `peri` in your project. Complete model setup and restart Peri.
+Follow the installer's PATH instructions and run Peri from your project directory. If no usable model provider is configured, the interactive setup wizard opens before your first session.
 
 ```bash
-peri                         # Start in your project
-peri -c                      # Continue your last session
-peri -p "Review this branch"  # Run a task and exit
-peri update                  # Update Peri
+peri --permission-mode default  # Interactive session with approval prompts when policy requires
+peri -c                         # Continue the most recent session in this directory
+peri -p "Summarize this project" # Run a non-interactive task and exit
+peri update                     # Update a script-managed installation
 ```
 
-Tool calls are auto-approved by default. For approval prompts, use `--permission-mode default`.
+Without an explicit permission mode, the default is Bypass. Headless `-p` does not show approval prompts. Permission modes are not OS sandboxing; use an isolated workspace when running untrusted projects.
 
 <details>
 <summary><strong>Configuration & runtime notes</strong></summary>
 
-- `/login`: providers · `/model`: model profiles · `/threads`: saved sessions.
-- Settings: `~/.peri/settings.json` (`--config-file`). Sessions: `~/.peri/threads/threads.db` (`--db-path`).
-- ACP client: `peri acp --cwd /path/to/project`.
+- Use `/login` to manage providers, `/model` to configure and select model profiles, and `/threads` to browse saved sessions.
+- By default, global settings are in `~/.peri/settings.json` and the local session database is `~/.peri/threads/threads.db`. Select different paths with `--config-file` and `--db-path`. See [configuration sources and precedence](docs/design/configuration-authority.md).
+- For an external ACP client, run `peri --setup` once in a terminal if model settings are not ready. After setup exits, configure the client to launch `peri acp --cwd /path/to/project` as a stdio subprocess. Put global options such as `--config-file` before `acp`. The stdio entry starts in Bypass; the client can select a different permission mode for the session.
 - Workflows require Node.js. Extensions may need other dependencies.
 - Claude Code compatibility varies by feature. Caching depends on your provider and workload.
 - Coordination uses skills and a shared runtime. MetaHarness changes apply to new sessions; MCP Apps needs a compatible host.
 
-Full options: `peri --help`. More: [Documentation](https://konghayao.github.io/peri-cool/).
+See `peri --help` and `peri acp --help` for the options supported by your installed version.
 
 </details>
 
 <details>
 <summary><strong>Build & contribute</strong></summary>
 
-Requires Rust with Edition 2024 support and native build tools.
+Requires the Rust toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) and native build tools.
 
 ```bash
 git clone https://github.com/konghayao/peri.git
 cd peri
-./dev.sh   # 开发模式；读取仓库根 .env（可选）
-./dev-tui.sh   # TUI 组件 storybook（textarea/list/scrollbar/markdown/OpenUI）；鼠标优先，q 退出，--dump 供无 TTY 检查
-# 构建发布二进制：
+./dev.sh      # Run from source; loads the repository .env if present
+./dev-tui.sh  # Launch the TUI component storybook; q quits, --dump works without a TTY
+# Build a release binary from this checkout:
 ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```
 

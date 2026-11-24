@@ -1,22 +1,20 @@
 # Peri Swarm 本地开发宿主
 
-> 状态：**已批准目标设计**（2026-11-20）。单机本地链路（HTTP 面、Rivet actor、双
-> Loom 库、Bun 沙箱、MCP 注入与 reattach）已落地，并以真实组件验收，证据见
-> [本地开发验收记录](../verification/peri-swarm-local-dev.md)；跨机调度、生产 TLS、
-> Linux SRT 与 1000 Agent 规模未验收。进度与剩余项以该记录的 `unverified` 清单和分支
-> `feat/peri-swarm-local-dev` 为准。本文只写稳定结构与边界，不记录实施批次、测试数量
-> 或运行日志。
+> 状态：**已实现单机开发宿主；生产拓扑为已批准目标**。本地链路验收见
+> [基础链路](../verification/peri-swarm-local-dev.md)与
+> [同会话追问、空闲回收及宿主中断](../verification/peri-swarm-local-followup-2026-11-23.md)。
+> 真实模型、多租户边界、跨实例在途接管、生产 TLS 与规模未验收。本文只写稳定结构与边界。
 
-Peri Swarm 是生产主线：Rivet actor 接线、会话托管与沙箱编排由本 crate 唯一实现。
+Peri Swarm 是服务端部署的实现主线，不是生产就绪声明：Rivet actor 接线、会话托管与沙箱编排由本 crate 唯一实现。
 早期试验性 TS 适配层（`npm-packages/peri-rivet`、`npm-packages/agent-builder`）已于
 2026-11-22 移除，不再作为部署入口。
 
 ## 1. 范围与非目标
 
 本地部署把一条 HTTP 调用链固定下来：客户端 → `peri-swarm`（axum 网关 + Rivet
-actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙箱）→ 两个 Loom
-逻辑库。断连不终止执行；客户端按序号续读；Rust 宿主退出后，下一次交互经
-`session/load` 恢复会话事实。
+actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使用 Bun 托管的
+沙箱；Peri 与 Swarm 分别读写各自的 Loom 逻辑库。客户端断连不终止执行，重连可按
+序号续读。Rust 宿主退出后的恢复由新输入触发，详见 §7。
 
 非目标：
 
@@ -699,7 +697,7 @@ Bun：
    执行工作区命令。当前执行机禁止 SRT 的 Unix socket，且无法使用 systemd 用户总线；
    生产 `systemd-run` 与 SRT 组合仍待验证。
 7. **真实模型工具调用**：工具 wire、冷/热分界与结果回填已在 stub 驱动下验证；
-   真实模型是否会选择工具、如何重试与失败恢复未验证。
+   真实模型是否会选择工具、如何重试、失败恢复及流式生成中断仍未验证。
 8. **调用方第三方 MCP**：注入形状与 `session/load` 复用有集成测试，但没有真实第三方
    MCP server 的端到端运行。
 9. **冷态可见性降级**：hosted 会话冻结的 system prompt 不含远端 workspace 指令与
@@ -711,7 +709,9 @@ Bun：
     权限凭据。
 13. **engine 重启后的客户端重连**：运行中停/启 engine 时进程是退出、请求 502 还是
     自动重连，未验证。
-14. **官方会话资源面的活体验证**：`swarm_turns` 建表、既有库的 `ALTER` 迁移与
-    `sessions.list` 的 `json_each` metadata 过滤只在单测中验证 SQL/参数形状，未在
-    真实 Loom 上执行；官方 `openai@7.60.0` 客户端进程尚未消费
-    `sessions.list/update/delete/turns`。
+14. **官方会话资源面**：既有库升级与双副本并发迁移、真实 Loom 的 metadata 过滤、
+    删除事务中断、SDK 完整资源面仍需独立验收；已覆盖范围见
+    [官方 SDK 探针](../verification/peri-swarm-session-resources-2026-11-21.md#5-真实官方-sdk-探针)。
+15. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
+    202 推断已执行。无 owner/lease/fencing 时不得让多个宿主同时服务同一 logicalId；
+    即使部署支持节点放置，也未证明旧宿主已停止。

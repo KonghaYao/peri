@@ -39,7 +39,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |
 | `PERI_MCP_CACHE` | MCP 响应缓存开关；`true/false`、`1/0`、`on/off`，忽略首尾空白和大小写；非法值报配置错误。环境值不强制覆盖文件中的 false；全部缺省时启用。 | `peri-config/src/mcp.rs` |
-| `PERI_MCP_BUILTIN` | 全局禁止默认注入内建 `web`、`artifact`、`cron`、`monitor`、`workspace`、`workflow` MCP 实例；`off` 或 `0` 关闭注入，缺省开启，其他值告警后仍开启。关闭 `workspace` 还会移除内建文件/终端/资源能力；`--bare` 也受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
+| `PERI_MCP_BUILTIN` | 选择内置 MCP 装配：缺省及 `on` / `1` / `v5` 使用单一 `peri` 出口；`legacy` / `v4` 为迁移期独立实例回滚；`off` / `0` 不自动注入内置能力。未知值告警并使用单出口。浏览器 worker（无进程内 builtin）恒为零注入，不读取本变量；显式配置的 remote workspace 仍按 url 注入。关闭 workspace 能力时不再提供内置文件、终端和资源能力；`--bare` 同样受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
 | `PERI_MCP_APPS` | stdio ACP 的 MCP Apps deployment profile；支持 MCP Apps 的客户端启动 Peri 时携带此变量，**存在即启用**，空串或 `0` 也启用；缺省关闭。Peri 提供 ACP relay，客户端负责 Apps UI。 | `peri-acp/src/host/stdio/mod.rs` |
 | `PERI_ASK_USER_TIMEOUT_SECS` | AskUser 等待 ACP 客户端回答的超时秒数；无效或缺省为 300 秒，`0` 为无限等待。适用于 TUI 和 stdio 共用 broker。 | `peri-acp/src/broker/transport_broker.rs` |
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |
@@ -52,7 +52,13 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `PERI_WEB_FETCH_TOKEN` | Web MCP 实例 `env` 中抓取请求的可选 Bearer 凭据；缺省或空串时不发送 `Authorization`。宿主不解释、不记录值。 | 同上 |
 | `PERI_WORKFLOW_ARTIFACT_DIR` | 显式注入的 Workflow 包目录（`package.json` + `dist/` 入口）；仍按同一包身份、入口越界与入口 SHA-256 校验，通过后直接使用（不写入本机缓存），校验失败告警并回落本机缓存/随包来源。部署与测试的注入点。 | `peri-workflow/src/runner/artifact.rs` |
 
-支持 MCP Apps 的客户端应在启动 stdio ACP 子进程时传入 `PERI_MCP_APPS=1`，例如 `PERI_MCP_APPS=1 peri acp`。Artifact 连接信息经 `mcpServers.artifact.env` 传给内建实例，例如 `{"mcpServers":{"artifact":{"env":{"PERI_ARTIFACTS_URL":"${ARTIFACT_ENDPOINT}","PERI_ARTIFACTS_TOKEN":"${ARTIFACT_SECRET}"}}}}`；Web 后端同理经 `mcpServers.web.env` 传给内建 `web` 实例（例如 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`）。`${…}` 由 MCP 配置加载器展开，因此 shell 变量可经该语法引用。外部 Artifact MCP 子进程使用自己的 MCP `env` 配置，不需要 Peri 宿主解释这些字段。
+支持 MCP Apps 的客户端在启动 stdio ACP 子进程时传入 `PERI_MCP_APPS=1`。默认 v5 中，Artifact 与 Web 的后端参数配置在 `mcpServers.peri.env`（全局 settings 的 `config.mcpServers`，或项目 `.mcp.json` 的顶层 `mcpServers`）。例如：
+
+```json
+{"mcpServers":{"peri":{"env":{"PERI_ARTIFACTS_URL":"${ARTIFACT_ENDPOINT}","PERI_ARTIFACTS_TOKEN":"${ARTIFACT_SECRET}"}}}}
+```
+
+`${…}` 由 MCP 配置加载器展开。旧 `mcpServers.artifact.env` 仅在 legacy 装配生效，默认 v5 不迁移它；未配置有效 URL 时会使用公共默认服务。Web 能力启用时，v5 兼容读取旧 `mcpServers.web.env`，同名键优先使用 `peri.env`。外部 Artifact MCP 子进程使用它自己的 `env`。边界见 [v5 装配](../design/mcp-v5-single-exit.md) 和 [Artifact 操作参考](../reference/artifact-remote-storage.md)。
 
 ## Browser Gateway
 

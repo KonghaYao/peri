@@ -1,6 +1,6 @@
 # peri-acp 协议设计
 
-> 已批准变更（2026-10-07）：已移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。撤销接口返回 method-not-found，不保留成功 shim。
+> 已批准变更（2026-10-07）：已移除持久执行接管及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议；这不等于移除 §2.1.1 的进入会话恢复。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。撤销接口返回 method-not-found，不保留成功 shim。
 
 > 状态：现行设计
 >
@@ -8,9 +8,9 @@
 
 ## 1. 协议分层
 
-ACP 协议分为标准 ACP 方法（TUI → 服务）与 ACP 事件通知（服务 → TUI）。标准方法承载请求-响应和交互；事件经 ACP 的 v2 映射与协议化面投递给客户端。
+Peri 在同一 JSON-RPC 传输上使用标准 ACP 方法与 Peri 专用扩展；交互请求、取消通知和服务端事件各有独立语义。事件经 ACP 的 v2 映射投递给客户端。
 
-**标准 ACP（JSON-RPC 方法）**：TUI 调用，ACP 执行并返回。覆盖会话生命周期、prompt 提交、配置/权限控制、插件管理、后台任务与工作流控制。请求-响应语义——发一个请求，收一个结果。
+**JSON-RPC 方法**：会话与 prompt 使用 ACP 基础交互；插件、后台任务、工作流、待发送队列等另有 Peri 扩展。请求有配对响应；通知（如 `session/cancel`）没有。
 
 **ACP 事件通知**：当前 TUI 的主事件面是标准 `session/update` 和 `peri/agent_event`。`peri/unstable_event` 只保留兼容或特定扩展用途，不作为通用 Agent → TUI 事件管道；完整链路见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
 
@@ -18,9 +18,9 @@ ACP 协议分为标准 ACP 方法（TUI → 服务）与 ACP 事件通知（服�
 
 ---
 
-## 2. 标准 ACP 方法（TUI → Agent）
+## 2. ACP 方法与 Peri 扩展（客户端 → 服务端）
 
-TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自定义事件来替代标准协议已有的操作。
+有标准 ACP 操作时不另造自定义事件；下表也列出 TUI 使用的 Peri 扩展，不应把它们当成所有 ACP 客户端都支持的标准方法。
 
 ### 2.1 会话生命周期
 
@@ -115,6 +115,8 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 保持完整，留给下一次 load 原位修复。
 
 #### 2.1.1 会话恢复结果 `_meta.peri.recovery`
+
+这里的恢复是显式进入会话时根据存储事实作判断，必要时用新运行实例启动恢复工作；不是接管旧进程、旧运行尝试或外部执行。只读历史分页和窗口读取不触发恢复。
 
 `session/load` / `session/resume` 的**会话装配与历史回放成功**后，即使进入会话的恢复准备失败也返回 `Ok`：历史与占用保留可展示，恢复结果放在 `_meta["peri.recovery"]`；该字段只在实际注入提醒或发生失败时附加，普通 idle load 不产生。失败不再使用 `-32011`（该码保留给历史游标跨会话错误）。
 
@@ -383,6 +385,12 @@ recovery 元数据并保留历史首屏。
 | `session/input/*` | 见共享 `UserInput*Request` DTO | 队列快照或操作回执 | `peri.userInputQueue` 协商的 enqueue / dispatch / takeback / snapshot；短控制请求与实际运行分离，见[用户待发送设计](user-input-queue.md) |
 | `session/execute-command` | — | — | **无宿主注册（遗留 `dispatch/execute_command.rs`，无生产调用者）**。Slash 命令由 executor 入口的 `session/command/` 注册表（`CommandRegistry`）拦截处理，不走此 JSON-RPC 方法；HITL 审批和 AskUser 回答也不经过它（见 §2.3 注） |
 
+主线待发送队列中，普通 `enqueue` 不打断当前模型或工具；可运行时按队首先后逐条交接。
+用户显式“立即发送”使用原有 `session/input/dispatch`，携带指定 `inputIds`，不是新增 steering RPC。
+只有活跃模型调用期间且选中输入尚未被 Receive 摄取时，才可能中断当前尝试；
+工具批次中只放行选中内容，由同一尝试在批次收尾后摄取。普通待发项不会随本次 steering 一起放行。
+dispatch 回执仅确认队列状态，不证明模型已收到输入；Stop 是独立的取消操作。细节以[用户待发送设计](user-input-queue.md)为准。
+
 ### 2.3 查询与控制
 
 | 方法 | 参数 | 返回值 | 语义 |
@@ -594,5 +602,7 @@ stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/
 ---
 
 ## 7. 兼容性
+
+未协商 `peri.userInputQueue` 的会话调用 `session/input/*` 返回 `-32601`；普通 `session/prompt` 和 `session/cancel` 不依赖该能力。协商到队列不等于协商到 `pluginSelections` 子能力，也不能仅凭同名 capability 推断旧版宿主具有当前的 steering 时序。
 
 `peri/unstable_event` 的遗留兼容 payload 可能随协议演进变化；新事件应优先使用 `session/update` 或 `peri/agent_event`。修改既有 wire payload 时，必须同步更新 ACP 与 TUI 两侧解析，并按 ARC-EVENT-001 验证完整事件链路。
