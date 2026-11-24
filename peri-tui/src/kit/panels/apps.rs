@@ -402,7 +402,7 @@ impl Hook for FrameDrawHook {
             cols: area.width,
             rows: area.height,
         };
-        if let Some(image) = image_cache::lookup_ready(&key) {
+        if let Some(image) = image_cache::lookup_ready_for_canvas(&key) {
             // 等比适配后的图像在预留区内居中（与 mapping::fit_image 同口径，
             // 阶段 2 的鼠标映射因此可直接复用该几何）。
             let cols = image.cols().min(area.width);
@@ -527,7 +527,7 @@ fn FrameCanvas(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         },
     );
 
-    let ready = key.as_ref().and_then(image_cache::lookup_ready);
+    let ready = key.as_ref().and_then(image_cache::lookup_ready_for_canvas);
     if ready.is_some() {
         let empty: AnyElement<'static> =
             element!(View(width: Constraint::Fill(1), height: Constraint::Fill(1))).into();

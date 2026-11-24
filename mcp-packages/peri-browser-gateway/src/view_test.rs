@@ -223,7 +223,11 @@ async fn session_streams_frames_relays_tool_calls_and_closes() -> anyhow::Result
     // SSE: meta、第一帧与 App 的 tools/call 请求都要到达宿主。
     let mut events = SseClient::open(&fixture.base, &id).await?;
     events.wait_for("event: meta").await?;
-    events.wait_for("event: frame").await?;
+    let frame = events.wait_for("\"viewportWidth\"").await?;
+    assert!(
+        frame.contains("\"viewportWidth\":800"),
+        "帧视口必须取 startScreencast 之后的值: {frame}"
+    );
     let request = events.wait_for("\"method\":\"tools/call\"").await?;
     assert!(request.contains("\"seq\":1"), "{request}");
 
@@ -530,6 +534,8 @@ impl FakeEngine {
 struct PageState {
     url: String,
     drained: bool,
+    /// `Page.startScreencast` 会改变布局视口；假引擎据此模拟前后不同的度量。
+    screencast_started: bool,
 }
 
 enum Role {
@@ -558,6 +564,7 @@ async fn serve_fake(stream: TcpStream, seen: Arc<Mutex<Vec<Value>>>) {
     let mut state = PageState {
         url: "about:blank".to_owned(),
         drained: false,
+        screencast_started: false,
     };
     while let Some(message) = socket.next().await {
         let text = match message {
@@ -671,7 +678,17 @@ fn fake_reply(method: &str, params: &Value, state: &mut PageState) -> Value {
             json!({"frameTree": {"frame": {"id": "top", "loaderId": state.url}}})
         }
         "Page.getLayoutMetrics" => {
-            json!({"cssLayoutViewport": {"clientWidth": 800, "clientHeight": 600}})
+            // 启动 screencast 前 1280x720，启动后（maxWidth/Height 生效）800x600。
+            let (width, height) = if state.screencast_started {
+                (800, 600)
+            } else {
+                (1280, 720)
+            };
+            json!({"cssLayoutViewport": {"clientWidth": width, "clientHeight": height}})
+        }
+        "Page.startScreencast" => {
+            state.screencast_started = true;
+            json!({})
         }
         _ => json!({}),
     }

@@ -38,15 +38,25 @@ fn cache() -> &'static Mutex<Cache> {
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
-/// 纯查表：当前键已编码完成时返回协议句柄。
+/// 同视图同画布的最近完成帧（允许 `seq` 落后于当前帧）。
+///
+/// 实时视图的帧流可能快于后台编码：精确帧键的查表在渲染时刻几乎不可能命中，
+/// 面板会长期停在「编码中」占位且 `drawn` 恒空，点击映射随之中断。视口在一帧
+/// 内固定，旧帧与新帧的映射几何一致，因此绘制与命中复用最近完成的编码结果；
+/// 视图切换与画布尺寸变化仍由键的其余字段隔离。
 #[must_use]
-pub fn lookup_ready(key: &FrameKey) -> Option<Arc<InlineImage>> {
+pub fn lookup_ready_for_canvas(key: &FrameKey) -> Option<Arc<InlineImage>> {
     let cache = cache().lock();
     cache
         .ready
         .as_ref()
-        .filter(|(ready_key, _)| ready_key == key)
+        .filter(|(ready_key, _)| same_canvas(ready_key, key))
         .map(|(_, image)| Arc::clone(image))
+}
+
+/// 同一视图、同一画布（列/行预算）即可复用；仅忽略帧序号。
+fn same_canvas(ready: &FrameKey, current: &FrameKey) -> bool {
+    ready.view_id == current.view_id && ready.cols == current.cols && ready.rows == current.rows
 }
 
 /// 当前键编码失败（面板据此显示降级文案，不反复重试）。

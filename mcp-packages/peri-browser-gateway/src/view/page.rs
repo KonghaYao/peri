@@ -276,11 +276,6 @@ async fn screencast(session: Arc<ViewSession>, target: String, cdp_url: String) 
             }
             continue;
         };
-        let viewport = viewer
-            .command("Page.getLayoutMetrics", json!({}))
-            .await
-            .ok()
-            .and_then(|value| cdp::viewport_from_metrics(&value));
         if cdp::start_screencast(&viewer).await.is_err() {
             let _ = viewer.close().await;
             if wait_or_stop(&stop, RECONNECT_DELAY).await {
@@ -288,6 +283,14 @@ async fn screencast(session: Arc<ViewSession>, target: String, cdp_url: String) 
             }
             continue;
         }
+        // 必须在 `start_screencast` 之后读取：`maxWidth`/`maxHeight` 会同步把
+        // 布局视口缩放到帧尺寸（实测 1280x720 → 1600x1000），启动前读到的
+        // CSS 视口会立刻过期，宿主按它换算的点击坐标整体偏移。
+        let viewport = viewer
+            .command("Page.getLayoutMetrics", json!({}))
+            .await
+            .ok()
+            .and_then(|value| cdp::viewport_from_metrics(&value));
         loop {
             let event = tokio::select! {
                 biased;

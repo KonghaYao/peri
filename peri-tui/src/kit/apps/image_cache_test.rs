@@ -21,9 +21,28 @@ fn no_graphics_protocol_never_encodes() {
         &caps,
         Some((8, 16)),
     );
-    assert!(lookup_ready(&key(1)).is_none(), "无协议时不得产出图像");
+    assert!(
+        lookup_ready_for_canvas(&key(1)).is_none(),
+        "无协议时不得产出图像"
+    );
     assert!(!is_failed(&key(1)));
     assert_eq!(revision(), before, "无协议时不触发编码完成");
+}
+
+#[test]
+fn recent_frame_reuse_ignores_sequence_but_not_view_or_canvas() {
+    let current = key(9);
+    assert!(same_canvas(&key(1), &current), "旧帧应在同一画布内复用");
+    assert!(same_canvas(&current, &current));
+    assert!(!same_canvas(
+        &FrameKey {
+            view_id: "v2".to_string(),
+            ..key(1)
+        },
+        &current
+    ));
+    assert!(!same_canvas(&FrameKey { cols: 41, ..key(1) }, &current));
+    assert!(!same_canvas(&FrameKey { rows: 21, ..key(1) }, &current));
 }
 
 #[test]
