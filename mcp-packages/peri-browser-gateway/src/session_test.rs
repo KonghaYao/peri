@@ -1,418 +1,91 @@
 use super::*;
-use crate::protocol::{Caps, ServerMessage};
-use crate::stream::FrameMeta;
-use bytes::Bytes;
+use crate::config::Config;
 
-const SECRET: &[u8] = b"test-secret";
-
-fn page(id: &str) -> PageRef {
-    PageRef {
-        target_id: id.to_owned(),
-        url: format!("https://example.test/{id}"),
-        title: format!("Page {id}"),
-    }
-}
-
-fn store() -> SessionStore {
-    SessionStore::for_tests(SECRET.to_vec())
-}
-
-async fn register(store: &SessionStore, pages: Vec<PageRef>) -> Session {
-    store
-        .register(
-            "s1",
-            "peri-abc",
-            "ws://127.0.0.1:8827",
-            pages,
-            AgentState::Idle,
-        )
-        .await
+fn directory() -> SessionDirectory {
+    let config =
+        Config::parse_from([], |key| (key == "HOME").then(|| "/fixture".to_owned())).unwrap();
+    SessionDirectory::new(
+        config.browser,
+        "http://127.0.0.1:1/".to_owned(),
+        config.secret,
+    )
 }
 
 #[tokio::test]
-async fn register_stores_the_session_with_a_derived_token() {
-    let store = store();
-    let session = register(&store, vec![page("t1")]).await;
+async fn live_publication_binds_one_core_to_both_indexes_and_revokes_both_at_close() {
+    let directory = directory();
+    let id: SessionId = "transport-fixture".into();
+    let entry = directory.initialize(id.clone());
+    assert!(entry.admit().is_none());
+    assert!(directory.list().is_empty());
+    assert!(!directory.publish(&entry));
+    assert!(entry.start_initialize());
+    assert!(!entry.start_initialize());
+    assert!(directory.publish(&entry));
+    assert!(!directory.publish(&entry));
+    let (token, core) = directory.list().pop().unwrap();
+    assert!(token == derive_token(&directory.secret, core.session_id()));
+    assert_ne!(core.session_id(), id.as_ref());
+    assert!(directory.by_token("unknown").is_none());
+    let via_token = directory.by_token(&token).unwrap();
+    let via_id = directory.entry(&id).unwrap();
+    assert!(Arc::ptr_eq(&via_id, &via_token));
+    let (core_from_permit, permit) = via_token.admit().unwrap();
+    assert!(Arc::ptr_eq(&core, &core_from_permit));
+    assert_eq!(core.list_pages().await["count"], 0);
 
-    assert_eq!(session.id, "s1");
-    assert_eq!(session.name, "peri-abc");
-    assert_eq!(session.cdp_ws, "ws://127.0.0.1:8827");
-    assert_eq!(session.token, token::derive_token(SECRET, "s1"));
-    assert_eq!(session.agent_state, AgentState::Idle);
-    assert_eq!(store.len().await, 1);
-
-    let stored = store.get("s1").await.expect("session is stored");
-    assert_eq!(stored.token, session.token);
-    assert!(store.get("missing").await.is_none());
-}
-
-/// Chrome's own target list publishes `devtools://…?ws=host:port/path`, with no
-/// scheme in the parameter. The gateway has the browser endpoint, so the page
-/// endpoint is derived from it.
-#[tokio::test]
-async fn devtools_url_points_at_the_active_page_without_a_scheme() {
-    let store = store();
-    let mut session = register(&store, vec![page("t1"), page("t2")]).await;
-    assert_eq!(
-        session.devtools_url(),
-        Some((
-            "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:8827/devtools/page/t1"
-                .to_owned(),
-            "t1".to_owned()
-        ))
-    );
-
-    session.set_active_page("t2");
-    assert_eq!(
-        session.devtools_url().map(|(url, _)| url),
-        Some(
-            "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:8827/devtools/page/t2"
-                .to_owned()
-        )
-    );
-
-    let empty = register(&store, Vec::new()).await;
-    assert_eq!(empty.devtools_url(), None, "nothing to debug");
+    entry.begin_close(CloseReason::Delete);
+    entry.begin_close(CloseReason::Transport);
+    assert!(entry.stop.is_cancelled());
+    assert!(via_token.admit().is_none());
+    assert!(directory.by_token(&token).is_none());
+    assert!(directory.list().is_empty());
+    assert!(directory.entry(&id).is_some(), "结算前保留 Closing 记录");
+    let mut settle = std::pin::pin!(entry.settle_domain());
+    assert!(futures::poll!(&mut settle).is_pending());
+    drop(permit);
+    let outcome = settle.await;
+    assert!(outcome.is_ok());
+    directory.finish(&id, &entry, outcome);
+    let (first, duplicate) = tokio::join!(entry.wait(), entry.wait());
+    assert!(first.is_ok() && duplicate.is_ok());
+    assert!(directory.entry(&id).is_none());
 }
 
 #[tokio::test]
-async fn lookup_by_token_accepts_only_the_derived_token() {
-    let store = store();
-    let session = register(&store, vec![page("t1")]).await;
-
-    let found = store
-        .lookup_by_token(&session.token)
-        .await
-        .expect("token resolves");
-    assert_eq!(found.id, "s1");
-
-    assert!(store.lookup_by_token("nope").await.is_none());
-    assert!(store.lookup_by_token("").await.is_none());
-    assert!(store.lookup_by_token(&session.token[..21]).await.is_none());
+async fn shutdown_includes_inflight_creation_and_never_publishes_late_sessions() {
+    let directory = directory();
+    let creation = directory.create_permit().unwrap();
+    let initial = directory.initialize("initial".into());
+    assert!(initial.start_initialize());
+    directory.begin_shutdown();
+    assert!(directory.create_permit().is_none());
+    assert!(initial.stop.is_cancelled());
+    assert!(!directory.publish(&initial));
+    let late_id: SessionId = "late".into();
+    let late = directory.initialize(late_id.clone());
+    assert!(late.stop.is_cancelled());
+    assert!(!late.start_initialize());
+    assert!(!directory.publish(&late));
+    assert!(directory.list().is_empty());
+    let mut wait = std::pin::pin!(directory.wait_shutdown());
+    assert!(futures::poll!(&mut wait).is_pending());
+    directory.finish(&late_id, &late, late.settle_domain().await);
+    directory.finish(&"initial".into(), &initial, initial.settle_domain().await);
+    drop(creation);
+    wait.await.unwrap();
 }
 
 #[tokio::test]
-async fn re_register_keeps_the_token_and_open_viewers() {
-    let store = store();
-    let session = register(&store, vec![page("t1")]).await;
-    let mut viewer = session.subscribe();
-
-    let again = store
-        .register(
-            "s1",
-            "peri-renamed",
-            "ws://127.0.0.1:9999",
-            vec![page("t2")],
-            AgentState::Driving,
-        )
-        .await;
-
-    assert_eq!(again.token, session.token);
-    assert_eq!(again.name, "peri-renamed");
-    assert_eq!(again.cdp_ws, "ws://127.0.0.1:9999");
-    assert_eq!(again.agent_state, AgentState::Driving);
-
-    let update = viewer.try_recv().expect("re-register publishes tabs");
-    match update {
-        ServerMessage::Tabs { tabs } => {
-            assert_eq!(tabs.len(), 1);
-            assert_eq!(tabs[0].id, "t2");
-            assert!(tabs[0].active);
-        }
-        other => panic!("unexpected message: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn update_pages_repairs_the_active_page() {
-    let store = store();
-    let session = register(&store, vec![page("t1"), page("t2")]).await;
-    assert_eq!(session.effective_active(), Some("t1"));
-
-    store
-        .set_active_page("s1", "t2")
-        .await
-        .expect("t2 is owned");
-    assert_eq!(
-        store.get("s1").await.unwrap().effective_active(),
-        Some("t2")
-    );
-
-    let updated = store
-        .update_pages("s1", vec![page("t3")])
-        .await
-        .expect("session exists");
-    assert_eq!(updated.effective_active(), Some("t3"));
-
-    let tabs = updated.tabs();
-    assert_eq!(tabs.len(), 1);
-    assert!(tabs[0].active);
-}
-
-#[tokio::test]
-async fn update_pages_pins_the_default_tab_across_reorders() {
-    let store = store();
-    register(&store, vec![page("t1"), page("t2")]).await;
-
-    // Kitesurf's `/json/list` order is not stable: the first poll pins a tab,
-    // later reorders must not move the screencast (or the controller).
-    let first = store
-        .update_pages("s1", vec![page("t1"), page("t2")])
-        .await
-        .expect("session exists");
-    assert_eq!(first.effective_active(), Some("t1"));
-
-    let reordered = store
-        .update_pages("s1", vec![page("t2"), page("t1")])
-        .await
-        .expect("session exists");
-    assert_eq!(reordered.effective_active(), Some("t1"));
-
-    // An explicit switch still wins, and survives another reorder.
-    store
-        .set_active_page("s1", "t2")
-        .await
-        .expect("t2 is owned");
-    let reordered = store
-        .update_pages("s1", vec![page("t2"), page("t1")])
-        .await
-        .expect("session exists");
-    assert_eq!(reordered.effective_active(), Some("t2"));
-
-    // Only when the held tab disappears does the next first page get pinned.
-    let replaced = store
-        .update_pages("s1", vec![page("t3"), page("t1")])
-        .await
-        .expect("session exists");
-    assert_eq!(replaced.effective_active(), Some("t3"));
-    let reordered = store
-        .update_pages("s1", vec![page("t1"), page("t3")])
-        .await
-        .expect("session exists");
-    assert_eq!(reordered.effective_active(), Some("t3"));
-}
-
-#[tokio::test]
-async fn update_pages_for_unknown_session_is_none() {
-    let store = store();
-    assert!(store.update_pages("nope", vec![]).await.is_none());
-    assert!(store.set_state("nope", AgentState::Driving).await.is_none());
-}
-
-#[tokio::test]
-async fn set_state_publishes_to_viewers() {
-    let store = store();
-    let session = register(&store, vec![]).await;
-    let mut viewer = session.subscribe();
-
-    let updated = store
-        .set_state("s1", AgentState::WaitingForHuman)
-        .await
-        .expect("session exists");
-    assert_eq!(updated.agent_state, AgentState::WaitingForHuman);
-
-    match viewer.try_recv().expect("state is published") {
-        ServerMessage::Agent { state } => assert_eq!(state, AgentState::WaitingForHuman),
-        other => panic!("unexpected message: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn set_active_page_rejects_foreign_pages() {
-    let store = store();
-    register(&store, vec![page("t1")]).await;
-    assert!(store.set_active_page("s1", "other").await.is_none());
-    assert!(store.set_active_page("missing", "t1").await.is_none());
-}
-
-#[tokio::test]
-async fn set_active_page_publishes_the_tab_strip() {
-    let store = store();
-    let session = register(&store, vec![page("t1"), page("t2")]).await;
-    let mut viewer = session.subscribe();
-
-    store
-        .set_active_page("s1", "t2")
-        .await
-        .expect("t2 is owned");
-
-    match viewer.try_recv().expect("switch is published") {
-        ServerMessage::Tabs { tabs } => {
-            assert_eq!(tabs.len(), 2);
-            assert!(!tabs[0].active);
-            assert!(tabs[1].active);
-        }
-        other => panic!("unexpected message: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn unregister_removes_the_session_and_its_token() {
-    let store = store();
-    let session = register(&store, vec![page("t1")]).await;
-    let removed = store.unregister("s1").await.expect("session existed");
-    assert_eq!(removed.id, "s1");
-    assert!(store.get("s1").await.is_none());
-    assert!(store.lookup_by_token(&session.token).await.is_none());
-    assert!(store.unregister("s1").await.is_none());
-}
-
-#[tokio::test]
-async fn list_is_sorted_by_session_id() {
-    let store = store();
-    for id in ["s3", "s1", "s2"] {
-        store
-            .register(id, id, "ws://127.0.0.1:8827", vec![], AgentState::Idle)
-            .await;
-    }
-    let ids: Vec<String> = store.list().await.into_iter().map(|s| s.id).collect();
-    assert_eq!(ids, ["s1", "s2", "s3"]);
-}
-
-#[tokio::test]
-async fn hello_describes_the_session() {
-    let store = store();
-    let session = store
-        .register(
-            "s1",
-            "peri-abc",
-            "ws://127.0.0.1:8827",
-            vec![page("t1")],
-            AgentState::Idle,
-        )
-        .await;
-
-    match session.hello_message() {
-        ServerMessage::Hello {
-            session: id,
-            name,
-            agent,
-            interactive,
-            caps,
-        } => {
-            assert_eq!(id, "s1");
-            assert_eq!(name, "peri-abc");
-            assert_eq!(agent, AgentState::Idle);
-            // The MCP owns the page until it yields: the monitor is read-only.
-            assert!(!interactive);
-            assert_eq!(
-                caps,
-                Caps {
-                    new_tab: true,
-                    diagnostics: true
-                }
-            );
-        }
-        other => panic!("unexpected message: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn tabs_mark_exactly_one_active_page() {
-    let store = store();
-    let mut session = store
-        .register(
-            "s1",
-            "peri-abc",
-            "ws://127.0.0.1:8827",
-            vec![page("t1"), page("t2")],
-            AgentState::Idle,
-        )
-        .await;
-
-    let active_count = session.tabs().iter().filter(|tab| tab.active).count();
-    assert_eq!(active_count, 1);
-    assert!(session.tabs()[0].active);
-
-    assert!(session.set_active_page("t2"));
-    match session.tabs_message() {
-        ServerMessage::Tabs { tabs } => {
-            assert_eq!(tabs.len(), 2);
-            assert!(!tabs[0].active);
-            assert!(tabs[1].active);
-        }
-        other => panic!("unexpected message: {other:?}"),
-    }
-    assert!(!session.set_active_page("t3"));
-}
-
-#[tokio::test]
-async fn cached_frames_are_keyed_by_page_and_shared_by_snapshots() {
-    let store = store();
-    let session = store
-        .register(
-            "s1",
-            "peri-abc",
-            "ws://127.0.0.1:8827",
-            vec![page("t1"), page("t2")],
-            AgentState::Idle,
-        )
-        .await;
-    let frame = |page_id: &str| {
-        Arc::new(Frame {
-            jpeg: Bytes::from_static(b"jpeg"),
-            meta: FrameMeta {
-                page_id: page_id.to_owned(),
-                viewport_width: 640,
-                viewport_height: 480,
-                device_width: 640,
-                device_height: 480,
-                page_scale_factor: 1.0,
-                scroll_offset_x: 0.0,
-                scroll_offset_y: 0.0,
-            },
-        })
-    };
-
-    assert!(session.cached_frame("t1").is_none());
-
-    // The supervisor writes through the `Arc` it received from `frame_cache`;
-    // viewers read through a session snapshot, so both must share one map.
-    session
-        .frame_cache()
-        .lock()
-        .expect("cache")
-        .insert("t1".to_owned(), frame("t1"));
-    let snapshot = session.clone();
-    assert_eq!(
-        snapshot
-            .cached_frame("t1")
-            .expect("t1 is cached")
-            .meta
-            .page_id,
-        "t1"
-    );
-    assert!(snapshot.cached_frame("t2").is_none());
-
-    session
-        .frame_cache()
-        .lock()
-        .expect("cache")
-        .insert("t2".to_owned(), frame("t2"));
-    assert_eq!(
-        snapshot
-            .cached_frame("t2")
-            .expect("t2 is cached")
-            .meta
-            .page_id,
-        "t2"
-    );
-}
-
-#[tokio::test]
-async fn debug_hides_the_token() {
-    let store = SessionStore::for_tests(b"secret".to_vec());
-    let token = token::derive_token(b"secret", "s1");
-    let session = store
-        .register(
-            "s1",
-            "peri-abc",
-            "ws://127.0.0.1:8827",
-            vec![],
-            AgentState::Idle,
-        )
-        .await;
-    let rendered = format!("{session:?}");
-    assert!(rendered.contains("[redacted]"));
-    assert!(!rendered.contains(&token));
+async fn an_expired_initialization_cannot_become_live() {
+    let directory = directory();
+    let id: SessionId = "incomplete".into();
+    let entry = directory.initialize(id.clone());
+    assert!(entry.start_initialize());
+    entry.expire_initialize();
+    assert!(entry.stop.is_cancelled());
+    assert!(!directory.publish(&entry));
+    assert!(entry.admit().is_none());
+    directory.finish(&id, &entry, entry.settle_domain().await);
+    entry.wait().await.unwrap();
 }

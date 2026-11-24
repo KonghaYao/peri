@@ -202,6 +202,7 @@
 | F-EXT-013 | L3 | Goal 提醒；目标提示不另建执行控制面 | [契约](../design/system-reminder.md) |
 | F-EXT-014 | L3 | Todo 管理；任务清单不成为执行调度器 | [契约](../design/tool-system.md) |
 | F-EXT-015 | L3 | 图像输入；媒体转换遵循模型协议边界 | [契约](../design/model-adapters.md) |
+| F-EXT-016 | L3 | Browser Gateway；会话各管其页面并可交人操作；`peri-browser` 另提供 `install kitesurf` 与 `start kitesurf` | [契约](../../mcp-packages/peri-browser-gateway/README.md) |
 | F-CLI-001 | L3 | 非交互输出；print 模式复用 Agent 执行链 | [契约](../design/architecture.md) |
 | F-CLI-002 | L3 | 身份登录；认证结果供模型连接使用 | [契约](../design/configuration-authority.md) |
 | F-CLI-003 | L4 | 版本更新；升级检查与运行会话分离 | [契约](../design/architecture.md) |

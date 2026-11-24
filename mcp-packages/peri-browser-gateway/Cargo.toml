@@ -3,8 +3,12 @@ name = "peri-browser-gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Standalone monitor gateway for the peri-browser MCP (sessions, pages, viewer)"
+description = "Loopback MCP and monitor gateway for Kitesurf browser sessions"
 license = "Apache-2.0"
+
+[[bin]]
+name = "peri-browser"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -13,18 +17,20 @@ axum.workspace = true
 base64 = "0.22"
 bytes = "1"
 futures.workspace = true
-reqwest.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# The process entry owns a multi-thread runtime, the UDS listener and the
-# shutdown signal; `process` is reserved for the future kitesurf supervisor.
-tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "process"] }
-# The gateway is a CDP viewer: it needs a WebSocket client, not the server side
-# that `axum::extract::ws` provides to the monitor page.
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
+tokio-util.workspace = true
 tokio-tungstenite = "0.29"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest.workspace = true
+tempfile.workspace = true

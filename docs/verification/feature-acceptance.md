@@ -200,6 +200,7 @@
 | F-EXT-013 | 源码存在 | [契约](../design/system-reminder.md) | [源码](../../peri-middlewares/src/goal)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-EXT-014 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../peri-middlewares/src/middleware/todo.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-EXT-015 | 源码存在 | [契约](../design/model-adapters.md) | [源码](../../peri-middlewares/src/middleware/image)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
+| F-EXT-016 | 源码存在 | [契约](../../mcp-packages/peri-browser-gateway/README.md) | [源码](../../mcp-packages/peri-browser-gateway/src)；[契约测试](../../mcp-packages/peri-browser-gateway/tests/mcp_http.rs)；[证据](peri-browser-gateway-mcp.md)；缺口：发布工作流与安装脚本未在 GitHub Release/CI 上运行；跨平台、真实 Release 安装与独立复验未完成 | 2026-11-23：lib 137 + mcp_http 19 通过；Kitesurf 0.5.2 真实引擎冒烟通过；CLI/生命周期隔离冒烟与安装脚本离线 harness 通过 |
 | F-CLI-001 | 源码存在 | [契约](../design/architecture.md) | [源码](../../peri-tui/src/cli_print.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-CLI-002 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-tui/src/cli_auth.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-CLI-003 | 源码存在 | [契约](../design/architecture.md) | [源码](../../peri-tui/src/update.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |

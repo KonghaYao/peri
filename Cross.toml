@@ -1,3 +1,8 @@
+# cross 默认只透传 CARGO_*/CROSS_* 等变量；release workflow 用
+# PERI_BROWSER_BUILD_VERSION 在编译期注入 peri-browser 版本，必须显式透传。
+[build.env]
+passthrough = ["PERI_BROWSER_BUILD_VERSION"]
+
 [target.x86_64-unknown-linux-gnu]
 pre-build = [
     "apt-get update",

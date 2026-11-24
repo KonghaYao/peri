@@ -1,45 +1,20 @@
-//! CDP page connections: one read-only viewer, one writable controller.
-//!
-//! Both connection kinds ride the same `/devtools/page/{targetId}` WebSocket and
-//! share the same pending-command/event plumbing in [`Connection`]. They differ
-//! in the query Kitesurf sees:
-//!
-//! - [`Viewer`] appends `?role=viewer`, so Kitesurf itself rejects navigation,
-//!   input and `Runtime.enable` (`Viewer connection cannot control the browser`).
-//!   This is the connection that carries frames (README §6.4).
-//! - [`Controller`] appends `?owner=peri-browser-gateway` and no `role`: it is a
-//!   page controller, the only writer of the page while the human holds it.
-//!   Measured on Kitesurf 0.5.3 (throwaway instance): a second controller on the
-//!   same target is refused with `HTTP 409 {"error":"Another controller owns this
-//!   page session"}`, a different owner can attach once the previous controller
-//!   disconnects, and `?owner=...` works without the instance `session` query.
-//!
-//! One connection owns one WebSocket: a writer task serialises commands and a
-//! reader task resolves responses by id and forwards events. Dropping the
-//! connection aborts both tasks, which closes the socket and (for a viewer) the
-//! Kitesurf-side screencast.
-//!
-//! Typed helpers ([`dispatch_mouse`], [`dispatch_key`], [`navigate`], ...) are
-//! free functions over [`PageController`] so the ownership driver can run its
-//! state machine against a fake controller in unit tests while the real
-//! connection stays a thin transport.
+//! Kitesurf 的 page controller、只读 viewer 和共用 CDP helper。
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
-use crate::protocol::{KeyEventKind, MouseButton, MouseEventKind};
+mod connection;
+mod navigation;
+
+use connection::Connection;
+pub use navigation::{navigate, navigation_state, NavigationState};
+
+use crate::input::{KeyEventKind, MouseButton, MouseEventKind};
 
 /// Viewer attach timeout (README §10 `PERI_BROWSER_CONNECT_TIMEOUT_MS`).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,19 +31,6 @@ pub const FRAME_MAX_HEIGHT: u32 = 1000;
 /// Thumbnail capture is a still image, not a second screencast.
 pub const THUMBNAIL_QUALITY: u8 = 40;
 
-/// Owner name the gateway uses for its writable page connection.
-///
-/// It is deliberately distinct from the MCP's owner: the two never hold the same
-/// page at once, and a distinct name makes a mistaken double attach a visible
-/// Kitesurf error instead of a silent second writer.
-pub const CONTROLLER_OWNER: &str = "peri-browser-gateway";
-
-/// How long `navigate` waits for the new document to show up in `location.href`
-/// before it reports the state as it stands. Kitesurf's evaluate reply can land
-/// before the commit.
-const NAVIGATION_SETTLE_TRIES: usize = 20;
-const NAVIGATION_SETTLE_DELAY: Duration = Duration::from_millis(100);
-
 #[derive(Debug, thiserror::Error)]
 pub enum CdpError {
     #[error("invalid CDP endpoint {url:?}: {reason}")]
@@ -79,6 +41,10 @@ pub enum CdpError {
         #[source]
         source: tokio_tungstenite::tungstenite::Error,
     },
+    #[error("another controller owns this page session (HTTP 409)")]
+    AnotherController,
+    #[error("engine did not confirm CDP socket close")]
+    UnconfirmedClose,
     #[error("CDP connection to {url} closed")]
     Closed { url: String },
     #[error("CDP command {method} timed out after {timeout_ms} ms")]
@@ -100,180 +66,6 @@ pub struct CdpEvent {
     pub params: Value,
 }
 
-struct Command {
-    id: u64,
-    method: String,
-    params: Value,
-}
-
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, CdpError>>>>>;
-
-/// One page-scoped CDP WebSocket.
-struct Connection {
-    url: String,
-    commands: mpsc::UnboundedSender<Command>,
-    events: mpsc::Receiver<CdpEvent>,
-    pending: Pending,
-    next_id: AtomicU64,
-    writer: JoinHandle<()>,
-    reader: JoinHandle<()>,
-}
-
-impl Connection {
-    async fn open(url: String) -> Result<Self, CdpError> {
-        let (socket, _response) = tokio::time::timeout(CONNECT_TIMEOUT, {
-            let url = url.clone();
-            async move { tokio_tungstenite::connect_async(url).await }
-        })
-        .await
-        .map_err(|_| CdpError::Timeout {
-            method: "WebSocket connect".to_owned(),
-            timeout_ms: CONNECT_TIMEOUT.as_millis() as u64,
-        })?
-        .map_err(|source| CdpError::Connect {
-            url: url.clone(),
-            source,
-        })?;
-
-        let (mut sink, mut stream) = socket.split();
-        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<Command>();
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-
-        let writer_pending = pending.clone();
-        let writer = tokio::spawn(async move {
-            while let Some(command) = command_rx.recv().await {
-                let payload = json!({
-                    "id": command.id,
-                    "method": command.method,
-                    "params": command.params,
-                });
-                let text = match serde_json::to_string(&payload) {
-                    Ok(text) => text,
-                    Err(error) => {
-                        // A `Value` always serialises; keep the pending entry
-                        // bounded by failing the whole connection if it does not.
-                        tracing::error!(error = %error, "cannot encode a CDP command");
-                        fail_pending(&writer_pending, &CdpError::Decode(error.to_string()));
-                        break;
-                    }
-                };
-                if let Err(error) = sink.send(Message::Text(text.into())).await {
-                    fail_pending(&writer_pending, &CdpError::WebSocket(error));
-                    break;
-                }
-            }
-            let _ = sink.close().await;
-        });
-
-        let reader_pending = pending.clone();
-        let reader_url = url.clone();
-        let reader = tokio::spawn(async move {
-            while let Some(message) = stream.next().await {
-                match message {
-                    Ok(Message::Text(text)) => {
-                        if !dispatch(text.as_str(), &reader_pending, &event_tx).await {
-                            break;
-                        }
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Ok(
-                        Message::Binary(_)
-                        | Message::Ping(_)
-                        | Message::Pong(_)
-                        | Message::Frame(_),
-                    ) => {}
-                    Err(error) => {
-                        fail_pending(&reader_pending, &CdpError::WebSocket(error));
-                        break;
-                    }
-                }
-            }
-            fail_pending(&reader_pending, &CdpError::Closed { url: reader_url });
-        });
-
-        Ok(Self {
-            url,
-            commands: command_tx,
-            events: event_rx,
-            pending,
-            next_id: AtomicU64::new(1),
-            writer,
-            reader,
-        })
-    }
-
-    fn url(&self) -> &str {
-        &self.url
-    }
-
-    /// Sends one CDP command and waits for its response.
-    async fn command(&self, method: &str, params: Value) -> Result<Value, CdpError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply, response) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("CDP pending map poisoned")
-            .insert(id, reply);
-
-        if self
-            .commands
-            .send(Command {
-                id,
-                method: method.to_owned(),
-                params,
-            })
-            .is_err()
-        {
-            self.pending
-                .lock()
-                .expect("CDP pending map poisoned")
-                .remove(&id);
-            return Err(CdpError::Closed {
-                url: self.url.clone(),
-            });
-        }
-
-        match tokio::time::timeout(COMMAND_TIMEOUT, response).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(CdpError::Closed {
-                url: self.url.clone(),
-            }),
-            Err(_) => {
-                self.pending
-                    .lock()
-                    .expect("CDP pending map poisoned")
-                    .remove(&id);
-                Err(CdpError::Timeout {
-                    method: method.to_owned(),
-                    timeout_ms: COMMAND_TIMEOUT.as_millis() as u64,
-                })
-            }
-        }
-    }
-
-    /// Waits for the next CDP event. Returns `None` once the socket is gone.
-    async fn next_event(&mut self) -> Option<CdpEvent> {
-        self.events.recv().await
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        self.writer.abort();
-        self.reader.abort();
-    }
-}
-
-impl std::fmt::Debug for Connection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Connection")
-            .field("url", &self.url)
-            .finish_non_exhaustive()
-    }
-}
-
 /// A read-only page connection (`?role=viewer`).
 pub struct Viewer {
     connection: Connection,
@@ -284,7 +76,7 @@ impl Viewer {
     pub async fn connect(cdp_url: &str, target_id: &str) -> Result<Self, CdpError> {
         let url = page_viewer_url(cdp_url, target_id)?;
         Ok(Self {
-            connection: Connection::open(url).await?,
+            connection: Connection::open(url, CONNECT_TIMEOUT, false).await?,
         })
     }
 
@@ -296,6 +88,10 @@ impl Viewer {
     /// Sends one CDP command and waits for its response.
     pub async fn command(&self, method: &str, params: Value) -> Result<Value, CdpError> {
         self.connection.command(method, params).await
+    }
+
+    pub async fn close(&mut self) -> Result<(), CdpError> {
+        self.connection.close().await
     }
 
     /// Waits for the next CDP event. Returns `None` once the socket is gone.
@@ -315,19 +111,38 @@ impl std::fmt::Debug for Viewer {
 
 /// A writable page connection (no `role=viewer` query).
 ///
-/// The gateway only opens one after the MCP confirmed the yield; owning two
-/// controllers for one target is refused by Kitesurf (HTTP 409), so this type is
-/// created exclusively by the ownership driver.
+/// 同一 target 的第二个 controller 会被 Kitesurf 以 HTTP 409 拒绝。
+/// 网关通过 `PageControl` 将一条 writer 连接排他地交给 Agent 或 monitor。
 pub struct Controller {
     connection: Connection,
 }
 
 impl Controller {
-    /// Connects to `target_id` below `cdp_url` as a page controller.
-    pub async fn connect(cdp_url: &str, target_id: &str) -> Result<Self, CdpError> {
-        let url = page_controller_url(cdp_url, target_id, CONTROLLER_OWNER)?;
+    /// Connects to `target_id` below `cdp_url` as a page controller owned by
+    /// `owner`.
+    ///
+    /// The owner is the process's identity on the page, not a CDP concept: the
+    /// MCP and the gateway pass different names so an accidental second writer is
+    /// reported by Kitesurf instead of silently sharing the page.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a non-WebSocket endpoint, an invalid target id or owner, a
+    /// refused attach (for example `Another controller owns this page session`),
+    /// and a connect timeout.
+    pub async fn connect(cdp_url: &str, target_id: &str, owner: &str) -> Result<Self, CdpError> {
+        Self::connect_with_timeout(cdp_url, target_id, owner, CONNECT_TIMEOUT).await
+    }
+
+    pub(crate) async fn connect_with_timeout(
+        cdp_url: &str,
+        target_id: &str,
+        owner: &str,
+        timeout: Duration,
+    ) -> Result<Self, CdpError> {
+        let url = page_controller_url(cdp_url, target_id, owner)?;
         Ok(Self {
-            connection: Connection::open(url).await?,
+            connection: Connection::open(url, timeout, true).await?,
         })
     }
 
@@ -339,6 +154,18 @@ impl Controller {
     /// Sends one CDP command and waits for its response.
     pub async fn command(&self, method: &str, params: Value) -> Result<Value, CdpError> {
         self.connection.command(method, params).await
+    }
+
+    pub async fn close(&mut self) -> Result<(), CdpError> {
+        self.connection.close().await
+    }
+
+    pub(crate) fn take_events(&mut self) -> tokio::sync::mpsc::Receiver<CdpEvent> {
+        self.connection.take_events()
+    }
+
+    pub(crate) fn reusable(&self) -> bool {
+        self.connection.reusable()
     }
 
     /// Waits for the next CDP event. Returns `None` once the socket is gone.
@@ -667,262 +494,6 @@ fn single_char(value: &str) -> Option<char> {
 }
 
 /// Address, history position and title of the controller's page.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NavigationState {
-    pub url: String,
-    pub title: String,
-    pub can_go_back: bool,
-    pub can_go_forward: bool,
-}
-
-#[derive(Debug, Clone)]
-struct HistoryEntry {
-    url: String,
-    title: String,
-}
-
-#[derive(Debug, Clone)]
-struct History {
-    current: usize,
-    entries: Vec<HistoryEntry>,
-}
-
-fn parse_history(value: &Value) -> Option<History> {
-    let current = usize::try_from(value.get("currentIndex")?.as_i64()?).ok()?;
-    let entries = value
-        .get("entries")?
-        .as_array()?
-        .iter()
-        .map(|entry| {
-            Some(HistoryEntry {
-                url: entry.get("url")?.as_str()?.to_owned(),
-                title: entry
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    if entries.is_empty() || current >= entries.len() {
-        return None;
-    }
-    Some(History { current, entries })
-}
-
-async fn read_history(controller: &dyn PageController) -> Result<History, CdpError> {
-    let value = controller
-        .command("Page.getNavigationHistory", json!({}))
-        .await?;
-    parse_history(&value).ok_or_else(|| CdpError::Decode("no navigation entries".to_owned()))
-}
-
-async fn document_title(controller: &dyn PageController) -> Option<String> {
-    let value = controller
-        .command(
-            "Runtime.evaluate",
-            json!({"expression": "document.title", "returnByValue": true}),
-        )
-        .await
-        .ok()?;
-    value
-        .get("result")?
-        .get("value")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-fn navigation_state_from(history: &History, title: Option<String>) -> NavigationState {
-    let entry = &history.entries[history.current];
-    NavigationState {
-        url: entry.url.clone(),
-        title: title.filter(|title| !title.is_empty()).unwrap_or_else(|| {
-            if entry.title.is_empty() {
-                entry.url.clone()
-            } else {
-                entry.title.clone()
-            }
-        }),
-        can_go_back: history.current > 0,
-        can_go_forward: history.current + 1 < history.entries.len(),
-    }
-}
-
-/// Reads the controller's current navigation state.
-///
-/// The live `location.href` wins over the history entry: Kitesurf keeps
-/// `Page.getNavigationHistory` on the previous document for a few seconds after
-/// a navigation commits, and the address bar must not lag behind the page.
-///
-/// # Errors
-///
-/// Fails when the history cannot be read or parsed.
-pub async fn navigation_state(
-    controller: &dyn PageController,
-) -> Result<NavigationState, CdpError> {
-    let history = read_history(controller).await?;
-    let title = document_title(controller).await;
-    let live = live_url(controller).await;
-    Ok(state_with_live_location(&history, title, live.as_deref()))
-}
-
-fn state_with_live_location(
-    history: &History,
-    title: Option<String>,
-    live: Option<&str>,
-) -> NavigationState {
-    let mut state = navigation_state_from(history, title);
-    if let Some(live) = live.filter(|live| *live != history.entries[history.current].url) {
-        // The history has not caught up with the document that just committed;
-        // the new entry will land one step forward.
-        state.url = live.to_owned();
-        state.can_go_back = true;
-        state.can_go_forward = false;
-    }
-    state
-}
-
-async fn live_url(controller: &dyn PageController) -> Option<String> {
-    let value = controller
-        .command(
-            "Runtime.evaluate",
-            json!({"expression": "location.href", "returnByValue": true}),
-        )
-        .await
-        .ok()?;
-    value
-        .get("result")?
-        .get("value")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-/// Navigates the controller's page and reports the resulting state.
-///
-/// Kitesurf never answers `Page.navigate` and stops answering every later
-/// command on that connection, so the navigation is written as
-/// `location.assign(...)` through `Runtime.evaluate`, which it does answer.
-/// It sometimes answers that evaluate with `Execution context was destroyed`
-/// once the new document took over; the effect decides, not the reply.
-///
-/// # Errors
-///
-/// Fails when the page rejects the evaluation and stayed where it was, or when
-/// the follow-up history read fails.
-pub async fn navigate(
-    controller: &dyn PageController,
-    url: &str,
-) -> Result<NavigationState, CdpError> {
-    let url = normalize_url(url);
-    let before = live_url(controller).await;
-    let expression = format!("location.assign({})", Value::String(url));
-    let mut retried = false;
-    loop {
-        let reply = controller
-            .command(
-                "Runtime.evaluate",
-                json!({"expression": expression, "userGesture": true}),
-            )
-            .await;
-        let changed = wait_for_location(controller, before.as_deref()).await;
-        if let Ok(value) = &reply {
-            if let Some(exception) = value.get("exceptionDetails") {
-                return Err(CdpError::Rejected {
-                    method: "Runtime.evaluate".to_owned(),
-                    message: exception_message(exception),
-                });
-            }
-        }
-        if let Err(error) = reply {
-            if changed {
-                tracing::debug!(error = %error, "evaluate failed after the navigation committed");
-                return navigation_state(controller).await;
-            }
-            // Kitesurf answers `Execution context was destroyed` for a moment
-            // after every navigation, and then the assignment never ran. One
-            // retry separates that from a navigation that really committed.
-            if !retried && destructured_retry_allowed(&error) {
-                retried = true;
-                tokio::time::sleep(NAVIGATION_SETTLE_DELAY).await;
-                continue;
-            }
-            return Err(error);
-        }
-        return navigation_state(controller).await;
-    }
-}
-
-/// Whether the error is the stale-context answer Kitesurf gives while the
-/// previous document is still being torn down.
-fn destructured_retry_allowed(error: &CdpError) -> bool {
-    matches!(error, CdpError::Protocol { code: -32000, message } if message.contains("Execution context was destroyed"))
-}
-
-/// Gives a bare host the scheme a browser would pick.
-///
-/// `example.com` typed into the address bar must not resolve relative to the
-/// current document; `Page.navigate` would have done exactly that.
-fn normalize_url(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return trimmed.to_owned();
-    }
-    let has_scheme = trimmed.split_once(':').is_some_and(|(scheme, rest)| {
-        !scheme.is_empty()
-            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-            && (rest.starts_with("//")
-                || matches!(
-                    scheme,
-                    "about" | "blob" | "data" | "file" | "javascript" | "view-source"
-                ))
-    });
-    if has_scheme {
-        return trimmed.to_owned();
-    }
-    // Chrome falls back to http for the loopback names people type.
-    if ["localhost", "127.", "[::1]"]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
-    {
-        return format!("http://{trimmed}");
-    }
-    format!("https://{trimmed}")
-}
-
-fn exception_message(exception: &Value) -> String {
-    exception
-        .get("exception")
-        .and_then(|exception| exception.get("description"))
-        .and_then(Value::as_str)
-        .or_else(|| exception.get("text").and_then(Value::as_str))
-        .unwrap_or("the page rejected the URL")
-        .to_owned()
-}
-
-/// Waits briefly for the document to commit so the caller reports the new URL.
-///
-/// Kitesurf's evaluate reply can arrive before the commit; the history read is
-/// the slow one, so the live location is polled instead of sleeping a fixed
-/// amount. Returns whether the location moved away from `before`.
-async fn wait_for_location(controller: &dyn PageController, before: Option<&str>) -> bool {
-    for attempt in 0..NAVIGATION_SETTLE_TRIES {
-        if live_url(controller)
-            .await
-            .as_deref()
-            .is_some_and(|live| Some(live) != before)
-        {
-            return true;
-        }
-        if attempt + 1 < NAVIGATION_SETTLE_TRIES {
-            tokio::time::sleep(NAVIGATION_SETTLE_DELAY).await;
-        }
-    }
-    false
-}
-
 /// Enables the diagnostics domains the monitor reproduces.
 ///
 /// `Runtime.enable`, `Network.enable` and `Page.enable` are rejected on a viewer
@@ -952,98 +523,6 @@ pub async fn layout_metrics(controller: &dyn PageController) -> Result<Option<Vi
     Ok(viewport_from_metrics(&value))
 }
 
-async fn dispatch(text: &str, pending: &Pending, events: &mpsc::Sender<CdpEvent>) -> bool {
-    let value: Value = match serde_json::from_str(text) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(error = %error, "ignoring malformed CDP message");
-            return true;
-        }
-    };
-
-    if let Some(id) = value.get("id").and_then(Value::as_u64) {
-        let reply = pending
-            .lock()
-            .expect("CDP pending map poisoned")
-            .remove(&id);
-        if let Some(reply) = reply {
-            let outcome = match value.get("error") {
-                Some(error) => Err(CdpError::Protocol {
-                    code: error.get("code").and_then(Value::as_i64).unwrap_or(0),
-                    message: error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown CDP error")
-                        .to_owned(),
-                }),
-                None => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
-            };
-            let _ = reply.send(outcome);
-        }
-        return true;
-    }
-
-    if let Some(method) = value.get("method").and_then(Value::as_str) {
-        tracing::trace!(method, "CDP event");
-        let event = CdpEvent {
-            method: method.to_owned(),
-            params: value.get("params").cloned().unwrap_or(Value::Null),
-        };
-        // Kitesurf replays every execution context of the target to each
-        // session (100+ on a busy page). Blocking here would stop the reader
-        // behind those events, and the reply to the command in flight — or to
-        // the next one — would never be dispatched. Consumers keep the newest
-        // state, so shedding events while the queue is full is safer than a
-        // socket that goes silent.
-        match events.try_send(event) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
-        }
-    } else {
-        true
-    }
-}
-
-fn fail_pending(pending: &Pending, error: &CdpError) {
-    let drained: Vec<_> = pending
-        .lock()
-        .expect("CDP pending map poisoned")
-        .drain()
-        .map(|(_, reply)| reply)
-        .collect();
-    for reply in drained {
-        let _ = reply.send(Err(clone_error(error)));
-    }
-}
-
-fn clone_error(error: &CdpError) -> CdpError {
-    match error {
-        CdpError::InvalidUrl { url, reason } => CdpError::InvalidUrl {
-            url: url.clone(),
-            reason: reason.clone(),
-        },
-        CdpError::Connect { url, .. } => CdpError::Closed { url: url.clone() },
-        CdpError::Closed { url } => CdpError::Closed { url: url.clone() },
-        CdpError::Timeout { method, timeout_ms } => CdpError::Timeout {
-            method: method.clone(),
-            timeout_ms: *timeout_ms,
-        },
-        CdpError::Protocol { code, message } => CdpError::Protocol {
-            code: *code,
-            message: message.clone(),
-        },
-        CdpError::Decode(message) => CdpError::Decode(message.clone()),
-        CdpError::Rejected { method, message } => CdpError::Rejected {
-            method: method.clone(),
-            message: message.clone(),
-        },
-        CdpError::WebSocket(_) => CdpError::Closed {
-            url: "CDP socket".to_owned(),
-        },
-    }
-}
-
-/// Screencast metadata from `Page.screencastFrame`.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreencastMetadata {
@@ -1169,7 +648,13 @@ pub async fn start_screencast(viewer: &Viewer) -> Result<(), CdpError> {
 /// The scale is native (`scale: 1`): a scaled capture leaves a retained capture
 /// surface on the page and can shrink the next screencast.
 pub async fn capture_thumbnail(cdp_url: &str, target_id: &str) -> Result<String, CdpError> {
-    let viewer = Viewer::connect(cdp_url, target_id).await?;
+    let mut viewer = Viewer::connect(cdp_url, target_id).await?;
+    let captured = thumbnail(&viewer).await;
+    let closed = viewer.close().await;
+    captured.and_then(|data| closed.map(|()| data))
+}
+
+pub(crate) async fn thumbnail(viewer: &Viewer) -> Result<String, CdpError> {
     let result = viewer
         .command(
             "Page.captureScreenshot",
