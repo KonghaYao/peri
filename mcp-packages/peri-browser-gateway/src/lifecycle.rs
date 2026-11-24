@@ -1,4 +1,5 @@
-//! `install kitesurf` and the engine side of `start kitesurf`.
+//! `install kitesurf`, `update kitesurf` and the engine side of `start
+//! kitesurf`.
 //!
 //! Installation downloads the official script into a private temporary
 //! directory and runs it with `bash`, so a failed `curl` cannot be hidden by a
@@ -47,8 +48,32 @@ static INSTALLER_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// Returns the installer's exit code so callers can propagate it unchanged.
 pub fn install(lookup: &impl Fn(&str) -> Option<String>) -> Result<i32> {
+    install_or_update(lookup, false)
+}
+
+/// `update kitesurf`: re-run the official installer unconditionally.
+///
+/// The installer resolves and downloads the latest release itself, so running
+/// it again is the update; skipping the already-installed short circuit is
+/// what makes `update` differ from the idempotent `install`. The installer
+/// replaces symlinks only and never touches a running process, so a running
+/// engine keeps the old binary until it is restarted.
+pub fn update_kitesurf(lookup: &impl Fn(&str) -> Option<String>) -> Result<i32> {
+    install_or_update(lookup, true)
+}
+
+/// Shared install path; `force` skips the already-installed short circuit.
+fn install_or_update(lookup: &impl Fn(&str) -> Option<String>, force: bool) -> Result<i32> {
     let root = install_root(lookup).context("HOME is not set; set KITESURF_INSTALL_DIR")?;
     let info = detect_install(&root, lookup);
+    if force {
+        match (info.installed, info.version.as_deref()) {
+            (true, Some(version)) => println!("updating kitesurf {version} ..."),
+            (true, None) => println!("updating kitesurf ..."),
+            (false, _) => println!("kitesurf is not installed; installing the latest release"),
+        }
+        return run_installer();
+    }
     if info.installed {
         match (info.path.as_ref(), info.version.as_ref()) {
             (Some(path), Some(version)) => println!(

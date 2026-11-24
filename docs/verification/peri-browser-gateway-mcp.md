@@ -131,6 +131,35 @@ export CARGO_INCREMENTAL=0
 - **进程身份**：状态新增可选 `pid_start`（Linux `/proc/<pid>/stat` 第 22 字段，macOS `ps -p <pid> -o lstart=`）；记录值与当前值都存在时必须相等，缺失时回退 `comm` basename。pid 复用不再触发 SIGTERM。
 - **新增单测**：`publishing_state_is_exclusive_and_never_replaces_the_winner`、`a_reused_pid_with_a_different_start_identity_is_not_the_gateway`、`missing_start_identity_falls_back_to_the_comm_basename`、`a_missing_pid_start_is_omitted_and_old_states_still_parse`；契约测试新增 `/healthz` pid 与状态 `pid_start` 断言，并验证第二次 `start` 不改写赢家状态。
 
+### update / update kitesurf（2026-11-24）
+
+范围：新增 `peri-browser update`，不接受参数，只复用官方 `scripts/install-browser.sh`，不复制检查版本、下载、校验与软链切换逻辑。实现为 `src/cli.rs` 的 `Command::Update` 与 `src/main.rs` 的 `update()`：以 `bash -c 'set -o pipefail; curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-browser.sh | bash'` 执行，stdin/stdout/stderr 与环境变量继承，退出码原样返回；不停止正在运行的网关。基线 `cebfddcab`（`origin/main`），证据由执行代理采集，不是独立复验。
+
+同一轮补充 `update kitesurf`：`src/cli.rs` 的 `parse_update` 接受 `[]` 与 `["kitesurf"]`，分别得到 `Command::Update` 与 `Command::UpdateKitesurf`；后者分派到 `src/lifecycle.rs` 的 `update_kitesurf`。`install` 与 `update_kitesurf` 共用 `install_or_update(lookup, force)`，`install` 保持 `force = false`，`update_kitesurf` 用 `force = true` 跳过“已安装即返回”短路，先打印 `updating kitesurf <version> ...`（无版本时 `updating kitesurf ...`，未安装时 `kitesurf is not installed; installing the latest release`），再原样返回 kitesurf 官方安装器的退出码。`install kitesurf` 的幂等行为未变。
+
+环境：macOS 26.6.2 arm64，Rust 1.99.0；exports 与本记录上方相同。
+
+| 检查 | 命令 | 观察结果 |
+| --- | --- | --- |
+| 构建 | `./scripts/cargo-rmcp-patched.sh build --offline --locked -p peri-browser-gateway` | PASS，`Finished dev profile`。 |
+| 测试 | `./scripts/cargo-rmcp-patched.sh test --offline --locked -p peri-browser-gateway` | PASS：lib 157（新增 `update_takes_an_optional_kitesurf_target`、`unknown_update_targets_point_at_the_supported_target_and_the_gateway`、`help_separates_bare_update_from_update_kitesurf` 与 lifecycle 的 `update_without_a_home_or_override_fails_before_any_download`）、`tests/mcp_http` 21、doc 0。 |
+| Clippy | `./scripts/cargo-rmcp-patched.sh clippy --offline --locked -p peri-browser-gateway --all-targets -- -D warnings` | PASS。 |
+| 格式 | `./scripts/cargo-rmcp-patched.sh fmt -p peri-browser-gateway -- --check` | PASS。 |
+| 功能目录 | `python3 scripts/test-feature-catalog.py && python3 scripts/check-feature-catalog.py` | PASS（22 tests）。 |
+| 多余参数 | `target/debug/peri-browser update kitesurf extra` | exit 1，stderr `update accepts at most one target; unexpected "extra"; see --help`。 |
+| 未知目标 | `target/debug/peri-browser update foo` | exit 1，stderr `unknown update target "foo"; supported: kitesurf; run peri-browser update without a target to update the gateway`。 |
+| 帮助 | `target/debug/peri-browser update --help` | 全局 help，列表含 `peri-browser update [kitesurf]`，说明裸 `update` 复用 browser 安装脚本且已安装的引擎不会升级、`update kitesurf` 无条件重跑 kitesurf 官方安装脚本，并提示安装器不停止运行中的进程、需 `stop` 后再 `start`。 |
+| `bash` 缺失 | `env PATH=/nonexistent target/debug/peri-browser update` | exit 1，stderr `failed to run bash ... update needs bash and curl on PATH`。 |
+| `curl` 缺失 | PATH 只含 `bash` 时执行 `update` | exit 127，`bash: curl: command not found`；`pipefail` 使空脚本未误报成功。 |
+| 真实安装（隔离目录） | `PERI_BROWSER_INSTALL_DIR=<tmp> PERI_BROWSER_SKIP_KITESURF=1 PERI_BROWSER_NO_PATH_HINT=1 target/debug/peri-browser update` | **失败**：`curl: (35) Recv failure: Connection reset by peer`，`update` 原样返回 35，临时目录为空；同环境直接执行同一条 `curl \| bash` 也返回 35，判定为网络出口问题而非实现差异。两次重试仍失败，成功安装未验证。 |
+| 失败传播 | 上述失败运行 | stderr 含 `peri-browser: update failed (exit code 35); check network access and that curl and bash are on PATH`；非零退出未被吞掉。 |
+| 短路绕过 | 同环境（PATH 上有 mise 安装的 kitesurf 0.5.2）依次执行 `install kitesurf` 与 `update kitesurf` | `install` 打印 `kitesurf already installed: …/0.5.2/kitesurf` 并 exit 0；`update kitesurf` 打印 `updating kitesurf ...` 后进入下载，exit 35。已安装短路被绕过。 |
+| 状态行（有版本） | `env -i HOME=<tmp> PATH=/usr/bin:/bin:/usr/sbin:/sbin KITESURF_INSTALL_DIR=<tmp>/kitesurf KITESURF_NO_PATH_HINT=1 target/debug/peri-browser update kitesurf`，隔离目录内含 `bin/kitesurf` 与 `current-version.txt=9.9.9` | stdout `updating kitesurf 9.9.9 ...`，随后 `curl: (35) Recv failure: Connection reset by peer`，exit 35。 |
+| 状态行（未安装） | 同上但隔离目录为空、HOME 与 PATH 均无 kitesurf | stdout `kitesurf is not installed; installing the latest release`，随后同样 exit 35。 |
+| 端到端（隔离目录） | `KITESURF_INSTALL_DIR=<tmp>/kitesurf KITESURF_NO_PATH_HINT=1 target/debug/peri-browser update kitesurf` | **失败**：stdout `updating kitesurf ...`，stderr `curl: (35) Recv failure: Connection reset by peer`，exit 35，`<tmp>/kitesurf` 未创建。另两次重试结果相同，均为网络出口重置，成功安装未验证。 |
+
+未验证项：隔离目录中的 `current-version.txt` 与 `bin/peri-browser --version` 因网络重置未取得；`update kitesurf` 的真实成功安装及其 `current-version.txt` / `bin/kitesurf --version` 同样未取得；更新后 `stop` 再 `start` 切换到新二进制（网关或引擎）未运行（未触碰 18791 的既有网关与本机 0.5.2 引擎）；Windows 仍走 `#[cfg(not(unix))]` 的 “Unix platform required”；安装脚本 SHA-256 校验失败路径由既有离线 harness 覆盖，本次未重复。
+
 ## 未运行与剩余风险
 
 - **真实引擎仅覆盖最小路径**：已用 Kitesurf 0.5.2 走通 initialize/connect/new_page/snapshot/list，以及带页面会话的 DELETE；未验证 monitor 浏览器交互、yield/request_human、真实导航与 fill、0.5.4、多会话并发。

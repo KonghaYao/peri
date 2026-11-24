@@ -1,5 +1,6 @@
 //! `peri-browser` entry point: serve the gateway in the foreground, run it in
-//! the background, stop it, or install/start kitesurf.
+//! the background, stop it, install/start/update kitesurf, or re-run the
+//! browser installer.
 
 use std::process::ExitCode;
 
@@ -56,6 +57,8 @@ async fn run(command: Command) -> anyhow::Result<i32> {
         }
         Command::Stop(options) => daemon::stop(options.bind, &process_env).await,
         Command::InstallKitesurf => lifecycle::install(&process_env),
+        Command::Update => update(),
+        Command::UpdateKitesurf => lifecycle::update_kitesurf(&process_env),
         Command::StartKitesurf(options) => {
             let owned = lifecycle::ensure_engine(options.port, &process_env).await?;
             let engine = EngineBinding {
@@ -66,6 +69,33 @@ async fn run(command: Command) -> anyhow::Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// The documented install one-liner. `pipefail` is required: without it a
+/// failed `curl` feeds an empty script to `bash`, which exits 0.
+#[cfg(unix)]
+const UPDATE_PIPELINE: &str =
+    "set -o pipefail; curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-browser.sh | bash";
+
+/// `update`: re-run the official installer with inherited stdio and environment
+/// (`PERI_BROWSER_INSTALL_DIR`, `PERI_BROWSER_SKIP_KITESURF`, ...), and return
+/// the script's exit code unchanged. The running gateway keeps its old binary.
+#[cfg(unix)]
+fn update() -> anyhow::Result<i32> {
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(UPDATE_PIPELINE)
+        .status()
+        .map_err(|error| {
+            anyhow::anyhow!("failed to run `bash`: {error}; `update` needs bash and curl on PATH")
+        })?;
+    let code = status.code().unwrap_or(1);
+    if code != 0 {
+        eprintln!(
+            "peri-browser: update failed (exit code {code}); check network access and that `curl` and `bash` are on PATH"
+        );
+    }
+    Ok(code)
 }
 
 #[cfg(unix)]
