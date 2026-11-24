@@ -258,6 +258,15 @@ fn child_receipt(instance_id: Option<&str>, event: &Value) -> Vec<Projected> {
 
 fn project_agent_event_done(params: &Value) -> Vec<Projected> {
     let Some(stop_reason) = params.get("stopReason").and_then(Value::as_str) else {
+        let request_id = params
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // Dropping this silently strands the turn: nothing else can close it.
+        tracing::warn!(
+            request_id,
+            "peri/agent_event_done without stopReason; turn has no terminal"
+        );
         return Vec::new();
     };
     vec![Projected::TurnCompleted {

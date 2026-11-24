@@ -166,6 +166,59 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
 }
 
 #[tokio::test]
+async fn a_batched_burst_keeps_host_order_and_consecutive_seqs() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest_batch(vec![
+        ("session/update".to_owned(), chunk("he")),
+        ("session/update".to_owned(), chunk("llo")),
+    ])
+    .await;
+
+    let items: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items.len(), 2, "one delta item per chunk");
+    assert_eq!(items[0].seq + 1, items[1].seq, "the run is contiguous");
+    assert_eq!(items[0].item_id, items[1].item_id, "one message identity");
+    assert_eq!(items[0].payload["text"], "he");
+    assert_eq!(items[1].payload["text"], "llo");
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 2);
+
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Running);
+    assert_eq!(row.last_item_seq, 2, "the cursor moves with the batch");
+
+    // The turn's completion still flushes the whole streamed text under the
+    // stable identity, after the batched deltas.
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let completion = drain(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            StreamEvent::Item(item) if item.payload["complete"] == true => Some(item),
+            _ => None,
+        })
+        .expect("completion item");
+    assert_eq!(completion.item_id, items[0].item_id);
+    assert_eq!(completion.payload["text"], "hello");
+    assert_eq!(completion.seq, 3);
+}
+
+#[tokio::test]
 async fn user_input_is_one_frame_with_a_stable_identity_and_advances_the_tail() {
     let Fixture {
         log,

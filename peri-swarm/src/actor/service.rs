@@ -58,6 +58,11 @@ use crate::store::{
 /// only a safety net against a lost terminal, not a turn deadline.
 const STEER_CONTINUATION_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Upper bound while an attempt-level prompt reply (no `stopReason`) waits for
+/// the turn's real terminal. The agent may legitimately run for minutes, so
+/// this is only a safety net against a lost `peri/agent_event_done`.
+const ATTEMPT_REPLY_TERMINAL_TIMEOUT: Duration = Duration::from_secs(1800);
+
 /// Turn identity visible to `GET /sessions` while the turn runs.
 #[derive(Clone, Debug)]
 struct TurnSlot {
@@ -549,10 +554,11 @@ impl AcpSwarmService {
         }
         match runtime.child.prompt(text, &request_id).await {
             Ok(reply) => {
+                let steered = runtime.log.steer_epoch() > 0;
                 // A steer cancels this attempt on purpose and the host continues
                 // the turn as a queued run; that run owns the terminal now, so
                 // the turn slot stays occupied until it reports one.
-                if runtime.log.steer_epoch() > 0
+                if steered
                     && !runtime
                         .log
                         .wait_turn_closed(&request_id, STEER_CONTINUATION_TIMEOUT)
@@ -563,11 +569,49 @@ impl AcpSwarmService {
                         request_id = %request_id,
                         "steer continuation reported no terminal; closing the turn"
                     );
+                    if let Some(stop_reason) = reply.stop_reason.clone() {
+                        runtime
+                            .log
+                            .finish_turn(&request_id, TurnOutcome::Completed(stop_reason))
+                            .await;
+                    }
+                } else if !steered {
+                    // The prompt reply is **not** the turn terminal:
+                    // `peri/agent_event_done`, ingested in item order, is.
+                    // Closing on the reply flushed live streams as
+                    // `complete:true` while the session's items were still
+                    // queued, then discarded the real terminal as late and left
+                    // the session `in_progress` forever. Wait for the reader's
+                    // terminal; only a lost one trips the safety net.
+                    tracing::debug!(
+                        logical_id = %runtime.log.logical_id(),
+                        request_id = %request_id,
+                        stop_reason = ?reply.stop_reason,
+                        pending_tasks = reply.pending_tasks,
+                        "session/prompt replied; waiting for the turn terminal"
+                    );
+                    if !runtime
+                        .log
+                        .wait_turn_closed(&request_id, ATTEMPT_REPLY_TERMINAL_TIMEOUT)
+                        .await
+                    {
+                        tracing::warn!(
+                            logical_id = %runtime.log.logical_id(),
+                            request_id = %request_id,
+                            "agent turn reported no terminal"
+                        );
+                        runtime
+                            .log
+                            .finish_turn(
+                                &request_id,
+                                TurnOutcome::Failed {
+                                    code: -32603,
+                                    message: "agent turn reported no terminal".to_owned(),
+                                },
+                            )
+                            .await;
+                    }
                 }
-                runtime
-                    .log
-                    .finish_turn(&request_id, TurnOutcome::Completed(reply.stop_reason))
-                    .await;
                 if reply.pending_tasks > 0 {
                     tracing::debug!(
                         logical_id = %runtime.log.logical_id(),

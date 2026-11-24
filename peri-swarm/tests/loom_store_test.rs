@@ -723,10 +723,19 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         .expect("run one turn");
     log.finish_turn(
         request_id,
-        TurnOutcome::Completed(reply.stop_reason.clone()),
+        TurnOutcome::Completed(
+            reply
+                .stop_reason
+                .clone()
+                .expect("the host reports a terminal stop reason"),
+        ),
     )
     .await;
-    assert_eq!(reply.stop_reason, "end_turn", "turn reply: {reply:?}");
+    assert_eq!(
+        reply.stop_reason.as_deref(),
+        Some("end_turn"),
+        "turn reply: {reply:?}"
+    );
     assert_eq!(
         stub.main_calls(),
         1,

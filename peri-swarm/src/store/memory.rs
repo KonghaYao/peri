@@ -257,6 +257,46 @@ impl SwarmStore for MemorySwarmStore {
         Ok(())
     }
 
+    async fn swarm_append_items(
+        &self,
+        rows: &[SwarmItemRow],
+        progress: Option<SwarmSessionUpdate>,
+    ) -> Result<(), StoreError> {
+        // Validate the whole run before writing anything: the caller retries a
+        // conflict with a reloaded `MAX(seq)`, which is only sound if a rejected
+        // run left no row behind.
+        {
+            let state = self.lock();
+            let mut seen = std::collections::HashSet::new();
+            for row in rows {
+                if !seen.insert((row.logical_id.clone(), row.seq)) {
+                    return Err(StoreError::Conflict(format!(
+                        "seq {} is duplicated inside the run for {}",
+                        row.seq, row.logical_id
+                    )));
+                }
+                if state
+                    .items
+                    .get(&row.logical_id)
+                    .is_some_and(|items| items.contains_key(&row.seq))
+                {
+                    return Err(StoreError::Conflict(format!(
+                        "seq {} already exists for {}",
+                        row.seq, row.logical_id
+                    )));
+                }
+            }
+        }
+        // The single-row path keeps the settlement-failure injection above.
+        for row in rows {
+            self.swarm_append_item(row.clone()).await?;
+        }
+        if let Some(update) = progress {
+            self.swarm_update_session(update).await?;
+        }
+        Ok(())
+    }
+
     async fn swarm_items_after(
         &self,
         logical_id: &str,

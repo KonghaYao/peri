@@ -181,6 +181,29 @@ pub enum TurnOutcome {
 /// fix the stream kind and swallow the later answer text.
 type StreamKey = (String, String, &'static str);
 
+/// Payload bytes one item transaction may carry.
+///
+/// Loom answers a statement batch above `max_sql_bytes` (64 KiB in the v1.1.24
+/// dev profile) with `413`. The bound parameter is the payload JSON *as a JSON
+/// string*, so escaping can double it; a quarter of the cap plus the per-row
+/// overhead below keeps a full batch under the limit even for text full of
+/// quotes and newlines.
+/// Payload bytes one append group may carry.
+///
+/// The limit is set by the remote store, not by this reader. Loom enforces a
+/// project `max_sql_bytes` (64 KiB by default) as an HTTP 413, and hrana makes
+/// any non-200 response fatal for the stream: the next statement opens a *new*
+/// session, and Loom counts opened sessions against a fixed project quota. A
+/// single oversized append therefore costs a permanent session, so the budget
+/// here stays well below the backend limit and leaves room for the wire
+/// overhead (SQL text, ids, source JSON, JSON escaping) which runs several
+/// times the payload bytes.
+const APPEND_BATCH_BYTES: usize = 8 * 1024;
+
+/// Non-payload bytes one row adds to the statement batch (SQL text, ids, source
+/// JSON, timestamps). Estimated high on purpose.
+const APPEND_ROW_OVERHEAD: usize = 256;
+
 struct MessageStream {
     kind: ItemKind,
     item_id: String,
@@ -192,6 +215,40 @@ struct MessageStream {
     /// messages, so the `final_answer`/`commentary` decision uses it instead of
     /// a map or arrival order.
     first_seq: Option<u64>,
+}
+
+/// Whether an append also moves the session's durable cursor/state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProgressWrite {
+    /// Mark the session `running` unconditionally: accepting input is progress
+    /// even before the turn starts, and the deferred-turn test depends on it.
+    Running,
+    /// Mark `running` only while a turn is open. A straggler item after the
+    /// terminal must not rewrite `idle` back to `running`, which would strand
+    /// the session in `in_progress` with no turn to close.
+    WhileTurnOpen,
+}
+
+/// One item prepared for a batched append: payload already fitted to the item
+/// budget, identity already minted, so the batch loop only assigns seqs.
+struct PreparedItem {
+    kind: ItemKind,
+    source: ItemSource,
+    payload: Value,
+    truncated: bool,
+    item_id: String,
+    /// Serialized payload size, used to keep one store transaction under the
+    /// backend's request budget.
+    payload_bytes: usize,
+}
+
+/// Items staged by [`ItemLog::ingest_batch`] between two non-item events.
+#[derive(Default)]
+struct StagedItems {
+    items: Vec<(ProjectedItem, Option<String>)>,
+    /// `(index into `items`, stream key)` of delta chunks whose `first_seq` the
+    /// append must fill in.
+    streams: Vec<(usize, StreamKey)>,
 }
 
 /// User item whose `turn.created`/`turn.item.added` frames are published when
@@ -240,6 +297,10 @@ struct LogState {
     failure: Option<String>,
     /// Monotonic count of ingested notifications; used as a drain fence.
     ingested: u64,
+    /// Last seq this log appended, cached so a batched append does not pay a
+    /// `MAX(seq)` read per batch. Cleared on a seq conflict, which is the only
+    /// way another writer can advance it.
+    next_seq: Option<u64>,
     /// Steers handed to the running turn. Each one cancels the in-flight
     /// attempt, so the turn is not finished by that attempt's terminal.
     steer_epoch: u64,
@@ -356,7 +417,7 @@ impl ItemLog {
             .map(|input_id| format!("itim_input_{input_id}"))
             .unwrap_or_else(ItemView::new_item_id);
         let seq = self
-            .append_item(
+            .append_starting_item(
                 ProjectedItem {
                     kind: ItemKind::Message,
                     source: ItemSource::root(),
@@ -407,81 +468,112 @@ impl ItemLog {
     /// Consume one host notification. Projection errors are impossible by
     /// construction; persistence errors are logged and never abort the reader.
     pub async fn ingest(&self, method: &str, params: &Value) {
-        let projected = projection::project(method, params);
-        {
-            let mut state = self.state.lock();
-            state.ingested = state.ingested.wrapping_add(1);
+        self.ingest_batch(vec![(method.to_owned(), params.clone())])
+            .await;
+    }
+
+    /// Consume a run of notifications in arrival order.
+    ///
+    /// Consecutive projected items are staged and appended as one store write,
+    /// so a burst of stream deltas costs one transaction instead of one per
+    /// chunk. A non-item projection flushes the staged run first: turn state and
+    /// item order must stay exactly as the host emitted them.
+    pub async fn ingest_batch(&self, messages: Vec<(String, Value)>) {
+        let mut staged = StagedItems::default();
+        for (method, params) in messages {
+            let projected = projection::project(&method, &params);
+            {
+                let mut state = self.state.lock();
+                state.ingested = state.ingested.wrapping_add(1);
+            }
+            for event in projected {
+                match event {
+                    Projected::Item(item) => self.stage_item(item, &mut staged),
+                    event => {
+                        self.flush_staged(&mut staged).await;
+                        self.dispatch_event(event).await;
+                    }
+                }
+            }
         }
-        for event in projected {
-            match event {
-                Projected::Item(item) => self.push_item(item).await,
-                // The gateway opens the turn before `session/prompt`, so the
-                // host's own start frame only confirms the generation. A queued
-                // (MQ) run has its own request id: it is adopted as the
-                // continuation of the open turn, never a second Swarm turn.
-                Projected::TurnStarted {
-                    request_id,
-                    generation,
-                    queued,
-                } => {
-                    let mut state = self.state.lock();
-                    if state.active.as_deref() == Some(request_id.as_str())
-                        && state.generation.is_none()
-                    {
-                        state.generation = generation;
-                    } else if queued && state.active.is_some() && state.steer_epoch > 0 {
-                        state.continuation = Some(ContinuationRun {
-                            request_id,
-                            epoch: state.steer_epoch,
-                        });
-                    }
+        self.flush_staged(&mut staged).await;
+    }
+
+    /// Apply one non-item projection in host order.
+    async fn dispatch_event(&self, event: Projected) {
+        match event {
+            // `ingest_batch` stages items; this arm keeps the match total for
+            // callers that hand over a single projected event.
+            Projected::Item(item) => self.push_item(item).await,
+            // The gateway opens the turn before `session/prompt`, so the
+            // host's own start frame only confirms the generation. A queued
+            // (MQ) run has its own request id: it is adopted as the
+            // continuation of the open turn, never a second Swarm turn.
+            Projected::TurnStarted {
+                request_id,
+                generation,
+                queued,
+            } => {
+                let mut state = self.state.lock();
+                if state.active.as_deref() == Some(request_id.as_str())
+                    && state.generation.is_none()
+                {
+                    state.generation = generation;
+                } else if queued && state.active.is_some() && state.steer_epoch > 0 {
+                    state.continuation = Some(ContinuationRun {
+                        request_id,
+                        epoch: state.steer_epoch,
+                    });
                 }
-                Projected::QueueChanged { .. } => {}
-                Projected::TurnCompleted {
-                    request_id,
-                    stop_reason,
-                } => {
-                    let closes = {
-                        let state = self.state.lock();
-                        let Some(active) = state.active.clone() else {
-                            continue;
-                        };
-                        match request_id.as_deref() {
-                            // The prompt attempt of the open turn. A steer
-                            // cancels it on purpose: the turn continues in the
-                            // queued run, so this terminal is not the turn's.
-                            Some(running) if running == active => {
-                                if state.steer_epoch == 0 {
-                                    Some((active, stop_reason))
-                                } else {
-                                    None
-                                }
-                            }
-                            // The queued run continuing the turn. A newer steer
-                            // supersedes it, so only the latest run closes it.
-                            Some(running) => state
-                                .continuation
-                                .as_ref()
-                                .filter(|run| {
-                                    run.request_id == running && run.epoch == state.steer_epoch
-                                })
-                                .map(|_| (active, stop_reason)),
-                            // Legacy/terminal frames without a request id only
-                            // close a turn that no steer has taken over.
-                            None if state.steer_epoch == 0 => Some((active, stop_reason)),
-                            None => None,
-                        }
+            }
+            Projected::QueueChanged { .. } => {}
+            Projected::TurnCompleted {
+                request_id,
+                stop_reason,
+            } => {
+                let closes = {
+                    let state = self.state.lock();
+                    let Some(active) = state.active.clone() else {
+                        // A terminal for a turn that is already closed: the
+                        // turn was finished early and this one is stranded.
+                        tracing::debug!(?request_id, "turn terminal ignored: no active turn");
+                        return;
                     };
-                    if let Some((active, stop_reason)) = closes {
-                        self.finish_turn(&active, TurnOutcome::Completed(stop_reason))
-                            .await;
+                    match request_id.as_deref() {
+                        // The prompt attempt of the open turn. A steer
+                        // cancels it on purpose: the turn continues in the
+                        // queued run, so this terminal is not the turn's.
+                        Some(running) if running == active => {
+                            if state.steer_epoch == 0 {
+                                Some((active, stop_reason))
+                            } else {
+                                None
+                            }
+                        }
+                        // The queued run continuing the turn. A newer steer
+                        // supersedes it, so only the latest run closes it.
+                        Some(running) => state
+                            .continuation
+                            .as_ref()
+                            .filter(|run| {
+                                run.request_id == running && run.epoch == state.steer_epoch
+                            })
+                            .map(|_| (active, stop_reason)),
+                        // Legacy/terminal frames without a request id only
+                        // close a turn that no steer has taken over.
+                        None if state.steer_epoch == 0 => Some((active, stop_reason)),
+                        None => None,
                     }
+                };
+                if let Some((active, stop_reason)) = closes {
+                    self.finish_turn(&active, TurnOutcome::Completed(stop_reason))
+                        .await;
                 }
-                Projected::ExecutionFailed { message } => {
-                    let mut state = self.state.lock();
-                    if state.active.is_some() {
-                        state.failure = Some(message);
-                    }
+            }
+            Projected::ExecutionFailed { message } => {
+                let mut state = self.state.lock();
+                if state.active.is_some() {
+                    state.failure = Some(message);
                 }
             }
         }
@@ -1685,8 +1777,12 @@ impl ItemLog {
         )));
     }
 
-    /// Persist one projected item, then broadcast it.
-    async fn push_item(&self, item: ProjectedItem) {
+    /// Stage one projected item for the next batched append.
+    ///
+    /// Stream deltas first update the in-memory text (the turn flush uses it)
+    /// and keep one identity per `(agent, messageId, kind)`; the delta itself is
+    /// staged with that identity. Non-stream items are staged as they are.
+    fn stage_item(&self, item: ProjectedItem, staged: &mut StagedItems) {
         if let Some((key, message_id, text)) = stream_parts(&item) {
             let item_id = {
                 let mut state = self.state.lock();
@@ -1722,23 +1818,47 @@ impl ItemLog {
                 source: item.source,
                 payload,
             };
-            match self.append_item(projected, Some(item_id)).await {
-                Ok(seq) => {
-                    // Persisted: the first chunk's seq orders this message among
-                    // the turn's outputs. A later chunk never rewrites it.
-                    let mut state = self.state.lock();
-                    if let Some(stream) = state.streams.get_mut(&key) {
-                        stream.first_seq.get_or_insert(seq);
-                    }
-                }
-                Err(error) => self.report_append_failure("item", error).await,
-            }
+            staged.streams.push((staged.items.len(), key));
+            staged.items.push((projected, Some(item_id)));
             return;
         }
-        let kind = item.kind;
-        if let Err(error) = self.append_item(item, None).await {
-            self.report_append_failure(kind.as_str(), error).await;
+        staged.items.push((item, None));
+    }
+
+    /// Persist and publish the staged run in one write.
+    async fn flush_staged(&self, staged: &mut StagedItems) {
+        if staged.items.is_empty() {
+            return;
         }
+        let streams = std::mem::take(&mut staged.streams);
+        match self
+            .append_items(
+                std::mem::take(&mut staged.items),
+                ProgressWrite::WhileTurnOpen,
+            )
+            .await
+        {
+            Ok(seqs) => {
+                // Persisted: the first chunk's seq orders this message among the
+                // turn's outputs. A later chunk never rewrites it.
+                let mut state = self.state.lock();
+                for (index, key) in streams {
+                    if let (Some(seq), Some(stream)) =
+                        (seqs.get(index), state.streams.get_mut(&key))
+                    {
+                        stream.first_seq.get_or_insert(*seq);
+                    }
+                }
+            }
+            Err(error) => self.report_append_failure("item", error).await,
+        }
+    }
+
+    /// Append and publish one item (completion flushes; single-frame paths).
+    async fn push_item(&self, item: ProjectedItem) {
+        let mut staged = StagedItems::default();
+        self.stage_item(item, &mut staged);
+        self.flush_staged(&mut staged).await;
     }
 
     async fn append_item(
@@ -1746,36 +1866,146 @@ impl ItemLog {
         item: ProjectedItem,
         stable_item_id: Option<String>,
     ) -> Result<u64, SwarmError> {
-        let (payload, truncated) = ItemView::fit_payload(item.payload);
-        let item_id = stable_item_id.unwrap_or_else(ItemView::new_item_id);
+        let mut seqs = self
+            .append_items(vec![(item, stable_item_id)], ProgressWrite::WhileTurnOpen)
+            .await?;
+        Ok(seqs.remove(0))
+    }
+
+    /// Append a projected item and mark the session running (acceptance path).
+    async fn append_starting_item(
+        &self,
+        item: ProjectedItem,
+        stable_item_id: Option<String>,
+    ) -> Result<u64, SwarmError> {
+        let mut seqs = self
+            .append_items(vec![(item, stable_item_id)], ProgressWrite::Running)
+            .await?;
+        Ok(seqs.remove(0))
+    }
+
+    /// Persist a run of items with consecutive seqs in one store write.
+    ///
+    /// The reader owns the sequence: `next_seq` is cached after the first
+    /// append and only re-read when a conflict proves another writer advanced
+    /// it. One transaction means a viewer never observes the second item of a
+    /// batch before the first is durable, and the session cursor moves with the
+    /// items instead of one round trip behind them.
+    async fn append_items(
+        &self,
+        items: Vec<(ProjectedItem, Option<String>)>,
+        progress: ProgressWrite,
+    ) -> Result<Vec<u64>, SwarmError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
         let created_at = peri_time::now_utc_rfc3339();
-        let mut appended = None;
+        let prepared: Vec<PreparedItem> = items
+            .into_iter()
+            .map(|(item, stable_item_id)| {
+                let (payload, truncated) = ItemView::fit_payload(item.payload);
+                let payload_bytes = serde_json::to_vec(&payload).map_or(0, |bytes| bytes.len());
+                PreparedItem {
+                    kind: item.kind,
+                    source: item.source,
+                    payload,
+                    truncated,
+                    item_id: stable_item_id.unwrap_or_else(ItemView::new_item_id),
+                    payload_bytes,
+                }
+            })
+            .collect();
+        let mut seqs = Vec::with_capacity(prepared.len());
+        let mut start = 0;
+        while start < prepared.len() {
+            let end = Self::batch_end(&prepared, start);
+            let group = &prepared[start..end];
+            let payload_bytes: usize = group.iter().map(|item| item.payload_bytes).sum();
+            let largest = group
+                .iter()
+                .map(|item| item.payload_bytes)
+                .max()
+                .unwrap_or(0);
+            tracing::debug!(
+                logical_id = %self.logical_id,
+                rows = group.len(),
+                payload_bytes,
+                largest_row_bytes = largest,
+                "append_items group"
+            );
+            seqs.extend(self.append_group(group, &created_at, progress).await?);
+            start = end;
+        }
+        Ok(seqs)
+    }
+
+    /// End index of the group that starts at `start`.
+    ///
+    /// One durable write must stay under the store's per-request budget: Loom
+    /// rejects a statement batch above `max_sql_bytes` with 413, and an item's
+    /// fitted payload alone can reach 1 MiB. A group always takes at least one
+    /// item so an oversized item still fails on its own rather than stalling.
+    fn batch_end(prepared: &[PreparedItem], start: usize) -> usize {
+        let mut end = start + 1;
+        let mut bytes = prepared[start].payload_bytes + APPEND_ROW_OVERHEAD;
+        while end < prepared.len()
+            && bytes + prepared[end].payload_bytes + APPEND_ROW_OVERHEAD <= APPEND_BATCH_BYTES
+        {
+            bytes += prepared[end].payload_bytes + APPEND_ROW_OVERHEAD;
+            end += 1;
+        }
+        end
+    }
+
+    /// Persist and broadcast one group of items with consecutive seqs.
+    async fn append_group(
+        &self,
+        prepared: &[PreparedItem],
+        created_at: &str,
+        progress: ProgressWrite,
+    ) -> Result<Vec<u64>, SwarmError> {
+        let mut appended: Option<Vec<u64>> = None;
 
         for attempt in 0..2 {
             let guard = self.seq_lock.lock().await;
-            let last = self
-                .store
-                .swarm_last_seq(&self.logical_id)
-                .await
-                .map_err(|error| store_failure("last_seq", error))?;
-            let seq = last + 1;
-            let result = self
-                .store
-                .swarm_append_item(SwarmItemRow {
+            let last = match self.next_seq().await {
+                Ok(last) => last,
+                Err(error) => {
+                    drop(guard);
+                    return Err(error);
+                }
+            };
+            let rows: Vec<SwarmItemRow> = prepared
+                .iter()
+                .enumerate()
+                .map(|(index, item)| SwarmItemRow {
                     logical_id: self.logical_id.clone(),
-                    seq,
-                    item_id: item_id.clone(),
+                    seq: last + 1 + index as u64,
+                    item_id: item.item_id.clone(),
                     kind: item.kind,
                     source: item.source.clone(),
-                    payload: payload.clone(),
-                    created_at: created_at.clone(),
-                    truncated,
+                    payload: item.payload.clone(),
+                    created_at: created_at.to_owned(),
+                    truncated: item.truncated,
                 })
-                .await;
+                .collect();
+            let write_progress = match progress {
+                ProgressWrite::Running => true,
+                ProgressWrite::WhileTurnOpen => self.state.lock().active.is_some(),
+            };
+            let update = write_progress.then(|| SwarmSessionUpdate {
+                logical_id: self.logical_id.clone(),
+                state: SessionState::Running,
+                last_item_seq: last + rows.len() as u64,
+                last_activity_at: created_at.to_owned(),
+            });
+            let result = self.store.swarm_append_items(&rows, update).await;
             drop(guard);
             match result {
                 Ok(()) => {
-                    appended = Some(seq);
+                    let end = last + rows.len() as u64;
+                    self.state.lock().next_seq = Some(end);
+                    appended = Some(((last + 1)..=end).collect());
                     break;
                 }
                 Err(crate::store::StoreError::Conflict(reason)) if attempt == 0 => {
@@ -1784,12 +2014,13 @@ impl ItemLog {
                         reason = %reason,
                         "swarm seq conflict; reloading MAX(seq) and retrying once"
                     );
+                    self.state.lock().next_seq = None;
                 }
-                Err(error) => return Err(store_failure("append_item", error)),
+                Err(error) => return Err(store_failure("append_items", error)),
             }
         }
 
-        let Some(seq) = appended else {
+        let Some(seqs) = appended else {
             self.update_state_quiet(SessionState::Failed).await;
             return Err(SwarmError::new(
                 ErrorKind::Unavailable,
@@ -1801,24 +2032,44 @@ impl ItemLog {
         // Persisted before the broadcast: a heartbeat may report this seq
         // before a viewer has rendered the item, which is the intended
         // "session progressed" meaning.
-        self.tail.fetch_max(seq, Ordering::Relaxed);
-        self.set_session_state(SessionState::Running, Some(seq))
-            .await?;
-        let view = ItemView {
-            id: item_id.clone(),
-            seq,
-            item_id,
-            kind: item.kind,
-            source: item.source,
-            payload,
-            created_at,
-            truncated,
-        };
-        self.broadcast(StreamEvent::Item(view.clone()));
-        for event in self.official_frames(&view) {
-            self.broadcast(StreamEvent::Official(event));
+        if let Some(last_seq) = seqs.last() {
+            self.tail.fetch_max(*last_seq, Ordering::Relaxed);
         }
-        Ok(seq)
+        for (seq, item) in seqs.iter().zip(prepared) {
+            let view = ItemView {
+                id: item.item_id.clone(),
+                seq: *seq,
+                item_id: item.item_id.clone(),
+                kind: item.kind,
+                source: item.source.clone(),
+                payload: item.payload.clone(),
+                created_at: created_at.to_owned(),
+                truncated: item.truncated,
+            };
+            self.broadcast(StreamEvent::Item(view.clone()));
+            for event in self.official_frames(&view) {
+                self.broadcast(StreamEvent::Official(event));
+            }
+        }
+        Ok(seqs)
+    }
+
+    /// Last persisted seq, read from the store only when the cache is cold.
+    async fn next_seq(&self) -> Result<u64, SwarmError> {
+        if let Some(seq) = self.state.lock().next_seq {
+            return Ok(seq);
+        }
+        let last = self
+            .store
+            .swarm_last_seq(&self.logical_id)
+            .await
+            .map_err(|error| store_failure("last_seq", error))?;
+        let mut state = self.state.lock();
+        // A concurrent appender under the same `seq_lock` cannot interleave, so
+        // the store value is still the cache's missing entry rather than a
+        // value to overwrite.
+        state.next_seq = Some(last);
+        Ok(last)
     }
 
     /// Official frames one persisted message frame implies.
