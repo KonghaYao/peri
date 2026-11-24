@@ -1,4 +1,4 @@
-//! 把预览状态转成消息区行；源码始终是可回退的最终事实。
+//! 把预览状态转成消息区行；消息区不内联源码，源码只在详情面板可见。
 
 use std::time::Instant;
 
@@ -16,6 +16,13 @@ use crate::kit::tui_render_unit::TuiRenderUnit;
 use super::hscroll;
 use super::preview::{PreviewContent, PreviewNotice, rebuild_history};
 use super::store;
+
+/// 围栏所在的展示面：消息区（chat）不内联源码，详情面板保留源码回退与尾部。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MermaidSurface {
+    Chat,
+    Detail,
+}
 
 /// 帧的横向视口元数据：绘制滚动条与命中换算共用同一组数字。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,14 +116,16 @@ impl PreviewScope {
     }
 }
 
-/// 消息区展示行：有可信帧时显示图 + 未确认源码尾部；否则保持完整源码。
-/// 直接渲染入口（测试/嵌套渲染）使用；消息区走 [`display_lines_peek`]。
+/// 消息区展示行：有可信帧时显示图（chat 不拼接未确认源码尾部）；无帧时 chat
+/// 显示占位或短原因，详情面板保持源码回退。直接渲染入口（测试/嵌套渲染）使用；
+/// 消息区走 [`display_lines_peek`]。
 pub(crate) fn display_lines(
     segment: &MermaidSegment,
     scope: &PreviewScope,
     width: usize,
     frozen: bool,
     foreground: Color,
+    surface: MermaidSurface,
 ) -> FenceRender {
     let key = scope.key(segment.fence.open_start);
     let selected = super::action_selected(&key);
@@ -132,6 +141,7 @@ pub(crate) fn display_lines(
             width,
             foreground,
             selected,
+            surface,
         );
     }
     let view = store::observe(key.clone(), &segment.fence, width, frozen);
@@ -143,6 +153,7 @@ pub(crate) fn display_lines(
         width,
         foreground,
         selected,
+        surface,
     )
 }
 
@@ -168,6 +179,7 @@ pub(crate) fn display_lines_peek(
             width,
             foreground,
             selected,
+            MermaidSurface::Chat,
         ),
         bytes,
     )
@@ -180,6 +192,12 @@ fn content_bytes(content: &PreviewContent) -> usize {
     }
 }
 
+/// 把预览视图转成围栏行。
+///
+/// 消息区（[`MermaidSurface::Chat`]）不内联源码：无帧时只显示「图表生成中」或
+/// 短原因，有帧时不追加未确认尾部；完整源码只属于详情面板。动作行始终保留，
+/// 它也是无帧/失败/不支持时打开图的唯一入口。
+#[allow(clippy::too_many_arguments)]
 fn render_content(
     segment: &MermaidSegment,
     key: &MermaidFenceKey,
@@ -188,9 +206,21 @@ fn render_content(
     width: usize,
     foreground: Color,
     action_selected: bool,
+    surface: MermaidSurface,
 ) -> FenceRender {
+    let chat = surface == MermaidSurface::Chat;
     let mut h_view = None;
     let mut lines = match content {
+        PreviewContent::Source if chat => {
+            let placeholder = match notice {
+                Some(notice) => notice_line(notice, foreground),
+                None => generating_line(foreground),
+            };
+            return FenceRender {
+                lines: vec![placeholder, open_action_line(foreground, action_selected)],
+                h_view: None,
+            };
+        }
         PreviewContent::Source => segment.lines.clone(),
         PreviewContent::Frame { lines, tail, .. } => {
             let viewport = HorizontalViewport::new(width, content_width(&lines));
@@ -213,7 +243,7 @@ fn render_content(
                     bar,
                 });
             }
-            if !tail.is_empty() {
+            if !chat && !tail.is_empty() {
                 rendered.push(Line::default());
                 for line in tail.lines() {
                     rendered.push(Line::from(Span::styled(
@@ -230,6 +260,14 @@ fn render_content(
     }
     lines.push(open_action_line(foreground, action_selected));
     FenceRender { lines, h_view }
+}
+
+/// 无可用帧时的消息区占位：不透露围栏源码，只说明图还在生成。
+fn generating_line(foreground: Color) -> Line<'static> {
+    Line::from(Span::styled(
+        i18n::tr("mermaid-generating"),
+        Style::default().fg(foreground).add_modifier(Modifier::DIM),
+    ))
 }
 
 /// 只做一次低成本判断，避免预览版本变化时重算无关消息。

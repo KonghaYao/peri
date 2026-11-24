@@ -45,9 +45,10 @@ pub enum PreviewNotice {
     Interrupted(String),
     Failed(String),
     UnknownStatement,
-    /// 图型没有可用的字符图布局（如 `block`/`block-beta`）：保留源码并说明原因。
+    /// 图型没有可用的字符图布局（如 `block`/`block-beta`）：只给简短原因，
+    /// 完整源码由详情面板回退。
     Unsupported(String),
-    /// 源码或排版结果超过几何预算：保留源码，等待概览视图（第 4 部分）。
+    /// 源码或排版结果超过几何预算：只给简短原因，源码由详情面板回退。
     TooLarge {
         bytes: usize,
     },
@@ -59,11 +60,11 @@ pub enum PreviewNotice {
 
 #[derive(Debug, Clone)]
 pub enum PreviewContent {
-    /// 没有可用帧：调用方继续展示完整源码。
+    /// 没有可用帧：详情面板回退完整源码，消息区只显示占位或短原因。
     Source,
     Frame {
         lines: Arc<Vec<String>>,
-        /// 尚未确认的源码尾部，显示在图下方。
+        /// 尚未确认的源码尾部；只有详情面板显示在图下方，消息区不追加。
         tail: String,
         layout_bytes: usize,
     },
@@ -330,6 +331,12 @@ impl FenceState {
     }
 
     fn view(&self, source: &str) -> PreviewView {
+        self.view_with(source, true)
+    }
+
+    /// `include_tail == false`：帧只展示已确认部分。消息区渲染先于观察，
+    /// 追加 chunk 或 resize 时复用上一张可信帧，未确认尾部不再内联源码。
+    fn view_with(&self, source: &str, include_tail: bool) -> PreviewView {
         let content = if let Some(frame) = &self.final_frame {
             PreviewContent::Frame {
                 lines: Arc::clone(&frame.lines),
@@ -337,7 +344,7 @@ impl FenceState {
                 layout_bytes: frame.bytes,
             }
         } else if let Some(frame) = &self.frame {
-            let tail = if self.trusted_end <= source.len() {
+            let tail = if include_tail && self.trusted_end <= source.len() {
                 source[self.trusted_end..].to_string()
             } else {
                 String::new()
@@ -350,7 +357,15 @@ impl FenceState {
         } else {
             PreviewContent::Source
         };
-        let notice = if let Some(reason) = &self.error {
+        PreviewView {
+            content,
+            notice: self.notice(source),
+        }
+    }
+
+    /// 提示口径由 `view` 与 `view_with` 共用，避免两条展示路径给出不同原因。
+    fn notice(&self, source: &str) -> Option<PreviewNotice> {
+        if let Some(reason) = &self.error {
             Some(PreviewNotice::Failed(reason.clone()))
         } else if self.over_budget {
             Some(PreviewNotice::TooLarge {
@@ -360,7 +375,7 @@ impl FenceState {
             Some(PreviewNotice::UnknownStatement)
         } else if self.closed && !self.mode.renders_when_closed() {
             Some(PreviewNotice::Unsupported(
-                "diagram type keeps its source in preview".to_string(),
+                "diagram type is not drawn inline".to_string(),
             ))
         } else if !self.closed && self.frozen {
             Some(PreviewNotice::Unclosed)
@@ -371,8 +386,13 @@ impl FenceState {
                     label: label.clone(),
                     statements: *statements,
                 })
-        };
-        PreviewView { content, notice }
+        }
+    }
+
+    /// 源码是已观察前缀、且手上还有可用帧：`peek` 可以复用旧帧。
+    fn has_reusable_frame(&self, source: &str) -> bool {
+        source.starts_with(self.source_seen.as_str())
+            && (self.frame.is_some() || self.final_frame.is_some())
     }
 }
 
@@ -620,7 +640,12 @@ impl PreviewEngine {
         view
     }
 
-    /// 只读当前可展示帧：不创建实例、不排队。未观察到或参数不匹配时回退源码。
+    /// 只读当前可展示帧：不创建实例、不排队。
+    ///
+    /// 精确命中返回与 `observe` 相同的视图（含未确认尾部）；源码追加或列宽
+    /// 变化时，只要仍是已观察前缀且手上有帧，就复用旧帧并省略尾部——消息区
+    /// 每帧先渲染后观察，这一步避免流式期间闪回整段源码。无帧或源码被替换
+    /// 才回退 `Source`。
     pub fn peek(
         &mut self,
         key: &MermaidFenceKey,
@@ -647,6 +672,11 @@ impl PreviewEngine {
                 },
                 notice: None,
             };
+        }
+        if let Some(state) = self.states.get(key)
+            && state.has_reusable_frame(source)
+        {
+            return state.view_with(source, false);
         }
         PreviewView {
             content: PreviewContent::Source,
@@ -876,7 +906,7 @@ pub fn rebuild_history(
     if !mode.renders_when_closed() {
         if fence.closed() {
             replay.notice = Some(PreviewNotice::Unsupported(
-                "diagram type keeps its source in preview".to_string(),
+                "diagram type is not drawn inline".to_string(),
             ));
         }
         return replay;

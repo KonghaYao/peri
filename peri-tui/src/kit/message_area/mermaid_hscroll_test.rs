@@ -21,13 +21,13 @@ use ratatui::widgets::Paragraph;
 const WIDE: &str = "sequenceDiagram\n  participant Client\n  participant Server\n  participant Loom\n  participant Rivet\n  Client->>Server: POST /v1/events with a fairly long request name\n  Server->>Loom: send(action), key=agent/<logicalId>\n  Loom->>Rivet: locate actor and forward";
 const NARROW: &str = "graph TD\nA-->B";
 
-fn context() -> crate::kit::entry_render_cache::EntryRenderContext {
+fn context_with(surface: EntrySurface) -> crate::kit::entry_render_cache::EntryRenderContext {
     crate::kit::atoms::init_atoms();
     crate::i18n::init(Some("en"));
     crate::kit::entry_render_cache::EntryRenderContext {
         theme: Arc::clone(&THEME_ATOM.state().read()),
         language: crate::kit::atoms::LANG_VERSION.get(),
-        surface: EntrySurface::Message,
+        surface,
         occurrence: 0,
     }
 }
@@ -46,6 +46,21 @@ fn bubble(source: &str) -> TuiRenderUnit {
     )
 }
 
+/// 未闭合围栏：详情面会把未确认尾部追加在图下，chat 面不追加。
+fn open_bubble(source: &str) -> TuiRenderUnit {
+    TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: format!("```mermaid\n{source}"),
+            reasoning: None,
+            message_id: Some("mermaid-hscroll".to_string()),
+            content_hash: 3_001 + source.len() as u64,
+        }
+        .into(),
+    )
+}
+
 struct Harness {
     snapshot: ViewModelsSnapshot,
     transcript: Transcript,
@@ -56,15 +71,23 @@ struct Harness {
 
 impl Harness {
     fn new(source: &str, width: u16) -> Self {
+        Self::with_vm(bubble(source), width, EntrySurface::Message)
+    }
+
+    fn new_open(source: &str, width: u16, surface: EntrySurface) -> Self {
+        Self::with_vm(open_bubble(source), width, surface)
+    }
+
+    fn with_vm(vm: TuiRenderUnit, width: u16, surface: EntrySurface) -> Self {
         Self {
             snapshot: ViewModelsSnapshot {
                 generation: 1,
-                items: vec![bubble(source)].into(),
+                items: vec![vm].into(),
             },
             transcript: Transcript::default(),
             caches: Vec::new(),
             grid: GridSpec::grid_for(width),
-            context: context(),
+            context: context_with(surface),
         }
     }
 
@@ -103,6 +126,73 @@ impl Harness {
             .warm_visible(&self.snapshot, &mut self.caches, 0, 40);
         index
     }
+}
+
+/// 去掉未确认尾部不改变条行号与命中区域：chat 与 detail 用同一组几何。
+#[test]
+#[serial_test::serial]
+fn removing_the_tail_keeps_the_bar_row_and_hits() {
+    crate::kit::mermaid::reset_for_test();
+    let source = format!("{WIDE}\n  Client->>Server: still streaming");
+    let mut chat = Harness::new_open(&source, 80, EntrySurface::Message);
+    let chat_index = chat.layout();
+    let area = Rect::new(0, 0, chat.grid.line_width(), 40);
+    let chat_hits = build_mermaid_hscroll_hits(&chat.caches, &chat_index, Some(area), 40, 0);
+    let chat_hit = chat_hits.first().expect("wide chat frame registers a hit");
+    let chat_bar_row = chat_hit.bar_row.expect("bar row inside viewport");
+    let chat_span = chat.caches[0].mermaid_fences[0].clone();
+    let chat_view = chat_span.h_view.expect("wide frame");
+    assert_eq!(
+        chat_span.logical.end - chat_span.logical.start,
+        chat_view.rows + 2,
+        "chat 围栏只有帧、条、未闭合提示与动作行，没有源码尾"
+    );
+    let chat_text = slot_text(&chat.caches[0]);
+    assert!(
+        !chat_text.contains("still streaming"),
+        "chat must not inline the tail: {chat_text}"
+    );
+
+    let mut detail = Harness::new_open(&source, 80, EntrySurface::Detail);
+    let detail_index = detail.layout();
+    let detail_area = Rect::new(0, 0, detail.grid.line_width(), 40);
+    let detail_hits =
+        build_mermaid_hscroll_hits(&detail.caches, &detail_index, Some(detail_area), 40, 0);
+    let detail_hit = detail_hits
+        .first()
+        .expect("wide detail frame registers a hit");
+    let detail_bar_row = detail_hit.bar_row.expect("bar row inside viewport");
+    let detail_view = detail.caches[0].mermaid_fences[0]
+        .h_view
+        .expect("wide frame");
+    let detail_text = slot_text(&detail.caches[0]);
+    assert!(
+        detail_text.contains("still streaming"),
+        "detail keeps the tail: {detail_text}"
+    );
+
+    assert_eq!(chat_bar_row, detail_bar_row, "尾部有无不得改变条行号");
+    assert_eq!(chat_view.bar_line, detail_view.bar_line);
+    assert_eq!(chat_view.rows, detail_view.rows);
+    assert_eq!(chat_view.max_offset, detail_view.max_offset);
+    assert_eq!(chat_hit.row_start, detail_hit.row_start);
+    assert_eq!(chat_hit.row_end, detail_hit.row_end);
+
+    let buffer = render_slot(&chat.caches[0], chat.grid.line_width());
+    let painted = row_text(&buffer, chat_bar_row);
+    assert!(
+        painted.contains('◄') && painted.contains('►'),
+        "真实 Buffer 的条行仍应命中: {painted:?}"
+    );
+}
+
+fn slot_text(slot: &VmCacheSlot) -> String {
+    let lines = slot.lines.as_ref().expect("materialized slot lines");
+    (0..slot.wrap_map.len())
+        .filter_map(|index| lines.line(index))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn row_text(buffer: &Buffer, row: u16) -> String {

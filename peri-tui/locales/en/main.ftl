@@ -1497,12 +1497,13 @@ panel-mcp-control-session-policy = MCP runtime control is disabled for this sess
 
 # ---- Mermaid streaming preview ----
 
-mermaid-unclosed = Mermaid block is unclosed; showing the received source.
+mermaid-generating = Diagram is being generated…
+mermaid-unclosed = Mermaid block is unclosed; the diagram retries when it closes. Source is in the diagram view.
 mermaid-interrupted = Mermaid block interrupted: { $reason }
 mermaid-render-failed = Mermaid preview unavailable: { $reason }
-mermaid-unknown-statement = Source shown: unrecognized Mermaid statement.
-mermaid-too-large = Diagram source is too large to lay out inline ({ $bytes } bytes); showing the source.
+mermaid-unknown-statement = Unrecognized Mermaid statement; the preview stops here. Source is in the diagram view.
+mermaid-too-large = Diagram is too large to draw inline ({ $bytes } bytes). Source is in the diagram view.
 mermaid-open-scope = Group { $label } · { $count } statements confirmed
-mermaid-unsupported = Source shown: { $reason }
+mermaid-unsupported = Diagram is not drawn inline: { $reason }. Source is in the diagram view.
 mermaid-open-diagram = View diagram
 mermaid-detail-copied = Diagram source copied.

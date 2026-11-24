@@ -855,3 +855,162 @@ fn a_queue_rejected_preview_is_retried_after_capacity_frees() {
         "target preview is missing from the queue: {sources:?}"
     );
 }
+
+/// 消息区每帧先渲染后观察：追加 chunk 时 `peek` 必须复用上一张可信帧，
+/// 而不是退回整段源码。
+#[test]
+fn peek_keeps_the_last_frame_when_source_is_appended() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let published = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &published, 60, false, now);
+    assert!(publish(&mut engine, now));
+    let before = frame_text(&engine.view(&key("m1")).expect("state exists"));
+
+    let appended = fence("graph TD\nA-->B\nB--", false);
+    let view = engine.peek(&key("m1"), &appended, 60);
+    assert_eq!(
+        frame_text(&view),
+        before,
+        "peek must reuse the current frame while the tail is still unconfirmed"
+    );
+    assert_eq!(
+        frame_tail(&view),
+        Some(""),
+        "peek must not inline the unconfirmed tail"
+    );
+    assert_eq!(view.notice, None);
+}
+
+/// resize 后第一帧同样先渲染后观察：旧列宽的帧继续显示，横向裁剪交给视口。
+#[test]
+fn peek_keeps_the_last_frame_across_width_change() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let source = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &source, 60, false, now);
+    assert!(publish(&mut engine, now));
+    let before = frame_text(&engine.view(&key("m1")).expect("state exists"));
+
+    let narrow = engine.peek(&key("m1"), &source, 40);
+    assert_eq!(
+        frame_text(&narrow),
+        before,
+        "a width change must reuse the previous frame until the new one arrives"
+    );
+    assert_eq!(frame_tail(&narrow), Some(""));
+}
+
+/// 围栏已闭合但终稿任务尚未完成：不能回到源码，继续显示上一张预览帧。
+#[test]
+fn closed_final_in_flight_peek_keeps_the_preview_frame() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let open = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &open, 60, false, now);
+    assert!(publish(&mut engine, now));
+
+    let closed = fence("graph TD\nA-->B\nB-->C\n", true);
+    let before_final = engine.peek(&key("m1"), &closed, 60);
+    let text = frame_text(&before_final);
+    assert!(
+        text.contains('A') && text.contains('B'),
+        "preview frame must survive until the final frame publishes: {text}"
+    );
+    assert_eq!(frame_tail(&before_final), Some(""));
+
+    let later = now + Duration::from_millis(10);
+    engine.observe(key("m1"), &closed, 60, false, later);
+    let job = engine
+        .take_due(later)
+        .expect("closed fence schedules a final");
+    assert_eq!(job.kind, JobKind::Final);
+    let during = engine.peek(&key("m1"), &closed, 60);
+    assert!(
+        frame_text(&during).contains('A'),
+        "peek while the final job runs must keep a frame"
+    );
+}
+
+/// 切换会话会释放上一会话的实例状态，`peek` 不得再借旧帧。
+#[test]
+fn peek_after_session_switch_returns_no_frame() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let source = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &source, 60, false, now);
+    assert!(publish(&mut engine, now));
+
+    let mut other = key("m2");
+    other.message.session_id = "other-session".to_string();
+    engine.observe(other, &source, 60, true, now);
+    assert!(
+        matches!(
+            engine.peek(&key("m1"), &source, 60).content,
+            PreviewContent::Source
+        ),
+        "a released session must not serve its old frame"
+    );
+}
+
+/// 终稿失败保持清帧：既不能把预览帧冒充终稿，也不能继续展示旧图。
+#[test]
+fn final_failure_drops_the_preview_frame() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let open = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &open, 60, false, now);
+    assert!(publish(&mut engine, now));
+
+    let broken = fence("graph TD\nA-->B\nthis is not valid\n", true);
+    engine.observe(
+        key("m1"),
+        &broken,
+        60,
+        false,
+        now + Duration::from_millis(10),
+    );
+    let job = engine
+        .take_due(now + Duration::from_millis(10))
+        .expect("closed fence schedules a final");
+    assert_eq!(job.kind, JobKind::Final);
+    let failure = render_job(&job).expect_err("unknown statements fail validation");
+    assert!(engine.complete(job, Err(failure), now + Duration::from_millis(11)));
+
+    let view = engine.peek(&key("m1"), &broken, 60);
+    assert!(
+        matches!(view.content, PreviewContent::Source),
+        "a failed final must clear the preview frame"
+    );
+    assert!(matches!(view.notice, Some(PreviewNotice::Failed(_))));
+}
+
+/// 预览排版失败只记录原因，最后一张好帧必须留下。
+#[test]
+fn preview_failure_keeps_the_last_good_frame() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let good = fence("graph TD\nA-->B\n", false);
+    engine.observe(key("m1"), &good, 60, false, now);
+    assert!(publish(&mut engine, now));
+
+    let extended = fence("graph TD\nA-->B\nB-->C\n", false);
+    let later = now + Duration::from_millis(100);
+    engine.observe(key("m1"), &extended, 60, false, later);
+    let job = engine
+        .take_due(later)
+        .expect("appended statement reschedules");
+    assert_eq!(job.kind, JobKind::Preview);
+    assert!(engine.complete(
+        job,
+        Err(RenderFailure::new("layout failed")),
+        now + Duration::from_millis(11)
+    ));
+
+    let view = engine.peek(&key("m1"), &extended, 60);
+    assert!(
+        frame_text(&view).contains('A'),
+        "a failed preview must keep the last good frame"
+    );
+    assert!(matches!(view.notice, Some(PreviewNotice::Failed(_))));
+}
