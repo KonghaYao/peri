@@ -120,6 +120,7 @@ impl UserInputMailbox {
             &request.original_draft,
             &request.plugin_selections,
         );
+        let mut boundary_attempt = None;
         let early = {
             let mut state = self.state.lock();
             self.validate(
@@ -185,6 +186,11 @@ impl UserInputMailbox {
                     return Err(UserInputQueueError::Capacity);
                 }
                 state.admissions_in_flight += 1;
+                // 在准入锁内固定 Enter 所属 attempt：MQ await 期间可能换 attempt，
+                // 不能在记录创建时改绑到后来者。
+                if tool_boundary {
+                    boundary_attempt = state.running_ticket().cloned();
+                }
                 None
             }
         };
@@ -275,9 +281,7 @@ impl UserInputMailbox {
                                         request.original_draft.clone(),
                                         request.plugin_selections.clone(),
                                     );
-                                if tool_boundary {
-                                    record.boundary_attempt = state.running_ticket().cloned();
-                                }
+                                record.boundary_attempt = boundary_attempt;
                                 state.records.push(record);
                                 state.revision += 1;
                                 if state.active.is_none() || state.paused {
@@ -716,23 +720,53 @@ impl UserInputMailbox {
         let mut state = self.state.lock();
         let mut unknown = Vec::new();
         let mut stale = Vec::new();
-        for record in &mut state.records {
-            if !ids.contains(&record.input_id) {
+        let mut removed = Vec::new();
+        for index in 0..state.records.len() {
+            let input_id = state.records[index].input_id.clone();
+            if !ids.contains(&input_id) {
                 continue;
             }
-            let status = uuid::Uuid::parse_str(&record.input_id)
+            let status = uuid::Uuid::parse_str(&input_id)
                 .ok()
                 .and_then(|uuid| outcome.status_of(&MessageId::from(uuid)));
             match status {
                 // Unknown 不是结论：不宣称已移交，留在 ready 里等下一次重试。
-                Some(MqSendStatus::Unknown) | None => unknown.push(record.input_id.clone()),
+                Some(MqSendStatus::Unknown) | None => {
+                    // 复位期间回到 Queued 的记录与确定状态同样撤回选择；
+                    // Unknown 仍保留重试资格。
+                    if state.records[index].state == UserInputState::Queued {
+                        stale.push(input_id.clone());
+                    }
+                    unknown.push(input_id);
+                }
+                // NotFound：MQ 与历史都没有该 ID，按 dispatch 的对账口径收敛。
+                Some(MqSendStatus::NotFound) => {
+                    let terminal = uuid::Uuid::parse_str(&input_id)
+                        .ok()
+                        .and_then(|uuid| state.terminal_identities.get(&uuid))
+                        .map(|identity| identity.state);
+                    match terminal {
+                        Some(terminal) => {
+                            state.records[index].state = terminal;
+                            state.records[index].handed_off = true;
+                        }
+                        None => removed.push(input_id),
+                    }
+                }
                 // Stop/失败收尾已把记录放回 Queued：本次接纳不再属于当前
                 // 执行，与 reset 同一临界区撤回选择。
-                Some(_) if record.state == UserInputState::Queued => {
-                    stale.push(record.input_id.clone());
+                Some(_) if state.records[index].state == UserInputState::Queued => {
+                    stale.push(input_id);
                 }
-                Some(_) => record.handed_off = true,
+                Some(_) => state.records[index].handed_off = true,
             }
+        }
+        if !removed.is_empty() {
+            state
+                .records
+                .retain(|record| !removed.contains(&record.input_id));
+            state.ready.retain(|id| !removed.contains(id));
+            state.revision += 1;
         }
         if !stale.is_empty() {
             let stale_ids: Vec<MessageId> = stale
