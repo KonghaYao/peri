@@ -20,6 +20,7 @@ USAGE:
   peri-browser start kitesurf [--port N] [--bind IP:PORT]
   peri-browser stop [--bind IP:PORT]
   peri-browser install kitesurf
+  peri-browser update
   peri-browser -V|--version
   peri-browser -h|--help
 
@@ -39,7 +40,9 @@ START OPTIONS:
 通过后返回。`start kitesurf` 先确保引擎就绪，再后台启动网关。
 状态：$HOME/.peri/browser/run/gateway-<port>.json
 日志：$HOME/.peri/browser/logs/gateway-<port>.log
-`stop` 只停止 `start` 拉起的网关；`install kitesurf` 下载并执行官方安装脚本。";
+`stop` 只停止 `start` 拉起的网关；`install kitesurf` 下载并执行官方安装脚本。
+`update` 重新运行官方安装脚本（默认同时处理 kitesurf，继承当前环境变量），
+正在运行的网关需 `stop` 后重新 `start` 才会用上新版本。";
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,8 @@ pub enum Command {
     /// `start [OPTIONS]`: background gateway with the serve options.
     StartGateway(Vec<String>),
     InstallKitesurf,
+    /// `update`: re-run the official installer, which handles kitesurf too.
+    Update,
     StartKitesurf(StartOptions),
     Stop(StopOptions),
     Help,
@@ -76,6 +81,8 @@ pub enum CliError {
     UnknownInstallTarget(String),
     #[error("unknown start target {0:?}; supported: kitesurf or gateway options")]
     UnknownStartTarget(String),
+    #[error("update takes no arguments; unexpected {0:?}; see --help")]
+    UnexpectedUpdateArgument(String),
     #[error("--port requires a value")]
     MissingPort,
     #[error("--port must be an integer from 1 to 65535")]
@@ -97,6 +104,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         Some((flag, _)) if flag == "--version" || flag == "-V" => Ok(Command::Version),
         Some((command, rest)) if command == "serve" => Ok(Command::Serve(rest.to_vec())),
         Some((command, rest)) if command == "install" => parse_install(rest),
+        Some((command, rest)) if command == "update" => parse_update(rest),
         Some((command, rest)) if command == "start" => parse_start(rest),
         Some((command, rest)) if command == "stop" => parse_stop(rest),
         _ => Ok(Command::Serve(args.to_vec())),
@@ -114,6 +122,14 @@ fn parse_install(rest: &[String]) -> Result<Command, CliError> {
         return Err(CliError::UnknownOption(flag.clone()));
     }
     Ok(Command::InstallKitesurf)
+}
+
+/// `update` forwards nothing: the installer reads its own environment.
+fn parse_update(rest: &[String]) -> Result<Command, CliError> {
+    match rest.first() {
+        Some(extra) => Err(CliError::UnexpectedUpdateArgument(extra.clone())),
+        None => Ok(Command::Update),
+    }
 }
 
 fn parse_start(rest: &[String]) -> Result<Command, CliError> {

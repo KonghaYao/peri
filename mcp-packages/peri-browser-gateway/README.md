@@ -10,9 +10,14 @@
 # 安装二进制与 kitesurf 引擎
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-browser.sh | bash
 
+# 已安装后更新：复用同一安装脚本，默认同时更新 kitesurf
+peri-browser update
+
 peri-browser start kitesurf   # 引擎 18971，网关 127.0.0.1:7391；健康检查通过后立即返回
 peri-browser stop             # 停止该网关；必要时一并停止它拉起的引擎
 ```
+
+`update` 不新增检查版本、下载、校验或切换软链的逻辑，只是重新运行上面的安装脚本，继承当前环境变量（`PERI_BROWSER_INSTALL_DIR`、`PERI_BROWSER_SKIP_KITESURF=1` 等）并原样返回脚本退出码。它不会停止正在运行的网关：进程继续使用旧二进制，需 `peri-browser stop` 后再 `peri-browser start` 才会切到新版本。
 
 `start kitesurf` 先确保引擎在后台就绪（已监听则复用，否则后台拉起并等待 `/json/version`），再以 `--cdp-url http://127.0.0.1:18971` 后台启动网关；`/healthz` 通过后命令返回 0，终端不再被占用。成功输出包含 MCP 地址、监控地址、pid、日志路径与 `stop` 提示。
 
@@ -51,6 +56,7 @@ cargo build -p peri-browser-gateway
 | `peri-browser start kitesurf [--port N] [--bind IP:PORT]` | 先确保 `kitesurf serve --port <N>` 就绪（日志 `$HOME/.kitesurf/serve-<N>.log`），再后台启动网关。 |
 | `peri-browser stop [--bind IP:PORT]` | 停止该 bind 上由 `start` 拉起的网关；未运行时打印提示并返回 0。 |
 | `peri-browser install kitesurf` | 安装 kitesurf；已安装则打印版本与路径并返回 0。 |
+| `peri-browser update` | 重新运行官方安装脚本，默认同时处理 kitesurf；不接受参数，继承环境变量并原样返回脚本退出码。 |
 | `peri-browser --version`、`peri-browser -h\|--help` | 版本与命令帮助。 |
 
 `start` / `stop` 的 `--bind` 默认 `127.0.0.1:7391`，`start kitesurf` 的 `--port` 默认 `18971`；`--bind` 只接受环回地址。端口 `0` 只对 `serve` / 裸调用有效；`start` 与 `start kitesurf` 需要固定端口，传 `0` 会被拒绝。引擎未安装时 `start kitesurf` 失败并提示先运行 `peri-browser install kitesurf`。
@@ -68,6 +74,8 @@ cargo build -p peri-browser-gateway
 ### 安装脚本
 
 `install-browser.sh` 支持 kitesurf 官方安装器覆盖的两个平台（macOS arm64、Linux x86_64），校验发布资产的 SHA-256，安装到 `$HOME/.peri/browser/bin/peri-browser`，随后执行 `peri-browser install kitesurf`。
+
+`peri-browser update` 直接复用该脚本：以 `bash -c 'set -o pipefail; curl -fsSL …/install-browser.sh | bash'` 执行 README 里的同一条命令，失败下载不会被空脚本掩盖；stdin/stdout/stderr 与环境变量都继承，退出码原样返回。`PERI_BROWSER_SKIP_KITESURF=1 peri-browser update` 只更新网关二进制。安装脚本只替换软链，正在运行的网关继续使用旧二进制，更新后需 `peri-browser stop` 再 `peri-browser start`。
 
 Peri 侧配置（HTTP MCP，宿主不含任何浏览器协商代码）：
 

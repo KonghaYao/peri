@@ -33,6 +33,7 @@ fn help_covers_every_entry_point() {
         "start [OPTIONS]",
         "start kitesurf",
         "stop [--bind IP:PORT]",
+        "peri-browser update",
         "-V|--version",
     ] {
         assert!(USAGE.contains(needle), "help 缺少 {needle}");
@@ -75,6 +76,31 @@ fn install_requires_the_kitesurf_target() {
     assert_eq!(
         parse(&args(&["install", "kitesurf", "--force"])),
         Err(CliError::UnknownOption("--force".to_owned()))
+    );
+}
+
+#[test]
+fn update_takes_no_arguments() {
+    assert_eq!(parse(&args(&["update"])), Ok(Command::Update));
+    for extra in ["--force", "kitesurf"] {
+        assert_eq!(
+            parse(&args(&["update", extra])),
+            Err(CliError::UnexpectedUpdateArgument(extra.to_owned())),
+            "argv={extra:?}"
+        );
+    }
+    assert_eq!(parse(&args(&["update", "--help"])), Ok(Command::Help));
+}
+
+#[test]
+fn help_describes_update_as_rerunning_the_install_script() {
+    assert!(
+        USAGE.contains("重新运行官方安装脚本"),
+        "help 未说明 update 复用安装脚本：{USAGE}"
+    );
+    assert!(
+        USAGE.contains("默认同时处理 kitesurf"),
+        "help 未说明 update 默认处理 kitesurf：{USAGE}"
     );
 }
 
