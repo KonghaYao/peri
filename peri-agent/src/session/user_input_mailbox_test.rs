@@ -108,6 +108,41 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
     );
 }
 
+#[tokio::test]
+async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("active turn");
+    let model_request = mailbox.begin_model_request();
+    let input = make_input(&mailbox, "next instructions");
+    let receipt = mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("submit");
+    assert_eq!(receipt.results[0].state, UserInputState::Queued);
+    assert!(!cancel.is_cancelled());
+    assert!(inbox.queue().selected_input_ids().is_empty());
+    mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("same command");
+    assert_eq!(mailbox.pending_steer_ids(&[]).len(), 1);
+    drop(model_request);
+    mailbox.stop().await;
+    mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("replay after stop");
+    assert!(mailbox.pending_steer_ids(&[]).is_empty());
+    assert_eq!(
+        record_state(&mailbox, &input.input_id),
+        Some((UserInputState::Queued, false))
+    );
+}
+
 #[test]
 fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
     let (mailbox, inbox) = make_mailbox();

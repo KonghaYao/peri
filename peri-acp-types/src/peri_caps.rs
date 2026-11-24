@@ -61,6 +61,9 @@ pub struct PeriCaps {
     /// 用户待发送队列与逐条发送控制，默认不协商。
     #[serde(default)]
     pub user_input_queue: bool,
+    /// TUI Enter selects this input for the next model boundary of an active turn.
+    #[serde(default)]
+    pub user_input_queue_tool_boundary: bool,
     /// 入队请求可携带 `pluginSelections`（`peri.userInputQueue.pluginSelections`）。
     ///
     /// 旧 Host 的 `EnqueueUserInputRequest` 拒绝未知字段，因此该能力必须独立协商：
@@ -125,6 +128,7 @@ impl PeriCaps {
             rewind: meta_bool(meta, "peri.rewind"),
             system_reminder: meta_bool(meta, "peri.systemReminder"),
             user_input_queue: meta_bool(meta, "peri.userInputQueue"),
+            user_input_queue_tool_boundary: meta_bool(meta, "peri.userInputQueue.toolBoundary"),
             user_input_queue_plugin_selections: meta_bool(
                 meta,
                 "peri.userInputQueue.pluginSelections",
@@ -198,6 +202,10 @@ impl PeriCaps {
             Value::Bool(self.user_input_queue),
         );
         m.insert(
+            "peri.userInputQueue.toolBoundary".into(),
+            Value::Bool(self.user_input_queue_tool_boundary),
+        );
+        m.insert(
             "peri.userInputQueue.pluginSelections".into(),
             Value::Bool(self.user_input_queue_plugin_selections),
         );
@@ -244,6 +252,7 @@ impl PeriCaps {
             rewind: true,
             system_reminder: true,
             user_input_queue: true,
+            user_input_queue_tool_boundary: true,
             user_input_queue_plugin_selections: true,
             session_workspace_v1: true,
             history_pagination: true,

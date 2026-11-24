@@ -40,6 +40,7 @@ impl InputRecord {
     ) -> Self {
         Self {
             input_id,
+            boundary_attempt: None,
             fingerprint,
             seq,
             content,

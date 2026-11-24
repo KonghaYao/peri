@@ -20,7 +20,11 @@ Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主
 错误响应只附纯快照，不产生查询、清理或 revision 副作用。
 ACP 定位会话、检查能力和写权限，执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。
 
-loading 期间普通输入只进入 Thread MQ 的待发投影，不打断当前模型或工具执行。
+TUI 默认声明 `peri.userInputQueue.toolBoundary`。用户在活跃执行中按 Enter 后，输入在 Thread MQ
+保持 Queued，可取回或点 ↑ 立即发送。当前模型回复发起的工具批次结束后，Receive 自动选择
+属于本次 attempt 的 Enter 输入，按 MQ 顺序写入历史，在下一次实际模型请求中各出现一次。
+同批已启动工具并发完成。在请求准备期间接纳的输入也经过这道边界。若当前执行先自然结束，
+输入沿用 idle 调度。未协商该能力的客户端、重启恢复的草稿与 Stop 回收的输入遵循原有排队规则。
 主 Agent 进入 idle 时，Mailbox 按 FIFO 选择队首一条 Queued 输入并提交发送选择，跳过已撤回或已投递项。
 等待后台任务而 idle 时，复用当前 attempt 唤醒 loop，不必等待后台任务全部完成；
 当前 turn 自然成功结束时，由宿主按同一规则启动下一条。后续普通输入等待下一次 idle。

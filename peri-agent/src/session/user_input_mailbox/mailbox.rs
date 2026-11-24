@@ -74,6 +74,8 @@ pub(super) struct ActiveRun {
 
 /// 运行期调度记录；正文与原稿是投影缓存，对账仍以 MQ 查询结果为准。
 pub(super) struct InputRecord {
+    /// Process-local intent; restored drafts and subsequent attempts stay queued.
+    pub(super) boundary_attempt: Option<UserInputRunTicket>,
     pub(super) input_id: String,
     /// 记录进入内存的单调序号：对账只能清理查询开始前已存在的记录。
     pub(super) seq: u64,
@@ -87,6 +89,14 @@ pub(super) struct InputRecord {
     /// 交付日志槽位在 enqueue 时预留；交付时转为日志条目，撤回时释放。
     /// 这样 `mark_delivered` 永远不会在消息已写入 transcript 后才因容量失败。
     pub(super) delivery_reserved: bool,
+}
+
+impl InputRecord {
+    pub(super) fn awaiting_tool_boundary(&self, ticket: Option<&UserInputRunTicket>) -> bool {
+        self.state == UserInputState::Queued
+            && ticket.is_some()
+            && self.boundary_attempt.as_ref() == ticket
+    }
 }
 
 pub(super) struct CommandReceipt {
@@ -145,6 +155,24 @@ pub(super) struct SnapshotSeed {
     pub(super) revision: u64,
     pub(super) active_request_id: Option<String>,
     pub(super) terminal_items: Vec<UserInputQueueTerminalItem>,
+}
+
+impl MailboxState {
+    pub(super) fn running_ticket(&self) -> Option<&UserInputRunTicket> {
+        self.active
+            .as_ref()
+            .filter(|active| {
+                self.valid
+                    && !self.paused
+                    && active.outcome.is_none()
+                    && active.reason == InterruptReason::None
+                    && active
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|token| !token.is_cancelled())
+            })
+            .map(|active| &active.ticket)
+    }
 }
 
 impl UserInputMailbox {
@@ -231,24 +259,22 @@ impl UserInputMailbox {
     }
 
     fn selected_steer_ids(&self, state: &MailboxState, missing: &[MessageId]) -> Vec<MessageId> {
-        if !state
-            .records
-            .iter()
-            .any(|record| record.state == UserInputState::Dispatching)
-        {
+        let ticket = state.running_ticket();
+        if !state.records.iter().any(|record| {
+            record.state == UserInputState::Dispatching || record.awaiting_tool_boundary(ticket)
+        }) {
             return Vec::new();
         }
         let selected = self.inbox.queue().selected_input_ids();
         state
             .records
             .iter()
-            .filter(|record| record.state == UserInputState::Dispatching)
             .filter_map(|record| {
-                uuid::Uuid::parse_str(&record.input_id)
-                    .ok()
-                    .map(MessageId::from)
+                let id = MessageId::from(uuid::Uuid::parse_str(&record.input_id).ok()?);
+                let pending = record.awaiting_tool_boundary(ticket)
+                    || (record.state == UserInputState::Dispatching && selected.contains(&id));
+                (pending && !missing.contains(&id)).then_some(id)
             })
-            .filter(|id| selected.contains(id) && !missing.contains(id))
             .collect()
     }
 
