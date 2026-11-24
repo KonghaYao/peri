@@ -135,6 +135,20 @@ struct SessionRuntime {
     channel: broadcast::Sender<StreamEvent>,
     /// Serializes turn admission checks; never held across a model turn.
     admission: AsyncMutex<()>,
+    /// Serializes one steer's reservation with its handoff: `note_steer` →
+    /// `session/input/enqueue` → `session/input/dispatch`, and the rollback
+    /// when the handoff fails. The reader claims the oldest unclaimed
+    /// generation for the next run that starts, so the reservation order must
+    /// be the enqueue order; without this lock two concurrent steers can
+    /// enqueue in the opposite order and the earlier dispatch's rollback can
+    /// no longer release the generation the later run claimed, leaving that
+    /// generation unresolved forever.
+    ///
+    /// The lock never covers the whole turn: the `epoch == 0` fallback runs
+    /// `session/prompt` (a model turn) after releasing it, and a steered turn
+    /// is not serialized against other turns. It is only taken after
+    /// `admission` is released, so the two never nest in reverse.
+    steer: AsyncMutex<()>,
     /// Active turn identity. `Some` means "a turn is running"; the value is
     /// cleared by the turn owner only.
     turn: watch::Sender<Option<TurnSlot>>,
@@ -152,6 +166,7 @@ impl SessionRuntime {
             log,
             channel,
             admission: AsyncMutex::new(()),
+            steer: AsyncMutex::new(()),
             turn,
         }
     }
@@ -726,6 +741,11 @@ impl AcpSwarmService {
     /// `turn_id` belongs to the accepted user item; it is only used by the
     /// `epoch == 0` fallback, where the turn ended before the handoff and the
     /// input runs as a normal turn.
+    ///
+    /// The reservation and the handoff run under [`SessionRuntime::steer`], so
+    /// the generation the reader sees claimed is reserved in the same order the
+    /// host receives the input. The lock is released before the `epoch == 0`
+    /// model turn and after the rollback, never covering a turn.
     async fn steer(
         &self,
         runtime: &Arc<SessionRuntime>,
@@ -738,20 +758,23 @@ impl AcpSwarmService {
         // in-flight attempt, and that attempt's `cancelled` terminal must not
         // close the turn. `0` means the turn ended before the handoff — the
         // input then runs as a normal turn instead of vanishing into the queue.
-        let epoch = runtime.log.note_steer();
+        let epoch = {
+            let _steer = runtime.steer.lock().await;
+            let epoch = runtime.log.note_steer();
+            if epoch != 0 {
+                if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
+                    // Roll back inside the lock: the generation has to leave the
+                    // unresolved set before the next steer reserves one, so a
+                    // queued run that starts meanwhile cannot claim the failed
+                    // generation as if it had been dispatched.
+                    runtime.log.abandon_steer(epoch).await;
+                    return Err(error);
+                }
+            }
+            epoch
+        };
         if epoch == 0 {
             self.run_turn(runtime, &text, turn_id).await?;
-            let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(InputOutcome::new(
-                submission.input_id.clone(),
-                Disposition::Inserted,
-                submission.mode,
-                last_item_seq,
-            ));
-        }
-        if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
-            runtime.log.abandon_steer(epoch).await;
-            return Err(error);
         }
         let last_item_seq = self.last_seq(logical_id).await?;
         Ok(InputOutcome::new(

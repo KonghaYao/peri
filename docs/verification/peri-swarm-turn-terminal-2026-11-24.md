@@ -681,11 +681,16 @@ panic 位置即宏起始行，与断言同号）。
 `peri-swarm/src/actor/reader.rs`、`peri-swarm/src/actor/reader_test.rs`，另加本记录与 issue；
 `service.rs`、store、schema、`Cargo.toml` 未改，未提交。
 
+> 第 9 轮修订：本轮把认领顺序归因于 transport 对同一 session 的 FIFO 帧序，该理由不充分——run_started
+> 到达顺序不能保证等于 reservation 顺序。第 9 轮由服务层 per-session 锁串行化 reservation 与
+> enqueue/dispatch，并改正注释。本轮残留的「两个有来源终态之间首次保留」也已在第 9 轮修复。
+> 本节其余真实输出与结论保留作历史记录。
+
 ### 两条阻塞项
 
 | 问题 | 触发序列 | 第 7 轮行为 | 本轮修复 |
 |---|---|---|---|
-| 1：迟到接管继承当前 generation | A `note_steer()`→1 并派发；其 `user_input_run_started` 仍在 transport 的 60ms 合并窗口内时 C `note_steer()`→2；reader 才 ingest A 的 run_started | 接管把 `generation` 记为当前计数器 2；host 为 C 取消 req-2，req-2 的终态 `2 >= max(2)` 通过并关闭 C 仍拥有的 turn，C 的 run 与终态全部被忽略，session 变 `Idle` 而 host 仍在执行 | 接管认领**最老的未解决 generation**（`outstanding_steers.first()`）并从集合移除；依赖 transport 对同一 session 的 run_started 帧按派发顺序（FIFO）到达 |
+| 1：迟到接管继承当前 generation | A `note_steer()`→1 并派发；其 `user_input_run_started` 仍在 transport 的 60ms 合并窗口内时 C `note_steer()`→2；reader 才 ingest A 的 run_started | 接管把 `generation` 记为当前计数器 2；host 为 C 取消 req-2，req-2 的终态 `2 >= max(2)` 通过并关闭 C 仍拥有的 turn，C 的 run 与终态全部被忽略，session 变 `Idle` 而 host 仍在执行 | 接管认领**最老的未解决 generation**（`outstanding_steers.first()`）并从集合移除；本轮把顺序归因于 transport 的 FIFO 帧序，第 9 轮改为服务层串行化（见下） |
 | 2a：continuation 终态进入 `settle` 后被保留却无人重放 | continuation 终态通过过滤进入 `settle`；期间 `note_steer()`→2，post-check 保留（`source=req-2`）；随后 `abandon_steer(2)` | 第 7 轮「集合非空即返回」；即使不返回，continuation 自己的 gen 1 仍在集合里，保留终态没有重放路径 | `abandon_steer` 删除「集合非空即返回」，改按保留终态的来源是否仍是当前 owner 判定；`source: Some(run)` 要求当前 continuation 正是该 run 且 `run.generation >= max_unresolved()` |
 | 2b：continuation 终态在新 steer 之后到达被丢弃 | 先 `note_steer()`→2，再交付 continuation（gen 1）终态 | continuation 终态过滤 `run.generation >= max_outstanding()` 不通过 → 直接丢弃，`abandon_steer(2)` 后无从重放 | `run.request_id == running` 且 `run.generation < max_unresolved()` 时以 `source: Some(run)` 保留终态；`>=` 时才关闭 |
 
@@ -695,7 +700,8 @@ panic 位置即宏起始行，与断言同号）。
   `max_outstanding()` 改名 `max_unresolved()`，返回该集合最大值（空集为 `0`）。
 - queued `TurnStarted`：`queued && active.is_some()` 时认领 `outstanding_steers.first()`（最小
   generation）并从集合 `remove`，`ContinuationRun { request_id, generation: 认领值 }`；集合为空则
-  不接管（迟到 run 在回滚后仍不被接管）。注释写明 FIFO 假设。
+  不接管（迟到 run 在回滚后仍不被接管）。本轮注释写明 FIFO 假设；第 9 轮已改为服务层串行化的
+  正确表述。
 - continuation 终态：`run.request_id == running` 且 `run.generation < max_unresolved()` →
   `suppress_terminal(turn_request_id, outcome, Some(run))` 保留；`>=` → 以
   `Some(max_unresolved())` 关闭。不是当前 continuation 的 run 终态仍被丢弃（无法证明属于当前 turn）。
@@ -800,12 +806,168 @@ panic 位置即宏起始行，与断言同号）。
 - 只覆盖 `ItemLog`；没有端到端复验，未用真实宿主计时复现 60ms 合并窗口。
 - 认领依赖「同一 session 的 `user_input_run_started` 帧按派发顺序到达」这一 FIFO 假设（transport
   串行转发）；若未来出现重放或并发注入同一 session 的 run_started，认领顺序需要重新论证。
+  **第 9 轮已修正**：transport 帧序本身不能保证认领顺序；改为服务层 per-session 锁把每个 steer 的
+  `note_steer` 与 enqueue/dispatch 串行化，宿主按 enqueue 顺序启动 run，因此 run_started 顺序等于
+  认领顺序。见[第 9 轮](#评审回合补充2026-11-24第-9-轮)。
 - `suppress_terminal` 的首次保留语义仍有残留：两个**有来源**终态之间首个保留，若其后 continuation 被
   更晚的 run 替换，较早保留的终态不会重放（其来源已不是 owner）。第 7 轮的「prompt 终态先占位导致
   continuation 终态被忽略」不再可达：有来源终态会替换无来源终态。
+  **第 9 轮已修复**：新终态来源等于当前 `continuation.request_id` 时替换较早的、来源不同的保留项；
+  同一来源的第二个终态仍保留首个 outcome。
 - 已被替换的 continuation run 的终态仍直接丢弃（`request_id` 不是当前 continuation）：若新 steer 的
   handoff 随后失败，turn 只能由兜底关闭。这是第 7 轮 Finding B 的既有取舍，本轮未改。
 - 乱序回滚只移除自身；迟到旧 turn 的回滚不影响新 turn（第 6/7 轮契约保持），本轮未新增该场景测试。
 - 矛盾状态：`dispatch_steer` 报错但宿主已启动该 run 时，`abandon_steer` 回滚的是未被认领的 generation；
   迟到的 `user_input_run_started` 会认领**另一个**等待中 steer 的 generation，该 run 的终态随后关闭那个
   steer 的 turn。仅在 `ItemLog` 级 probe 确认，未做服务层复现，本轮不修。
+
+## 评审回合补充（2026-11-24，第 9 轮）
+
+基线 `01f2fe089`；以下是在该 worktree 运行的 Rust 回归，不是端到端复验。CodeRabbit 在该 head 上提出
+3 条 Major，均确认成立并修正。代码改动只落在 `peri-swarm/src/actor/reader.rs`、
+`peri-swarm/src/actor/reader_test.rs`、`peri-swarm/src/actor/service.rs`、
+`peri-swarm/src/actor/service_test.rs`，另加本记录与 issue；store、schema、`Cargo.toml` 未改，未提交。
+
+### 三条 findings
+
+| 问题 | 可达交错 | 修复 |
+|---|---|---|
+| 1：`suppress_terminal` 永久保留过时 continuation 的终态 | A(gen1) 被接管 → A 终态到达时 B(gen2) 已 note → 保留 `source=A` → B 的 run_started 接管 gen2 → C(gen3) note → B 终态到达（`gen2 < 3`）因已有 `source=A` 被丢弃 → C 派发失败 `abandon_steer(3)` → 保留项 `source=A` 不是当前 continuation(B)，不能重放；B 的终态已被消费 → turn 等 300 秒兜底 | `suppress_terminal` 增加替换规则：保留项与新 `source` 都是 `Some` 且不同，**且**新 `source` 等于当前 `continuation.request_id` → 替换；同 source 与其余情况保留首个 outcome，不破坏 `Failed`/`Completed` 双终态语义 |
+| 2：认领顺序可与 reservation 顺序相反 | `note_steer()` 与 `dispatch_steer()`（snapshot → enqueue → dispatch）之间没有 per-session 锁；两个并发 steer 可能后 reservation 先 enqueue/dispatch，reader 把最老 generation 认领给先启动的 run；较早的 dispatch 失败后它的 generation 已被认领无法回滚，较晚的 generation 永远 unresolved，turn 卡住 | `SessionRuntime` 新增 `steer: AsyncMutex<()>`，`steer()` 内串行化 `note_steer` → enqueue/dispatch → 失败回滚；`epoch == 0` 先释放锁再 `run_turn`（锁不覆盖整轮 turn），`last_seq` 在锁外 |
+| 3：`finish_turn_observed` 关闭前未确认终态仍属于当前 owner | 调用方在锁内算出 `expected_max_unresolved`，释放锁后 `finish_turn_observed` 再取快照；两次 `parking_lot::Mutex` 获取之间（线程窗口，不是 await 窗口）新 run 接管使 `max_unresolved` 回落，入口 `snapshot.0 > expected` 放行，退出比较也因快照已含新 continuation 而不拦，结果用被超越的终态关闭了新 run 拥有的 turn | 在真正清空 turn 之前（退出块）做**单点** owner 校验，仅当 `expected_max_unresolved.is_some()`：`source: Some(run)` 要求 `continuation.request_id == run`；`source: None` 要求 `continuation.is_none()`；不匹配走 `suppress_terminal(...)` 并 return。入口块不重复校验：有入口校验时退出校验与既有 `continuation != snapshot.1` 严格等价，属同一规则的两份维护点；决策值与入口快照来自两个更早的临界区，关闭前是唯一仍有效的判定位置。`expected = None` 的无条件 closer（超时 / 丢失终态兜底）行为不变 |
+
+### 实现要点（`peri-swarm/src/actor/reader.rs`、`peri-swarm/src/actor/service.rs`）
+
+- `reader.rs:391` `suppress_terminal`：替换条件改为「无保留项 / 无来源被有来源替换 / 两个不同来源且新来源
+  是当前 continuation」；同一来源的第二个终态不覆盖首个 outcome。
+- `reader.rs:421` 新增 `LogState::terminal_owner_matches(source)`：`Some(run)` 要求当前
+  `continuation.request_id == run`，`None` 要求 `continuation.is_none()`。
+- `reader.rs:1038` 退出块注释与 `reader.rs:1053` 的 `superseded`：owner 校验只在这里，紧邻清空 turn
+  之前（仍只在 `expected_max_unresolved.is_some()` 时生效）；其余两条比较（`max_unresolved` 回落、
+  continuation 身份）不变，`expected = None` 不校验，无条件关闭语义保持。
+- 收尾收敛（第 9 轮验证后）：入口块不再重复 owner 校验。有入口校验时退出校验与既有
+  `continuation != snapshot.1` 严格等价，属同一规则的两份维护点；决策值与入口快照来自两个更早的
+  临界区，因此只在真正关闭前统一复核一次。入口原有的 `snapshot.0 > expected` 判断保留。
+- 五个终态分支 / 三个调用点逐一确认：prompt attempt 终态（`reader.rs:689` 判定、`:758` 调用，
+  `source: None`）、continuation 终态（`:721` 判定、`:758` 调用，`Some(run)`）、legacy 无 request-id
+  （`:748` 判定、`:758` 调用，`None`）、`abandon_steer` 重放（`:1414`，`Some(0)` + 原 source）、
+  `finish_turn` 无条件关闭（`:961`，`None`）。前四个的 source 与当前 owner 一致时行为不变；
+  `expected = None` 完全不变。
+- `service.rs:151` `SessionRuntime::steer`（`AsyncMutex<()>`，与 `admission` 并列）：只串行化
+  reserve → enqueue → dispatch → rollback，不覆盖模型 turn，且在 `admission` 释放后获取，不与其形成反向
+  嵌套。`service.rs:761` 的 `steer()` 在锁内 `note_steer` 与 `dispatch_steer`，失败时锁内
+  `abandon_steer(epoch)`；`epoch == 0` 先离开锁再 `run_turn`。
+- `reader.rs:338`（`outstanding_steers` 文档）与 `reader.rs:650`（queued `TurnStarted` 注释）改正 FIFO
+  表述：正确的不变量是「服务层串行化 reservation 与 enqueue/dispatch，宿主按 enqueue 顺序启动 run，
+  因此 run_started 顺序 == 认领顺序」，不再声称 transport 天然按 dispatch 顺序转发。
+
+### 定向回归
+
+命令均为 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib -- --exact
+<模块路径>::<测试名>`（reader 测试在 `actor::reader::tests`，service 测试在
+`actor::service::service_test`；只写测试名会 0 matched），6 条新增测试各 exit 0，各为
+`1 passed; 0 failed; 0 ignored; 0 measured; 328 filtered out`。
+
+| 测试 | 覆盖 | 结果 |
+|---|---|---|
+| `a_newer_continuation_terminal_replaces_the_superseded_one`（`reader_test.rs:2675`） | 修复 1：A 终态保留 → B 接管 → C note → B 终态替换 → `abandon_steer(3)` 后以 B 的 `end_turn` 关闭，会话 `Idle`；同 source 第二个终态不覆盖首个 outcome | exit 0，1 passed |
+| `a_terminal_from_a_run_the_turn_no_longer_continues_does_not_close`（`reader_test.rs:2769`） | 修复 3：`continuation=req-9` 时直接调 `finish_turn_observed("req-1", Completed, Some(0), Some("req-3"))` → turn 仍打开、无终态帧、保留项仍在；随后 req-9 终态正常关闭 | exit 0，1 passed |
+| `a_prompt_terminal_does_not_close_a_turn_a_continuation_owns`（`reader_test.rs:2838`） | 修复 3：`source: None` + `continuation=Some(req-9)` + `Some(0)` → 不关闭；随后 req-9 终态正常关闭 | exit 0，1 passed |
+| `a_prompt_terminal_in_settle_yields_to_a_run_adopted_meanwhile`（`reader_test.rs:2908`） | 修复 3 的生产派发路径：`ingest` 投递 prompt 终态（`cancelled`）进入 `settle`；期间 note gen1 + 回滚、note gen2 并由 req-2 认领（`max_unresolved()` 回到 0）；关闭者让位并保留 prompt 终态（`source: None`），req-2 的 `end_turn` 才关闭 turn 并置 `Idle` | exit 0，1 passed |
+| `concurrent_steers_dispatch_in_reservation_order`（`service_test.rs:432`） | 修复 2：`AcpChild::for_test` + `mpsc_transport_pair`，第一个 snapshot 延迟 150ms 后并发两个 steer，断言 dispatch 的 `inputIds[0]` 顺序为 `["u1","u2"]`；首个 snapshot 信号等待加 5s 超时，回归时失败而不是悬挂 | exit 0，1 passed |
+| `a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances`（`service_test.rs:570`） | 修复 2：u1 的 dispatch 回 RPC 错误 → `steer` 返回 `Err(QueueUnavailable)`、`steer_pending() == false`、`steer_generation() == 1`；随后 steer 推进到 generation 2 | exit 0，1 passed |
+
+新增测试说明：
+
+- 修复 1 的测试全部为 `ItemLog` 级 `ingest`：A 的终态用 `cancelled`、B 的用 `end_turn`；同一 source
+  的第二条终态用 `end_turn`，断言保留项仍是首个 `cancelled`。
+- 修复 3 的两条直接调用私有 `finish_turn_observed`，第一条先断言 turn 仍打开、无 `TurnEvent::Completed`
+  / `Failed`、`LogState::suppressed_terminal` 仍在，再交付 req-9 的 `end_turn`，断言唯一终态并置 `Idle`。
+- 修复 3 的第三条走生产派发路径：`log.ingest("peri/agent_event_done", run_terminal("req-1", "cancelled"))`
+  经 `dispatch_event` 判定为 prompt attempt 终态（`expected = Some(0)`、`source = None`）后进入 `settle`；
+  paused clock 下主任务睡 1ms 后依次 `note_steer()`→1、`abandon_steer(1)`、`note_steer()`→2、`ingest`
+  req-2 的 `user_input_run_started` 认领 gen2（`max_unresolved()` 回到 0）。断言 turn 仍打开、无终态帧、
+  保留项为 `req-1`/`source: None`/`cancelled`；随后 req-2 的 `end_turn` 关闭 turn 并置 `Idle`。它与
+  `reader_test.rs:1410` 的 `a_rollback_does_not_reuse_the_generation_a_later_steer_advances` 分工：后者
+  直接调用 `finish_turn_observed(.., Some(1), None)`，固定「决策令牌 stale、回滚不复用 gen1」的白盒路径；
+  前者固定「生产 `ingest` 判定 + `settle` 期间接管」的完整轨迹。
+- 修复 2 的服务级测试不依赖随机 sleep：responder 收到 u1 的 snapshot 后才放行 u2 的 spawn；u1 的 snapshot
+  回复单独延迟 150ms，其它 RPC 立即回复。去掉锁时 u2 的 enqueue/dispatch 必然先完成，顺序断言反转。
+  测试结束 drop service/runtime 关闭 client，responder 的 `recv()` 返回 `None` 后 join，无悬挂任务。
+
+### 反向验证（第 9 轮，真实执行，`/tmp/peri-rev9` 与收尾收敛 `/tmp/peri-converge-check` 副本）
+
+- 去掉修复 1 的替换分支（恢复「首个有来源终态保留」）：
+  `a_newer_continuation_terminal_replaces_the_superseded_one` FAILED，exit 101，
+  `panicked at peri-swarm/src/actor/reader_test.rs:2722`，`left: Some("run-a") right: Some("run-b")`，
+  `0 passed; 1 failed; 0 ignored; 0 measured; 327 filtered out`。
+- 去掉修复 3 的 owner 校验（收敛前为入口与退出两处，同时删除）：两条新测试均 FAILED，exit 101，
+  `reader_test.rs:2791`（`left: None right: Some("req-1")`，`a superseded run's terminal must not close the adopted run's turn`）
+  与 `reader_test.rs:2858`（同一断言），各 `0 passed; 1 failed`。
+- 收尾收敛后重跑（`/tmp/peri-converge-check` 完整副本）：代码只保留退出块一处校验，只删除这一处即
+  同两条测试 FAILED，exit 101，位置与断言同上（`reader_test.rs:2791`、`:2858`）。两处并存时单删任一条
+  都不失败（收尾评审结论），因此收敛后这一条删除实验同时证明单点校验仍被两条测试覆盖。
+- 新增生产路径测试的变异验证（真实执行，`/tmp/peri-mutation-r10` 完整副本，副本已删除）：
+  - 删除 `finish_turn_observed` 退出块整个 `superseded` 校验后，
+    `a_prompt_terminal_in_settle_yields_to_a_run_adopted_meanwhile` FAILED，exit 101，
+    `panicked at peri-swarm/src/actor/reader_test.rs:2941`，
+    `assertion left == right failed: the prompt terminal must not close the turn the adopted run owns`，
+    `left: None right: Some("req-1")`，`0 passed; 1 failed; 0 ignored; 0 measured; 328 filtered out`。
+  - 只删除 owner 项（`expected_max_unresolved.is_some() && !state.terminal_owner_matches(source)`）时，
+    新测试仍通过：该交错发生在 `settle` 期间，入口快照的 continuation 为 `None`，退出比较
+    `continuation != snapshot.1` 已经拦住；在单线程测试模型里 `source: None` 的 owner 项与这条快照比较
+    等价，只有「决策锁与入口快照之间的跨线程窗口」才单独需要 owner 项。同一变异下两条白盒测试
+    `a_terminal_from_a_run_the_turn_no_longer_continues_does_not_close`（`reader_test.rs:2791`）与
+    `a_prompt_terminal_does_not_close_a_turn_a_continuation_owns`（`reader_test.rs:2858`）FAILED，
+    `0 passed; 2 failed`，exit 101——单点 owner 项的独立覆盖仍由这两条直接调用测试承担。
+  - 恢复 `reader.rs` 后新测试再次通过（exit 0，`1 passed`）；副本 `reader.rs` SHA-256 与工作树一致
+    （`770c80a6a301ce9cc6460cbdf308f99799ad83c3ccbd8c7b6d171625f0154b1b`）。
+- 去掉修复 2 的锁（保留 note → dispatch → 回滚序列）：
+  `concurrent_steers_dispatch_in_reservation_order` FAILED，exit 101，
+  `panicked at peri-swarm/src/actor/service_test.rs:550`，`left: ["u2", "u1"] right: ["u1", "u2"]`，
+  `0 passed; 1 failed`。同一次运行中 `a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances`
+  仍通过——它校验回滚语义，不单独覆盖并发顺序；顺序覆盖由前一条测试承担。
+- 上述临时修改均在 `/tmp` 副本内完成（`/tmp/peri-rev9`、`/tmp/peri-converge-check`、
+  `/tmp/peri-mutation-r10`），未改动 worktree；副本随后删除。
+
+### 全量门禁
+
+- `./scripts/cargo-rmcp-patched.sh fmt -p peri-swarm -- --check` → exit 0。
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -D warnings` → exit 0，
+  末行 `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 2.34s`。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib` → exit 0：
+
+  ```text
+  test result: ok. 329 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+  ```
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0，合计 427 passed、0 failed、
+  6 ignored：lib 329、main 0、`actor_runtime` 17（1 ignored）、`http_contract` 25、`items_pagination` 13、
+  `loom_store` 0（3 ignored）、`mcp_injection` 4、`openai_hosted` 7、`rivet_actor` 0（2 ignored）、
+  `session_resources` 17、`streaming` 15、Doc-tests 0。
+- `git diff --check` → exit 0。
+- `bash scripts/check-changed.sh` → exit 0。
+
+### 本次未覆盖与残留窗口
+
+- 修复 2 的测试只覆盖两个并发 steer、以及单个 steer 的 dispatch 失败回滚；未覆盖三个以上并发、以及
+  `epoch == 0` 路径在释放锁后的 `run_turn` 与后续 steer 的并发（既有语义），没有真实 host / Rivet actor
+  并发 RPC 的端到端复验。
+- 新残留：串行化点使宿主 RPC 无总超时时，后续 steer 会排队等待（锁被 snapshot / enqueue / dispatch /
+  回滚的 RPC 持有）；宿主没有总超时，等待没有截止时间。
+- 既有残留：steer future 在 `note_steer` 之后、`abandon_steer` 之前被取消时，已 noted generation 没有
+  drop 清理；`outstanding_steers` 会一直保留该 generation。
+- 残留不变：「enqueue 成功但 dispatch 失败、宿主之后仍启动该 input」的矛盾状态仍未复现与修复；迟到
+  `user_input_run_started` 会认领另一个等待中 steer 的 generation。
+- 已被替换的 continuation run 终态仍直接丢弃（`request_id` 不是当前 continuation）；若新 steer 的
+  handoff 随后失败，turn 只能由兜底关闭（第 7 轮 Finding B 取舍）。
+- 持续 steer 流仍没有全局截止时间；服务层取消 `run_turn` 的时序仍无测试；没有端到端复验。
+- 认领顺序的测试缺口：并发服务测试只断言 dispatch RPC 顺序（`inputIds[0]`），未验证 `run_started`
+  到达 reader 的顺序；「宿主按 enqueue 顺序启动 run」与「每个 dispatched input 恰好一个 `run_started`」
+  仍是假设（代码依据是服务层 per-session 锁 + 宿主队列语义，但没有测试）。
+- `abandon_steer` 在 steer 锁内可能 await：重放路径调用 `finish_turn_observed`，其中有 `settle()` 与
+  approval 结算的 store I/O，因此后续 steer 的排队时间不只是宿主 RPC 往返。
+- 验证记录：owner 校验收敛为单点后由两条直接调用 `finish_turn_observed` 的白盒测试（`reader_test.rs:2769`、
+  `reader_test.rs:2838`）与一条生产 `ingest` 路径的 paused-clock 测试（`reader_test.rs:2908`）覆盖。新增了
+  paused-clock 下的生产路径复现（`settle` 期间接管且 continuation 身份变化）；仍无随机/压力交错——多线程
+  决策锁与入口快照之间的窗口、多个并发 steer 与接管同时发生都没有复现。

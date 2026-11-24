@@ -335,9 +335,11 @@ struct LogState {
     /// turn the first one still owns.
     ///
     /// A queued run claims the smallest generation left here when its
-    /// `user_input_run_started` is ingested: the transport delivers frames of
-    /// one session in dispatch order, so the oldest unclaimed steer is the one
-    /// that run was dispatched for.
+    /// `user_input_run_started` is ingested. Run starts arrive in claim order:
+    /// the service serializes each steer's reservation with its enqueue and
+    /// dispatch on one per-session lock, and the host starts a queued run in
+    /// enqueue order, so the oldest unclaimed steer is the one that run was
+    /// dispatched for.
     outstanding_steers: BTreeSet<u64>,
     /// Latest queued run adopted by the open turn.
     continuation: Option<ContinuationRun>,
@@ -375,23 +377,54 @@ impl LogState {
     ///
     /// A continuation's terminal (`source: Some(_)`) is the turn's real
     /// terminal, the prompt attempt's terminal (`source: None`) only a fallback
-    /// for a failed handoff: the first continuation terminal replaces a
-    /// retained prompt terminal so the turn closes with the outcome of the run
-    /// that owned it. Otherwise the first retained terminal wins, so a `Failed`
+    /// for a failed handoff, so a retained prompt terminal is replaced by a
+    /// continuation's.
+    ///
+    /// A retained continuation terminal is replaced too when it comes from a
+    /// run the turn no longer continues: the newer continuation's terminal is
+    /// the only one [`ItemLog::abandon_steer`] may replay (a rollback only
+    /// replays a terminal whose source still owns the turn). Keeping the first
+    /// one would drop the newer run's terminal and leave a failed handoff to
+    /// the safety net. Every other case keeps the first outcome, so a `Failed`
     /// timeout already queued as the turn's outcome is not overwritten by a
     /// later `Completed` from the same attempt.
     fn suppress_terminal(&mut self, request_id: &str, outcome: TurnOutcome, source: Option<&str>) {
-        let replaces_prompt_terminal = source.is_some()
-            && self
-                .suppressed_terminal
-                .as_ref()
-                .is_some_and(|terminal| terminal.source.is_none());
-        if self.suppressed_terminal.is_none() || replaces_prompt_terminal {
+        let replaces = match self.suppressed_terminal.as_ref() {
+            None => true,
+            Some(terminal) => match (terminal.source.as_deref(), source) {
+                (None, Some(_)) => true,
+                (Some(retained), Some(new)) => {
+                    retained != new
+                        && self
+                            .continuation
+                            .as_ref()
+                            .is_some_and(|run| run.request_id == new)
+                }
+                _ => false,
+            },
+        };
+        if replaces {
             self.suppressed_terminal = Some(SuppressedTerminal {
                 request_id: request_id.to_owned(),
                 outcome,
                 source: source.map(str::to_owned),
             });
+        }
+    }
+
+    /// Whether a terminal produced by `source` still belongs to the turn's
+    /// owner.
+    ///
+    /// The prompt attempt (`source: None`) owns the turn only while no queued
+    /// run continues it; a continuation's terminal (`source: Some(run)`) only
+    /// while that same run is the current continuation.
+    fn terminal_owner_matches(&self, source: Option<&str>) -> bool {
+        match source {
+            Some(run) => self
+                .continuation
+                .as_ref()
+                .is_some_and(|continuation| continuation.request_id == run),
+            None => self.continuation.is_none(),
         }
     }
 }
@@ -614,14 +647,17 @@ impl ItemLog {
                     // was rolled back is late and stays ignored.
                     //
                     // It claims the OLDEST unresolved generation, not the
-                    // current counter: the transport delivers a session's
-                    // frames in dispatch order, so the oldest unclaimed steer is
-                    // the one this run was dispatched for. A run_started can
-                    // reach the reader after a later steer was noted (`runtime`
-                    // coalesces frames for up to 60ms); inheriting the counter
-                    // would hand that older run the newer steer's generation,
-                    // and its `cancelled` terminal would then close a turn the
-                    // newer steer owns.
+                    // current counter. The ordering that makes "oldest" mean
+                    // "this run's steer" is established before the host sees
+                    // the input: the service serializes reservation with
+                    // enqueue and dispatch per session, and the host starts a
+                    // queued run in enqueue order, so run starts reach the
+                    // reader in claim order. A run_started can reach the reader
+                    // after a later steer was noted (`runtime` coalesces frames
+                    // for up to 60ms); inheriting the counter would hand that
+                    // older run the newer steer's generation, and its
+                    // `cancelled` terminal would then close a turn the newer
+                    // steer owns.
                     if let Some(claimed) = state.outstanding_steers.first().copied() {
                         state.outstanding_steers.remove(&claimed);
                         state.continuation = Some(ContinuationRun {
@@ -934,6 +970,20 @@ impl ItemLog {
     /// timeout or a lost terminal). `source` names the continuation run that
     /// produced `outcome` (`None` for the prompt attempt) and is only stored
     /// when the terminal is deferred.
+    ///
+    /// When the caller decided from an observation (`Some`), `source` must
+    /// still own the turn when the close actually happens: the caller's decision
+    /// and this method are separate critical sections, and a run adopted in
+    /// between claims the generation the caller's expected value counted. The
+    /// unresolved maximum then falls back to what the caller saw while a new
+    /// continuation owns the turn, so closing would end that run's turn with a
+    /// superseded terminal.
+    ///
+    /// That owner check runs once, immediately before the turn is cleared: the
+    /// decision value and the snapshot come from separate earlier critical
+    /// sections, so the close is the only place where ownership is still
+    /// current. The entry block does not repeat it — one rule, one maintenance
+    /// location.
     async fn finish_turn_observed(
         &self,
         request_id: &str,
@@ -984,12 +1034,26 @@ impl ItemLog {
             // of the unresolved set, so the maximum can fall back to the
             // snapshot even though a queued run now owns the turn: the
             // continuation identity is part of the snapshot for that reason.
+            //
+            // The owner check lives only here, immediately before the close: the
+            // decision value and the snapshot come from earlier critical
+            // sections, so this is the last point where the terminal's source can
+            // still be compared with a live owner. A run adopted between them
+            // claims the generation the caller's `expected` counted, so the
+            // maximum falls back to the caller's value and the entry snapshot
+            // already carries the new continuation — the two snapshot comparisons
+            // then see no change, and only the owner check still catches the
+            // superseded terminal. An unconditional closer (`None`) skips the
+            // check: a timeout or lost terminal must still close the turn.
             let unresolved = state.max_unresolved();
             let continuation = state
                 .continuation
                 .as_ref()
                 .map(|run| run.request_id.as_str());
-            let superseded = unresolved > snapshot.0 || continuation != snapshot.1.as_deref();
+            let superseded = (expected_max_unresolved.is_some()
+                && !state.terminal_owner_matches(source))
+                || unresolved > snapshot.0
+                || continuation != snapshot.1.as_deref();
             if superseded {
                 state.suppress_terminal(request_id, outcome, source);
                 return;

@@ -7,18 +7,21 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::response::IntoResponse as _;
 use serde_json::json;
 
 use peri_acp::transport::mpsc::{mpsc_transport_pair, MpscServerTransport};
+use peri_acp::transport::types::{AcpError, IncomingMessage};
+use peri_acp::transport::AcpTransport as _;
 
-use super::{AcpSwarmService, ActorServiceConfig, SessionRuntime};
+use super::{AcpSwarmService, ActorServiceConfig, SessionRuntime, TurnSlot};
 use crate::actor::reader::ItemLog;
 use crate::actor::runtime::AcpChild;
 use crate::domain::{
-    ApprovalDecision, ErrorCode, ErrorKind, EventCursor, ItemKind, LogicalId, McpToolSpec,
-    OfficialEvent, SessionState, StreamEvent,
+    ApprovalDecision, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputSubmission,
+    ItemKind, LogicalId, McpToolSpec, OfficialEvent, SessionState, StreamEvent,
 };
 use crate::service::SwarmService;
 use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore};
@@ -29,9 +32,10 @@ struct Fixture {
     service: Arc<AcpSwarmService>,
     log: Arc<ItemLog>,
     store: Arc<MemorySwarmStore>,
+    runtime: Arc<SessionRuntime>,
     /// Keeps the in-memory transport's server side alive; dropping it closes the
     /// client write path and turns delivery into a false failure.
-    _server: MpscServerTransport,
+    server: MpscServerTransport,
 }
 
 fn tool(label: &str, require_approval: serde_json::Value) -> McpToolSpec {
@@ -108,12 +112,13 @@ async fn fixture(closed_transport: bool) -> Fixture {
     service
         .sessions
         .lock()
-        .insert(LOGICAL_ID.to_owned(), runtime);
+        .insert(LOGICAL_ID.to_owned(), Arc::clone(&runtime));
     Fixture {
         service,
         log,
         store,
-        _server: server,
+        runtime,
+        server,
     }
 }
 
@@ -390,4 +395,250 @@ async fn a_delivered_approval_settles_and_leaves_no_pending_action() {
                 && row.payload["decision"] == "approve"),
         "the durable row records the answer"
     );
+}
+
+/// One `mode=steer` user input for the service-level steer tests.
+fn steer_submission(input_id: &str, text: &str) -> InputSubmission {
+    InputSubmission {
+        input_id: input_id.to_owned(),
+        kind: InputKind::User,
+        mode: InputMode::Steer,
+        text: Some(text.to_owned()),
+        attachments: Vec::new(),
+        plugin_selections: Vec::new(),
+        original_draft: None,
+    }
+}
+
+/// Open the turn the steer path appends to: an active log turn and the
+/// runtime's turn slot.
+async fn open_turn(runtime: &SessionRuntime) {
+    runtime
+        .log
+        .begin_turn("req-1", "turn_1")
+        .await
+        .expect("turn opens");
+    runtime.turn.send_replace(Some(TurnSlot {
+        request_id: "req-1".to_owned(),
+        started_at: "2026-11-24T00:00:00Z".to_owned(),
+    }));
+}
+
+/// Round 9 finding 2: two concurrent steers must reach the host in the order
+/// their generations were reserved. The reader claims the oldest unclaimed
+/// generation for the next run that starts, so a handoff that overtakes the
+/// earlier reservation would make the claim name the wrong input.
+#[tokio::test]
+async fn concurrent_steers_dispatch_in_reservation_order() {
+    let Fixture {
+        service,
+        runtime,
+        server,
+        ..
+    } = fixture(false).await;
+    open_turn(&runtime).await;
+
+    let server = Arc::new(server);
+    let (first_snapshot_tx, first_snapshot_rx) = tokio::sync::oneshot::channel();
+    let (dispatched_tx, mut dispatched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let responder = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            let mut first_snapshot = true;
+            let mut first_snapshot_tx = Some(first_snapshot_tx);
+            loop {
+                let Some(message) = server.recv().await else {
+                    break;
+                };
+                let IncomingMessage::Request { id, method, params } = message else {
+                    panic!("unexpected host message");
+                };
+                match method.as_str() {
+                    "session/input/snapshot" if first_snapshot => {
+                        first_snapshot = false;
+                        first_snapshot_tx
+                            .take()
+                            .expect("first snapshot signal")
+                            .send(())
+                            .expect("test observes the first snapshot");
+                        // Hold the first reply only; the responder keeps
+                        // serving the other steer. Without the service lock the
+                        // second handoff overtakes the first.
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            server
+                                .send_response(id, Ok(json!({ "generation": "gen-1" })))
+                                .await
+                                .expect("delayed snapshot response");
+                        });
+                    }
+                    "session/input/snapshot" => {
+                        server
+                            .send_response(id, Ok(json!({ "generation": "gen-1" })))
+                            .await
+                            .expect("snapshot response");
+                    }
+                    "session/input/enqueue" => {
+                        server
+                            .send_response(id, Ok(json!({ "ok": true })))
+                            .await
+                            .expect("enqueue response");
+                    }
+                    "session/input/dispatch" => {
+                        let input_id = params["inputIds"][0]
+                            .as_str()
+                            .expect("dispatched input id")
+                            .to_owned();
+                        dispatched_tx.send(input_id).expect("dispatch order");
+                        server
+                            .send_response(id, Ok(json!({ "ok": true })))
+                            .await
+                            .expect("dispatch response");
+                    }
+                    other => panic!("unexpected host request: {other}"),
+                }
+            }
+        })
+    };
+
+    let u1 = {
+        let service = Arc::clone(&service);
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            service
+                .steer(
+                    &runtime,
+                    &steer_submission("u1", "first"),
+                    &logical_id(),
+                    "turn_1",
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), first_snapshot_rx)
+        .await
+        .expect("the first steer reached the snapshot RPC")
+        .expect("signal");
+    let u2 = {
+        let service = Arc::clone(&service);
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            service
+                .steer(
+                    &runtime,
+                    &steer_submission("u2", "second"),
+                    &logical_id(),
+                    "turn_1",
+                )
+                .await
+        })
+    };
+    let first = tokio::time::timeout(Duration::from_secs(5), u1)
+        .await
+        .expect("u1 does not hang")
+        .expect("u1 task")
+        .expect("u1 steer");
+    let second = tokio::time::timeout(Duration::from_secs(5), u2)
+        .await
+        .expect("u2 does not hang")
+        .expect("u2 task")
+        .expect("u2 steer");
+    assert_eq!(first.input_id, "u1");
+    assert_eq!(second.input_id, "u2");
+
+    let order: Vec<String> = std::iter::from_fn(|| dispatched_rx.try_recv().ok()).collect();
+    assert_eq!(
+        order,
+        ["u1", "u2"],
+        "dispatch order must follow reservation order"
+    );
+
+    // Closing the client ends the responder's receive loop.
+    drop(service);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("the responder stops once the client closes")
+        .expect("responder");
+}
+
+/// Round 9 finding 2: a failed dispatch rolls the reserved generation back
+/// under the same lock, so no generation stays unresolved and the next steer
+/// still advances.
+#[tokio::test]
+async fn a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances() {
+    let Fixture {
+        service,
+        runtime,
+        server,
+        ..
+    } = fixture(false).await;
+    open_turn(&runtime).await;
+
+    let server = Arc::new(server);
+    let responder = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            loop {
+                let Some(message) = server.recv().await else {
+                    break;
+                };
+                let IncomingMessage::Request { id, method, params } = message else {
+                    panic!("unexpected host message");
+                };
+                let result = match method.as_str() {
+                    "session/input/snapshot" => Ok(json!({ "generation": "gen-1" })),
+                    "session/input/enqueue" => Ok(json!({ "ok": true })),
+                    "session/input/dispatch" if params["inputIds"][0] == "u1" => {
+                        Err(AcpError::new(-32602, "dispatch rejected"))
+                    }
+                    "session/input/dispatch" => Ok(json!({ "ok": true })),
+                    other => panic!("unexpected host request: {other}"),
+                };
+                server.send_response(id, result).await.expect("response");
+            }
+        })
+    };
+
+    let error = service
+        .steer(
+            &runtime,
+            &steer_submission("u1", "first"),
+            &logical_id(),
+            "turn_1",
+        )
+        .await
+        .expect_err("the rejected dispatch fails the steer");
+    assert_eq!(error.code(), ErrorCode::QueueUnavailable);
+    assert_eq!(error.details()["operation"], "session/input/dispatch");
+    assert!(
+        !runtime.log.steer_pending(),
+        "the rollback must leave no steer owning the turn"
+    );
+    assert_eq!(runtime.log.steer_generation(), 1);
+
+    let next = service
+        .steer(
+            &runtime,
+            &steer_submission("u2", "second"),
+            &logical_id(),
+            "turn_1",
+        )
+        .await
+        .expect("the next steer still advances");
+    assert_eq!(next.input_id, "u2");
+    assert_eq!(runtime.log.steer_generation(), 2);
+    assert!(
+        runtime.log.steer_pending(),
+        "the dispatched steer owns the turn until its run starts"
+    );
+
+    // Closing the client ends the responder's receive loop.
+    drop(service);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("the responder stops once the client closes")
+        .expect("responder");
 }
