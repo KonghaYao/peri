@@ -174,7 +174,8 @@ impl SessionRuntime {
 
 /// Keep the safety net alive when `finish_turn` deferred the close to a steer.
 /// The retry runs detached, so cancelling the prompt future cannot drop the
-/// only closer of the turn.
+/// only closer of the turn. It first waits one grace period for a continuation
+/// terminal, so a steer that already took over is not pre-empted.
 fn arm_deferred_close(runtime: &Arc<SessionRuntime>, request_id: &str, outcome: TurnOutcome) {
     if runtime.log.active_turn().as_deref() != Some(request_id) {
         return;
@@ -184,7 +185,7 @@ fn arm_deferred_close(runtime: &Arc<SessionRuntime>, request_id: &str, outcome: 
     tokio::spawn(async move {
         runtime
             .log
-            .close_lost_turn(&request_id, outcome, STEER_CONTINUATION_TIMEOUT)
+            .close_lost_turn_after_grace(&request_id, outcome, STEER_CONTINUATION_TIMEOUT)
             .await;
     });
 }
@@ -571,7 +572,7 @@ impl AcpSwarmService {
         }
         match runtime.child.prompt(text, &request_id).await {
             Ok(reply) => {
-                let steered = runtime.log.steer_epoch() > 0;
+                let steered = runtime.log.steer_pending();
                 // A steer cancels this attempt on purpose and the host continues
                 // the turn as a queued run; that run owns the terminal now, so
                 // the turn slot stays occupied until it reports one.
@@ -597,8 +598,17 @@ impl AcpSwarmService {
                             message: "steer continuation reported no terminal".to_owned(),
                         },
                     };
-                    runtime.log.finish_turn(&request_id, outcome.clone()).await;
-                    arm_deferred_close(runtime, &request_id, outcome);
+                    // Arm the detached closer before the first
+                    // `finish_turn().await`: if `settle` is dropped with this
+                    // future, the turn still has a closer. The task waits for a
+                    // continuation terminal first and only force-closes after
+                    // its grace.
+                    //
+                    // This does not cover the `wait_turn_closed` above: a
+                    // cancel during that (300s/1800s) wait leaves the turn with
+                    // no closer, an older window this change does not widen.
+                    arm_deferred_close(runtime, &request_id, outcome.clone());
+                    runtime.log.finish_turn(&request_id, outcome).await;
                 } else if !steered {
                     // The prompt reply is **not** the turn terminal:
                     // `peri/agent_event_done`, ingested in item order, is.
@@ -628,8 +638,10 @@ impl AcpSwarmService {
                             code: -32603,
                             message: "agent turn reported no terminal".to_owned(),
                         };
-                        runtime.log.finish_turn(&request_id, outcome.clone()).await;
-                        arm_deferred_close(runtime, &request_id, outcome);
+                        // Arm before the cancellable close, same as the steer
+                        // path above.
+                        arm_deferred_close(runtime, &request_id, outcome.clone());
+                        runtime.log.finish_turn(&request_id, outcome).await;
                     }
                 }
                 if reply.pending_tasks > 0 {
@@ -652,8 +664,11 @@ impl AcpSwarmService {
                     ChildError::Closed => (-32603, "agent transport is closed".to_owned()),
                 };
                 let outcome = TurnOutcome::Failed { code, message };
-                runtime.log.finish_turn(&request_id, outcome.clone()).await;
-                arm_deferred_close(runtime, &request_id, outcome);
+                // Arm before the cancellable close: a steer may defer this
+                // terminal, and dropping the prompt future must not drop the
+                // only closer of the turn.
+                arm_deferred_close(runtime, &request_id, outcome.clone());
+                runtime.log.finish_turn(&request_id, outcome).await;
                 Err(child_error(error))
             }
         }

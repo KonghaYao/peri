@@ -1153,7 +1153,8 @@ async fn a_steer_admitted_while_settling_keeps_the_turn_open() {
     finishing.await.expect("finish_turn");
 
     assert_eq!(log.active_turn().as_deref(), Some("req-1"));
-    assert_eq!(log.steer_epoch(), 1);
+    assert_eq!(log.steer_generation(), 1);
+    assert!(log.steer_pending());
     assert!(!drain(&mut events)
         .iter()
         .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))));
@@ -1182,7 +1183,8 @@ async fn a_terminal_kept_by_a_steer_guard_closes_the_turn_when_the_handoff_fails
     finishing.await.expect("finish_turn");
 
     assert_eq!(log.active_turn().as_deref(), Some("req-1"));
-    assert_eq!(log.steer_epoch(), 1);
+    assert_eq!(log.steer_generation(), 1);
+    assert!(log.steer_pending());
     assert!(!drain(&mut events)
         .iter()
         .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))));
@@ -1238,7 +1240,8 @@ async fn a_failed_timeout_close_kept_by_a_steer_guard_closes_when_the_handoff_fa
     finishing.await.expect("finish_turn");
 
     assert_eq!(log.active_turn().as_deref(), Some("req-1"));
-    assert_eq!(log.steer_epoch(), 1);
+    assert_eq!(log.steer_generation(), 1);
+    assert!(log.steer_pending());
     assert!(!drain(&mut events)
         .iter()
         .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Failed { .. }))));
@@ -1326,7 +1329,8 @@ async fn a_steer_rolled_back_while_settling_lets_the_timeout_close_the_turn() {
     // Under the paused clock, `finish_turn` has its snapshot and is settling.
     tokio::time::sleep(Duration::from_millis(1)).await;
     log.abandon_steer(1).await;
-    assert_eq!(log.steer_epoch(), 0);
+    assert_eq!(log.steer_generation(), 1);
+    assert!(!log.steer_pending());
     assert_eq!(log.active_turn().as_deref(), Some("req-1"));
     finishing.await.expect("finish_turn");
 
@@ -1362,7 +1366,8 @@ async fn a_stale_decision_epoch_after_rollback_still_closes_the_turn() {
     drain(&mut events);
     assert_eq!(log.note_steer(), 1);
     log.abandon_steer(1).await;
-    assert_eq!(log.steer_epoch(), 0);
+    assert_eq!(log.steer_generation(), 1);
+    assert!(!log.steer_pending());
     assert_eq!(log.active_turn().as_deref(), Some("req-1"));
 
     log.finish_turn_observed("req-1", TurnOutcome::Completed("end_turn".into()), Some(1))
@@ -1387,6 +1392,358 @@ async fn a_stale_decision_epoch_after_rollback_still_closes_the_turn() {
         .expect("read")
         .expect("row");
     assert_eq!(row.state, SessionState::Idle);
+}
+
+/// A rollback must not recycle the generation a closer already observed: the
+/// closer yields to the second steer and only that steer's run closes the turn.
+#[tokio::test(start_paused = true)]
+async fn a_rollback_does_not_reuse_the_generation_a_later_steer_advances() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn_observed("req-1", TurnOutcome::Completed("cancelled".into()), Some(1))
+                .await;
+        })
+    };
+    // Under the paused clock the closer already has its generation snapshot and
+    // is settling.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    log.abandon_steer(1).await;
+    assert!(!log.steer_pending());
+    // The rollback keeps generation 1, so the next steer must advance to 2
+    // instead of handing out the value the closer observed.
+    assert_eq!(log.note_steer(), 2);
+    assert_eq!(log.steer_generation(), 2);
+    assert!(log.steer_pending());
+    // The second steer is adopted by its queued run.
+    log.ingest(
+        "peri/agent_event",
+        &json!({
+            "event_json": json!({
+                "type": "user_input_run_started",
+                "value": { "request_id": "req-2" },
+            })
+            .to_string(),
+        }),
+    )
+    .await;
+    finishing.await.expect("finish_turn");
+
+    assert_eq!(
+        log.active_turn().as_deref(),
+        Some("req-1"),
+        "the stale closer must not close a turn the second steer took over"
+    );
+    assert!(
+        !drain(&mut events)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))),
+        "the yielding closer must not publish a terminal"
+    );
+
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "end_turn", "requestId": "req-2" }),
+    )
+    .await;
+
+    assert!(log.active_turn().is_none());
+    let terminals: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals,
+        [TurnEvent::completed("req-1", "turn_1", "end_turn")],
+        "the continuation terminal closes the turn, not the retained one"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// A later failed steer must not release a turn an earlier successful steer
+/// still owns: only the earlier queued run may terminate it.
+#[tokio::test(start_paused = true)]
+async fn a_failed_steer_does_not_release_an_earlier_steers_turn() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    // Steer A was handed off; the host cancelled the prompt attempt, whose
+    // terminal is not the turn's.
+    assert_eq!(log.note_steer(), 1);
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "cancelled", "requestId": "req-1" }),
+    )
+    .await;
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+
+    // Steer B fails before A's queued run started. Rolling B back must not
+    // replay the retained terminal: steer A still owns the turn.
+    assert_eq!(log.note_steer(), 2);
+    log.abandon_steer(2).await;
+    assert!(log.steer_pending(), "steer A still owns the turn");
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(
+        !drain(&mut events)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))),
+        "the retained prompt terminal must not close A's turn"
+    );
+
+    // A's queued run is adopted and closes the turn with its own terminal.
+    log.ingest(
+        "peri/agent_event",
+        &json!({
+            "event_json": json!({
+                "type": "user_input_run_started",
+                "value": { "request_id": "req-2" },
+            })
+            .to_string(),
+        }),
+    )
+    .await;
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "end_turn", "requestId": "req-2" }),
+    )
+    .await;
+
+    assert!(log.active_turn().is_none());
+    let terminals: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals,
+        [TurnEvent::completed("req-1", "turn_1", "end_turn")],
+        "the earlier steer's run is the only terminal"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// Two failed steers rolled back out of order: the first rollback leaves the
+/// turn owned by the other steer, and only the last one replays the terminal.
+#[tokio::test]
+async fn out_of_order_steer_rollbacks_release_the_turn_only_at_the_last_one() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    assert_eq!(log.note_steer(), 1);
+    assert_eq!(log.note_steer(), 2);
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "cancelled", "requestId": "req-1" }),
+    )
+    .await;
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+
+    // The later steer rolls back first: steer 1 still owns the turn.
+    log.abandon_steer(2).await;
+    assert!(log.steer_pending(), "steer 1 is still outstanding");
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(
+        !drain(&mut events)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))),
+        "one rollback must not replay the retained terminal"
+    );
+
+    // The last outstanding steer rolls back: now the retained terminal closes
+    // the turn instead of leaving it open until the prompt timeout.
+    log.abandon_steer(1).await;
+    assert!(log.active_turn().is_none());
+    assert!(!log.steer_pending());
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "cancelled"
+        )),
+        "the reply's own stop reason closes the turn: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// A rollback admitted during `settle` leaves no steer owning the turn, so the
+/// closer must finish its job instead of deferring to the safety net.
+#[tokio::test(start_paused = true)]
+async fn a_rollback_during_settle_does_not_defer_the_close() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn_observed("req-1", TurnOutcome::Completed("end_turn".into()), Some(0))
+                .await;
+        })
+    };
+    // Under the paused clock the closer already has its snapshot and is
+    // settling.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    log.abandon_steer(1).await;
+    finishing.await.expect("finish_turn");
+
+    assert!(
+        log.active_turn().is_none(),
+        "a rolled-back steer must not defer the close"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "end_turn"
+        )),
+        "the closer must publish its terminal: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// The pre-settle guard only yields to a change that still owns the turn: a
+/// lone rollback leaves a stale generation behind, and the closer must finish
+/// its job instead of deferring to the safety net.
+#[tokio::test(start_paused = true)]
+async fn a_stale_generation_without_an_owner_does_not_defer_the_close() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    assert_eq!(log.note_steer(), 1);
+    log.abandon_steer(1).await;
+    assert!(!log.steer_pending(), "the rollback leaves no owner");
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+
+    // The expected value is stale, but no steer owns the turn any more.
+    log.finish_turn_observed("req-1", TurnOutcome::Completed("end_turn".into()), Some(0))
+        .await;
+
+    assert!(
+        log.active_turn().is_none(),
+        "a stale generation without an owner must not defer the close"
+    );
+    let seen = drain(&mut events);
+    let terminals = seen
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                StreamEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Failed { .. })
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1, "exactly one terminal: {seen:?}");
+    assert!(
+        matches!(
+            terminals[0],
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. }) if stop_reason == "end_turn"
+        ),
+        "the closer must publish its own terminal: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// The generation keeps counting across turns, so a late rollback from a closed
+/// turn cannot release the next turn's first steer.
+#[tokio::test]
+async fn a_late_rollback_does_not_release_the_next_turns_steer() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    assert_eq!(log.note_steer(), 1);
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    assert!(log.active_turn().is_none());
+    drain(&mut events);
+
+    log.begin_turn("req-2", "turn_2").await.expect("turn");
+    let generation = log.note_steer();
+    assert!(
+        generation > 1,
+        "the generation must not be reused across turns: {generation}"
+    );
+    assert!(log.steer_pending());
+
+    log.abandon_steer(1).await;
+    assert!(
+        log.steer_pending(),
+        "a stale rollback must not release the new turn's steer"
+    );
+    assert_eq!(log.active_turn().as_deref(), Some("req-2"));
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Running);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1494,6 +1851,156 @@ async fn a_retry_does_not_close_after_the_continuation_terminal() {
         .expect("read")
         .expect("row");
     assert_eq!(row.state, SessionState::Idle);
+}
+
+/// The safety net must give a steered continuation its grace: a terminal that
+/// arrives first closes the turn and no forced terminal is published.
+#[tokio::test(start_paused = true)]
+async fn a_grace_close_waits_for_the_continuation_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+    log.ingest(
+        "peri/agent_event",
+        &json!({
+            "event_json": json!({
+                "type": "user_input_run_started",
+                "value": { "request_id": "req-2" },
+            })
+            .to_string(),
+        }),
+    )
+    .await;
+
+    let grace = Duration::from_secs(5);
+    let closing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.close_lost_turn_after_grace(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+                grace,
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(
+        !closing.is_finished(),
+        "the safety net must wait out the grace period"
+    );
+
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "end_turn", "requestId": "req-2" }),
+    )
+    .await;
+    closing.await.expect("close_lost_turn_after_grace");
+
+    assert!(log.active_turn().is_none());
+    let terminals: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals,
+        [TurnEvent::completed("req-1", "turn_1", "end_turn")],
+        "the continuation terminal must be the only one"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// Without any continuation terminal the safety net force-closes the turn once
+/// the grace expires.
+#[tokio::test(start_paused = true)]
+async fn a_grace_close_forces_the_turn_after_the_grace_without_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+    log.ingest(
+        "peri/agent_event",
+        &json!({
+            "event_json": json!({
+                "type": "user_input_run_started",
+                "value": { "request_id": "req-2" },
+            })
+            .to_string(),
+        }),
+    )
+    .await;
+
+    let grace = Duration::from_secs(5);
+    let closing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.close_lost_turn_after_grace(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+                grace,
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    tokio::time::sleep(grace + Duration::from_secs(1)).await;
+    closing.await.expect("close_lost_turn_after_grace");
+
+    assert!(
+        log.active_turn().is_none(),
+        "the safety net must close a turn whose continuation never reported"
+    );
+    let terminals: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminals.len(), 1, "exactly one terminal: {terminals:?}");
+    assert!(
+        matches!(
+            &terminals[0],
+            TurnEvent::Failed { error, .. }
+                if error.code == -32603 && error.message == "agent turn reported no terminal"
+        ),
+        "the forced close keeps the original failure: {terminals:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Failed);
 }
 
 #[tokio::test]
