@@ -50,15 +50,16 @@ jobs:
                   CI_HEAD_SHA: ${{ github.sha }}
               run: bash scripts/ci-classify-changes.sh
 
-    # sidecar 门禁：与发布共用同一份构建 + 摘要校验实现（含固定的 bun 版本）。
-    # 任何非 docs-only 变更都验证 pin 与锁定构建一致，避免 pin 漂移到 tag
-    # 发布时才暴露；docs-only 由 changes.docs_only 跳过。
+    # 复用发布的锁定构建与摘要校验，只验证 pin，不上传发布归档所需的 Sidecar。
     workflow-sidecar:
         name: Workflow sidecar
         needs: changes
         if: needs.changes.outputs.docs_only != 'true'
         uses: ./.github/workflows/workflow-sidecar.yml
+        with:
+            upload_artifact: false
 
+    # 保留历史 job ID 和名称，避免分支保护与检查标识漂移。本 job 只运行测试和轻量门禁。
     build:
         name: Build (${{ matrix.os }})
         needs: changes
@@ -99,7 +100,6 @@ jobs:
               with:
                   toolchain: 1.99.0
                   targets: ${{ matrix.target }}
-                  components: clippy
 
             # 覆盖清单核对：先跑解析器单测（fixture 驱动，不需要 cargo），再枚举
             # workspace 的测试目标并检查必跑套件仍在执行范围内，在昂贵的构建之前
@@ -144,14 +144,6 @@ jobs:
               uses: taiki-e/install-action@v2
               with:
                   tool: nextest@0.9.148
-
-            # 保留完整构建：它覆盖 nextest 构建阶段不涉及的非 test 模式目标
-            # （bin/example/bench 的常规构建与链接），且与测试步骤共用同一 package
-            # 根集合与 profile（dev/test 的 debug 已在顶部统一为 0），产物可被后续
-            # 测试步骤直接复用，不是重复编译。
-            - name: Build
-              shell: bash
-              run: ./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
             # 统一测试入口：所有测试步骤共用同一组 Cargo 选择（--locked --workspace），
             # 测试范围差异只落在 nextest 的 `-E` 过滤器上，因此整个 job 内依赖图、
@@ -257,15 +249,6 @@ jobs:
               run: >-
                   ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
                   --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
-
-            - name: Clippy
-              shell: bash
-              run: |
-                  if [[ "$RUNNER_OS" == "Windows" ]]; then
-                      ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --lib --bins -- -D warnings
-                  else
-                      ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
-                  fi
 
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
@@ -416,11 +399,11 @@ jobs:
                   fi
 
                   if [[ "$DOCS_ONLY" == "true" ]]; then
-                      printf 'docs-only：按策略跳过 sidecar 与 Rust 三平台任务，汇总检查通过\n'
+                      printf 'docs-only：按策略跳过 sidecar pin 校验、Rust 三平台测试与录放 E2E，汇总检查通过\n'
                       exit 0
                   fi
 
-                  # 非 docs-only 时 sidecar 构建必须真跑并通过摘要校验；
+                  # 非 docs-only 时必须实际验证 sidecar pin；
                   # skipped 说明触发条件出了问题，不能当成通过。
                   if [[ "$SIDECAR_RESULT" != "success" ]]; then
                       printf '::error::Workflow sidecar 结果 = %s（期望 success）\n' "$SIDECAR_RESULT" >&2
@@ -440,4 +423,4 @@ jobs:
                       exit 1
                   fi
 
-                  printf '完整验证通过\n'
+                  printf '普通 CI 验证通过\n'

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # verify-async.sh — 后台全量验证 + 结构化回执（与交互路径解耦）
 #
-# 为什么：交互路径（提交 hook、交付前收窄门）一旦编到 test target 就要付分钟级成本。
+# 为什么：将整个 workspace 的 all-targets 检查移出交互路径，避免承担分钟级冷编译成本。
 # 本地实测（2026-10-16，Apple Silicon，dev profile，根 target 热态）：
 #   check --locked --workspace                无改动 6.96s；touch peri-model 后 24.85s
 #   check --locked --workspace --all-targets  首次 192.43s；test target 热后 30.93s
 # 本脚本自身实测（隔离 target/verify）：
 #   冷建首轮 7m12s（check 306s + clippy 126s，一次性，target/verify 4.4G）；
 #   稳态增量 50s（touch peri-model：check 23s + clippy 27s）
-# 所以全量门改到隔离 target 上后台执行：交互路径只跑收窄门（scripts/check-changed.sh），
+# 所以全量门移到隔离 target 后台执行；交互路径按暂存改动收窄 Clippy，或用 scripts/check-changed.sh 检查类型，
 # 全量结论以回执文件为准，由下一轮会话读取，而不是把对话卡在编译上。
 #
 # 隔离 target：CARGO_TARGET_DIR=target/verify
@@ -26,10 +26,10 @@
 #   当前工作区比对，不一致即判定 stale——stale 回执不能当作当前代码的证据。started
 #   通知本身不算通过，判定只看每个 step 的 exit status。
 #
-# 命令范围（CI 同款入口的本地副本）：
+# 全量本地检查（普通 CI 不运行这里的 check / Clippy）：
 #   1. check  --locked --workspace --all-targets
 #   2. clippy --locked --workspace --all-targets -- -D warnings（check 失败时跳过）
-#   cargo test --workspace 留在 CI：本地分钟级且吃 CPU，不进入回执承诺的 5 分钟窗口。
+#   Rust 测试、doctest 与录放 E2E 留在普通 CI，不进入本地回执。
 #
 # 用法：
 #   bash scripts/verify-async.sh start [--reason TEXT]   # 立即返回，后台继续
@@ -271,7 +271,7 @@ receipt = {
     "seconds_total": int(os.environ["VT_TOTAL_SECS"]),
     "verdict": os.environ["VT_VERDICT"],
     "steps": steps,
-    "not_run": ["cargo test --workspace（留在 CI）", "E2E（KonghaYao/peri-e2e 固定 commit；见 docs/standards/testing.md）"],
+    "not_run": ["workspace nextest / doctest（留在 CI）", "E2E（KonghaYao/peri-e2e 固定 commit；见 docs/standards/testing.md）"],
     "logs": {
         "check": os.environ["VT_CHECK_OUT"],
         "clippy": os.environ["VT_CLIPPY_OUT"],

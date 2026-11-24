@@ -296,6 +296,15 @@ impl ReactLLM for EchoLLM {
 
 ## 八、运行命令
 
+### TEST-GATES-001
+
+- **Scope**：本地提交、普通 PR／分支 CI、Peri Agent 预发布与正式发布。
+- **Rule**：
+  - **本地提交**：按 [Lefthook 配置](../../lefthook.yml) 运行 `lefthook run pre-commit`。格式检查和 `cargo check --locked` 仅由 Rust 文件 glob 触发，类型检查仍采用 Cargo 默认包与目标范围。只有 Clippy 按暂存路径选择直接涉及的 crate，共享构建输入变更时改查整个 workspace；macOS/Linux 用 `--all-targets`，Windows 用 `--lib --bins`，均用 `-D warnings`。Cargo 读取工作树；若局部暂存使工作树与拟提交内容不同，按 [GIT-COMMIT-001](git.md#git-commit-001) 另行验证暂存快照。本地 hook 可跳过，不能代替远端检查。
+  - **普通 CI**：以 [CI workflow](../../.github/workflows/ci.yml) 的同一提交运行和汇总检查 `CI result` 为准。保留静态检查、三平台 Rust 测试与 doctest、Linux 真实二进制的离线 E2E，以及 Workflow sidecar 构建与身份校验（不上传供发布的 sidecar）；不额外运行 workspace 全目标 Build 或 Clippy。仅按 workflow 允许的策略跳过；分类失败或应运行的检查失败、取消、意外跳过均不能当通过。汇总通过不等于启用了 GitHub required check；启用时保持检查名称稳定，核对分支保护。
+  - **发布验证**：以 [Agent release](../../.github/workflows/release-agent.yml) 和 [pre-release](../../.github/workflows/pre-release.yml) 对候选提交的运行和实际产物为准；普通 CI 绿灯、本地 `--release` 构建均不能替代发布平台矩阵、归档内容及校验和检查。Workflow sidecar 构建和身份校验失败时，不得进入发布构建；校验归档时仍须核对 sidecar 内容身份。发布只编译各流程指定的交付目标，不等同于 workspace 全目标构建；若变更需要验证例程、基准等常规目标的独立编译与链接，手动运行下面的全目标命令。
+- **Verify**：交付报告分别列出本地命令与终态、普通 CI 的提交与汇总结果、发布候选的 tag／提交与产物结果；未执行或未纳入范围的阶段明确标注，不写成已通过。
+
 ### 8.1 根 workspace
 
 根 workspace 的实际 package 集合以 `cargo metadata --no-deps` 为验证事实源；根 `Cargo.toml` 的 `[workspace].members` 是显式入口，但 Cargo 还可能自动纳入 workspace 根目录下、被成员依赖的 path package。不要只按目录名、members 文本或历史 issue 推断最终集合。
@@ -306,6 +315,9 @@ cargo metadata --no-deps --format-version 1
 
 # 根 workspace 全量运行（包含 peri-theme）
 cargo test --workspace
+
+# 显式验证 workspace 全目标，包括例程和基准的独立编译与链接
+./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
 # 单 crate
 cargo test -p peri-agent --lib
@@ -332,8 +344,8 @@ cargo test -p <crate> --test <target>
 # 改进程级环境变量或起真实子进程/真实 wire 的目标：目标内不保证互斥，需串行
 cargo test -p <crate> --test <target> -- --test-threads=1
 
-# pre-commit（不含测试）
-lefthook run pre-commit    # fmt + check + clippy（改动命中 crate）+ layer-imports
+# pre-commit（本地；不运行 workspace Rust 测试套件）
+lefthook run pre-commit    # 实际检查范围见 lefthook.yml
 ```
 
 ### 8.2 Peri TUI E2E（外部仓 + 固定 commit）

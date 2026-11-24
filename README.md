@@ -156,11 +156,14 @@ git clone https://github.com/konghayao/peri.git
 cd peri
 ./dev.sh      # Run from source; loads the repository .env if present
 ./dev-tui.sh  # Launch the TUI component storybook; q quits, --dump works without a TTY
-# Build a release binary from this checkout:
+# Build an optimized local binary from this checkout (not a publishable release):
 ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```
 
 AI-assisted development, with human responsibility for review and release.
+
+See [verification gates](docs/standards/testing.md#test-gates-001)
+for the distinction between local hooks, ordinary CI, and release validation.
 
 [Repository guidance](CLAUDE.md) · [Architecture](docs/design/architecture.md) · [Code index](docs/code-index/) · [Standards](docs/standards/index.md) · [Testing](docs/standards/testing.md)
 
