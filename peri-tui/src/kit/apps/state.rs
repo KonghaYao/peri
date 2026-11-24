@@ -327,8 +327,15 @@ pub fn registry_revision() -> u64 {
     REGISTRY_REVISION.load(Ordering::Acquire)
 }
 
+/// 发现结果变化：版本 +1，并推进结构纪元。
+///
+/// 工具卡/折叠组头的「打开应用」动作来自后台轮询的 `apps/list`；轮询完成时
+/// ACP 事件流通常已静止，只改版本不会让消息区重算。结构纪元同时负责：
+/// 唤醒订阅者（消息区订阅它）与让 transcript 重新派生（缓存失效）。
 fn bump_registry_revision() {
     REGISTRY_REVISION.fetch_add(1, Ordering::AcqRel);
+    let epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get().saturating_add(1);
+    crate::kit::atoms::STRUCTURAL_EPOCH.set(epoch);
 }
 
 /// 全局状态的写入串行化。

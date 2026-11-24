@@ -84,6 +84,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 订阅 IMAGE_HOVER：Moved handler 写入时触发消息区重渲染（hover 行
     // 绝对路径显示/清除）。读取仍在渲染 body 视口循环（读副本，G3 视口级）。
     hooks.use_atom(&IMAGE_HOVER);
+    // MCP Apps 发现结果到达时（后台轮询，ACP 流通常已静止）必须重算消息区：
+    // 订阅结构纪元唤醒渲染，纪元变化同时让 transcript 重新派生，工具卡与
+    // 折叠组头的「打开应用」动作才会出现/消失。
+    let structural_epoch = hooks.use_atom(&crate::kit::atoms::STRUCTURAL_EPOCH);
+    let _structural_epoch = *structural_epoch.read();
 
     let (snapshot, publication) = self::vm_cache::read_render_snapshot();
     let todo_items = todo_atom.read().clone();

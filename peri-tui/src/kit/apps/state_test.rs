@@ -156,13 +156,25 @@ fn registry_lookup_requires_matching_session_and_tool_call() {
 fn descriptor_revision_bumps_only_on_change() {
     reset_for_test();
     let before = registry_revision();
+    let epoch_before = crate::kit::atoms::STRUCTURAL_EPOCH.get();
     publish_descriptors(vec![entry("app-1", None)]);
     let after_first = registry_revision();
+    let epoch_after = crate::kit::atoms::STRUCTURAL_EPOCH.get();
     assert!(after_first > before);
+    assert!(
+        epoch_after > epoch_before,
+        "发现结果变化必须推进结构纪元：消息区据此重渲染出工具卡 chip"
+    );
     publish_descriptors(vec![entry("app-1", None)]);
     assert_eq!(registry_revision(), after_first, "重复发布不 bump");
+    assert_eq!(
+        crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+        epoch_after,
+        "重复发布不推进结构纪元"
+    );
     publish_descriptors(vec![]);
     assert!(registry_revision() > after_first);
+    assert!(crate::kit::atoms::STRUCTURAL_EPOCH.get() > epoch_after);
 }
 
 #[serial_test::serial]
