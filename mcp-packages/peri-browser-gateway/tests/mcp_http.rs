@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+#[path = "contracts/daemon.rs"]
+mod daemon;
 #[path = "contracts/monitor_handoff.rs"]
 mod monitor_handoff;
 #[path = "contracts/onboarding_wire.rs"]

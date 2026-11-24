@@ -1,10 +1,10 @@
-//! `install kitesurf` and `start kitesurf`.
+//! `install kitesurf` and the engine side of `start kitesurf`.
 //!
 //! Installation downloads the official script into a private temporary
 //! directory and runs it with `bash`, so a failed `curl` cannot be hidden by a
 //! pipe and no other user can plant the file. Starting spawns
-//! `kitesurf serve` in its own process group, waits for `/json/version`, and
-//! leaves the engine running while the gateway stays in the foreground.
+//! `kitesurf serve` in its own process group and waits for `/json/version`;
+//! the engine keeps running after the command that started it exits.
 
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::cli::StartOptions;
 use crate::onboarding::{detect_install, install_root};
 use crate::provision::probe_engine;
 
@@ -68,21 +67,19 @@ pub fn install(lookup: &impl Fn(&str) -> Option<String>) -> Result<i32> {
 
 /// `start kitesurf`: reuse or spawn the engine and wait until it answers.
 ///
-/// Printing the gateway URLs is part of the command contract; the caller then
-/// enters the foreground serve loop.
-pub async fn start(options: &StartOptions, lookup: &impl Fn(&str) -> Option<String>) -> Result<()> {
-    let engine_url = engine_url(options.port);
-    if probe_engine(&engine_probe_url(options.port), PROBE_ATTEMPT_LIMIT)
+/// Returns `true` when this call spawned the engine, so the caller records
+/// ownership in the gateway state and `stop` knows whether the engine is ours.
+pub async fn ensure_engine(port: u16, lookup: &impl Fn(&str) -> Option<String>) -> Result<bool> {
+    let engine_url = engine_url(port);
+    if probe_engine(&engine_probe_url(port), PROBE_ATTEMPT_LIMIT)
         .await
         .reachable
     {
         println!("kitesurf already running at {engine_url}");
-    } else {
-        start_engine(options.port, lookup).await?;
+        return Ok(false);
     }
-    println!("mcp: http://{}/mcp", options.bind);
-    println!("monitor: http://{}/", options.bind);
-    Ok(())
+    start_engine(port, lookup).await?;
+    Ok(true)
 }
 
 /// HTTP origin shown to the user.
@@ -95,13 +92,6 @@ fn engine_url(port: u16) -> String {
 /// the WebSocket endpoint the same way `browser_connect` derives it.
 fn engine_probe_url(port: u16) -> String {
     format!("ws://127.0.0.1:{port}/devtools/browser")
-}
-
-/// Whether the engine at `port` still answers `/json/version`.
-pub async fn engine_reachable(port: u16) -> bool {
-    probe_engine(&engine_probe_url(port), PROBE_ATTEMPT_LIMIT)
-        .await
-        .reachable
 }
 
 /// Creates an owner-only directory for the downloaded installer.

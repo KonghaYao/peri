@@ -165,7 +165,10 @@ async fn sdk_expiry_revokes_even_a_live_monitor_and_drains_the_transport() -> an
         .await?
         .json()
         .await?;
-    assert_eq!(health, json!({"ok": true, "sessions": 0}));
+    assert_eq!(
+        health,
+        json!({"ok": true, "sessions": 0, "pid": std::process::id()})
+    );
     stop.cancel();
     server.await??;
     Ok(())

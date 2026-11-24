@@ -1,5 +1,5 @@
-//! `peri-browser` entry point: serve the gateway, install kitesurf, or start
-//! kitesurf and then serve the gateway in the foreground.
+//! `peri-browser` entry point: serve the gateway in the foreground, run it in
+//! the background, stop it, or install/start kitesurf.
 
 use std::process::ExitCode;
 
@@ -7,6 +7,8 @@ use std::process::ExitCode;
 use peri_browser_gateway::cli::{self, Command, StartOptions};
 #[cfg(unix)]
 use peri_browser_gateway::config::Config;
+#[cfg(unix)]
+use peri_browser_gateway::daemon::{self, EngineBinding};
 #[cfg(unix)]
 use peri_browser_gateway::lifecycle;
 #[cfg(unix)]
@@ -48,17 +50,19 @@ async fn run(command: Command) -> anyhow::Result<i32> {
             serve(args).await?;
             Ok(0)
         }
+        Command::StartGateway(args) => {
+            daemon::start_gateway(args, &process_env, None).await?;
+            Ok(0)
+        }
+        Command::Stop(options) => daemon::stop(options.bind, &process_env).await,
         Command::InstallKitesurf => lifecycle::install(&process_env),
         Command::StartKitesurf(options) => {
-            lifecycle::start(&options, &process_env).await?;
-            let result = serve(gateway_args(&options)).await;
-            if lifecycle::engine_reachable(options.port).await {
-                eprintln!(
-                    "kitesurf is still running; stop it with `kitesurf stop --port {}`",
-                    options.port
-                );
-            }
-            result?;
+            let owned = lifecycle::ensure_engine(options.port, &process_env).await?;
+            let engine = EngineBinding {
+                port: options.port,
+                owned,
+            };
+            daemon::start_gateway(gateway_args(&options), &process_env, Some(engine)).await?;
             Ok(0)
         }
     }
@@ -76,7 +80,7 @@ async fn serve(args: Vec<String>) -> anyhow::Result<()> {
     .await
 }
 
-/// The foreground gateway uses the same listener and suggested engine as the
+/// The background gateway uses the same listener and suggested engine as the
 /// explicit `start kitesurf` flags.
 #[cfg(unix)]
 fn gateway_args(options: &StartOptions) -> Vec<String> {

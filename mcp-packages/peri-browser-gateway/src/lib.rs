@@ -5,6 +5,7 @@ pub mod cdp;
 pub mod cli;
 pub mod config;
 mod core;
+pub mod daemon;
 mod diagnostics;
 pub mod error;
 mod handoff;
