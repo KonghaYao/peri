@@ -469,3 +469,61 @@ index 8d79fb1..019aa6b 100644
  #[test]
  fn listen_request_round_trips_required_fields_and_arbitrary_metadata() {
      let mut request = SubscriptionsListenRequest::new(SubscriptionsListenRequestParams::new(
+
+--- a/src/transport/streamable_http_server/session/local.rs
++++ b/src/transport/streamable_http_server/session/local.rs
+@@ -431,19 +431,25 @@
+             return;
+         };
+         tracing::trace!(?resource, http_request_id, "unregister resource");
+-        let Some(channel) = self.tx_router.get_mut(&http_request_id) else {
++        let Some(channel) = self.tx_router.get(&http_request_id) else {
+             tracing::warn!(http_request_id, "http request wise channel not found");
+             return;
+         };
+         if !channel.resources.is_empty() && !matches!(resource, ResourceKey::McpRequestId(_)) {
+             return;
+         }
++        self.complete_channel(http_request_id);
++    }
++    /// Close the sender so the client's SSE stream ends, but keep the entry so
++    /// the cache is available for late resume requests
++    /// (`SessionConfig::completed_cache_ttl`).
++    fn complete_channel(&mut self, http_request_id: HttpRequestId) {
++        let Some(channel) = self.tx_router.get_mut(&http_request_id) else {
++            return;
++        };
+         tracing::debug!(http_request_id, "close http request wise channel");
+         let resources: Vec<_> = channel.resources.drain().collect();
+         channel.completed_at = Some(Instant::now());
+-        // Close the sender so the client's SSE stream ends,
+-        // but keep the entry so the cache is available for
+-        // late resume requests.
+         let (closed_tx, _) = tokio::sync::mpsc::channel(1);
+         channel.tx.tx = closed_tx;
+         for resource in resources {
+@@ -635,15 +641,16 @@
+         let outbound_channel = self.resolve_outbound_channel(&message);
+         match outbound_channel {
+             OutboundChannel::RequestWise { id, close } => {
+-                if let Some(request_wise) = self.tx_router.get_mut(&id) {
+-                    request_wise.tx.send(message).await?;
+-                    if close && let Some(channel) = self.tx_router.remove(&id) {
+-                        for resource in channel.resources {
+-                            self.resource_router.remove(&resource);
+-                        }
+-                    }
+-                } else {
++                let Some(request_wise) = self.tx_router.get_mut(&id) else {
+                     return Err(SessionError::ChannelClosed(Some(id)));
++                };
++                request_wise.tx.send(message).await?;
++                if close {
++                    // A dispatched response ends the client's SSE stream, but
++                    // the client may have dropped it before reading the
++                    // response: retain the cache so `Last-Event-ID` can replay
++                    // it until `completed_cache_ttl` expires.
++                    self.complete_channel(id);
+                 }
+             }
+             OutboundChannel::Common => self.common.send(message).await?,

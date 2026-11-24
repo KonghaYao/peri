@@ -21,6 +21,8 @@ python3 scripts/test-cargo-patches.py
 
 同一补丁还限制 generic service loop 的成功 response 日志：`CustomResult` 可能承载凭据，且 response 事件没有 method 关联，故收发 TRACE 仅记录请求 ID 与方向，handler DEBUG 仅记录请求 ID。请求、通知、JSON-RPC 错误与传输错误仍保留完整诊断；业务 `Err` 被成功 `CustomResult` 包装时，由 credentials handler 自己记录类型化错误。此调整不修改 MCP wire、不隐藏错误内容、不绕过 credentials MCP。回归位于 `mcp-packages/credentials` 的模型认证测试，覆盖 DEBUG/TRACE 下合成成功 token 不落日志和错误诊断保留。
 
+同一补丁还修正 Streamable HTTP 会话层的迟到恢复：request-wise 通道在派发 response 后原先直接移除，重放缓存随之丢失，客户端在断开与重连之间的 reply 不可恢复（`LocalSessionManager` 的 `completed_cache_ttl` 因此对已完成请求形同虚设）。现在完成时只关闭 sender 并按 `completed_cache_ttl`（默认 60 秒）保留缓存，迟到 `GET` + `Last-Event-ID` 重放后关闭，与 `unregister_resource` 已有的保留语义共用同一实现。连接中的客户端仍在 reply 后立即收到流结束，写操作不会重发；所有使用 rmcp Streamable HTTP 服务端的消费者（浏览器网关与 `peri-mcp-common` 的 standalone 服务）共享该行为，客户端路径不受影响。回归位于 `peri-browser-gateway` 的 `mcp_http::shutdown::sse_resume_*` 契约测试。
+
 补丁曾为 `matches_response_id`、`set_client_request_metadata`、`is_authorization_required` 加 `cfg_attr(not(feature = "client"), allow(dead_code))`：三者只在 `client` feature 下被调用，而 path 覆盖的依赖不享受 Cargo 对 registry 依赖的 lint cap，未启用该 feature 时会暴露 dead_code 告警。上游 3.6.0 已改用 `#[cfg(feature = "client")]` 门控这三个函数，补丁不再包含该变通。
 
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：

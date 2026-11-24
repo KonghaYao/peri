@@ -74,6 +74,67 @@ async fn sse_resume_replays_a_reply_without_executing_the_write_twice() -> anyho
     engine.shutdown().await
 }
 
+/// 已派发的 reply 在缓存窗口内仍可按 `Last-Event-ID` 重放：POST SSE 读走
+/// reply 后通道已完成，迟到恢复必须从 completed 缓存取回同一份结果，且写只
+/// 执行一次（客户端无需重发 `tools/call`）。
+#[tokio::test]
+async fn sse_resume_replays_an_already_dispatched_reply_from_the_completed_cache(
+) -> anyhow::Result<()> {
+    let mut engine = Engine::ephemeral().await?;
+    let mut gateway = Gateway::start(&engine.url(), &[]).await?;
+    let id = gateway.init().await?;
+    gateway.connect(&id, &engine.url()).await?;
+    let gate = engine.gate_reply("Input.dispatchKeyEvent");
+    let (request_id, message) = gateway.tool_request("press_key", json!({"key": "Enter"}));
+    let response = gateway
+        .post(Some(&id), message)
+        .send()
+        .await?
+        .error_for_status()?;
+    tokio::time::timeout(WAIT, gate.arrived.cancelled()).await?;
+    gate.release.cancel();
+    // Reply 派发后 SDK 关闭该 request-wise 通道，POST SSE 随即结束。
+    let delivered = tokio::time::timeout(WAIT, response.text()).await??;
+    let cursor = delivered
+        .lines()
+        .find_map(|line| line.strip_prefix("id:"))
+        .expect("SDK priming 事件 id")
+        .trim()
+        .to_owned();
+    assert!(
+        delivered.contains(&format!("\"id\":{request_id}")),
+        "POST SSE 应先收到 reply: {delivered}"
+    );
+
+    let resumed = gateway
+        .events(&id)
+        .header("last-event-id", cursor)
+        .send()
+        .await?
+        .error_for_status()?;
+    let replayed = tokio::time::timeout(WAIT, resumed.text()).await??;
+    let replies: Vec<Value> = replayed
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter(|data| !data.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(replies.len(), 1, "迟到恢复必须恰好重放一次: {replayed}");
+    assert_eq!(replies[0]["id"], request_id);
+    assert_ne!(replies[0]["result"]["isError"], true);
+    assert_eq!(
+        engine
+            .events()
+            .iter()
+            .filter(|event| matches!(event, Event::Command(Role::Writer, _, method, _) if method == "Input.dispatchKeyEvent"))
+            .count(),
+        2,
+        "一次按键只发 down/up，恢复不重发工具调用"
+    );
+    gateway.shutdown().await?;
+    engine.shutdown().await
+}
+
 #[tokio::test]
 async fn delete_revokes_admission_then_waits_for_writer_viewer_and_ws_even_if_one_caller_leaves(
 ) -> anyhow::Result<()> {
