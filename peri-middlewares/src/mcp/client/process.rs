@@ -1,4 +1,5 @@
 //! Stdio subprocesses remain owned by the session pool through handshake cancellation and close.
+use futures::StreamExt;
 use peri_process::ProcessTree;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::service::TxJsonRpcMessage;
@@ -198,15 +199,18 @@ impl super::McpClientPool {
 
     pub(super) async fn close_processes(&self) -> usize {
         let processes = self.processes.lock().clone();
-        let mut unfinished = 0;
-        for process in processes {
-            if !matches!(
-                peri_time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
-                Ok(Ok(()))
-            ) {
-                unfinished += 1;
-            }
-        }
+        // 子进程彼此独立：并行收口，单项 5s 上限不逐项累加。
+        let outcomes: Vec<bool> = futures::stream::iter(processes)
+            .map(|process| async move {
+                matches!(
+                    peri_time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
+                    Ok(Ok(()))
+                )
+            })
+            .buffer_unordered(super::lifecycle::MAX_PARALLEL_CLOSES)
+            .collect()
+            .await;
+        let unfinished = outcomes.into_iter().filter(|settled| !settled).count();
         self.processes
             .lock()
             .retain(|process| !process.is_stopped());
