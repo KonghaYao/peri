@@ -265,9 +265,25 @@ struct PendingUserItem {
 #[derive(Clone, Debug, PartialEq)]
 struct ContinuationRun {
     request_id: String,
-    /// [`LogState::steer_generation`] observed when this run started. A run
-    /// whose generation is older has already been superseded by a newer steer.
+    /// Steer generation this run claimed when it started: the oldest
+    /// generation that no earlier run had claimed and that had not been rolled
+    /// back. A run older than a steer that is still unresolved has been
+    /// superseded by that steer, so its terminal is not the turn's.
     generation: u64,
+}
+
+/// A terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can close
+/// the turn when the handoff fails.
+#[derive(Debug)]
+struct SuppressedTerminal {
+    /// Request id of the turn the deferred terminal belongs to.
+    request_id: String,
+    outcome: TurnOutcome,
+    /// Request id of the continuation run that produced the terminal, or
+    /// `None` for the prompt attempt of the turn. A rollback may only replay a
+    /// terminal whose source still owns the turn: a prompt `cancelled` must not
+    /// close a turn a live queued run owns.
+    source: Option<String>,
 }
 
 #[derive(Default)]
@@ -309,27 +325,74 @@ struct LogState {
     ///
     /// The counter is global to the log, not per turn: a late `abandon_steer`
     /// from a closed turn must never match the first steer of the next turn.
+    /// Ownership itself is [`Self::max_unresolved`], not this counter: the
+    /// counter only never reuses a value, while the unresolved set says which
+    /// steers still wait for their run.
     steer_generation: u64,
-    /// Steers whose handoff has not been rolled back yet. A single flag would
-    /// forget how many steers still own the turn, so rolling back the second one
-    /// would close a turn the first one still owns.
+    /// Steers whose handoff has been dispatched but that no queued run claimed
+    /// yet and that were not rolled back. A single flag would forget how many
+    /// steers still own the turn, so rolling back the second one would close a
+    /// turn the first one still owns.
+    ///
+    /// A queued run claims the smallest generation left here when its
+    /// `user_input_run_started` is ingested: the transport delivers frames of
+    /// one session in dispatch order, so the oldest unclaimed steer is the one
+    /// that run was dispatched for.
     outstanding_steers: BTreeSet<u64>,
     /// Latest queued run adopted by the open turn.
     continuation: Option<ContinuationRun>,
-    /// Request ID and full outcome of a terminal deferred by a steer, kept so
-    /// [`ItemLog::abandon_steer`] can close the turn if the handoff fails.
-    suppressed_terminal: Option<(String, TurnOutcome)>,
+    /// Terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can
+    /// close the turn if the handoff fails.
+    suppressed_terminal: Option<SuppressedTerminal>,
 }
 
 impl LogState {
     /// Whether a steer still owns the open turn: an unrolled-back steer is
     /// outstanding, or a queued run was adopted as the turn's continuation.
     ///
-    /// A rolled-back steer owns nothing. Closers therefore compare generations
-    /// **and** this fact: a mere rollback during `settle` must not defer the
-    /// close to a safety net that only fires minutes later.
+    /// A rolled-back steer owns nothing. This decides whether a terminal is
+    /// kept at all; whether a closer must yield is decided by
+    /// [`Self::max_unresolved`] and the continuation identity, so a steer noted
+    /// and rolled back while the closer settles does not defer the close to a
+    /// safety net that only fires minutes later.
     fn steer_owns_turn(&self) -> bool {
         !self.outstanding_steers.is_empty() || self.continuation.is_some()
+    }
+
+    /// Generation of the newest steer that is still unresolved; `0` when none
+    /// is.
+    ///
+    /// "Unresolved" means handed to the session but neither claimed by a queued
+    /// run that started for it ([`ContinuationRun::generation`]) nor rolled
+    /// back. A terminal belongs to the turn only while its run is at least this
+    /// new: a run older than a steer that is still unresolved has been
+    /// superseded by that steer.
+    fn max_unresolved(&self) -> u64 {
+        self.outstanding_steers.last().copied().unwrap_or(0)
+    }
+
+    /// Keep the terminal deferred by a steer.
+    ///
+    /// A continuation's terminal (`source: Some(_)`) is the turn's real
+    /// terminal, the prompt attempt's terminal (`source: None`) only a fallback
+    /// for a failed handoff: the first continuation terminal replaces a
+    /// retained prompt terminal so the turn closes with the outcome of the run
+    /// that owned it. Otherwise the first retained terminal wins, so a `Failed`
+    /// timeout already queued as the turn's outcome is not overwritten by a
+    /// later `Completed` from the same attempt.
+    fn suppress_terminal(&mut self, request_id: &str, outcome: TurnOutcome, source: Option<&str>) {
+        let replaces_prompt_terminal = source.is_some()
+            && self
+                .suppressed_terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.source.is_none());
+        if self.suppressed_terminal.is_none() || replaces_prompt_terminal {
+            self.suppressed_terminal = Some(SuppressedTerminal {
+                request_id: request_id.to_owned(),
+                outcome,
+                source: source.map(str::to_owned),
+            });
+        }
     }
 }
 
@@ -544,11 +607,28 @@ impl ItemLog {
                     && state.generation.is_none()
                 {
                     state.generation = generation;
-                } else if queued && state.active.is_some() && state.steer_owns_turn() {
-                    state.continuation = Some(ContinuationRun {
-                        request_id,
-                        generation: state.steer_generation,
-                    });
+                } else if queued && state.active.is_some() {
+                    // A queued run continues the turn only while a steer still
+                    // waits to be adopted: an adopted run alone does not adopt a
+                    // second one, so a run that starts after the last handoff
+                    // was rolled back is late and stays ignored.
+                    //
+                    // It claims the OLDEST unresolved generation, not the
+                    // current counter: the transport delivers a session's
+                    // frames in dispatch order, so the oldest unclaimed steer is
+                    // the one this run was dispatched for. A run_started can
+                    // reach the reader after a later steer was noted (`runtime`
+                    // coalesces frames for up to 60ms); inheriting the counter
+                    // would hand that older run the newer steer's generation,
+                    // and its `cancelled` terminal would then close a turn the
+                    // newer steer owns.
+                    if let Some(claimed) = state.outstanding_steers.first().copied() {
+                        state.outstanding_steers.remove(&claimed);
+                        state.continuation = Some(ContinuationRun {
+                            request_id,
+                            generation: claimed,
+                        });
+                    }
                 }
             }
             Projected::QueueChanged { .. } => {}
@@ -564,7 +644,7 @@ impl ItemLog {
                         tracing::debug!(?request_id, "turn terminal ignored: no active turn");
                         return;
                     };
-                    let steer_generation = state.steer_generation;
+                    let max_unresolved = state.max_unresolved();
                     let steer_owns = state.steer_owns_turn();
                     match request_id.as_deref() {
                         // The prompt attempt of the open turn. A steer
@@ -572,36 +652,75 @@ impl ItemLog {
                         // queued run, so this terminal is not the turn's.
                         Some(running) if running == active => {
                             if !steer_owns {
-                                Some((active, stop_reason, steer_generation))
+                                // No steer and no continuation own the turn,
+                                // so the unresolved maximum is `0`.
+                                Some((
+                                    active,
+                                    TurnOutcome::Completed(stop_reason),
+                                    max_unresolved,
+                                    None,
+                                ))
                             } else {
-                                // Keep the prompt outcome in case the handoff fails.
-                                state.suppressed_terminal =
-                                    Some((running.to_owned(), TurnOutcome::Completed(stop_reason)));
+                                // Keep the prompt outcome in case the handoff
+                                // fails. It carries no source: only a replay
+                                // with no queued run owning the turn may use it.
+                                state.suppress_terminal(
+                                    running,
+                                    TurnOutcome::Completed(stop_reason),
+                                    None,
+                                );
                                 None
                             }
                         }
-                        // The queued run continuing the turn. A newer steer
-                        // supersedes it, so only the latest run closes it.
-                        Some(running) => state
-                            .continuation
-                            .as_ref()
-                            .filter(|run| {
-                                run.request_id == running && run.generation == steer_generation
-                            })
-                            .map(|_| (active, stop_reason, steer_generation)),
+                        // The queued run continuing the turn. Only the run the
+                        // turn currently continues may terminate it; an older
+                        // run's terminal is stranded.
+                        //
+                        // A continuation older than a steer that is still
+                        // unresolved has been superseded by that steer: its
+                        // terminal is kept (with its source) instead of
+                        // dropped, because the newer steer's handoff may still
+                        // fail and then this run's terminal is the turn's. A
+                        // dropped terminal could never be replayed.
+                        Some(running) => {
+                            let continuation = state
+                                .continuation
+                                .as_ref()
+                                .filter(|run| run.request_id == running);
+                            match continuation.map(|run| run.generation) {
+                                Some(generation) if generation < max_unresolved => {
+                                    // `active` is the turn the terminal would
+                                    // close; the run id is only its source.
+                                    state.suppress_terminal(
+                                        &active,
+                                        TurnOutcome::Completed(stop_reason),
+                                        Some(running),
+                                    );
+                                    None
+                                }
+                                Some(_) => Some((
+                                    active,
+                                    TurnOutcome::Completed(stop_reason),
+                                    max_unresolved,
+                                    Some(running.to_owned()),
+                                )),
+                                None => None,
+                            }
+                        }
                         // Legacy/terminal frames without a request id only
                         // close a turn that no steer has taken over.
-                        None if !steer_owns => Some((active, stop_reason, steer_generation)),
+                        None if !steer_owns => Some((
+                            active,
+                            TurnOutcome::Completed(stop_reason),
+                            max_unresolved,
+                            None,
+                        )),
                         None => None,
                     }
                 };
-                if let Some((active, stop_reason, steer_generation)) = closes {
-                    self.finish_turn_observed(
-                        &active,
-                        TurnOutcome::Completed(stop_reason),
-                        Some(steer_generation),
-                    )
-                    .await;
+                if let Some((closed, outcome, expected, source)) = closes {
+                    self.finish_turn_observed(&closed, outcome, Some(expected), source.as_deref())
+                        .await;
                 }
             }
             Projected::ExecutionFailed { message } => {
@@ -803,34 +922,48 @@ impl ItemLog {
     /// If a steer takes over during `settle`, keep the full `outcome` for a
     /// failed handoff instead of closing the turn immediately.
     pub async fn finish_turn(&self, request_id: &str, outcome: TurnOutcome) {
-        self.finish_turn_observed(request_id, outcome, None).await;
+        self.finish_turn_observed(request_id, outcome, None, None)
+            .await;
     }
 
+    /// Close the turn whose terminal was observed under `request_id`, unless a
+    /// steer that is still unresolved owns it.
+    ///
+    /// `expected_max_unresolved` is the [`LogState::max_unresolved`] the caller
+    /// based its decision on; `None` means the caller decided unconditionally (a
+    /// timeout or a lost terminal). `source` names the continuation run that
+    /// produced `outcome` (`None` for the prompt attempt) and is only stored
+    /// when the terminal is deferred.
     async fn finish_turn_observed(
         &self,
         request_id: &str,
         outcome: TurnOutcome,
-        expected_generation: Option<u64>,
+        expected_max_unresolved: Option<u64>,
+        source: Option<&str>,
     ) {
-        let steer_generation = {
+        let snapshot = {
             let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
                 return;
             }
-            // A newer steer owns the turn; keep the terminal for a failed
-            // handoff instead of closing it. A rollback alone owns nothing:
-            // deferring on it would leave the turn to a safety net that only
-            // fires minutes later. The generation still detects every steer,
-            // because it never reuses a value.
-            if expected_generation.is_some_and(|generation| state.steer_generation != generation)
-                && state.steer_owns_turn()
-            {
+            // A steer that is still unresolved owns the turn; keep the terminal
+            // for a failed handoff instead of closing it. The token is the
+            // maximum unresolved generation, not the counter: a steer noted and
+            // rolled back before this closer wakes up leaves nothing unresolved,
+            // and deferring on it would leave the turn to a safety net that only
+            // fires minutes later.
+            let snapshot = (
+                state.max_unresolved(),
                 state
-                    .suppressed_terminal
-                    .get_or_insert((request_id.to_owned(), outcome));
+                    .continuation
+                    .as_ref()
+                    .map(|run| run.request_id.clone()),
+            );
+            if expected_max_unresolved.is_some_and(|expected| snapshot.0 > expected) {
+                state.suppress_terminal(request_id, outcome, source);
                 return;
             }
-            state.steer_generation
+            snapshot
         };
         // Notifications and JSON-RPC responses leave the host on the same
         // transport but are dispatched to the reader and the request router
@@ -842,13 +975,23 @@ impl ItemLog {
             if state.active.as_deref() != Some(request_id) {
                 return;
             }
-            // Same rule after settle: a change is only a handoff when a steer
-            // still owns the turn. A rollback during `settle` leaves no owner,
-            // so this closer keeps its duty and closes the turn now.
-            if state.steer_generation != steer_generation && state.steer_owns_turn() {
-                state
-                    .suppressed_terminal
-                    .get_or_insert((request_id.to_owned(), outcome));
+            // Same rule after settle: only a steer that still owns the turn when
+            // the closer wakes up keeps its duty. A steer noted and rolled back
+            // during `settle` leaves the maximum at its snapshot, so this closer
+            // closes the turn now.
+            //
+            // A continuation adopted during `settle` claims its generation out
+            // of the unresolved set, so the maximum can fall back to the
+            // snapshot even though a queued run now owns the turn: the
+            // continuation identity is part of the snapshot for that reason.
+            let unresolved = state.max_unresolved();
+            let continuation = state
+                .continuation
+                .as_ref()
+                .map(|run| run.request_id.as_str());
+            let superseded = unresolved > snapshot.0 || continuation != snapshot.1.as_deref();
+            if superseded {
+                state.suppress_terminal(request_id, outcome, source);
                 return;
             }
             state.active = None;
@@ -1140,9 +1283,9 @@ impl ItemLog {
     ///
     /// The host answers a dispatched steer by cancelling the in-flight attempt,
     /// so the turn must survive that attempt's `cancelled` terminal. The
-    /// generation is monotonic for the lifetime of the log and is passed to
-    /// [`Self::abandon_steer`] when the handoff fails. `0` means no turn is
-    /// open, so the caller runs the input as a normal turn.
+    /// generation stays in [`LogState::outstanding_steers`] until a queued run
+    /// claims it or the caller passes it to [`Self::abandon_steer`]. `0` means
+    /// no turn is open, so the caller runs the input as a normal turn.
     pub fn note_steer(&self) -> u64 {
         let mut state = self.state.lock();
         if state.active.is_none() {
@@ -1156,46 +1299,66 @@ impl ItemLog {
 
     /// Undo [`Self::note_steer`] after a failed handoff.
     ///
-    /// Only the rolled-back generation leaves the outstanding set, so an
+    /// Only the rolled-back generation leaves the unresolved set, so an
     /// out-of-order rollback (a later steer first) never releases an earlier
-    /// one. A queued run already adopted for that generation owns the turn now,
-    /// so its rollback replays nothing.
+    /// one. A generation already claimed by a queued run is no longer in the
+    /// set, so rolling back a superseded steer cannot hand that run's ownership
+    /// to the next one: the claim, not the rollback, decides which generation a
+    /// run owns.
     ///
-    /// Rollback never lowers the generation, because a closer may already have
-    /// observed the value. It re-pins an earlier adopted run to the current
-    /// generation, and only when no steer owns the turn any more does it replay
-    /// a retained terminal so the turn can still close.
+    /// A retained terminal is replayed only while it still belongs to the
+    /// turn's owner: the prompt attempt's terminal (`source: None`) when no
+    /// queued run took over and no earlier steer is still unresolved, or a
+    /// continuation's own terminal while that same run still owns the turn and
+    /// no newer steer supersedes it. A prompt `cancelled` must never close a
+    /// turn a live run owns, and a superseded run's terminal must not close a
+    /// turn a newer steer owns.
     pub async fn abandon_steer(&self, generation: u64) {
         let terminal = {
             let mut state = self.state.lock();
             if !state.outstanding_steers.remove(&generation) {
-                // Already rolled back or never noted here (a late rollback from
-                // a closed turn): the current steer set stays untouched.
+                // Already rolled back, already claimed by a queued run, or never
+                // noted here (a late rollback from a closed turn): the current
+                // steer set stays untouched.
                 return;
             }
-            let current = state.steer_generation;
-            let unowned = state.outstanding_steers.is_empty();
-            match state.continuation.as_mut() {
-                // The adopted run owns the turn; its own terminal closes it.
-                Some(run) if run.generation >= generation => None,
-                // An earlier run is still the turn owner. The counter cannot go
-                // back, so re-pin the run instead of reusing an old value.
-                Some(run) => {
-                    run.generation = current;
-                    None
+            let replayable = match state.suppressed_terminal.as_ref() {
+                // No queued run took the turn over, so the prompt attempt's own
+                // terminal is still the turn's. An earlier steer that is still
+                // unresolved may yet hand the turn to its run, so the prompt
+                // terminal has to wait for that steer to resolve too.
+                Some(SuppressedTerminal { source: None, .. }) => {
+                    state.continuation.is_none() && state.outstanding_steers.is_empty()
                 }
-                // No run took over. Replay only once no other steer is
-                // outstanding: an earlier steer still owns the open turn.
-                None if unowned => state.suppressed_terminal.take(),
-                None => None,
+                // A continuation's terminal closes the turn only while that
+                // same run still owns it and no newer unresolved steer has
+                // superseded it.
+                Some(SuppressedTerminal {
+                    source: Some(source),
+                    ..
+                }) => state.continuation.as_ref().is_some_and(|run| {
+                    run.request_id == *source && run.generation >= state.max_unresolved()
+                }),
+                None => false,
+            };
+            if !replayable {
+                return;
             }
+            state.suppressed_terminal.take()
         };
-        if let Some((request_id, outcome)) = terminal {
-            // Replay with the rollback's generation. If a newer steer arrived in
-            // the meantime, the guard yields and keeps the terminal instead of
-            // closing its turn.
-            self.finish_turn_observed(&request_id, outcome, Some(generation))
-                .await;
+        if let Some(suppressed) = terminal {
+            // Replay with no steer unresolved: the rollback removed the last
+            // one, and a retained continuation terminal implies its own
+            // generation was claimed out of the set when its run started. A
+            // steer admitted in the meantime makes the guard yield and retain
+            // the terminal again, with the same source.
+            self.finish_turn_observed(
+                &suppressed.request_id,
+                suppressed.outcome,
+                Some(0),
+                suppressed.source.as_deref(),
+            )
+            .await;
         }
     }
 

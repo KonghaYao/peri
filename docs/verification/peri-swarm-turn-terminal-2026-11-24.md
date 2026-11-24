@@ -357,6 +357,9 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 308 filtered out
 并补上跨 turn 的 generation 身份。代码只改 `reader.rs`、`service.rs`（一处注释）、
 `reader_test.rs`，另加本记录与 issue 的对应小节。
 
+> 第 7 轮修订：本节的守卫 token（「generation 变化且 `steer_owns_turn()`」）与 `abandon_steer`
+> 的 re-pin 分支已被替换，见[第 7 轮](#评审回合补充2026-11-24第-7-轮)；本节其余结论未变。
+
 ### 回归与修复
 
 | 问题 | 触发 | 第 5 轮行为 | 本轮修复 |
@@ -507,3 +510,302 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 312 filtered out
   第 5 轮保留，只经源码审查确认，未做运行时验证。
 - `run_turn` 在两个长等待（300 秒 / 1800 秒）中被取消时仍没有 closer；这是既有窗口，见上文更正。
 - 仍只覆盖 `ItemLog`；未直接取消服务层 `run_turn`，未用真实宿主计时复现服务分支，没有端到端复验。
+
+## 评审回合补充（2026-11-24，第 7 轮）
+
+> 第 8 轮修订：本轮的 `max_outstanding()`、接管记「当前 `steer_generation`」、continuation 终态
+> 「不通过即丢弃」、`suppress_terminal` 的 `get_or_insert` 与「集合非空即不重放」均已被替换，见
+> [第 8 轮](#评审回合补充2026-11-24第-8-轮)；本节其余结论与真实输出未变，保留作历史记录。
+
+基线 `10b77bd99` 加本轮未提交改动；以下是在该 worktree 运行的 Rust 回归，不是端到端复验。
+CodeRabbit 提出两条 Major，先用源码推演确认成立，再重构 steer 归属判定。代码只改
+`peri-swarm/src/actor/reader.rs`、`peri-swarm/src/actor/reader_test.rs`，另加本记录与 issue 的对应
+小节；`service.rs`（`steer_pending()` 调用不变）、store、schema、`Cargo.toml` 未改，未提交。
+
+### 两条 Major
+
+| 问题 | 触发序列 | 第 6 轮行为 | 本轮修复 |
+|---|---|---|---|
+| A：回滚后的 continuation 终态被滞留 | continuation 终态以期望值 `1` 通过过滤进入 `settle`；`settle` 期间 `note_steer()`（→2）后 `abandon_steer(2)` | `abandon_steer` 命中 `Some(run) if run.generation >= generation` 直接返回；post-settle 守卫见 `steer_generation` 变化且 `steer_owns_turn()`（continuation 仍在）→ 保留终态并返回。此后没有路径重放，turn 滞留到服务层 300 秒 / 1800 秒兜底 | 让位判据改为「`max_outstanding() > 快照`」：note 后立即回滚把最大值带回快照值，closer 继续正常关闭，终态得以发布 |
+| B：失败 steer 把新 steer 的 ownership 转给旧 run | A 的 run 在 gen 1 被接管；B、C 分别 note 到 2、3；B 失败触发 `abandon_steer(2)` | re-pin 分支把 A 的 generation 改成当时的 `steer_generation`（3，属 C）；A 的终态通过 `run.generation == steer_generation` 检查并关闭 turn，清掉 C 的保留 | 删除 re-pin；continuation 终态过滤改为 `run.generation >= max_outstanding()`。A（1）不满足 3 → 丢弃、turn 保持打开；C 的 run 接替后才关闭 |
+
+### 归属判定（`peri-swarm/src/actor/reader.rs`）
+
+- owner token：`LogState::max_outstanding()` 返回 `outstanding_steers` 的最大值（空集合为 `0`），
+  取代「`steer_generation` 是否变化」作为让位判据。`steer_generation` 仍是全局单调的分配器，只用于
+  接管时给 run 记录 generation；关闭 turn 与 `begin_turn` 都不重置它，只清空集合、`continuation`、
+  `suppressed_terminal`。
+- `finish_turn_observed(request_id, outcome, expected_max_outstanding, source)`：
+  - pre-settle：`Some(expected)` 且 `max_outstanding() > expected` → 保留终态并返回；
+  - 快照 `max_outstanding()`，`settle` 后：`active` 不再匹配 → 返回；`max_outstanding() > 快照`
+    → 保留终态并返回；否则关闭。
+  - 即只有「`settle` 期间出现且仍未被回滚的新 steer」才让位；note 后立即回滚不再让位，判据不再是
+    generation 是否变化。
+- `dispatch_event`：
+  - queued `TurnStarted` 的接管条件为 `queued && active.is_some() && !outstanding_steers.is_empty()`，
+    `run.generation` 记接管时的 `steer_generation`；已接管的 run 单独存在时不接管第二个。
+  - prompt attempt 终态：`steer_owns_turn()` 为真 → 以 `source: None` 存入 suppressed；否则以
+    `Some(0)` 关闭（此时最大未撤销值为 `0`）。
+  - continuation 终态：`run.request_id == running && run.generation >= max_outstanding()`，通过时以
+    `Some(max_outstanding())` 关闭并传 `source: Some(running)`；不通过时丢弃（不抑制）。
+  - legacy `None` request id 分支保持原样。
+- `SuppressedTerminal { request_id, outcome, source }`：`abandon_steer` 只在集合清空后尝试重放；
+  `source: None` 要求没有 continuation，`source: Some(id)` 要求当前 continuation 正是该 run。重放走
+  `finish_turn_observed(.., Some(0), source)`，`source` 原样带回，重放期间再来新 steer 时按同一来源
+  重新保留。re-pin 分支已删除，adopted run 不再被改写 generation。
+- `service.rs` 未改逻辑：`steer_pending()` 仍是 `steer_owns_turn()` 的别名（集合非空或 continuation
+  存在），语义仍是「仍有 steer / continuation 占有 turn」。
+
+### 定向回归
+
+命令均为 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib -- <过滤词>`。
+旧 17 + 新 4 共 21 条逐条运行，各 exit 0，各为
+`1 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out`。
+
+| 测试 | 过滤词 | 结果 |
+|---|---|---|
+| `a_failed_steer_handoff_closes_the_turn_with_the_prompt_terminal` | 同名 | exit 0，1 passed |
+| `a_steer_admitted_while_settling_keeps_the_turn_open` | 同名 | exit 0，1 passed |
+| `a_terminal_kept_by_a_steer_guard_closes_the_turn_when_the_handoff_fails` | 同名 | exit 0，1 passed |
+| `a_failed_timeout_close_kept_by_a_steer_guard_closes_when_the_handoff_fails` | 同名 | exit 0，1 passed |
+| `a_terminal_decided_on_an_older_epoch_is_not_used_to_close` | 同名 | exit 0，1 passed |
+| `a_steer_rolled_back_while_settling_lets_the_timeout_close_the_turn` | 同名 | exit 0，1 passed |
+| `a_stale_decision_epoch_after_rollback_still_closes_the_turn` | 同名 | exit 0，1 passed |
+| `a_deferred_lost_terminal_close_is_retried` | 同名 | exit 0，1 passed |
+| `a_retry_does_not_close_after_the_continuation_terminal` | 同名 | exit 0，1 passed |
+| `a_rollback_does_not_reuse_the_generation_a_later_steer_advances` | 同名 | exit 0，1 passed |
+| `a_grace_close_waits_for_the_continuation_terminal` | 同名 | exit 0，1 passed |
+| `a_grace_close_forces_the_turn_after_the_grace_without_terminal` | 同名 | exit 0，1 passed |
+| `a_failed_steer_does_not_release_an_earlier_steers_turn` | 同名 | exit 0，1 passed |
+| `out_of_order_steer_rollbacks_release_the_turn_only_at_the_last_one` | 同名 | exit 0，1 passed |
+| `a_rollback_during_settle_does_not_defer_the_close` | 同名 | exit 0，1 passed |
+| `a_stale_generation_without_an_owner_does_not_defer_the_close` | 同名 | exit 0，1 passed |
+| `a_late_rollback_does_not_release_the_next_turns_steer` | 同名 | exit 0，1 passed |
+| `a_rolled_back_steer_does_not_strand_the_continuation_terminal`（新增，Finding A） | 同名 | exit 0，1 passed |
+| `a_failed_newer_steer_does_not_hand_the_turn_to_the_older_run`（新增，Finding B） | 同名 | exit 0，1 passed |
+| `a_rolled_back_steer_still_lets_the_adopted_run_close_the_turn`（新增，B 的另一半） | 同名 | exit 0，1 passed |
+| `a_rolled_back_steer_does_not_replay_the_prompts_terminal_for_a_live_run`（新增，prompt 终态） | 同名 | exit 0，1 passed |
+
+旧用例中直接调用 `finish_turn_observed` 的 5 处补上 `source = None`（4 参数签名），断言未改。
+新增测试说明：
+
+- `a_rolled_back_steer_does_not_strand_the_continuation_terminal`（Finding A）：steer 1 的 queued run
+  `req-2` 被接管后，其 `agent_event_done` 在暂停时钟下进入 `settle`；期间 `note_steer()`（→2）并
+  `abandon_steer(2)`。断言 turn 已关闭、恰好一个 `Completed`（`end_turn`）终态、会话 `Idle`。
+- `a_failed_newer_steer_does_not_hand_the_turn_to_the_older_run`（Finding B）：A 的 run `req-2` 在 gen 1
+  接管；`note_steer()`→2、→3；`abandon_steer(2)`；A 的 `agent_event_done` 到达后断言 turn 仍打开、
+  没有终态帧（C 仍 outstanding）；随后 `req-3` 的 `user_input_run_started` 被接管，`req-3` 的终态关闭
+  turn，唯一终态为 `Completed`（`end_turn`），会话 `Idle`。
+- `a_rolled_back_steer_still_lets_the_adopted_run_close_the_turn`（B 的另一半）：A 接管后
+  `note_steer()`→2 并立即 `abandon_steer(2)`（无 C），A 的终态必须关闭 turn，唯一终态
+  `Completed`（`end_turn`），会话 `Idle`。
+- `a_rolled_back_steer_does_not_replay_the_prompts_terminal_for_a_live_run`：steer 1 的 prompt attempt
+  `cancelled` 终态被保留、`req-2` 接管后，再 note→2 并回滚 2 和 1（集合清空）。断言 turn 仍打开、
+  没有 `cancelled` 终态；`req-2` 的 `end_turn` 是唯一发布终态，会话 `Idle`。
+
+### 反向验证（第 7 轮，真实执行）
+
+先记录 `shasum -a 256 peri-swarm/src/actor/reader.rs`：
+
+```text
+fc6d38aeab183bb2070f705117c577311630ca3babb2c0e3e40f4f83a1b22af0  peri-swarm/src/actor/reader.rs
+```
+
+两次破坏都在 `reader.rs` 内做最小改动，跑完对应测试后立即恢复，再校验哈希一致。
+
+破坏 1：把 post-settle 守卫改回第 6 轮形式
+`if state.steer_generation != snapshot && state.steer_owns_turn()`（即恢复 Finding A），exit 101：
+
+```text
+test actor::reader::tests::a_rolled_back_steer_does_not_strand_the_continuation_terminal ... FAILED
+thread 'actor::reader::tests::a_rolled_back_steer_does_not_strand_the_continuation_terminal' (39458506) panicked at peri-swarm/src/actor/reader_test.rs:1793:5:
+assertion `left == right` failed: the continuation terminal must close the turn instead of waiting for the safety net
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s
+```
+
+破坏 2：在 `abandon_steer` 恢复 re-pin（集合非空时把更早的 continuation 改绑到当前 generation，即恢复
+Finding B），exit 101：
+
+```text
+test actor::reader::tests::a_failed_newer_steer_does_not_hand_the_turn_to_the_older_run ... FAILED
+thread 'actor::reader::tests::a_failed_newer_steer_does_not_hand_the_turn_to_the_older_run' (39459720) panicked at peri-swarm/src/actor/reader_test.rs:1853:5:
+assertion `left == right` failed: steer C still owns the turn
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.03s
+```
+
+恢复后 `shasum -a 256 peri-swarm/src/actor/reader.rs` 仍为
+`fc6d38aeab183bb2070f705117c577311630ca3babb2c0e3e40f4f83a1b22af0`。两处 panic 行号是当时（`cargo fmt`
+重排测试调用点之前）的真实输出；当前文件对应断言在 `reader_test.rs:1825`、`:1885`（多行 `assert_eq!` 的
+panic 位置即宏起始行，与断言同号）。
+
+### 全量门禁
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib` → exit 0：
+
+  ```text
+  test result: ok. 318 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+  ```
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0，合计 416 passed、0 failed、
+  6 ignored：lib 318、main 0、`actor_runtime` 17（1 ignored）、`http_contract` 25、`items_pagination` 13、
+  `loom_store` 0（3 ignored）、`mcp_injection` 4、`openai_hosted` 7、`rivet_actor` 0（2 ignored）、
+  `session_resources` 17、`streaming` 15、Doc-tests 0。
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -D warnings` → exit 0，
+  末行 `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 9.77s`。
+- `./scripts/cargo-rmcp-patched.sh fmt -p peri-swarm -- --check` → exit 0（先对 `reader_test.rs` 的调用点
+  执行过一次 `fmt -p peri-swarm`，未改动 `reader.rs`，其 SHA-256 保持 `fc6d38ae…`）。
+- `git diff --check` → exit 0。
+- `bash scripts/check-changed.sh` → exit 0，输出 `[check-changed] cargo check --locked -p peri-swarm`。
+
+### 本次未覆盖与残留窗口
+
+- 首次保留的终态不可替换：prompt attempt 的 `cancelled` 先占用 `suppressed_terminal`，之后
+  continuation 自己的终态被 `get_or_insert` 忽略。若随后该 steer 回滚，保留项是 prompt 终态而
+  continuation 仍存在 → 不重放，turn 仍需兜底关闭。本轮按设计保留「首次保留」，未替换为更权威的
+  来源。
+- Finding B 中被丢弃的旧 run 终态不会重新尝试：A 的终态（gen 1 < C 的 3）直接丢弃；若 C 的 run
+  在 host 侧从未启动，turn 只能由 300 秒 / 1800 秒兜底关闭。丢弃是刻意的：无法证明 A 的终态属于
+  C 之后的 turn。
+- 迟到 queued run 在另一个 steer outstanding 时仍会被接管：接管只检查集合非空，不校验该 run 对应
+  哪个 steer，因此一个迟到（甚至已回滚）的 run 可以替换 `continuation`，旧 run 的终态随后被丢弃。
+  第 6 轮的 `a_rollback_does_not_reuse_the_generation_a_later_steer_advances` 正依赖这种接管。
+- 持续 steer 流（每轮 `settle` 都有新 steer 接管）没有全局截止时间：closer 每轮让位，仍只有服务层
+  300 秒 / 1800 秒兜底。未构造压力测试。
+- 服务层取消 `run_turn`（300 秒 / 1800 秒等待期间）仍没有 closer；既有窗口，未新增测试。
+- 只覆盖 `ItemLog`；未直接取消服务层 `run_turn`，未用真实宿主计时复现服务分支，没有端到端复验。
+
+## 评审回合补充（2026-11-24，第 8 轮）
+
+基线 `10b77bd99` 加第 7 轮与本轮未提交改动；以下是在该 worktree 运行的 Rust 回归，不是端到端复验。
+独立 verification 在第 7 轮代码上确认两条阻塞项，本轮修正并补齐守卫。代码改动同样只落在
+`peri-swarm/src/actor/reader.rs`、`peri-swarm/src/actor/reader_test.rs`，另加本记录与 issue；
+`service.rs`、store、schema、`Cargo.toml` 未改，未提交。
+
+### 两条阻塞项
+
+| 问题 | 触发序列 | 第 7 轮行为 | 本轮修复 |
+|---|---|---|---|
+| 1：迟到接管继承当前 generation | A `note_steer()`→1 并派发；其 `user_input_run_started` 仍在 transport 的 60ms 合并窗口内时 C `note_steer()`→2；reader 才 ingest A 的 run_started | 接管把 `generation` 记为当前计数器 2；host 为 C 取消 req-2，req-2 的终态 `2 >= max(2)` 通过并关闭 C 仍拥有的 turn，C 的 run 与终态全部被忽略，session 变 `Idle` 而 host 仍在执行 | 接管认领**最老的未解决 generation**（`outstanding_steers.first()`）并从集合移除；依赖 transport 对同一 session 的 run_started 帧按派发顺序（FIFO）到达 |
+| 2a：continuation 终态进入 `settle` 后被保留却无人重放 | continuation 终态通过过滤进入 `settle`；期间 `note_steer()`→2，post-check 保留（`source=req-2`）；随后 `abandon_steer(2)` | 第 7 轮「集合非空即返回」；即使不返回，continuation 自己的 gen 1 仍在集合里，保留终态没有重放路径 | `abandon_steer` 删除「集合非空即返回」，改按保留终态的来源是否仍是当前 owner 判定；`source: Some(run)` 要求当前 continuation 正是该 run 且 `run.generation >= max_unresolved()` |
+| 2b：continuation 终态在新 steer 之后到达被丢弃 | 先 `note_steer()`→2，再交付 continuation（gen 1）终态 | continuation 终态过滤 `run.generation >= max_outstanding()` 不通过 → 直接丢弃，`abandon_steer(2)` 后无从重放 | `run.request_id == running` 且 `run.generation < max_unresolved()` 时以 `source: Some(run)` 保留终态；`>=` 时才关闭 |
+
+### 归属判定（`peri-swarm/src/actor/reader.rs`）
+
+- `outstanding_steers` 语义改为「已派发、尚未被 queued run 认领、也未被回滚的 steer」；
+  `max_outstanding()` 改名 `max_unresolved()`，返回该集合最大值（空集为 `0`）。
+- queued `TurnStarted`：`queued && active.is_some()` 时认领 `outstanding_steers.first()`（最小
+  generation）并从集合 `remove`，`ContinuationRun { request_id, generation: 认领值 }`；集合为空则
+  不接管（迟到 run 在回滚后仍不被接管）。注释写明 FIFO 假设。
+- continuation 终态：`run.request_id == running` 且 `run.generation < max_unresolved()` →
+  `suppress_terminal(turn_request_id, outcome, Some(run))` 保留；`>=` → 以
+  `Some(max_unresolved())` 关闭。不是当前 continuation 的 run 终态仍被丢弃（无法证明属于当前 turn）。
+- `finish_turn_observed(request_id, outcome, expected_max_unresolved, source)`：快照改为
+  `(max_unresolved(), continuation.request_id)`；pre-settle 仍是 `max > expected` 让位；post-settle
+  改为 `max > 快照 max || continuation.request_id != 快照 continuation` 让位。接管会把认领的
+  generation 移出集合，`max` 可能回到快照值，因此必须同时比较 continuation 身份。
+- `suppress_terminal`：不再用 `get_or_insert`。已有 `source: None` 且新终态 `source: Some(_)` 时替换；
+  其余保持首次保留。有来源的 continuation 终态优先于无来源的 prompt 终态。
+- `abandon_steer(g)`：`remove(&g)` 失败即返回（已回滚、已被认领、或来自已关闭 turn）；删除
+  「集合非空即返回」；仅当保留终态来源仍是当前 owner 时重放：
+  - `source == None`：要求 `continuation.is_none()` **且**没有更老的未解决 steer（否则该 steer 的
+    handoff 仍可能产生终态，prompt 终态尚不属于 turn）；
+  - `source == Some(run_id)`：要求当前 `continuation.request_id == run_id` 且
+    `run.generation >= max_unresolved()`。
+  重放走 `finish_turn_observed(.., Some(0), 原 source)`；重放 `settle` 期间出现新 steer 时守卫会
+  再次保留。
+- 关闭 turn 与 `begin_turn` 仍清空集合 / `continuation` / `suppressed_terminal`，不重置
+  `steer_generation`；`steer_owns_turn()` 仍为「集合非空 || continuation 存在」，`steer_pending()`
+  语义不变；`note_steer`、legacy `None` request-id 帧行为不变；prompt attempt 终态的门禁
+  （`steer_owns_turn()` 时抑制）不变，但存储规则由「无条件覆盖」改为「首次保留，且有来源终态替换
+  无来源终态」。
+
+### 定向回归
+
+命令均为 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib -- <过滤词>`。
+旧 21 + 新 5 共 26 条逐条运行，各 exit 0，各为
+`1 passed; 0 failed; 0 ignored; 0 measured; 322 filtered out`。
+
+| 测试 | 结果 |
+|---|---|
+| `a_failed_steer_handoff_closes_the_turn_with_the_prompt_terminal` | exit 0，1 passed |
+| `a_steer_admitted_while_settling_keeps_the_turn_open` | exit 0，1 passed |
+| `a_terminal_kept_by_a_steer_guard_closes_the_turn_when_the_handoff_fails` | exit 0，1 passed |
+| `a_failed_timeout_close_kept_by_a_steer_guard_closes_when_the_handoff_fails` | exit 0，1 passed |
+| `a_terminal_decided_on_an_older_epoch_is_not_used_to_close` | exit 0，1 passed |
+| `a_steer_rolled_back_while_settling_lets_the_timeout_close_the_turn` | exit 0，1 passed |
+| `a_stale_decision_epoch_after_rollback_still_closes_the_turn` | exit 0，1 passed |
+| `a_deferred_lost_terminal_close_is_retried` | exit 0，1 passed |
+| `a_retry_does_not_close_after_the_continuation_terminal` | exit 0，1 passed |
+| `a_rollback_does_not_reuse_the_generation_a_later_steer_advances` | exit 0，1 passed |
+| `a_grace_close_waits_for_the_continuation_terminal` | exit 0，1 passed |
+| `a_grace_close_forces_the_turn_after_the_grace_without_terminal` | exit 0，1 passed |
+| `a_failed_steer_does_not_release_an_earlier_steers_turn` | exit 0，1 passed |
+| `out_of_order_steer_rollbacks_release_the_turn_only_at_the_last_one` | exit 0，1 passed |
+| `a_rollback_during_settle_does_not_defer_the_close` | exit 0，1 passed |
+| `a_stale_generation_without_an_owner_does_not_defer_the_close` | exit 0，1 passed |
+| `a_late_rollback_does_not_release_the_next_turns_steer` | exit 0，1 passed |
+| `a_rolled_back_steer_does_not_strand_the_continuation_terminal` | exit 0，1 passed |
+| `a_failed_newer_steer_does_not_hand_the_turn_to_the_older_run` | exit 0，1 passed |
+| `a_rolled_back_steer_still_lets_the_adopted_run_close_the_turn` | exit 0，1 passed |
+| `a_rolled_back_steer_does_not_replay_the_prompts_terminal_for_a_live_run` | exit 0，1 passed |
+| `a_late_run_started_claims_the_oldest_steer_not_the_current_counter`（新增） | exit 0，1 passed |
+| `a_retained_continuation_terminal_closes_the_turn_after_the_rollback`（新增） | exit 0，1 passed |
+| `a_superseded_continuation_terminal_is_replayed_after_the_rollback`（新增） | exit 0，1 passed |
+| `each_queued_run_claims_the_oldest_unclaimed_steer`（新增） | exit 0，1 passed |
+| `a_continuation_terminal_replaces_the_retained_prompt_terminal`（新增） | exit 0，1 passed |
+
+新增测试说明（paused clock 用于 2a）：
+
+- `a_late_run_started_claims_the_oldest_steer_not_the_current_counter`（阻塞 1）：`note_steer()`→1、
+  →2 后才 ingest A 的 `user_input_run_started`（`req-2`）；`req-2` 的 `cancelled` 终态到达后断言
+  turn 仍打开且没有终态帧；`req-3` 的 run_started 认领 2，其 `end_turn` 关闭 turn，唯一终态为
+  `Completed`（`end_turn`），会话 `Idle`。
+- `a_retained_continuation_terminal_closes_the_turn_after_the_rollback`（阻塞 2a）：
+  `req-2` 接管后其终态在暂停时钟下进入 `settle`；期间 `note_steer()`→2，closer 保留终态；断言 turn
+  仍打开、无终态；`abandon_steer(2)` 后由保留的 continuation 终态关闭 turn（唯一 `end_turn` 终态、
+  会话 `Idle`），不依赖 300 秒兜底。
+- `a_superseded_continuation_terminal_is_replayed_after_the_rollback`（阻塞 2b）：`req-2` 接管后先
+  `note_steer()`→2，再交付 `req-2` 的 `end_turn` 终态（被保留而非丢弃）；`abandon_steer(2)` 后由该
+  终态关闭 turn。
+- `each_queued_run_claims_the_oldest_unclaimed_steer`（认领顺序）：`note_steer()`→1、→2；
+  `req-2`、`req-3` 依次 run_started；`req-2` 的终态在 C 已被 `req-3` 认领后不关闭 turn，只有 `req-3`
+  的终态关闭。
+- `a_continuation_terminal_replaces_the_retained_prompt_terminal`（来源优先）：prompt attempt 的
+  `cancelled` 先占位；`req-2` 接管并 `note_steer()`→2 后，`req-2` 的 `end_turn` 终态替换占位项；
+  `abandon_steer(2)` 后 turn 以 `end_turn` 关闭，`cancelled` 没有关闭过 live run。
+
+### 全量门禁
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib` → exit 0：
+
+  ```text
+  test result: ok. 323 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+  ```
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0，合计 421 passed、0 failed、
+  6 ignored：lib 323、main 0、`actor_runtime` 17（1 ignored）、`http_contract` 25、`items_pagination` 13、
+  `loom_store` 0（3 ignored）、`mcp_injection` 4、`openai_hosted` 7、`rivet_actor` 0（2 ignored）、
+  `session_resources` 17、`streaming` 15、Doc-tests 0。
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -D warnings` → exit 0，
+  末行 `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 1.96s`。
+- `./scripts/cargo-rmcp-patched.sh fmt -p peri-swarm -- --check` → exit 0。
+- `git diff --check` → exit 0。
+- `bash scripts/check-changed.sh` → exit 0，输出 `[check-changed] cargo check --locked -p peri-swarm`。
+
+### 本次未覆盖与残留窗口
+
+- 持续 steer 流（每轮 `settle` 都有新 steer 接管）仍没有全局截止时间：closer 每轮让位，只有服务层
+  300 秒 / 1800 秒兜底。未构造压力测试。
+- 服务层取消 `run_turn`（两个长等待期间）仍没有 closer；既有窗口，未新增测试。
+- 只覆盖 `ItemLog`；没有端到端复验，未用真实宿主计时复现 60ms 合并窗口。
+- 认领依赖「同一 session 的 `user_input_run_started` 帧按派发顺序到达」这一 FIFO 假设（transport
+  串行转发）；若未来出现重放或并发注入同一 session 的 run_started，认领顺序需要重新论证。
+- `suppress_terminal` 的首次保留语义仍有残留：两个**有来源**终态之间首个保留，若其后 continuation 被
+  更晚的 run 替换，较早保留的终态不会重放（其来源已不是 owner）。第 7 轮的「prompt 终态先占位导致
+  continuation 终态被忽略」不再可达：有来源终态会替换无来源终态。
+- 已被替换的 continuation run 的终态仍直接丢弃（`request_id` 不是当前 continuation）：若新 steer 的
+  handoff 随后失败，turn 只能由兜底关闭。这是第 7 轮 Finding B 的既有取舍，本轮未改。
+- 乱序回滚只移除自身；迟到旧 turn 的回滚不影响新 turn（第 6/7 轮契约保持），本轮未新增该场景测试。
+- 矛盾状态：`dispatch_steer` 报错但宿主已启动该 run 时，`abandon_steer` 回滚的是未被认领的 generation；
+  迟到的 `user_input_run_started` 会认领**另一个**等待中 steer 的 generation，该 run 的终态随后关闭那个
+  steer 的 turn。仅在 `ItemLog` 级 probe 确认，未做服务层复现，本轮不修。
