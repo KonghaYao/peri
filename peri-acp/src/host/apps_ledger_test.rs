@@ -1,7 +1,9 @@
 //! `RequestLedger`（设计 §8 六种情况 + 指纹 / 容量 / 回收 / 销毁不可重建）。
 //!
 //! 全部用小预算触发边界（§9.2：不得把「1024 条目」当有界）；生产预算来自
-//! `mcp_apps_facade` 的 §4.3 常量。
+//! `mcp_apps_facade` 的 §4.3 常量。唯一例外是
+//! `capacity_pressure_at_production_limit_rejects_the_33rd_without_consuming_seq`：
+//! 它刻意用生产预算占满上限，断言基线本身是上界。
 
 use std::time::Duration;
 
@@ -576,4 +578,114 @@ fn namespace_kind_mismatch_is_rejected_and_budget_follows_contract_constants() {
     );
     assert_eq!(production.max_result_bytes, MAX_RESULT_BYTES as usize);
     assert_eq!(production.max_retained_bytes, MAX_RETAINED_BYTES as usize);
+}
+
+/// 验收计划（容量压力）：生产预算下占满 `MAX_PENDING_PER_NAMESPACE` 后，第 33 项必须
+/// `CapacityRejected` 且**不消耗序号**；容量释放后同一序号可登记，重发是幂等重放。
+///
+/// 其余用例用小预算触发边界；本用例专门验证生产基线（不调参）下的第 33 项边界。
+#[tokio::test]
+async fn capacity_pressure_at_production_limit_rejects_the_33rd_without_consuming_seq() {
+    // 验收计划的基线 = 32。契约常量若因 4b 实测调参而变动，须同步更新计划，故此处钉住。
+    assert_eq!(
+        MAX_PENDING_PER_NAMESPACE, 32,
+        "验收计划以 32 为基线：契约常量调参时请同步更新计划与本源测试"
+    );
+    let limit = MAX_PENDING_PER_NAMESPACE as usize;
+    let ledger = RequestLedger::new(LedgerBudget::conservative());
+    let ns = namespace(&ledger, "ns-capacity-production");
+    assert_eq!(
+        ledger.budget_for_tests().max_pending_per_namespace,
+        limit,
+        "生产预算必须投影契约常量"
+    );
+
+    // 占满上限：seq 1..=32 各自不同指纹，全部登记。
+    for seq in 1..=MAX_PENDING_PER_NAMESPACE {
+        match ledger.admit(&ns, RequestSeq::new(seq), &fingerprint(seq)) {
+            AdmissionVerdict::Accepted { .. } => {}
+            other => panic!("上限内第 {seq} 项必须被登记，实际: {other:?}"),
+        }
+    }
+    assert_eq!(
+        ledger.pending_len(&ns),
+        limit,
+        "占满后未决条目数 = 生产上限"
+    );
+    assert_eq!(
+        ledger.next_seq(&ns),
+        RequestSeq::new(MAX_PENDING_PER_NAMESPACE + 1),
+        "占满后权威推进到 33（= last_accepted + 1）"
+    );
+
+    // 第 33 项：容量已满 ⇒ 显式拒绝，且不登记、不消耗序号。
+    let overflow = RequestSeq::new(MAX_PENDING_PER_NAMESPACE + 1);
+    let overflow_fingerprint = fingerprint(MAX_PENDING_PER_NAMESPACE + 1);
+    match ledger.admit(&ns, overflow, &overflow_fingerprint) {
+        AdmissionVerdict::CapacityRejected => {}
+        other => panic!("占满生产上限后第 33 项必须 CapacityRejected，实际: {other:?}"),
+    }
+    assert_eq!(ledger.next_seq(&ns), overflow, "容量拒绝不得消耗序号");
+    assert_eq!(ledger.pending_len(&ns), limit, "容量拒绝不得登记");
+
+    // 释放一个在途项（终态）后，同一序号必须可登记。
+    assert!(
+        ledger.complete(&ns, RequestSeq::new(1), completed("released for capacity")),
+        "已登记请求的终态必须被账本记账"
+    );
+    let registered = match ledger.admit(&ns, overflow, &overflow_fingerprint) {
+        AdmissionVerdict::Accepted { pending } => pending,
+        other => panic!("容量释放后第 33 项必须可登记，实际: {other:?}"),
+    };
+    assert_eq!(
+        ledger.pending_len(&ns),
+        limit,
+        "释放一个 + 登记一个 = 仍是上限（未越界）"
+    );
+    assert_eq!(
+        ledger.next_seq(&ns),
+        RequestSeq::new(MAX_PENDING_PER_NAMESPACE + 2),
+        "登记后权威推进到 34"
+    );
+
+    // 同 seq 同指纹重发：加入同一等待（只登记一次），不推进序号。
+    let replayed = match ledger.admit(&ns, overflow, &overflow_fingerprint) {
+        AdmissionVerdict::JoinedPending { pending } => pending,
+        other => panic!("同 key 同指纹必须加入同一等待，实际: {other:?}"),
+    };
+    assert!(
+        Arc::ptr_eq(&registered, &replayed),
+        "第 33 项必须只登记一次（共用同一 pending）"
+    );
+    assert!(
+        Arc::ptr_eq(&registered.slot, &replayed.slot),
+        "第 33 项必须共用同一结果槽"
+    );
+    assert_eq!(
+        ledger.pending_len(&ns),
+        limit,
+        "幂等重放不得产生第二条 pending"
+    );
+    assert_eq!(
+        ledger.next_seq(&ns),
+        RequestSeq::new(MAX_PENDING_PER_NAMESPACE + 2),
+        "幂等重放不得消耗序号"
+    );
+
+    // 终态之后同 key 再传：返回同一结果（幂等重放），不再执行第二次。
+    assert!(
+        ledger.complete(&ns, overflow, completed("accepted after release")),
+        "第 33 项终结必须被账本记账"
+    );
+    match ledger.admit(&ns, overflow, &overflow_fingerprint) {
+        AdmissionVerdict::Duplicate { outcome } => {
+            assert_eq!(outcome, completed("accepted after release"))
+        }
+        other => panic!("终态后同 key 必须返回同一结果，实际: {other:?}"),
+    }
+    assert_eq!(
+        ledger.pending_len(&ns),
+        limit - 1,
+        "第 33 项终结后未决数回落"
+    );
 }
