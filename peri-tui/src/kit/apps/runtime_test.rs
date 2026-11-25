@@ -239,6 +239,8 @@ impl AppsRpc for FakeRpc {
 struct FakeSource {
     events: VecDeque<ViewEvent>,
     hold: bool,
+    /// 测试节奏：每个事件投递前消耗一个许可（事件序列不再一次性冲进事件循环）。
+    pace: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 #[async_trait]
@@ -246,6 +248,12 @@ impl ViewEventSource for FakeSource {
     async fn next_event(
         &mut self,
     ) -> Result<Option<ViewEvent>, crate::kit::apps::view_client::ViewClientError> {
+        if let (Some(pace), false) = (self.pace.as_ref(), self.events.is_empty()) {
+            let Ok(permit) = Arc::clone(pace).acquire_owned().await else {
+                return Ok(None);
+            };
+            permit.forget();
+        }
         if let Some(event) = self.events.pop_front() {
             return Ok(Some(event));
         }
@@ -265,6 +273,7 @@ struct FakeViewApi {
     /// 每个连接的脚本；空时返回 hold 连接的 source。
     scripts: Mutex<VecDeque<VecDeque<ViewEvent>>>,
     hold: bool,
+    pace: Option<Arc<tokio::sync::Semaphore>>,
     clicks: Mutex<Vec<(String, ViewportPoint)>>,
     app_results: Mutex<Vec<(String, u64, ViewAppResult)>>,
 }
@@ -328,6 +337,7 @@ impl ViewSessionApi for FakeViewApi {
         Ok(Box::new(FakeSource {
             events: script.unwrap_or_default(),
             hold: self.hold,
+            pace: self.pace.clone(),
         }))
     }
 }
@@ -351,6 +361,22 @@ fn view_context(
     api: Arc<dyn ViewSessionApi>,
     cancel: CancellationToken,
 ) -> ViewContext {
+    view_context_with_decode(
+        view_id,
+        rpc,
+        api,
+        cancel,
+        super::frame_decode::jpeg_decoder(),
+    )
+}
+
+fn view_context_with_decode(
+    view_id: &str,
+    rpc: Arc<dyn AppsRpc>,
+    api: Arc<dyn ViewSessionApi>,
+    cancel: CancellationToken,
+    decode: super::frame_decode::FrameDecodeFn,
+) -> ViewContext {
     ViewContext {
         rpc,
         api,
@@ -363,6 +389,7 @@ fn view_context(
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(5),
         },
+        decode,
     }
 }
 
@@ -836,6 +863,155 @@ async fn real_gateway_auth_smoke_is_optional() {
     // 空 HTML：网关在建页面前返回 400 empty_html，不触碰 Kitesurf。
     let error = client.create_session("").await.expect_err("empty html");
     assert_eq!(error.code(), "empty_html");
+}
+
+/// 帧解码闸门：`seq == 1` 的解码会卡在 [`DecodeGate::wait`]，直到测试放行。
+#[derive(Default)]
+struct DecodeGate {
+    open: Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl DecodeGate {
+    fn wait(&self) {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            let (guard, timeout) = self.cv.wait_timeout(open, Duration::from_secs(5)).unwrap();
+            if timeout.timed_out() {
+                return;
+            }
+            open = guard;
+        }
+    }
+
+    fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+fn stub_frame_image(seq: u64) -> crate::kit::apps::state::FrameImage {
+    crate::kit::apps::state::FrameImage {
+        seq,
+        width: 1,
+        height: 1,
+        viewport_width: 1,
+        viewport_height: 1,
+        image: Arc::new(image::DynamicImage::new_rgb8(1, 1)),
+    }
+}
+
+/// 回归：帧解码不得阻塞 SSE 事件循环。
+///
+/// 原缺陷：事件循环对每帧 `await` base64+JPEG 解码，帧快于解码时积压，
+/// 排在流后面的 `app-request` 被推迟（真实会话实测 5–10s）。
+/// 这里把首帧解码卡住：只有「投递不等解码」的实现才能让 app-request 进入
+/// 中继并完成 tools/call；旧实现会在 `wait_for_async` 超时后失败。
+#[serial_test::serial]
+#[tokio::test]
+async fn app_request_is_not_blocked_by_frame_decoding() {
+    seed_view("v1");
+    let rpc = Arc::new(FakeRpc::with_session("session-1"));
+    rpc.set_attach_ok(Some(HTML));
+    *rpc.read_default.lock().unwrap() = Some(Ok(read_response(vec![raw_html(HTML)], 1)));
+    *rpc.tool_default.lock().unwrap() =
+        Some(Ok(tool_response(completed_tool(json!({"ok": true})), 2)));
+    let api = Arc::new(FakeViewApi {
+        hold: true,
+        // 先只放行 ready + 帧 1；其余事件在首帧解码卡住后再投递。
+        pace: Some(Arc::new(tokio::sync::Semaphore::new(2))),
+        ..FakeViewApi::default()
+    });
+    api.scripts.lock().unwrap().push_back(VecDeque::from(vec![
+        ready_status(),
+        frame_event(1),
+        frame_event(2),
+        frame_event(3),
+        ViewEvent::AppRequest(tools_call(1, "sync", json!({}))),
+    ]));
+    let pace = Arc::clone(api.pace.as_ref().expect("pace"));
+
+    let gate = Arc::new(DecodeGate::default());
+    let decoded = Arc::new(Mutex::new(Vec::new()));
+    let decode = {
+        let gate = Arc::clone(&gate);
+        let decoded = Arc::clone(&decoded);
+        Arc::new(move |frame: &crate::kit::apps::view_client::FrameEvent| {
+            decoded.lock().unwrap().push(frame.seq);
+            if frame.seq == 1 {
+                gate.wait();
+            }
+            Some(stub_frame_image(frame.seq))
+        })
+    };
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(run_view(view_context_with_decode(
+        "v1",
+        Arc::clone(&rpc) as Arc<dyn AppsRpc>,
+        Arc::clone(&api) as Arc<dyn ViewSessionApi>,
+        cancel.clone(),
+        decode,
+    )));
+
+    // 首帧解码在途（被卡住）：事件循环必须继续，帧 2/3 与 app-request 照常投递。
+    wait_for_async(|| decoded.lock().unwrap().contains(&1)).await;
+    assert_eq!(
+        *decoded.lock().unwrap(),
+        vec![1],
+        "解码 1 卡住时不能有别的帧被解"
+    );
+    pace.add_permits(4);
+    wait_for_async(|| !rpc.tool_calls.lock().unwrap().is_empty()).await;
+    let call = rpc.tool_calls.lock().unwrap()[0].clone();
+    assert_eq!(call.name, "sync");
+    assert_eq!(
+        call.seq, 2,
+        "apps/request 的 ledger 序号从 resources/read 的 nextSeq 继续"
+    );
+    assert_eq!(
+        *decoded.lock().unwrap(),
+        vec![1],
+        "帧 2/3 只是投递到单槽，不等待解码"
+    );
+
+    // 回填后网关收到 /app-results，pendingRequests 回落。
+    wait_for_async(|| api.app_results.lock().unwrap().len() == 1).await;
+    wait_for_async(|| {
+        APPS_STATE
+            .state()
+            .read()
+            .view("v1")
+            .is_some_and(|view| view.pending_requests == 0)
+    })
+    .await;
+
+    // 放行解码：积压的 2 被合并，只解最新帧 3。
+    gate.open();
+    wait_for_async(|| {
+        APPS_STATE
+            .state()
+            .read()
+            .view("v1")
+            .and_then(|view| view.frame.as_ref().map(|frame| frame.seq))
+            == Some(3)
+    })
+    .await;
+    assert_eq!(
+        *decoded.lock().unwrap(),
+        vec![1, 3],
+        "单槽只保留最新帧：中间帧被合并丢弃"
+    );
+
+    // 取消结束视图：解码任务与清理都不得挂死。
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("视图收尾不得挂死")
+        .expect("join");
+    assert_eq!(
+        api.deleted.lock().unwrap().as_slice(),
+        &["view-1".to_string()]
+    );
 }
 
 #[path = "runtime/relay_test.rs"]

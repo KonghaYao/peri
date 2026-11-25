@@ -39,9 +39,11 @@ use super::mapping::ViewportPoint;
 use super::state::{self, AppEntry, AppView, AppsRuntimeState};
 use super::view_client::{AppsViewClient, ViewSessionApi};
 
+mod frame_decode;
 mod relay;
 mod view_task;
 
+use self::frame_decode::jpeg_decoder;
 use self::view_task::{ViewContext, run_view};
 
 /// 单次 ACP RPC 的外层超时（`send_raw_request` 自身无超时）。
@@ -455,6 +457,7 @@ impl Runtime {
             view_id: view_id.clone(),
             cancel: view_cancel.clone(),
             policy: self.policy,
+            decode: jpeg_decoder(),
         };
         let join = tokio::spawn(run_view(context));
         self.views.insert(

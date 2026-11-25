@@ -16,11 +16,11 @@ use peri_acp_types::mcp_apps_facade::{
 };
 
 use super::super::request_queue::PendingAppRequest;
-use super::super::state::{self, AppEntry, FrameImage, ViewPhase};
+use super::super::state::{self, AppEntry, ViewPhase};
 use super::super::view_client::{
-    CreatedViewSession, FrameEvent, MAX_VIEW_HTML_BYTES, ViewEvent, ViewSessionApi,
-    decode_frame_bytes,
+    CreatedViewSession, MAX_VIEW_HTML_BYTES, ViewEvent, ViewSessionApi,
 };
+use super::frame_decode::{FrameDecodeFn, FrameDecoder};
 use super::relay::{
     RELAY_BUDGET, RELAY_RETRY_INTERVAL, RelayContext, dispatch_app_request, start_relay,
 };
@@ -29,9 +29,6 @@ use super::{AppsRpc, CLEANUP_TIMEOUT, StreamPolicy};
 /// `resources/read` 的 `Pending` 轮询上限（与 facade 的 30s 等待预算对齐）。
 const READ_POLL_BUDGET: Duration = Duration::from_secs(30);
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// 帧 JPEG 的输入上限与解压后尺寸上限（防解码炸弹）。
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const MAX_FRAME_DIMENSION: u32 = 8192;
 
 pub(super) struct ViewContext {
     pub(super) rpc: Arc<dyn AppsRpc>,
@@ -41,6 +38,8 @@ pub(super) struct ViewContext {
     pub(super) view_id: String,
     pub(super) cancel: CancellationToken,
     pub(super) policy: StreamPolicy,
+    /// 帧解码实现（生产是 JPEG 解码；测试注入可控时序）。
+    pub(super) decode: FrameDecodeFn,
 }
 
 pub(super) async fn run_view(context: ViewContext) {
@@ -52,6 +51,7 @@ pub(super) async fn run_view(context: ViewContext) {
         view_id,
         cancel,
         policy,
+        decode,
     } = context;
 
     // 1. attach：领取 record + 请求域身份（不调用业务工具）。
@@ -144,8 +144,22 @@ pub(super) async fn run_view(context: ViewContext) {
         ledger_next,
     );
 
-    // 5. SSE：断线重连 + 帧/状态/closed 解析；app-request 进入中继队列。
-    let outcome = stream_view(&api, &view_id, &created, &cancel, policy, &relay_tx).await;
+    // 5. 帧解码：单槽最新帧 + 独立任务；事件循环不等待解码。
+    let mut frames = FrameDecoder::start(view_id.clone(), cancel.clone(), decode);
+
+    // 6. SSE：断线重连 + 帧/状态/closed 解析；app-request 进入中继队列。
+    let outcome = stream_view(
+        &api,
+        &view_id,
+        &created,
+        &cancel,
+        policy,
+        &relay_tx,
+        &mut frames,
+    )
+    .await;
+    // 视图结束：解完最后一帧后停止解码任务（超时 abort，不拖住收尾）。
+    frames.finish(CLEANUP_TIMEOUT).await;
     match outcome {
         StreamOutcome::Cancelled | StreamOutcome::RemoteClosed => {}
         StreamOutcome::Unavailable(code) => fail_view(&view_id, &code),
@@ -155,7 +169,7 @@ pub(super) async fn run_view(context: ViewContext) {
     drop(relay_tx);
     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, relay_join).await;
 
-    // 6. 关闭路径：DELETE 网关会话（幂等）；detach 尽力而为。
+    // 7. 关闭路径：DELETE 网关会话（幂等）；detach 尽力而为。
     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, api.delete_session(&created.session_id)).await;
     detach_best_effort(&rpc, &session_id, &binding).await;
 }
@@ -313,6 +327,7 @@ async fn stream_view(
     cancel: &CancellationToken,
     policy: StreamPolicy,
     relay_tx: &mpsc::Sender<PendingAppRequest>,
+    frames: &mut FrameDecoder,
 ) -> StreamOutcome {
     let mut attempt = 0u32;
     // SSE 重连时网关会重放尚未回答的 app-request（新连接 cursor 从 0 起）：
@@ -349,7 +364,8 @@ async fn stream_view(
             match next {
                 Ok(Some(ViewEvent::Frame(frame))) => {
                     received_event = true;
-                    apply_frame_event(view_id, frame).await;
+                    // 只投递不解码：帧落后时可合并/丢弃，事件流继续。
+                    frames.offer(Arc::new(frame));
                 }
                 Ok(Some(ViewEvent::AppRequest(request))) => {
                     received_event = true;
@@ -365,6 +381,9 @@ async fn stream_view(
                         .await;
                 }
                 Ok(Some(ViewEvent::Closed { reason })) => {
+                    // 终态不再接收帧：先把已收到的最后一帧解完再落地 closed，
+                    // 保证「关闭前最后一帧」仍会显示（只等一次解码）。
+                    frames.finish(CLEANUP_TIMEOUT).await;
                     state::update_view(view_id, |view| {
                         if matches!(view.phase, ViewPhase::Closed { .. }) {
                             return false;
@@ -431,34 +450,4 @@ async fn wait_backoff(cancel: &CancellationToken, delay: Duration) -> bool {
         _ = cancel.cancelled() => true,
         _ = peri_time::sleep(delay) => false,
     }
-}
-
-async fn apply_frame_event(view_id: &str, frame: FrameEvent) {
-    let Ok(bytes) = decode_frame_bytes(&frame) else {
-        return;
-    };
-    if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
-        return;
-    }
-    let decoded = tokio::task::spawn_blocking(move || {
-        image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some(decoded) = decoded else {
-        return;
-    };
-    if decoded.width() > MAX_FRAME_DIMENSION || decoded.height() > MAX_FRAME_DIMENSION {
-        return;
-    }
-    let image = FrameImage {
-        seq: frame.seq,
-        width: decoded.width(),
-        height: decoded.height(),
-        viewport_width: frame.viewport_width,
-        viewport_height: frame.viewport_height,
-        image: Arc::new(decoded),
-    };
-    state::update_view(view_id, |view| view.apply_frame(image));
 }
