@@ -1,9 +1,15 @@
 use super::FoldState;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::render;
+use ratatui_kit::ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use super::TuiRenderUnit;
+
+/// 单行文本（测试断言行首归属）。
+fn line_text(line: &Line<'static>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
 
 // ── [Slice 4 §6.8] Interaction block 渲染 ──
 
@@ -95,6 +101,13 @@ fn test_interaction_completed_expanded_shows_question() {
 
     let text = super::all_text(&lines);
     assert!(text.contains("Deny"), "结果行");
+    // Permission 保持现状：标题 = result 文案，问题摘要在第二行。
+    assert!(
+        line_text(&lines[0]).contains("Deny")
+            && !line_text(&lines[0]).contains("Bash wants to run"),
+        "Permission 首行仍是 result 文案，实际 {:?}",
+        line_text(&lines[0])
+    );
     assert!(
         text.contains("Bash wants to run: cargo test"),
         "展开时问题摘要可见"
@@ -151,4 +164,163 @@ fn test_interaction_option_cols_follow_process_prefix_width() {
             assert!(rendered > grid.first_prefix_width());
         }
     }
+}
+
+// ── [AskUser 显示归属] completed AskUser block：标题=首问 header，答案不漂移 ──
+
+/// completed 展开态：首行 = 状态符号 + 问题 header（不是答案）；预设选项
+/// 选中项 ✓，未匹配时不追加 `Selected:` 行。
+#[test]
+fn test_ask_user_completed_expanded_title_is_header() {
+    crate::i18n::init(Some("en"));
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::completed_ask_user_block("Fast", &["q1"]));
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    let first = line_text(&lines[0]);
+    assert!(
+        first.contains("\u{2713}") && first.contains("Length"),
+        "首行 = 状态符号 + 问题 header，实际 {first:?}"
+    );
+    assert!(!first.contains("Fast"), "答案不得作为标题，实际 {first:?}");
+
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("[\u{2713} Fast]"),
+        "选中预设项 ✓，实际 {text:?}"
+    );
+    assert!(text.contains("[Complete]"), "未选项保留，实际 {text:?}");
+    assert!(
+        !text.contains("Selected:"),
+        "预设选项不追加已选行，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("Answered 1 questions"),
+        "单问不显示答复问数，实际 {text:?}"
+    );
+}
+
+/// 自由文本答案（不匹配任何预设选项 label）：选项行之后追加 `Selected:
+/// <result>`，且不得给任何选项打 ✓。
+#[test]
+fn test_ask_user_completed_expanded_free_text_answer() {
+    crate::i18n::init(Some("en"));
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::completed_ask_user_block(
+        "5 min recommended",
+        &["q1"],
+    ));
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("Selected: 5 min recommended"),
+        "自由文本答案单独一行，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("[\u{2713} Fast]") && !text.contains("[\u{2713} Complete]"),
+        "不匹配选项时不得乱标 ✓，实际 {text:?}"
+    );
+}
+
+/// 多问调用：inline block 只展示首问，选项行之后追加 `Answered N questions`
+/// （n = question_ids.len()）。
+#[test]
+fn test_ask_user_completed_expanded_multi_question_count() {
+    crate::i18n::init(Some("en"));
+    let vm = TuiRenderUnit::TuiAskUserBlock(super::completed_ask_user_block(
+        "Fast",
+        &["q1", "q2", "q3"],
+    ));
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("Answered 3 questions"),
+        "多问调用显示已答复问数，实际 {text:?}"
+    );
+}
+
+/// Collapsed：单行 `✓ header：answer`，不显示选项与问数；长答案保持单行
+/// 截断（不折行）。
+#[test]
+fn test_ask_user_completed_collapsed_header_and_answer() {
+    crate::i18n::init(Some("en"));
+    let mut b = super::completed_ask_user_block("Fast", &["q1", "q2"]);
+    b.fold = FoldState::Collapsed;
+    b.recompute_hash();
+    let vm = TuiRenderUnit::TuiAskUserBlock(b);
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    assert_eq!(lines.len(), 1, "Collapsed 收束为单行");
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("Length: Fast"),
+        "单行含 header 与答案，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("[Fast]") && !text.contains("Answered"),
+        "Collapsed 不显示选项与问数，实际 {text:?}"
+    );
+
+    // 长答案在窄宽度下仍为单行（截断，不折行）。
+    let mut long = super::completed_ask_user_block(
+        "5 minutes recommended decision brief with a long explanatory tail",
+        &["q1"],
+    );
+    long.fold = FoldState::Collapsed;
+    long.recompute_hash();
+    let vm = TuiRenderUnit::TuiAskUserBlock(long);
+    let grid = GridSpec::grid_for(30);
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    assert_eq!(lines.len(), 1, "窄宽度下 Collapsed 仍单行截断");
+    assert!(
+        line_text(&lines[0]).contains("Length: 5 minutes"),
+        "长答案保留 header 前缀，实际 {:?}",
+        line_text(&lines[0])
+    );
+}
+
+/// Collapsed 无答案（result 空）：单行只显示状态符号 + header。
+#[test]
+fn test_ask_user_completed_collapsed_without_answer_shows_header() {
+    crate::i18n::init(Some("en"));
+    let mut b = super::completed_ask_user_block("", &["q1"]);
+    b.fold = FoldState::Collapsed;
+    b.recompute_hash();
+    let vm = TuiRenderUnit::TuiAskUserBlock(b);
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    assert_eq!(lines.len(), 1, "Collapsed 收束为单行");
+    let text = super::all_text(&lines);
+    assert!(text.contains("Length"), "header 可见，实际 {text:?}");
+    assert!(!text.contains(':'), "无答案时不拼接分隔符，实际 {text:?}");
+}
+
+/// header 缺失（防御路径）：expanded 首行回退 i18n 文案，而非答案。
+#[test]
+fn test_ask_user_completed_expanded_empty_header_falls_back() {
+    crate::i18n::init(Some("en"));
+    let mut b = super::completed_ask_user_block("Fast", &["q1"]);
+    b.question.clear();
+    b.recompute_hash();
+    let vm = TuiRenderUnit::TuiAskUserBlock(b);
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) = render::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    let first = line_text(&lines[0]);
+    assert!(
+        first.contains("User answered Peri's questions:"),
+        "header 为空时回退 i18n 文案，实际 {first:?}"
+    );
+    assert!(!first.contains("Fast"), "答案不得作为标题，实际 {first:?}");
 }

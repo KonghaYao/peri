@@ -39,7 +39,9 @@ pub struct TuiAskUserBlock {
     /// Semantic response authority. Historical/replay-only blocks may omit it.
     pub owner: Option<InteractionOwner>,
     /// AskUser 原始问题 ID 顺序；inline action 不读取 ambient pending state。
-    /// 与 request_id 一样是身份元数据，不参与可见内容 hash。
+    /// ID 字符串本身是身份元数据，不参与可见内容 hash；但**数量**参与
+    /// （completed block 渲染 `已答复 N 问` 依赖它）。与 request_id 一样进
+    /// partial_eq。
     pub question_ids: Vec<String>,
     /// 折叠状态——折叠 pass（spec §7 interaction 行）驱动；
     /// 生产创建点 push 到 committed，折叠 pass 与用户覆盖共同驱动。
@@ -70,9 +72,10 @@ pub fn interaction_kind_code(k: &InteractionKind) -> u64 {
 
 impl TuiAskUserBlock {
     /// \[G1\] 内容哈希公式单点——生产创建点 / 结果回写 / 折叠 pass 共用。
-    /// 包含 kind/pending/verb/question/options/result + fold/is_error/user_modified；
-    /// `request_id` 是身份字段不参与（同 message_id 先例）。result 秒级稳定
-    /// （提交后定型），pending 翻转与选项变化必须触发按 hash 分片的缓存重建。
+    /// 包含 kind/pending/verb/question/options/result、fold/is_error/user_modified
+    /// 与 question_ids 数量；`request_id` 与 question_id 字符串是身份字段不参与
+    /// （同 message_id 先例）。result 秒级稳定（提交后定型），pending 翻转、
+    /// 选项变化与问数变化必须触发按 hash 分片的缓存重建。
     pub fn recompute_hash(&mut self) {
         let mut h = super::hash::tui_hash_combine(0, interaction_kind_code(&self.kind));
         h = super::hash::tui_hash_combine(h, u64::from(self.pending));
@@ -82,6 +85,7 @@ impl TuiAskUserBlock {
             h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(opt));
         }
         h = super::hash::tui_hash_combine(h, self.options.len() as u64);
+        h = super::hash::tui_hash_combine(h, self.question_ids.len() as u64);
         h = super::hash::tui_hash_combine(
             h,
             match &self.result {

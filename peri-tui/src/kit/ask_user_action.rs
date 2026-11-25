@@ -34,6 +34,9 @@ pub enum AskUserResponseAction {
         owner: InteractionOwner,
         /// 答案 map，key = question_id，value = ElicitationContentValue 的 JSON
         answers: Value,
+        /// 首问 id——inline block 只展示首问，本地 display result 取该问题的
+        /// 答案；取整个 map 的首个非空值会把后续问题的答案错挂到首问下。
+        first_question_id: Option<String>,
     },
     /// 用户取消（Esc）
     Cancel {
@@ -75,8 +78,8 @@ pub fn spawn_ask_user_consumer(
                         Some(AskUserResponseAction::Cancel { owner, request_id_str }) => {
                             handle_cancel(&acp_client, &owner, &request_id_str).await;
                         }
-                        Some(AskUserResponseAction::Submit { owner, request_id_str, answers }) => {
-                            handle_submit(&acp_client, &owner, &request_id_str, &answers).await;
+                        Some(AskUserResponseAction::Submit { owner, request_id_str, answers, first_question_id }) => {
+                            handle_submit(&acp_client, &owner, &request_id_str, &answers, first_question_id.as_deref()).await;
                         }
                         Some(AskUserResponseAction::Reject { owner, request_id_str }) => {
                             handle_reject(&acp_client, &owner, &request_id_str).await;
@@ -90,13 +93,17 @@ pub fn spawn_ask_user_consumer(
 
 /// 处理提交：构造 Accept response JSON，调用 send_response。
 /// Client 先 claim owner；成功或传输失败都会 owner-aware terminalize。
-/// 失败是 `ResponseTransportFailed` 终态，不恢复 pending、不重试。result =
-/// 首个非空答案（inline 快速回答的选中 label），无答案时回退 `Answered`。
+/// 失败是 `ResponseTransportFailed` 终态，不恢复 pending、不重试。
+///
+/// wire 的 `content` 始终是完整 answers map；本地 display result 只取**首问
+/// 自己的答案**（inline block 只展示首问）。首问未答/缺失时回退 `Answered`——
+/// 不能取整个 map 的首个非空值，否则第 2 问的答案会挂到首问下。
 async fn handle_submit(
     acp_client: &AcpTuiClient,
     owner: &InteractionOwner,
     request_id_str: &str,
     answers: &Value,
+    first_question_id: Option<&str>,
 ) {
     let response = json!({
         "action": "accept",
@@ -105,20 +112,32 @@ async fn handle_submit(
 
     info!(request_id = %request_id_str, "kit ask_user_consumer: sending Accept response");
 
-    let result = answers
-        .as_object()
-        .and_then(|m| {
-            m.values()
-                .find(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
-        })
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    let result = first_question_id
+        .and_then(|id| answers.get(id))
+        .map(display_answer)
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| i18n::tr("render-interaction-result-answered"));
     if let Err(e) = acp_client
         .respond_interaction(owner, response, result)
         .await
     {
         error!(error = %e, "kit ask_user_consumer: send_response failed");
+    }
+}
+
+/// 单个答案值 → 本地展示文本：单选 string 原样；多选 array 以 `, ` 拼接
+/// （元素均为 label / 自定义文本）。空串、空数组与非字符串类型返回空串，
+/// 由调用方回退到 i18n 文案。
+fn display_answer(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
     }
 }
 

@@ -233,6 +233,21 @@ fn completed_block(result: &str) -> TuiAskUserBlock {
     b
 }
 
+/// [AskUser 显示归属] completed AskUser block：首问 header + 预设选项 +
+/// 答案（result）+ 原始 question_ids（问数）。
+fn completed_ask_user_block(result: &str, question_ids: &[&str]) -> TuiAskUserBlock {
+    let mut b = pending_permission_block();
+    b.kind = crate::kit::tui_render_unit::InteractionKind::AskUser;
+    b.pending = false;
+    b.verb = "AskUser".into();
+    b.question = "Length".into();
+    b.options = vec!["Fast".into(), "Complete".into()];
+    b.result = Some(result.to_string());
+    b.question_ids = question_ids.iter().map(|s| (*s).to_string()).collect();
+    b.recompute_hash();
+    b
+}
+
 #[path = "render_interaction_test.rs"]
 mod interaction_tests;
 

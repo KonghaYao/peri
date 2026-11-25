@@ -894,6 +894,12 @@ render-interaction-result-allowed-once = Allowed once
 render-interaction-result-denied = Denied
 render-interaction-result-answered = Answered
 render-interaction-result-rejected = Rejected
+# AskUser completed block：自由文本/多选拼接的答案（不匹配任何预设选项）。
+render-interaction-selected = Selected: { $result }
+# AskUser completed block：多问调用的已答复问数（inline 只展示首问）。
+render-interaction-answered-questions = Answered { $count } questions
+# AskUser Collapsed 单行：问题 header + 答案。
+render-interaction-collapsed-ask-user = { $header }: { $result }
 
 # ---- Composer (spec §10) ----
 
