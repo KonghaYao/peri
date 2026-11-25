@@ -286,6 +286,10 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
                   --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
 
+            - name: Show sccache stats
+              if: always() && runner.os == 'Linux'
+              run: sccache --show-stats || true
+
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
     # 套件本体在公开仓 KonghaYao/peri-e2e，由 .github/peri-e2e.rev 固定到 40 位 commit；
