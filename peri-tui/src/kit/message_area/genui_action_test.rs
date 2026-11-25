@@ -361,7 +361,7 @@ fn pressed_overlay_covers_wrapped_hit_rows_without_changing_text() {
             &mut normal,
         );
     let mut pressed = normal.clone();
-    draw_pressed(&mut pressed, &hits, &key, &fixture.context.theme, false);
+    draw_pressed(&mut pressed, &hits, &key, &fixture.context.theme);
     for hit in &hits {
         for col in hit.x_start..hit.x_end {
             let cell = &pressed[(col, hit.row)];
@@ -392,13 +392,7 @@ fn pressed_overlay_covers_wrapped_hit_rows_without_changing_text() {
     assert_eq!(hits.last().unwrap().key.vm_hash, key.vm_hash);
     assert!(!hits.last().unwrap().key.matches(&key));
     let mut after_rebuild = normal.clone();
-    draw_pressed(
-        &mut after_rebuild,
-        &hits,
-        &key,
-        &fixture.context.theme,
-        false,
-    );
+    draw_pressed(&mut after_rebuild, &hits, &key, &fixture.context.theme);
     assert_eq!(after_rebuild, normal);
 }
 

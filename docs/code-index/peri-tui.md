@@ -18,7 +18,10 @@
 Storybook 文档共用 `h_viewport::HorizontalViewport`/`scrollbar::HorizontalBar`：
 帧宽超过正文列宽时按 `MermaidFenceKey` 保存横向偏移并绘制底部条，拖拽、Shift+
 滚轮/横向滚轮与入口焦点下的 ←/→ 平移同一份几何。`NO_COLOR` 的纯样式剥离
-（去色保留 modifier/对齐）由 `style::strip_line_colors` 持有，宿主决定应用时机。文本选区的显示列→字节换算、
+（去色保留 modifier/对齐）由 `style::strip_line_colors`/`style::strip_buffer_colors`
+持有，宿主决定应用时机；TUI 在 `AppShell` 根 hook（`kit/no_color.rs::NoColorFrameHook`）
+每帧绘制后对整帧 Buffer 剥离一次，主区/面板/弹窗共用，不再有 surface 级剥离 pass。
+文本选区的显示列→字节换算、
 字素切片与真实 `Paragraph` 折行行首由 `selection` 提供，`SelectionAnchor` 的消息身份、
 历史前插重绑与剪贴板仍在宿主。文本严格列宽截断与省略号预算由 `text::truncate_to_width`
 统一，旧 `truncate_by_width` 仅保留前缀预算契约；Edit/Write 的 unified diff 在
@@ -231,7 +234,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 历史内容与当前执行边界 | `src/kit/acp_events/{tool,turn}.rs`；`acp_events_test/{history_runtime,steer}_test.rs` | 历史工具缺结果为静态记录不完整提示，结果按 tool ID 补全，不恢复运行态；UserInputDelivered 只确认消息展示，不开启 loading，当前 RunStarted/实时执行事件独立驱动 loading；正常手动续聊与真实执行保持原链路 |
 | P0 prompt 时序 | `src/kit/acp_events/bridge_state.rs`、`src/kit/acp_events/turn.rs` + `acp_types/current_turn/{streaming,projection}.rs` + `acp_events_test/{snapshot,steer}_test.rs` | `BridgeState::push_user_bubble` 先归档旧输出再加入新 prompt；运行中 subagent 或工具尚待 `ToolEnded` 时保留 current turn，`CurrentTurn::push_user_bubble` 按 segment 时序插入。`p0_new_prompt_follows_unarchived_previous_answer`、`p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open` 及两个 `p0_*_preserves_running_tool_result` 检查顺序与在途工具结果；prompt request ID 用于执行/取消归属，不决定消息排列 |
 | Welcome（空态欢迎屏） | `welcome.rs` | `Welcome`：logo + 会话空态引导 |
-| AppShell / SessionColumn | `app_shell.rs` + `layout.rs` | `AppShell` 顶层外壳；`SessionColumn` + `layout_plan` 垂直布局；消息区/输入区与状态栏/后台任务栏分别由 `CenterBand` 包裹收进居中带 |
+| AppShell / SessionColumn | `app_shell.rs` + `layout.rs` + `no_color.rs` | `AppShell` 顶层外壳；`SessionColumn` + `layout_plan` 垂直布局；消息区/输入区与状态栏/后台任务栏分别由 `CenterBand` 包裹收进居中带。`NoColorFrameHook` 在根组件 `post_component_draw`（所有子组件之后）按 `TERMINAL_CAPS.color` 对整帧 Buffer 调 `style::strip_buffer_colors`，NO_COLOR 只在根级应用一次 |
 | SlashCompletion / MentionPopup | `slash_completion.rs` + `mention_popup.rs` | slash 命令补全弹窗（fuzzy 过滤，仅搜索层）；文件 @mention 弹窗 |
 | PanelOverlay / PopupOverlay | `panel_overlay.rs` + `popup_overlay.rs` | 面板层（`PanelOverlay`）与居中弹窗层（`PopupOverlay`，`open_popup`） |
 | 面板目录 PanelRegistry | `panel_registry.rs` | 面板种类→渲染函数注册表（`render`、`open_panel`、快捷键 `from_shortcut`） |
@@ -309,7 +312,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | Plugin 面板装配与展示 | kit/panels/plugin/plugin_panel.rs + plugin/{data,render,identity,search_handler,panel_handler}.rs | `PluginPanel` 保持公共入口；`data` 管本地目录缓存，`render_discover_list` 保留 loading/error 下的可编辑输入；`handle_search_event` 路由 Discover 与 marketplace 输入，`handle_panel_event` 保留其他 tab 与既有安装操作生命周期；详情/市场详情按 `identity.rs` 的稳定身份（名称 + 来源 + 作用域）定位并逐项复验，身份消失即清理并走不可用提示，不回退旧下标；缓存仅由成功且复验通过的市场请求刷新；列表 Space 把高亮插件加入/移出待提交上下文（只登记插件 ID，按渲染时身份而非行号解析）；能力未协商时，Space 仍可移除已登记的选择，只有新增选择会提示入口不可用并保留草稿与选择，不静默丢弃 |
 | Plugin 搜索生命周期回归 | kit/panels/plugin/search_request_test.rs | `plugin_search_*`：真实 mpsc 请求/响应及 notifier → bridge → render；覆盖错误重试、同 query 乱序与无身份旧通知、session switch/reset、关闭/Drop、空/无效结果、键鼠提交可达和远端条目身份；回调暂拒收保留结果、可取消延迟重试，接收后只投影一次 |
 | 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs + kit/event_handlers.rs | `open_popup`/`close_popup`/`is_popup_active`；Rewind Enter 由根级 Global 模态仲裁发送既有 `REWIND_ACTION_TX`，鼠标与渲染留在 popup |
-| subagent 详情面板内容源 | kit/panels/subagent_detail/sub_agent_detail_panel.rs + kit/bg_task_identity.rs + kit/bg_task_live/live_projection.rs | `resolve_selected_subagent`：能对上某次 bg 运行时以 `BG_LIVE_DETAIL` 为准，VIEW_MODELS 扫描只作回退（`find_selected_subagent`）。底栏点击按 task_id 精确选中该行；消息区 Enter 按组 instance_id 对应 live 明细的 `subagent_instance_id`。后台事件按最新绑定的 task_id 写入，避免 resume 复用 child_thread_id 后新明细为空。bg 的工具事件不进组、组在 turn 边界（`TurnSuspended`/`TurnInterrupted`）被归档冻结，以 VIEW_MODELS 优先会让面板停在下线那一刻。详情绘制 hook 在 Border 改写 `drawer.area` 前捕获面板外框；回归见 `subagent_detail_test.rs`、`subagent_detail_cache_test.rs`、`bg_task_identity_test.rs` 与 `bg_task_live_test.rs` |
+| subagent 详情面板内容源 | kit/panels/subagent_detail/sub_agent_detail_panel.rs + kit/bg_task_identity.rs + kit/bg_task_live/live_projection.rs | `resolve_selected_subagent`：能对上某次 bg 运行时以 `BG_LIVE_DETAIL` 为准，VIEW_MODELS 扫描只作回退（`find_selected_subagent`）。底栏点击按 task_id 精确选中该行；消息区 Enter 按组 instance_id 对应 live 明细的 `subagent_instance_id`。后台事件按最新绑定的 task_id 写入，避免 resume 复用 child_thread_id 后新明细为空。bg 的工具事件不进组、组在 turn 边界（`TurnSuspended`/`TurnInterrupted`）被归档冻结，以 VIEW_MODELS 优先会让面板停在下线那一刻。详情几何单点：`DetailGeometry` 在 draw 期（Border 改写 `drawer.area` 前）记录面板内容区，prepare 的网格/视口、鼠标命中与滚轮仲裁同读这一份；首帧未测量时不 prepare，由 `poll_change` 请求校正帧后按实测宽度准备；回归见 `subagent_detail_test.rs`、`subagent_detail_cache_test.rs`、`bg_task_identity_test.rs` 与 `bg_task_live_test.rs` |
 
 ### App/配置/启动（src/app/ src/config/ src/acp_client/）
 

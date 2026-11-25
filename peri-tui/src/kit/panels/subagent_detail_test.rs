@@ -5,6 +5,9 @@ use super::Rect;
 use super::TuiRenderUnit;
 
 use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
+use ratatui::backend::TestBackend;
+use ratatui_kit::prelude::*;
+use std::task::{Context, Poll, Waker};
 
 use crate::kit::tui_render_unit::{TuiSubAgentGroup, TuiUserBubble};
 
@@ -52,18 +55,20 @@ fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
 }
 
 #[test]
-fn detail_viewport_uses_panel_bounds_once() {
-    assert_eq!(
-        super::detail_viewport(Rect::new(4, 3, 60, 12)),
-        Rect::new(4, 4, 59, 10)
-    );
+fn detail_viewport_reserves_scrollbar_column_inside_content_area() {
+    // 面板外框 → 内容区（扣上下边框/标题）→ 视口（再让出最右滚动条列）。
+    let content = super::detail_content_area(Rect::new(4, 3, 60, 12));
+    assert_eq!(content, Rect::new(4, 4, 60, 10));
+    assert_eq!(super::detail_viewport(content), Rect::new(4, 4, 59, 10));
 }
 
 #[test]
 fn detail_width_budget_matches_drawn_viewport() {
     for width in [2, 3, 6, 7, 30, 40, 60, 100, 120] {
-        let viewport = super::detail_viewport(Rect::new(0, 0, width, 12));
-        let grid = GridSpec::grid_for(width);
+        let content = super::detail_content_area(Rect::new(0, 0, width, 12));
+        let viewport = super::detail_viewport(content);
+        let mut grid = GridSpec::grid_for(width);
+        grid.indent = 0;
         assert!(grid.line_width() <= viewport.width, "panel width {width}");
         if width >= 7 {
             assert!(
@@ -72,6 +77,68 @@ fn detail_width_budget_matches_drawn_viewport() {
             );
         }
     }
+}
+
+/// 首帧几何未知时不得按兜底宽度 prepare（旧路径 `Rect::default()` → 2 列）；
+/// 记录内容区之后，prepare 用实测宽度派生网格与视口高度。
+#[test]
+fn detail_prepare_waits_for_measured_content_geometry() {
+    let mut geometry = super::DetailGeometry::default();
+    assert_eq!(geometry.content(), None);
+    assert!(
+        geometry.prepare_layout().is_none(),
+        "几何未知时不应准备（否则会按极窄兜底宽度折行）"
+    );
+
+    geometry.observe(Rect::new(0, 2, 80, 24));
+    assert_eq!(geometry.content(), Some(Rect::new(0, 3, 80, 22)));
+    let layout = geometry
+        .prepare_layout()
+        .expect("记录内容区后 prepare 布局可用");
+    let mut expected = GridSpec::grid_for(80);
+    expected.indent = 0;
+    assert_eq!(layout.grid, expected, "网格宽度取记录的内容区宽度");
+    assert_eq!(layout.viewport_height, 22, "视口高度取内容区高度");
+}
+
+/// 首次测量与每次几何变化各请求一帧校正渲染（`MsgAreaTracker` 模式）：
+/// 首帧 update 之后才记录到内容区，没有这次校正就不会按实测宽度重新 prepare。
+#[test]
+fn detail_geometry_requests_one_corrective_frame_per_geometry_change() {
+    let mut geometry = super::DetailGeometry::default();
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(geometry.poll_change(&mut context), Poll::Pending);
+
+    geometry.observe(Rect::new(0, 2, 80, 24));
+    assert_eq!(geometry.poll_change(&mut context), Poll::Ready(()));
+    assert_eq!(
+        geometry.poll_change(&mut context),
+        Poll::Pending,
+        "同一几何不重复请求"
+    );
+
+    geometry.observe(Rect::new(0, 2, 80, 24));
+    assert_eq!(geometry.poll_change(&mut context), Poll::Pending);
+
+    geometry.observe(Rect::new(0, 2, 100, 24));
+    assert_eq!(geometry.poll_change(&mut context), Poll::Ready(()));
+}
+
+/// draw 阶段从面板外框回填内容区：hook 的 `pre_component_draw` 看到的就是
+/// 面板区域（`panel_shell!` 的边框在子节点绘制时才收窄 `drawer.area`）。
+#[test]
+fn detail_geometry_hook_records_draw_area() {
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 60))
+        .expect("draw geometry: fixture parameters must construct a valid value");
+    let mut geometry = super::DetailGeometry::default();
+    let area = Rect::new(4, 2, 80, 24);
+    terminal
+        .draw(|frame| {
+            let mut drawer = ComponentDrawer::new(frame, area);
+            geometry.pre_component_draw(&mut drawer);
+        })
+        .expect("draw geometry: fixture parameters must construct a valid value");
+    assert_eq!(geometry.content(), Some(Rect::new(4, 3, 80, 22)));
 }
 
 #[test]

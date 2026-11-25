@@ -150,7 +150,6 @@ pub(super) struct PressedOverlay {
     pub(super) hits: State<Arc<Vec<GenUiButtonHit>>>,
     pub(super) pressed: State<Option<PressedGenuiKey>>,
     pub(super) area: Option<Rect>,
-    pub(super) strip_color: bool,
 }
 
 impl Hook for PressedOverlay {
@@ -161,13 +160,7 @@ impl Hook for PressedOverlay {
         }
         if let Some(key) = self.pressed.read().as_ref() {
             let theme = peri_theme::atoms::THEME_ATOM.state();
-            draw_pressed(
-                drawer.buffer_mut(),
-                &self.hits.read(),
-                key,
-                &theme.read(),
-                self.strip_color,
-            );
+            draw_pressed(drawer.buffer_mut(), &self.hits.read(), key, &theme.read());
         }
     }
 }
@@ -177,7 +170,6 @@ fn draw_pressed(
     hits: &[GenUiButtonHit],
     key: &PressedGenuiKey,
     theme: &ThemeDefinition,
-    strip_color: bool,
 ) {
     for hit in hits.iter().filter(|hit| key.matches(&hit.key)) {
         let rect =
@@ -195,14 +187,7 @@ fn draw_pressed(
             continue;
         };
         let style = pressed_button_style(normal.fg, theme);
-        buffer.set_style(
-            rect,
-            if strip_color {
-                peri_tui_components::style::strip_style_color(style)
-            } else {
-                style
-            },
-        );
+        buffer.set_style(rect, style);
     }
 }
 

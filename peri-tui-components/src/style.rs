@@ -3,7 +3,8 @@
 //! Only color fields are removed: modifiers, symbols, text and alignment survive so
 //! state never depends on color alone. The host decides when to apply this pass.
 
-use ratatui::style::Style;
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 /// Strip fg/bg/underline colors from a line while keeping modifiers and alignment.
@@ -32,6 +33,19 @@ pub fn strip_style_color(style: Style) -> Style {
         underline_color: None,
         add_modifier: style.add_modifier,
         sub_modifier: style.sub_modifier,
+    }
+}
+
+/// Strip fg/bg/underline colors from every cell of `buffer`, keeping modifiers.
+///
+/// Apply this once per frame after all components have drawn (the root hook), so
+/// no surface needs its own color-stripping pass. Cell symbols, modifiers
+/// (`BOLD`, `REVERSED`, ...) and diff options survive.
+pub fn strip_buffer_colors(buffer: &mut Buffer) {
+    for cell in &mut buffer.content {
+        cell.fg = Color::Reset;
+        cell.bg = Color::Reset;
+        cell.underline_color = Color::Reset;
     }
 }
 
