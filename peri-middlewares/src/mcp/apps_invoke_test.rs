@@ -320,6 +320,7 @@ async fn host_invoke_cannot_resolve_a_closed_builtin_instance() {
                 ),
                 // 会话关闭集：workspace 实例被 MetaHarness 关闭。
                 closed_instances: std::iter::once("workspace".to_string()).collect(),
+                interaction_broker: None,
                 session_cancel: CancellationToken::new(),
             },
         ),
@@ -478,6 +479,7 @@ async fn host_invoke_runs_through_canonical_entry() {
                     ),
                 ),
                 closed_instances: Default::default(),
+                interaction_broker: None,
                 session_cancel: CancellationToken::new(),
             },
         ),

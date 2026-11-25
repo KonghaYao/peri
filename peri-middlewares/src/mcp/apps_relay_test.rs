@@ -312,6 +312,7 @@ async fn relay_with_service(
             peri_agent::session::factory::InvocationRuleChain::from_derived_blueprint(rules),
         ),
         closed_instances: Default::default(),
+        interaction_broker: None,
         session_cancel: tokio_util::sync::CancellationToken::new(),
     }));
     // 生产同序：会话环境登记运行时世代（签发点据此盖章）→ 签发 record → 附着连接。

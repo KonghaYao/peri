@@ -335,6 +335,9 @@ pub struct SessionInvocationService {
     pub(super) outcomes: InvocationOutcomeStore,
     /// session 层取消令牌（invocation 令牌的父；会话关闭即中断执行）。
     pub(super) session_cancel: CancellationToken,
+    /// 本会话交互 broker（Host / App 发起的 MCP 工具 elicitation 也走同一入口）。
+    pub(super) interaction_broker:
+        Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 }
 
 impl Debug for SessionInvocationService {
@@ -363,6 +366,8 @@ pub struct SessionInvocationInputs {
     pub closed_instances: BTreeSet<String>,
     /// session 层取消令牌。
     pub session_cancel: CancellationToken,
+    /// 本会话交互 broker；`None` 时该入口的 MCP elicitation 恒 decline。
+    pub interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 }
 
 impl Debug for SessionInvocationInputs {
@@ -391,6 +396,7 @@ impl SessionInvocationService {
             rules: inputs.rules,
             closed_instances: inputs.closed_instances,
             session_cancel: inputs.session_cancel,
+            interaction_broker: inputs.interaction_broker,
         }
     }
 
@@ -530,13 +536,16 @@ impl SessionInvocationService {
     /// 会话允许视图：与 `McpMiddleware` 同一准入原语（不重枚举 pool），且
     /// **携带本会话的关闭集**——关闭的 builtin 实例工具不在准入视图内。
     pub(super) fn session_visible_bridges(&self) -> Vec<McpToolBridge> {
-        super::super::admission::McpAdmissionPreparation::new(
+        let mut admission = super::super::admission::McpAdmissionPreparation::new(
             Arc::clone(&self.pool),
             Some(self.session_id.clone()),
             self.session_cancel.clone(),
             self.closed_instances.clone(),
-        )
-        .open_typed_bridges()
+        );
+        if let Some(broker) = self.interaction_broker.as_ref() {
+            admission = admission.with_interaction_broker(Arc::clone(broker));
+        }
+        admission.open_typed_bridges()
     }
 
     /// 在会话允许视图内解析 effective 名（同名冒充在此被拒绝）。

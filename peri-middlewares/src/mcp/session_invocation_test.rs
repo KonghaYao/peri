@@ -209,6 +209,7 @@ impl Fixture {
             queue: Arc::new(MessageQueue::new),
             rules: Arc::new(InvocationRuleChain::from_derived_blueprint(rules)),
             closed_instances: Default::default(),
+            interaction_broker: None,
             session_cancel: session_cancel.clone(),
         }));
         Self {
@@ -956,6 +957,7 @@ fn resolution_service(
             MiddlewareChain::new(),
         )),
         closed_instances: closed,
+        interaction_broker: None,
         session_cancel: CancellationToken::new(),
     }))
 }

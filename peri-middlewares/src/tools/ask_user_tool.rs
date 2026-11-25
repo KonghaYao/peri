@@ -196,6 +196,10 @@ impl BaseTool for AskUserTool {
             InteractionResponse::Decisions(_) => {
                 Err("ask_user_question: unexpected response type".into())
             }
+            // elicitation 响应形状不属于 AskUserQuestion：同样按协议不匹配拒绝。
+            InteractionResponse::Elicitation(_) => {
+                Err("ask_user_question: unexpected elicitation response type".into())
+            }
         }
     }
 }

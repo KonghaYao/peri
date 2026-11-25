@@ -783,14 +783,16 @@ fn not_connected(server: &str) -> McpPoolError {
 struct PoolCatalog {
     pool: Arc<McpClientPool>,
     session: String,
+    interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 }
 impl SessionMcpCatalogPort for PoolCatalog {
     fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot> {
         loop {
             let generation = self.pool.catalog_generation.load(Ordering::Acquire);
-            let mut bridges = super::tool_bridge::build_typed_tool_bridges_visible_to(
+            let mut bridges = super::tool_bridge::build_typed_tool_bridges_visible_to_with_broker(
                 &self.pool,
                 Some(&self.session),
+                self.interaction_broker.as_ref(),
             );
             let required: std::collections::BTreeMap<_, _> = self
                 .pool
@@ -834,10 +836,12 @@ impl SessionMcpCatalogPort for PoolCatalog {
 pub(crate) fn catalog_source(
     pool: Arc<McpClientPool>,
     session: &str,
+    interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 ) -> Arc<dyn SessionMcpCatalogPort> {
     Arc::new(PoolCatalog {
         pool,
         session: session.into(),
+        interaction_broker,
     })
 }
 

@@ -258,6 +258,7 @@ async fn request_timeout_stops_server_shell() {
             json!({"command":"echo $$ > timeout.pid; exec sleep 60", "timeout":120000}),
         ),
         Some(Duration::from_secs(1)),
+        None,
     )
     .await;
     assert!(matches!(result, Err(ServiceError::Timeout { .. })));

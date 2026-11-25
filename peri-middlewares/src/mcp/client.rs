@@ -7,6 +7,7 @@ mod cache;
 #[cfg(test)]
 #[path = "client/cache_policy_test.rs"]
 mod cache_policy_tests;
+mod elicitation;
 mod instance_face;
 mod lifecycle;
 mod monitor_alert;
@@ -66,6 +67,7 @@ use std::sync::Arc;
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub(crate) use cache::ConnectionResourceCache;
+pub(crate) use elicitation::ElicitationLease;
 pub(crate) use notification_tap::{
     pending_notification_reminder, NotificationTap, PendingMcpNotification,
 };

@@ -141,6 +141,13 @@ impl UserInteractionBroker for AcpTransportBroker {
         match context {
             InteractionContext::Approval { items } => self.handle_approval(items).await,
             InteractionContext::Questions { requests } => self.handle_questions(requests).await,
+            // 契约先落地（#589 commit 1）；投影在本 PR 后续 commit 补齐前显式失败，
+            // 不得伪造答复。
+            InteractionContext::Elicitation { .. } => InteractionResponse::Failed {
+                failure: InteractionFailure::Transport {
+                    detail: "MCP elicitation projection is not wired yet".into(),
+                },
+            },
         }
     }
 }

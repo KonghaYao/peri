@@ -17,7 +17,8 @@ pub(super) fn add_mcp(
             .with_builtin_closures(crate::mcp::builtin::closed_instances(
                 &ctx.meta_harness_disabled,
             ))
-            .with_sub_agent_face_closed(sub_agent_face_closed);
+            .with_sub_agent_face_closed(sub_agent_face_closed)
+            .with_interaction_broker(Arc::clone(&ctx.broker));
         mw.ensure_discovery();
         crate::mcp::middleware::attach_connection_notifier(
             pool,

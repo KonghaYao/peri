@@ -13,6 +13,8 @@ use rmcp::service::RoleClient;
 use rmcp::ServiceError;
 use std::time::Duration;
 
+use super::client::ElicitationLease;
+
 const CANCEL_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct PendingRequest {
@@ -56,15 +58,17 @@ pub(super) async fn call_tool(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
     timeout: Option<Duration>,
+    elicitation: Option<&ElicitationLease>,
 ) -> Result<CallToolResponse, ServiceError> {
-    // One deadline covers transport backpressure and response latency together.
-    let deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
+    // 每轮尝试独立 deadline：发送与响应各自有界，等待用户的时间不吞掉
+    // 工具本身的传输预算。
+    let send_deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
     let send = peer.send_request_with_option(
         ClientRequest::CallToolRequest(CallToolRequest::new(params)),
         PeerRequestOptions::no_options(),
     );
-    let handle =
-        match deadline {
+    let mut handle =
+        match send_deadline {
             Some(deadline) => peri_time::timeout_at(deadline, send).await.map_err(|_| {
                 ServiceError::Timeout {
                     timeout: timeout.expect("deadline has a duration"),
@@ -76,21 +80,53 @@ pub(super) async fn call_tool(
         peer: peer.clone(),
         id: Some(handle.id.clone()),
     };
-    let response = handle.await_response();
-    let result = match timeout {
-        Some(duration) => {
-            match peri_time::timeout_at(deadline.expect("bounded request"), response).await {
-                Ok(result) => result,
-                Err(_) => {
-                    pending.cancel().await;
-                    return Err(ServiceError::Timeout { timeout: duration });
+
+    // 用户在 elicitation 中思考时续期：deadline 到点仍在提问 → 重置；提问结束
+    // （作答 / 取消）→ 立即给 server 一个新的完整窗口。
+    let mut deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
+    let mut activity_rx = elicitation.map(ElicitationLease::activity_receiver);
+    let mut settled = None;
+    let result = loop {
+        let until = deadline;
+        let inactivity = async {
+            match &mut activity_rx {
+                Some(rx) => {
+                    let _ = rx.changed().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            result = &mut handle.rx => {
+                let response = result.map_err(|_| ServiceError::TransportClosed)??;
+                settled = Some(response);
+            }
+            _ = async {
+                match until {
+                    Some(until) => peri_time::sleep_until(until).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let duration = timeout.expect("deadline has a duration");
+                if elicitation.is_some_and(ElicitationLease::is_asking) {
+                    deadline = Some(peri_time::monotonic_now() + duration);
+                    continue;
+                }
+                pending.cancel().await;
+                return Err(ServiceError::Timeout { timeout: duration });
+            }
+            _ = inactivity => {
+                if let Some(duration) = timeout {
+                    deadline = Some(peri_time::monotonic_now() + duration);
                 }
             }
         }
-        None => response.await,
+        if let Some(response) = settled.take() {
+            break response;
+        }
     };
     pending.id.take();
-    match result? {
+    match result {
         ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
         ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
         _ => Err(ServiceError::UnexpectedResponse),

@@ -86,7 +86,7 @@ for line in sys.stdin:
 async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
     let (mut owner, pool, _cwd) = pool_fixture();
     let (mut other_owner, other, _other_cwd) = pool_fixture();
-    let source = super::catalog_source(pool.clone(), "s1");
+    let source = super::catalog_source(pool.clone(), "s1", None);
     let initial = source.snapshot();
     let registered = pool
         .clone()
@@ -116,7 +116,7 @@ async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
             .kind,
         "server_not_found"
     );
-    assert!(super::catalog_source(other.clone(), "s1")
+    assert!(super::catalog_source(other.clone(), "s1", None)
         .snapshot()
         .tools
         .is_empty());
@@ -294,7 +294,7 @@ async fn cleanup_failure_stays_owned_and_stop_retry_never_publishes_tools() {
         assert_eq!(error.kind, "shutdown_incomplete");
         assert_eq!(count.load(Ordering::SeqCst), expected);
         assert_eq!(pool.server_slot("docs").services.lock().len(), 1);
-        assert!(super::catalog_source(pool.clone(), "s1")
+        assert!(super::catalog_source(pool.clone(), "s1", None)
             .snapshot()
             .tools
             .is_empty());
@@ -359,7 +359,7 @@ async fn register_oauth_without_credentials_returns_authorization_without_callba
     let response = pool.clone().control_mcp(request).await.unwrap();
     assert_eq!(response.status, McpControlStatus::NeedsAuthorization);
     assert!(pool.active_oauth_flow("authdocs").is_none());
-    assert!(super::catalog_source(pool.clone(), "s1")
+    assert!(super::catalog_source(pool.clone(), "s1", None)
         .snapshot()
         .tools
         .is_empty());

@@ -25,7 +25,18 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         self: Arc<Self>,
         session_id: &str,
     ) -> Option<Arc<dyn peri_acp_types::mcp_control::SessionMcpCatalogPort>> {
-        Some(crate::mcp::control::catalog_source(self, session_id))
+        Some(crate::mcp::control::catalog_source(self, session_id, None))
+    }
+    fn catalog_source_with_broker(
+        self: Arc<Self>,
+        session_id: &str,
+        broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+    ) -> Option<Arc<dyn peri_acp_types::mcp_control::SessionMcpCatalogPort>> {
+        Some(crate::mcp::control::catalog_source(
+            self,
+            session_id,
+            Some(broker),
+        ))
     }
     fn dynamic_loader_bindings(
         self: Arc<Self>,

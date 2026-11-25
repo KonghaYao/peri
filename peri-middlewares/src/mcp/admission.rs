@@ -151,6 +151,9 @@ pub(crate) struct McpAdmissionPreparation {
     /// `builtin::closed_instances` 求出的集合。判定只走 `builtin::is_closed` /
     /// `is_closed_source`，本模块不硬编码实例名或 `mcp__web__` 前缀。
     closed_instances: BTreeSet<String>,
+    /// 本会话交互 broker：随 bridge 交给 MCP elicitation 路由；`None` =
+    /// 该调用面没有交互入口（elicit 恒 decline）。
+    interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 }
 
 impl McpAdmissionPreparation {
@@ -174,7 +177,18 @@ impl McpAdmissionPreparation {
             session_id,
             cancel,
             closed_instances,
+            interaction_broker: None,
         }
+    }
+
+    /// 注入会话交互 broker（装配面调用；不调用时 elicitation fail-closed）。
+    #[must_use]
+    pub(crate) fn with_interaction_broker(
+        mut self,
+        broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+    ) -> Self {
+        self.interaction_broker = Some(broker);
+        self
     }
 
     /// 该 server 的实例是否在本 session 被关闭（唯一判定入口
@@ -280,9 +294,10 @@ impl McpAdmissionPreparation {
     /// 关闭实例的 bridge 既不得进入 deferred 目录（面②），也不得被提升为
     /// direct（面①）；过滤只走 `closed_instances` / `is_closed`，不硬编码实例名。
     pub(crate) fn open_typed_bridges(&self) -> Vec<McpToolBridge> {
-        tool_bridge::build_typed_tool_bridges_visible_to(
+        tool_bridge::build_typed_tool_bridges_visible_to_with_broker(
             &self.tool_pool,
             self.session_id.as_deref(),
+            self.interaction_broker.as_ref(),
         )
         .into_iter()
         .filter(|bridge| !self.is_bridge_closed(bridge))

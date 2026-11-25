@@ -175,7 +175,9 @@ impl McpClientPool {
             .peer
             .as_ref()
             .expect("instance_handle 已确认 peer 存在");
-        match crate::mcp::tool_request::call_tool(peer, request, Some(TOOL_CALL_TIMEOUT)).await {
+        match crate::mcp::tool_request::call_tool(peer, request, Some(TOOL_CALL_TIMEOUT), None)
+            .await
+        {
             Ok(CallToolResponse::Complete(result)) => {
                 let text = tool_bridge::format_contents(&result.content);
                 if result.is_error == Some(true) {

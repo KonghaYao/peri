@@ -1,7 +1,11 @@
 use crate::identity::AttemptId;
 use crate::interaction::AttachmentId;
 use crate::interaction::ConnectionEpoch;
+use crate::interaction::ElicitationDecision;
+use crate::interaction::ElicitationRequest;
 use crate::interaction::InteractionAttribution;
+use crate::interaction::InteractionContext;
+use crate::interaction::InteractionResponse;
 use crate::interaction::TrustedInteractionOwner;
 use crate::interaction::UnansweredCause;
 use crate::interaction::ELICITATION_UNANSWERED_META_KEY;
@@ -283,4 +287,121 @@ fn attribution_round_trips_through_wire_shape() {
         serde_json::from_value::<InteractionAttribution>(json).expect("attribution deserializes"),
         attribution
     );
+}
+
+// ─── MCP elicitation contract ────────────────────────────────────────────────
+
+#[test]
+fn mcp_elicitation_form_round_trips_without_losing_schema() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "approve": { "type": "boolean", "title": "Approve" },
+            "note": { "type": "string", "description": "optional note" }
+        },
+        "required": ["approve"]
+    });
+    let context = InteractionContext::Elicitation {
+        request: ElicitationRequest::Form {
+            server: "expense".into(),
+            tool: "submit_expense".into(),
+            message: "Approve this expense?".into(),
+            requested_schema: schema.clone(),
+        },
+    };
+    let json = serde_json::to_value(&context).expect("elicitation context serializes");
+    assert_eq!(json["kind"], "Elicitation");
+    assert_eq!(json["request"]["mode"], "form");
+    assert_eq!(json["request"]["server"], "expense");
+    assert_eq!(json["request"]["requested_schema"], schema);
+
+    let decoded: InteractionContext =
+        serde_json::from_value(json).expect("elicitation context deserializes");
+    let InteractionContext::Elicitation {
+        request: ElicitationRequest::Form {
+            requested_schema, ..
+        },
+    } = decoded
+    else {
+        panic!("expected form elicitation")
+    };
+    assert_eq!(requested_schema, schema);
+}
+
+#[test]
+fn mcp_elicitation_url_keeps_2025_11_25_id_and_allows_0728_absence() {
+    let with_id = serde_json::json!({
+        "kind": "Elicitation",
+        "request": {
+            "mode": "url",
+            "server": "oauth",
+            "tool": "connect",
+            "message": "Authorize in browser",
+            "url": "https://example.com/connect",
+            "elicitation_id": "e-1"
+        }
+    });
+    let decoded: InteractionContext =
+        serde_json::from_value(with_id).expect("url elicitation deserializes");
+    let InteractionContext::Elicitation {
+        request: ElicitationRequest::Url { elicitation_id, .. },
+    } = decoded
+    else {
+        panic!("expected url elicitation")
+    };
+    assert_eq!(elicitation_id, "e-1");
+
+    // 2026-07-28 移除了 elicitationId；缺字段必须可解码（空串表示不存在）。
+    let without_id = serde_json::json!({
+        "kind": "Elicitation",
+        "request": {
+            "mode": "url",
+            "server": "oauth",
+            "tool": "connect",
+            "message": "Authorize in browser",
+            "url": "https://example.com/connect"
+        }
+    });
+    let decoded: InteractionContext =
+        serde_json::from_value(without_id).expect("0728 url elicitation deserializes");
+    let InteractionContext::Elicitation {
+        request: ElicitationRequest::Url { elicitation_id, .. },
+    } = decoded
+    else {
+        panic!("expected url elicitation")
+    };
+    assert_eq!(elicitation_id, "");
+}
+
+#[test]
+fn mcp_elicitation_decisions_keep_three_actions_distinct() {
+    let accept = InteractionResponse::Elicitation(ElicitationDecision::Accept {
+        content: serde_json::json!({ "approve": false }),
+    });
+    let json = serde_json::to_value(&accept).expect("accept serializes");
+    assert_eq!(json["kind"], "Elicitation");
+    assert_eq!(json["action"], "accept");
+    assert_eq!(json["content"], serde_json::json!({ "approve": false }));
+    let decoded: InteractionResponse = serde_json::from_value(json).expect("accept deserializes");
+    assert!(matches!(
+        decoded,
+        InteractionResponse::Elicitation(ElicitationDecision::Accept { content })
+            if content == serde_json::json!({ "approve": false })
+    ));
+
+    for (decision, action) in [
+        (ElicitationDecision::Decline, "decline"),
+        (ElicitationDecision::Cancel, "cancel"),
+    ] {
+        let response = InteractionResponse::Elicitation(decision);
+        let json = serde_json::to_value(&response).expect("decision serializes");
+        assert_eq!(json["action"], action);
+        let decoded: InteractionResponse =
+            serde_json::from_value(json).expect("decision deserializes");
+        match (action, decoded) {
+            ("decline", InteractionResponse::Elicitation(ElicitationDecision::Decline)) => {}
+            ("cancel", InteractionResponse::Elicitation(ElicitationDecision::Cancel)) => {}
+            (expected, other) => panic!("expected {expected}, got {other:?}"),
+        }
+    }
 }
