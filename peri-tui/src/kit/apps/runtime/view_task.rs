@@ -385,7 +385,9 @@ async fn stream_view(
                     // 保证「关闭前最后一帧」仍会显示（只等一次解码）。
                     frames.finish(CLEANUP_TIMEOUT).await;
                     state::update_view(view_id, |view| {
-                        if matches!(view.phase, ViewPhase::Closed { .. }) {
+                        // 失败/本地错误是终态：远端随后发的 closed 只是清理事实，
+                        // 不能覆盖失败码（A5：浏览器退出要留下明确原因）。
+                        if view.phase.is_terminal() {
                             return false;
                         }
                         view.phase = ViewPhase::Closed { reason };

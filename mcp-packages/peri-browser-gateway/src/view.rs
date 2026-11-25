@@ -482,8 +482,14 @@ impl ViewSession {
     }
 
     /// Terminal phase after the page target is released; wakes SSE streams.
+    ///
+    /// 已记录失败时保留 `Failed`：`fail` 与 teardown 之间的窗口很短，`watch`
+    /// 会合并 `Failed → Closed`，宿主只收到无原因的 `closed`（A5 要求失败可见）。
     pub fn finish(&self) {
-        self.phase.send_replace(Phase::Closed);
+        let failed = matches!(&*self.phase.borrow(), Phase::Failed(_));
+        if !failed {
+            self.phase.send_replace(Phase::Closed);
+        }
         self.frames.send_replace(None);
         self.wake.notify_waiters();
     }

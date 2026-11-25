@@ -185,7 +185,15 @@ async fn pump(session: Arc<ViewSession>, tx: tokio::sync::mpsc::Sender<Event>) {
         }
         tokio::select! {
             biased;
-            _ = session.stop().cancelled() => break,
+            _ = session.stop().cancelled() => {
+                // teardown 先 cancel stop、再 finish：biased select 会先看到取消。
+                // 若这里直接 break，失败阶段（controller_closed 等）永远发不出去，
+                // 宿主只能看到无原因的 closed（A5）。补发一次失败事件再收尾。
+                if let Phase::Failed(failure) = session.phase() {
+                    let _ = send_error(&tx, &failure).await;
+                }
+                break;
+            }
             changed = frame_rx.changed() => {
                 if changed.is_err() {
                     break;

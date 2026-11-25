@@ -497,6 +497,7 @@ struct FakeEngine {
     url: String,
     commands: Arc<Mutex<Vec<Value>>>,
     task: JoinHandle<()>,
+    connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl FakeEngine {
@@ -505,16 +506,29 @@ impl FakeEngine {
         let url = format!("http://{}", listener.local_addr()?);
         let commands = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&commands);
+        let connections = Arc::new(Mutex::new(Vec::new()));
+        let handles = Arc::clone(&connections);
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve_fake(stream, Arc::clone(&seen)));
+                handles
+                    .lock()
+                    .expect("connections lock")
+                    .push(tokio::spawn(serve_fake(stream, Arc::clone(&seen))));
             }
         });
         Ok(Self {
             url,
             commands,
             task,
+            connections,
         })
+    }
+
+    /// 模拟浏览器进程退出：关闭已接受的 CDP 连接（含 writer controller）。
+    fn abort_connections(&self) {
+        for handle in self.connections.lock().expect("connections lock").drain(..) {
+            handle.abort();
+        }
     }
 
     fn commands(&self) -> Vec<Value> {
@@ -692,4 +706,74 @@ fn fake_reply(method: &str, params: &Value, state: &mut PageState) -> Value {
         }
         _ => json!({}),
     }
+}
+
+/// A5：控制器在中途断开时，失败码必须在 teardown 之后仍然可见。
+///
+/// 真实链路里 `fail(controller_closed)` 与 `finish()` 紧邻；若 `finish` 直接
+/// 覆盖为 `Closed`，SSE watch 只观察到终态，宿主只能看到无原因的 `closed`。
+#[test]
+fn failed_session_keeps_failure_across_teardown() {
+    let documents = Arc::new(AppDocuments::new(AppDocument::placeholder()));
+    let session = ViewSession::new(
+        "failed-session".to_owned(),
+        "http://127.0.0.1/apps".to_owned(),
+        CancellationToken::new(),
+        documents,
+    );
+    session.fail("controller_closed", "the page controller socket closed");
+    session.finish();
+    let status = session.status();
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["code"], "controller_closed");
+    assert_eq!(
+        status["message"], "the page controller socket closed",
+        "失败原因不能退化为无原因的 closed"
+    );
+}
+
+/// 正常关闭仍落到 `Closed`。
+#[test]
+fn clean_session_finishes_as_closed() {
+    let documents = Arc::new(AppDocuments::new(AppDocument::placeholder()));
+    let session = ViewSession::new(
+        "clean-session".to_owned(),
+        "http://127.0.0.1/apps".to_owned(),
+        CancellationToken::new(),
+        documents,
+    );
+    session.finish();
+    assert_eq!(session.status()["state"], "closed");
+}
+
+/// A5：浏览器（Kitesurf）中途退出时，宿主必须收到带失败码的 `state failed`，
+/// 而不是只有无原因的 `closed`。
+///
+/// teardown 先 cancel stop 再 finish；SSE pump 的 biased select 会先观察到
+/// stop，若直接退出就会把失败阶段丢掉。
+#[tokio::test]
+async fn engine_exit_reports_failed_before_closed() -> anyhow::Result<()> {
+    let fixture = Fixture::start(true, Some(TOKEN)).await?;
+    let created = fixture
+        .create("<html><head></head><body>app</body></html>")
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = created.json().await?;
+    let id = created["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    assert_eq!(fixture.wait_ready(&id).await["state"], "ready");
+
+    let mut events = SseClient::open(&fixture.base, &id).await?;
+    events.wait_for("event: meta").await?;
+    // 模拟浏览器进程退出：CDP 连接全部断开。
+    let engine = fixture.engine.as_ref().expect("fake engine");
+    engine.abort_connections();
+
+    let failed = events.wait_for("\"state\":\"failed\"").await?;
+    assert!(failed.contains("controller_closed"), "{failed}");
+    events.wait_for("event: closed").await?;
+    fixture.finish().await;
+    Ok(())
 }

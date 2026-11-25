@@ -420,6 +420,15 @@ fn ready_status() -> ViewEvent {
     })
 }
 
+fn failed_status(code: &str) -> ViewEvent {
+    ViewEvent::Status(ViewSessionStatus {
+        state: "failed".to_string(),
+        code: Some(code.to_string()),
+        frames: 0,
+        pending_requests: 0,
+    })
+}
+
 fn closed(reason: &str) -> ViewEvent {
     ViewEvent::Closed {
         reason: Some(reason.to_string()),
@@ -550,6 +559,42 @@ async fn attach_and_resources_read_never_call_business_tools() {
     assert_eq!(view.ui_resource_mime.as_deref(), Some(MCP_APPS_HTML_MIME));
     assert!(matches!(view.phase, ViewPhase::Closed { .. }));
     assert_eq!(view.frame.as_ref().map(|frame| frame.seq), Some(1));
+}
+
+/// A5：网关先发 failed 再发 closed 时，终态必须保留失败码。
+///
+/// 真实链路里 controller 断开后 teardown 会立即补一个 closed；若 closed
+/// 覆盖 Failed，面板只剩无原因的 closed。
+#[serial_test::serial]
+#[tokio::test]
+async fn failed_status_survives_remote_closed() {
+    seed_view("v1");
+    let rpc = Arc::new(FakeRpc::with_session("session-1"));
+    rpc.set_attach_ok(Some(HTML));
+    *rpc.read_default.lock().unwrap() = Some(Ok(read_response(vec![raw_html(HTML)], 1)));
+    let api = Arc::new(FakeViewApi::default());
+    api.scripts.lock().unwrap().push_back(VecDeque::from(vec![
+        ready_status(),
+        failed_status("controller_closed"),
+        closed("controller_closed"),
+    ]));
+
+    run_view(view_context(
+        "v1",
+        Arc::clone(&rpc) as Arc<dyn AppsRpc>,
+        Arc::clone(&api) as Arc<dyn ViewSessionApi>,
+        CancellationToken::new(),
+    ))
+    .await;
+
+    let state = APPS_STATE.state().read().clone();
+    let view = state.view("v1").expect("view");
+    assert!(
+        matches!(&view.phase, ViewPhase::Failed { code } if code == "controller_closed"),
+        "closed 不得覆盖失败终态: {:?}",
+        view.phase
+    );
+    assert_eq!(view.last_error.as_deref(), Some("controller_closed"));
 }
 
 #[serial_test::serial]
