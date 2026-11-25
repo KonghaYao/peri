@@ -82,9 +82,17 @@ export interface InteractionFactRecord {
         type: "string" | "number" | "integer" | "boolean";
         required: boolean;
     }>;
-    variant?: "ask_user";
+    variant?: "ask_user" | "mcp_url";
     /** 仅 `variant === "ask_user"`；普通 elicitation 继续使用 `fields`。 */
     questions?: InteractionQuestion[];
+    /** 外部 MCP elicitation 的来源与 URL 事实（form 也带 server/tool）。 */
+    mcpElicitation?: {
+        server: string;
+        tool: string;
+        mode: "form" | "url";
+        url?: string;
+        targetHost?: string;
+    };
     formSupport?: "unsupported";
     formReason?: string;
 }

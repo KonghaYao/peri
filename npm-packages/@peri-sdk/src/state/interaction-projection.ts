@@ -44,7 +44,15 @@ type InteractionDisplayRecord = {
     options?: Array<{ optionId: string; name: string }>;
     /** 仅普通 elicitation。 */
     fields?: FormField[];
-    variant?: "ask_user";
+    variant?: "ask_user" | "mcp_url";
+    /** 外部 MCP elicitation 的公开来源；URL 模式没有 fields/questions。 */
+    mcpElicitation?: {
+        server: string;
+        tool: string;
+        mode: "form" | "url";
+        url?: string;
+        targetHost?: string;
+    };
     /** 仅 `variant === "ask_user"`；不回退写入 `fields`。 */
     questions?: InteractionQuestionDisplay[];
     formSupport?: "unsupported";
@@ -171,6 +179,7 @@ export class InteractionProjection {
                 const value = input[key];
                 if (typeof value === "string" && value) record.set(key, value);
             }
+            if (input.mcpElicitation) record.set("mcpElicitation", { ...input.mcpElicitation });
             if (kind === "permission") {
                 if (input.options?.length) {
                     record.set("options", input.options.map((option) => ({ optionId: option.optionId, name: option.name })));

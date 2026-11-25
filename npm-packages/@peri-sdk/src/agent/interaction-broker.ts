@@ -30,6 +30,8 @@ export class InteractionAnswerError extends Error {
 
 interface InteractionBrokerOptions {
     emit: (fact: ChatFact) => void;
+    /** 用户已同意导航后的打开动作；默认浏览器 window.open，Node 只打印链接。 */
+    onOpenUrl?: (url: string) => void;
     /** 当前 turn id；只用于事实展示，不参与身份判定。 */
     currentTurnId?: () => string | null;
     now?: () => string;
@@ -52,6 +54,28 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function nonEmpty(value: unknown): string | null {
     return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+type McpElicitationMarker = {
+    server: string;
+    tool: string;
+    mode: "form" | "url";
+    url?: string;
+};
+
+/** `_meta["io.peri/mcpElicitation"]`：Peri 注入的外部 MCP 来源。 */
+function parseMcpElicitationMarker(raw: unknown): McpElicitationMarker | null {
+    const meta = record(raw);
+    const marker = record(meta?.["io.peri/mcpElicitation"]);
+    const server = nonEmpty(marker?.server);
+    const tool = nonEmpty(marker?.tool);
+    if (!server || !tool) return null;
+    return { server, tool, mode: "form" };
+}
+
+function urlHost(url: string): string {
+    const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(url);
+    return match ? match[1] : url;
 }
 
 function formFields(fields: Array<{
@@ -162,6 +186,15 @@ export class InteractionBroker {
         const sessionId = this.requireSession(value?.sessionId);
         const message = typeof value?.message === "string" ? value.message : "";
         const schema = record(value?.requestedSchema);
+        const marker = parseMcpElicitationMarker(value?._meta);
+        const mcp: McpElicitationMarker | null = marker
+            ? {
+                ...marker,
+                mode: value?.mode === "url" ? "url" : "form",
+                ...(nonEmpty(value?.url) ? { url: nonEmpty(value?.url)! } : {}),
+            }
+            : null;
+        if (mcp?.mode === "url") return this.mcpUrlElicitation(mcp, sessionId, message);
         const parsed = parseAskUserQuestionElicitation(value);
         if (parsed.kind === "invalid") {
             // 形状不合契约的 AskUserQuestion 没有可作答界面：不发布记录，直接拒绝。
@@ -169,7 +202,64 @@ export class InteractionBroker {
             return { action: "decline" } satisfies ElicitationDecision;
         }
         if (parsed.kind === "ask-user") return this.askUserQuestion(parsed.request, sessionId, message);
-        return this.genericElicitation(schema, sessionId, message);
+        return this.genericElicitation(schema, sessionId, message, mcp ?? undefined);
+    }
+
+    /**
+     * 外部 MCP URL：只暴露 server、目标域名与 URL；accept 仅表示同意导航。
+     * 不自动预取，也不在 accept 前打开。
+     */
+    private async mcpUrlElicitation(
+        mcp: McpElicitationMarker,
+        sessionId: string,
+        message: string,
+    ): Promise<ElicitationDecision> {
+        if (!mcp.url) {
+            this.options.emit({ kind: "interactions-expired" });
+            return { action: "decline" };
+        }
+        const id = `interaction:${crypto.randomUUID()}`;
+        const recordFact: InteractionFactRecord = {
+            id,
+            kind: "elicitation",
+            sessionId,
+            title: `${mcp.server} · ${mcp.tool}`,
+            message,
+            variant: "mcp_url",
+            mcpElicitation: {
+                server: mcp.server,
+                tool: mcp.tool,
+                mode: "url",
+                url: mcp.url,
+                targetHost: urlHost(mcp.url),
+            },
+            ...(this.turnId() ? { turnId: this.turnId()! } : {}),
+        };
+        const decision = await this.awaitAnswer<ElicitationDecision>(
+            id,
+            "elicitation",
+            sessionId,
+            recordFact,
+            (answer) => answer.kind === "elicitation" ? answer.decision : null,
+            () => ({ action: "decline" }),
+            (value) => value.action,
+        );
+        if (decision.action === "accept") this.openExternalUrl(mcp.url);
+        return decision;
+    }
+
+    private openExternalUrl(url: string): void {
+        if (this.options.onOpenUrl) {
+            this.options.onOpenUrl(url);
+            return;
+        }
+        const browser = (globalThis as { window?: { open?: (url: string, target?: string, features?: string) => unknown } }).window;
+        if (browser?.open) {
+            browser.open(url, "_blank", "noopener,noreferrer");
+            return;
+        }
+        // Node/headless：只输出可复制链接，不启动浏览器。
+        console.info(`[peri-sdk] Open URL: ${url}`);
     }
 
     private async askUserQuestion(
@@ -207,6 +297,7 @@ export class InteractionBroker {
         schema: Record<string, unknown> | null,
         sessionId: string,
         message: string,
+        mcp?: McpElicitationMarker,
     ): Promise<ElicitationDecision> {
         const id = `interaction:${crypto.randomUUID()}`;
         const form = evaluateElicitationForm(schema);
@@ -217,6 +308,15 @@ export class InteractionBroker {
             title: "需要你的输入",
             message,
             fields: formFields(form.fields),
+            ...(mcp
+                ? {
+                    mcpElicitation: {
+                        server: mcp.server,
+                        tool: mcp.tool,
+                        mode: "form" as const,
+                    },
+                }
+                : {}),
             ...(form.supported ? {} : { formSupport: "unsupported", formReason: form.reason }),
             ...(this.turnId() ? { turnId: this.turnId()! } : {}),
         };
