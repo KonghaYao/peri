@@ -554,10 +554,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         for target in result.build_only:
             print(f"  B {target.package:22} {target.kind:5} {target.name}")
         doctest_packages = sorted(result.workspace_packages - result.doctest_excluded)
-        print(
-            f"doctests   {len(doctest_packages)} package(s)  "
-            f"(不执行: {' '.join(sorted(result.doctest_excluded))})"
-        )
+        if result.doctest_excluded:
+            doctest_note = f"不执行: {' '.join(sorted(result.doctest_excluded))}"
+        else:
+            doctest_note = "不排除任何包"
+        print(f"doctests   {len(doctest_packages)} package(s)  ({doctest_note})")
 
         for message in result.errors:
             print(f"::error::{message}", file=sys.stderr)

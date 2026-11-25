@@ -272,15 +272,12 @@ jobs:
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_authority_projection_test)'
 
-            # 提示：下方 --exclude 会改变 resolver=3 的特性统一导致部分依赖重编。
-            # 经核查 peri-acp / peri-tui / peri-middlewares 均无可执行 Rust doctest（只有 text/json/ignore）；
-            # 若同步把 scripts/ci-test-inventory.sh 中 doctest_excluded 改为 ()，
-            # 这里去掉三个 --exclude 即可做到 doctest 零重编（当前保留以 100% 通过现有 inventory 检查）。
-            - name: Run doctests (excluding ACP, TUI and middleware)
+            # 三个历史排除包（peri-acp / peri-tui / peri-middlewares）经核查只有 text/json/ignore
+            # 形态的 fence，没有可执行 Rust doctest。不加 --exclude 才能与 nextest 主调用共享同一份
+            # resolver=3 特性投影，避免 doctest 触发依赖重编；inventory 的 doctest_excluded 同步为空。
+            - name: Run doctests (all workspace packages)
               shell: bash
-              run: >-
-                  cargo test --doc --locked --workspace
-                  --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
+              run: cargo test --doc --locked --workspace
 
     # 离线录放业务回归：修复缺失补丁配置导致的缓存失效，与 Build (ubuntu-latest) 共享
     # 同一套 Linux 依赖缓存 + mold 链接器，同时保持并行执行不拉长 PR 端到端耗时。

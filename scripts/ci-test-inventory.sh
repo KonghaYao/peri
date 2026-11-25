@@ -71,13 +71,10 @@ step_includes=(
     'peri-agent:test:compact_authority_projection_test'
 )
 
-# doctest 步骤的范围：`cargo test --doc --workspace --exclude ...`。
-# nextest 不支持 doctest，因此单独一个入口，与 nextest 同 job 内共享编译。
-doctest_excluded=(
-    peri-acp
-    peri-tui
-    peri-middlewares
-)
+# doctest 步骤的范围：`cargo test --doc --workspace`（不加 --exclude）。
+# nextest 不支持 doctest，因此单独一个入口；三个历史排除包经核查没有可执行 Rust
+# doctest，去掉排除后与 nextest 主调用共享同一份 resolver=3 特性投影，避免重编。
+doctest_excluded=()
 
 # 必跑套件（--check 的判据）。ARC-COMPACT-001 要求 Compact 对抗套件真实执行
 # 且各自命中非零用例，因此它们单列而不是依赖通配。
@@ -138,7 +135,7 @@ cargo metadata --no-deps --format-version 1 > "$metadata_file"
 WORKFLOW="$workflow" \
 EXCLUDED_TARGETS="$(printf '%s\n' "${main_excluded[@]}")" \
 INCLUDES="$(printf '%s\n' "${step_includes[@]}")" \
-DOCTEST_EXCLUDED="$(printf '%s\n' "${doctest_excluded[@]}")" \
+DOCTEST_EXCLUDED="$(printf '%s\n' "${doctest_excluded[@]:-}")" \
 REQUIRED="$(printf '%s\n' "${required_suites[@]}")" \
 PER_BINARY="$(printf '%s\n' "${per_binary_suites[@]}")" \
 AS_JSON="$as_json" \

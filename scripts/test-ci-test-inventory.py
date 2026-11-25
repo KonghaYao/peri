@@ -39,7 +39,7 @@ REQUIRED = [
     "peri-model:test:responses_wire_test",
 ]
 PER_BINARY = list(EXCLUDED)
-DOCTEST_EXCLUDED = {"peri-acp", "peri-tui"}
+DOCTEST_EXCLUDED: set[str] = set()
 
 
 def render_workflow(expressions: list[str], doctest: bool = True) -> str:
@@ -57,8 +57,7 @@ def render_workflow(expressions: list[str], doctest: bool = True) -> str:
             "      - name: doctests",
             "        shell: bash",
             "        run: >-",
-            "            cargo test --doc --workspace "
-            "--exclude peri-acp --exclude peri-tui",
+            "            cargo test --doc --workspace",
         ]
     return "\n".join(lines) + "\n"
 
@@ -313,7 +312,12 @@ class InventoryEvaluationTests(unittest.TestCase):
         )
 
     def test_doctest_exclusions_must_match_manifest(self):
-        result = self.evaluate(self.normal_text.replace("--exclude peri-tui", ""))
+        result = self.evaluate(
+            self.normal_text.replace(
+                "cargo test --doc --locked --workspace",
+                "cargo test --doc --locked --workspace --exclude peri-acp",
+            )
+        )
         self.assertTrue(
             any("doctest 排除包与 doctest_excluded 不一致" in error for error in result.errors),
             result.errors,
