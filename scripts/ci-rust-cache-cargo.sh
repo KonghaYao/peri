@@ -8,6 +8,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ "${1:-}" == "cargo" && "${2:-}" == "metadata" ]]; then
+    # 首次调用会解包并打补丁，GNU patch 的 "patching file …" 会写到 stdout，
+    # 污染 rust-cache 对 metadata JSON 的解析（成员清单为空，key 少算 manifest）。
+    # 先静默预热一次，正式调用的 stdout 只剩 JSON。
+    "$repo_root/scripts/cargo-rmcp-patched.sh" --version >/dev/null 2>&1 || true
     shift
     exec "$repo_root/scripts/cargo-rmcp-patched.sh" "$@"
 fi

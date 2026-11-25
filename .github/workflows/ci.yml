@@ -127,10 +127,10 @@ jobs:
             # 裸 cargo 解析失败后 cleanTargetDir 按空依赖集清理，缓存只剩 ~11MB，
             # 依赖每轮全量重编。cmd-format 仅 Linux 把 metadata 转交带补丁配置的
             # scripts/ci-rust-cache-cargo.sh，其余平台保持 {0}。
-            # cache-workspace-crates 仅 Linux 打开作对照：恢复的 workspace 产物会被
-            # 源码 mtime 指纹作废（本工作区几乎每次提交都有 crate 变化），实测无净收益
-            # 即回退；cache-all-crates 三平台保持默认 false（本 job 没有 CI 内额外
-            # 编译的 crate）。
+            # cache-workspace-crates 已在 Linux 实测：恢复的 workspace 产物会被源码
+            # mtime 指纹全部作废（首次 nextest 仍重编 34 个 crate），只增加归档与
+            # 解包成本，故维持默认 false；cache-all-crates 三平台保持 false
+            # （本 job 没有 CI 内额外编译的 crate）。
             #
             # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
             # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
@@ -144,7 +144,6 @@ jobs:
               with:
                   key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-linux-cache-v1' || '' }}
                   cmd-format: ${{ runner.os == 'Linux' && 'bash scripts/ci-rust-cache-cargo.sh {0}' || '{0}' }}
-                  cache-workspace-crates: ${{ runner.os == 'Linux' }}
                   save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/ubuntu-build-cache' }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
@@ -153,6 +152,34 @@ jobs:
               uses: taiki-e/install-action@v2
               with:
                   tool: nextest@0.9.148
+
+            # 实验：Linux 用 sccache 的 GitHub Actions 后端缓存 rustc 产物。
+            # sccache 只缓存 lib/check 单元（test/bin/proc-macro 与最终链接不可缓存），
+            # 并与 rust-cache 共用 10 GB 缓存池；是否保留由冷/热两跑净收益决定。
+            # 环境变量放在缓存步骤之后，避免 RUSTC_WRAPPER 进入 rust-cache 的 env hash。
+            - name: Install sccache
+              if: runner.os == 'Linux'
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: sccache@0.20.1
+
+            - name: Configure sccache storage tokens
+              if: runner.os == 'Linux'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+                      core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+            - name: Enable sccache
+              if: runner.os == 'Linux'
+              run: |
+                  {
+                      echo "RUSTC_WRAPPER=sccache"
+                      echo "SCCACHE_GHA_ENABLED=true"
+                      echo "SCCACHE_GHA_VERSION=v1"
+                      echo "SCCACHE_GHA_RW_MODE=${{ (github.ref == 'refs/heads/main' || github.head_ref == 'ci/ubuntu-build-cache') && 'READ_WRITE' || 'READ_ONLY' }}"
+                  } >> "$GITHUB_ENV"
 
             # 统一测试入口：所有测试步骤共用同一组 Cargo 选择（--locked --workspace），
             # 测试范围差异只落在 nextest 的 `-E` 过滤器上，因此整个 job 内依赖图、
