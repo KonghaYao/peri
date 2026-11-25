@@ -554,7 +554,9 @@ impl UserInteractionBroker for SlowAcceptBroker {
     }
 }
 
-#[tokio::test]
+// 虚拟时钟：20ms 工具 deadline 必须真的先到点，且不依赖真实计时精度——
+// Windows 定时器粒度（约 15ms）会让「20ms 到点 / 150ms 作答」的真实等待翻转。
+#[tokio::test(start_paused = true)]
 async fn elicitation_activity_renews_the_tool_deadline() {
     let router = ElicitationRouter::new("reverse-fixture", 1);
     let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
