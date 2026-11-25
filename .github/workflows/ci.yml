@@ -120,11 +120,17 @@ jobs:
             # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
             # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
             # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
-            # cache-workspace-crates 与 cache-all-crates 均保持默认 false（已评估，不启用）：
-            # 前者恢复来的产物会被源码指纹立刻作废（本工作区的 crate 几乎每次提交都在变），
-            # 却把清理、压缩、上传的成本按整个 target 计（现 Windows 单平台已约 1.1GB）；
-            # 后者只对本仓在 CI 内额外编译的 crate 有意义，而本 job 没有这类编译
-            # （跨平台工具链由预编译产物安装），故无收益。
+            #
+            # Linux 试验（Ubuntu 缓存提速，数据见 PR 正文）：rust-cache 保存阶段用裸
+            # `cargo metadata --all-features` 收集依赖集；peri-resources 的
+            # emscripten-only `wasm-fetch` 特性只存在于 patches/ 的本地补丁，
+            # 裸 cargo 解析失败后 cleanTargetDir 按空依赖集清理，缓存只剩 ~11MB，
+            # 依赖每轮全量重编。cmd-format 仅 Linux 把 metadata 转交带补丁配置的
+            # scripts/ci-rust-cache-cargo.sh，其余平台保持 {0}。
+            # cache-workspace-crates 仅 Linux 打开作对照：恢复的 workspace 产物会被
+            # 源码 mtime 指纹作废（本工作区几乎每次提交都有 crate 变化），实测无净收益
+            # 即回退；cache-all-crates 三平台保持默认 false（本 job 没有 CI 内额外
+            # 编译的 crate）。
             #
             # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
             # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
@@ -132,11 +138,14 @@ jobs:
             # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
             # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
             # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
+            # 实验期间临时允许本分支写缓存；最终提交恢复为仅 main。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
-                  key: ${{ matrix.target }}
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
+                  key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-linux-cache-v1' || '' }}
+                  cmd-format: ${{ runner.os == 'Linux' && 'bash scripts/ci-rust-cache-cargo.sh {0}' || '{0}' }}
+                  cache-workspace-crates: ${{ runner.os == 'Linux' }}
+                  save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/ubuntu-build-cache' }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
             # 三条平台都由 GitHub Releases 的预编译产物安装（不源码编译）。
