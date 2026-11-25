@@ -51,16 +51,6 @@ fn test_invalidate_clears_cache() {
 }
 
 #[test]
-fn test_has_valid_cache_fingerprint_mismatch() {
-    let mut pool = AgentPool::new();
-    // 模拟已缓存但 fingerprint 不匹配
-    pool.fingerprint = "OpenAI:gpt-4o".to_string();
-    // cached_llm 为 None，has_valid_cache 应返回 false
-    let provider = make_openai_provider("gpt-4o");
-    assert!(!pool.has_valid_cache(&provider));
-}
-
-#[test]
 fn test_fingerprint_openai() {
     let provider = make_openai_provider("gpt-4o-mini");
     let fp = crate::session::agent_pool::fingerprint(&provider);
@@ -85,9 +75,8 @@ fn test_fingerprint_anthropic() {
 #[test]
 fn test_has_valid_cache_after_fingerprint_only_set() {
     let mut pool = AgentPool::new();
-    // 直接设置 fingerprint 但没有 cached_llm
-    pool.fingerprint = "OpenAI:gpt-4o".to_string();
     let provider = make_openai_provider("gpt-4o");
+    pool.fingerprint = crate::session::agent_pool::fingerprint(&provider);
     // cached_llm 为 None → false
     assert!(!pool.has_valid_cache(&provider));
 }

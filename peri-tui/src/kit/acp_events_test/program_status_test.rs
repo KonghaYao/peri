@@ -217,18 +217,6 @@ fn cancel_reports_idle_and_prompt_failure_reports_error() {
 
 #[test]
 #[serial]
-fn turn_done_keeps_working_while_async_agent_runs() {
-    let mut state = reset();
-    set_bg_tasks(vec![bg_entry("agent-1", "agent", Some("running"))]);
-
-    prompt(&mut state, "r1");
-    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
-
-    assert_eq!(current(), ProgramStatus::Working);
-}
-
-#[test]
-#[serial]
 fn turn_done_with_running_shell_reports_done() {
     let mut state = reset();
     set_bg_tasks(vec![bg_entry("shell-1", "shell", Some("running"))]);

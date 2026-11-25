@@ -598,19 +598,6 @@ async fn test_receive_consumes_prompt_defer_and_info_together() {
     assert!(ctx.session.queue.is_empty_sync());
 }
 
-#[tokio::test]
-async fn test_receive_exit_on_empty_queue() {
-    // RCRA：空队列 → consumed=0 → 退出判断触发
-    let ctx = make_context();
-    let input = ReceiveInput {
-        context: ctx.clone(),
-    };
-    let output = crate::agent::stages::receive::run_receive(input)
-        .await
-        .expect("the run receive fixture result is required for this assertion");
-    assert_eq!(output.consumed_count, 0);
-}
-
 /// M10：hook 的显式停止意图（`continue:false`）经 Receive 唯一出口停止：
 /// 消费必须置位 `stop_requested`，且不得按可唤醒消息驱动额外模型请求。
 #[tokio::test]

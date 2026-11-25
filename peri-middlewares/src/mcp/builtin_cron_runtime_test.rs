@@ -79,7 +79,7 @@ fn counting_driver(
 /// ② `shutdown` 必须是 `Joined`，且 task 确实走到终点（`stopped` 已触发）；
 /// ③ 反控：已 join 的一代不得再驱动（计数冻结）、到期任务也不得再自行触发；
 /// ④ 同一结论由 `BuiltinInstanceSupervisor::close` 承载（tick 侧没有第二条关闭路径）。
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn tick_shutdown_joins_task_and_stops_triggers() {
     let (scheduler, mut triggers) = scheduler_fixture();
     let task_id = scheduler
@@ -172,7 +172,7 @@ async fn tick_shutdown_joins_task_and_stops_triggers() {
 /// 的窗口跨过的边界数按调度抖动为 2~3（最多吞掉一个边界）。
 /// 证伪逻辑：任一窗口若有两个驱动并存，两个驱动各自 ≈1 次/interval ⇒ 计数 ≈2N（N=3 时
 /// ≈6），远超上界 3——上界能拒掉双驱动，不是「宽到什么都测不出」。
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn tick_reconnect_has_single_driver_per_interval() {
     let (scheduler, _triggers) = scheduler_fixture();
     let ticks = Arc::new(AtomicUsize::new(0));

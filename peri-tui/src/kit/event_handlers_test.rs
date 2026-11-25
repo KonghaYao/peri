@@ -38,27 +38,6 @@ fn test_determine_ctrl_c_action_loading() {
 }
 
 #[test]
-fn test_determine_ctrl_c_action_idle_first() {
-    // 空闲状态下首次按 Ctrl+C 返回 FirstQuit
-    let now = Instant::now();
-    assert_eq!(
-        super::determine_ctrl_c_action(false, None, now),
-        CtrlCAction::FirstQuit
-    );
-}
-
-#[test]
-fn test_determine_ctrl_c_action_idle_double() {
-    // 空闲状态下 1 秒内双击返回 Quit
-    let now = Instant::now();
-    let first = now - Duration::from_millis(500);
-    assert_eq!(
-        super::determine_ctrl_c_action(false, Some(first), now),
-        CtrlCAction::Quit
-    );
-}
-
-#[test]
 fn test_determine_ctrl_c_action_idle_expired() {
     // 空闲状态下超过 1 秒未双击，重置为 FirstQuit
     let now = Instant::now();

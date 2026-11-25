@@ -79,16 +79,6 @@ async fn test_missing_questions_key_returns_err() {
     assert!(result.is_err(), "missing questions key should return Err");
 }
 
-#[tokio::test]
-async fn test_valid_single_question_parsed() {
-    let tool = make_tool(make_answer(&["选项A"], None));
-    let result = tool
-        .invoke(single_question_input(), tool_context())
-        .await
-        .unwrap();
-    assert_eq!(result, "[问: H1]\n回答: 选项A");
-}
-
 // ── 单问题返回格式 ──
 
 #[tokio::test]

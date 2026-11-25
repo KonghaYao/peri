@@ -31,6 +31,10 @@
 #
 # 用法：
 #   bash scripts/changed-crate-args.sh [--direct-only] [--staged-only]
+#   bash scripts/changed-crate-args.sh --ci-pr BASE_SHA
+#   CI compares the checked-out merge commit to its base parent. Only ordinary
+#   Rust source/test edits and verified package assets are eligible; unknown
+#   inputs fall back to --workspace.
 #   CHANGED_DIFF_FILES=$'peri-agent/src/lib.rs\nmcp-packages/cron/src/lib.rs' \
 #     bash scripts/changed-crate-args.sh              # 测试注入，跳过 git
 #
@@ -50,10 +54,13 @@ cd "$repo_root"
 
 direct_only=0
 staged_only=0
+ci_pr=0
+ci_base=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --direct-only) direct_only=1 ;;
         --staged-only) staged_only=1 ;;
+        --ci-pr) ci_pr=1; ci_base="${2:?--ci-pr requires a base SHA}"; shift ;;
         -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
         *)
             echo "changed-crate-args.sh: 未知参数 $1" >&2
@@ -63,9 +70,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-DIRECT_ONLY="$direct_only" STAGED_ONLY="$staged_only" python3 - <<'PYTHON'
+DIRECT_ONLY="$direct_only" STAGED_ONLY="$staged_only" CI_PR="$ci_pr" CI_BASE="$ci_base" python3 - <<'PYTHON'
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -73,6 +81,7 @@ import sys
 root = os.getcwd()
 direct_only = os.environ.get("DIRECT_ONLY") == "1"
 staged_only = os.environ.get("STAGED_ONLY") == "1"
+ci_pr = os.environ["CI_PR"] == "1"
 
 
 def git_paths(*args):
@@ -82,7 +91,27 @@ def git_paths(*args):
     return [os.fsdecode(path) for path in data.split(b"\0") if path]
 
 
-if "CHANGED_DIFF_FILES" in os.environ:
+if ci_pr:
+    try:
+        doc_rules = Path("scripts/ci-docs-only-patterns.txt").read_text().splitlines()
+        docs = [re.compile(rule) for rule in doc_rules if rule]
+        parent = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD^1"],
+            cwd=root, text=True, stderr=subprocess.PIPE,
+        ).strip()
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^2"], cwd=root, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        if parent != os.environ["CI_BASE"] or direct_only or staged_only:
+            raise ValueError("PR merge base parent or selection mode does not match")
+        changed = git_paths("diff", "--no-renames", "--name-only", "-z", parent, "HEAD", "--")
+        files = [path for path in changed if not any(rule.search(path) for rule in docs)]
+    except (OSError, ValueError, re.error, subprocess.CalledProcessError) as exc:
+        print(f"[changed-crate-args] full workspace: {exc}", file=sys.stderr)
+        print("--workspace")
+        sys.exit(0)
+elif "CHANGED_DIFF_FILES" in os.environ:
     # 测试入口按换行分隔，但保留每个路径的空白。
     files = [path for path in os.environ["CHANGED_DIFF_FILES"].split("\n") if path]
 else:
@@ -116,6 +145,14 @@ if any(f in BUILD_INPUT_FILES or f.startswith(BUILD_INPUT_DIRS) for f in files):
     sys.exit(0)
 
 if not files:
+    if ci_pr:
+        print("--workspace")
+    sys.exit(0)
+
+# The terminal tests in peri-mcp-workspace import this file with #[path].
+# Cargo metadata therefore has no dependency edge for this shared test input.
+if ci_pr and "peri-middlewares/src/at_mention/work_fixture.rs" in files:
+    print("--workspace")
     sys.exit(0)
 
 try:
@@ -147,6 +184,15 @@ def owner_of(path):
 direct = []
 for path in files:
     name = owner_of(path)
+    if ci_pr:
+        relative = path[len(members[name]) + 1:] if name else ""
+        rust_source = relative.startswith(("src/", "tests/")) and relative.endswith(".rs")
+        tui_locale = name == "peri-tui" and relative in {
+            "locales/en/main.ftl", "locales/zh-CN/main.ftl",
+        }
+        if not (rust_source or relative == "README.md" or tui_locale):
+            print("--workspace")
+            sys.exit(0)
     if name and name not in direct:
         direct.append(name)
 
@@ -167,6 +213,12 @@ if not direct_only:
                 seen.add(dependent)
                 stack.append(dependent)
     direct = sorted(seen)
+    # Keep all four Compact gates for Agent changes. A wasm-only change, or a
+    # future standalone crate with no known native tests, also uses the full job.
+    native_suites = {"peri-tui", "peri-swarm", "peri-browser-gateway"}
+    if ci_pr and ("peri-agent" in seen or seen.isdisjoint(native_suites)):
+        print("--workspace")
+        sys.exit(0)
     if len(direct) == len(members):
         print("--workspace")
         sys.exit(0)

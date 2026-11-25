@@ -1,10 +1,11 @@
 # cargo nextest 配置：把「测试选择」与「Cargo 编译图」分离。
 #
-# CI 里所有 nextest 调用都使用同一组 Cargo 参数（`--locked --workspace`），
+# 全量 CI 的所有 nextest 调用都使用同一组 Cargo 参数（`--locked --workspace`），
 # 各步骤的测试范围差异只落在命令行 `-E` 过滤器上。nextest 的构建阶段不参与过滤
 # （先按 `cargo test --no-run` 语义构建全部测试二进制，再决定运行哪些），因此
 # 包集合、target、profile 与 feature 投影在整个 job 内保持恒定，步骤切换不再
-# 触发依赖重编译。
+# 触发依赖重编译。按影响范围选包的原生平台 PR job 只调用一次 nextest，
+# 并对同一组包运行 doctest。
 #
 # 这里只放「跨步骤共享、且与 Cargo 选择无关」的规则；每个步骤的范围写在
 # .github/workflows/ci.yml 对应步骤的 `-E` 里，便于就地 review。

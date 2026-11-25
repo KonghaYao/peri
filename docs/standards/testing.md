@@ -455,11 +455,13 @@ worldDrift 压到 0。通用 re-anchor 脚本已被 ref + source-anchored 取代
 
 ### 8.4 CI nextest profile 与超时护栏
 
-CI 的 Rust 测试是「一次主调用（`--workspace --profile ci`，排除 Compact 四套对抗）+ 四次逐 binary 门禁」；配置在 [.config/nextest.toml](../../.config/nextest.toml)，执行范围由 `scripts/ci-test-inventory.sh --check` 与 workflow 双向核对。`[profile.ci]` 继承 `[profile.default]` 的 `default-filter`、`overrides` 与 `test-groups`，只追加护栏：
+全量 CI 的 Rust 测试是「一次主调用（`--workspace --profile ci`，排除 Compact 四套对抗）+ 四次逐 binary 门禁」；配置在 [.config/nextest.toml](../../.config/nextest.toml)，执行范围由 `scripts/ci-test-inventory.sh --check` 与 workflow 双向核对。`[profile.ci]` 继承 `[profile.default]` 的 `default-filter`、`overrides` 与 `test-groups`，只追加护栏：
 
 - `slow-timeout = { period = "60s", terminate-after = 2, grace-period = "10s" }`：单测试超过 60s 标记 slow，累计约 120s 后终止，再留 10s 收集输出（Windows 忽略 grace）。挂起用例按失败暴露，不等到 job 的 `timeout-minutes`。
 - `global-timeout = "50m"`：整轮测试上限；job 的 60 分钟仍是最后兜底。
 - `retries = 0`、`fail-fast = false`：不用重试掩盖 flake，一次挂起也不遮蔽其余用例的失败。
+
+普通源码 PR 的 Linux job 执行全量。macOS / Windows 扣除已有文档白名单后，若剩余变更全部为 workspace 成员的 Rust 源码或测试（`src/**/*.rs`、`tests/**/*.rs`）、成员根 `README.md`，或 TUI 内嵌的中英文 `main.ftl`，则运行受影响包及其所有反向依赖的 nextest 与 doctest。依赖图包含开发、构建、可选和平台依赖。依赖闭包涉及 `peri-agent`、改动跨包直接引用的终端测试夹具、选区缺少已知原生测试入口、基线无法核实或含其他路径时，三平台均全量。推送到主分支和预发布分支也走三平台全量。PR 的分类摘要记录实际选包；Linux 的四个 Compact 独立门禁始终执行（纯文档跳过规则沿用上节）。
 
 已确认超过 120s 的用例在 `[[profile.ci.overrides]]` 放宽到 2×120s，按测试名精确匹配（`#[path]` 引入的模块名不等于文件名，例如 `kit::steer_consumer::tests`）。新增 override 前先确认过滤器实际命中的测试，不要按包整体放宽。
 

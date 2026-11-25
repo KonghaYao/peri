@@ -2,8 +2,8 @@
 # CI 变更分类：判断一次运行是否只改了「已确认不影响构建与测试」的文档路径。
 #
 # 只有**全部**受影响路径都落在白名单内才判定 docs-only；任何一处落在白名单外、
-# 状态码不认识、或 base 版本无法解析，都回退为完整验证。文档与代码混改因此天然
-# 走完整验证，不需要额外规则。
+# 状态码不认识、或 base 版本无法解析，都不会跳过构建。原生平台 PR job 的包范围
+# 另由 changed-crate-args.sh --ci-pr 根据合并树和 Cargo 依赖图确定。
 #
 # 白名单刻意不用 `**/*.md` 全局匹配：crate 内的 `descriptions/*.md`、`SKILL.md`
 # 等是 `include_str!` 的构建输入，改它们必须触发验证。白名单只列经核实「CI 不读」
@@ -47,14 +47,10 @@ done
 
 # ─── 白名单：改动这些路径不影响构建与测试 ────────────────────────────────────
 # 新增条目必须能回答「CI 的哪一步读它」；答不上来才允许加入。
-docs_only_patterns=(
-    '^README\.md$'
-    '^CHANGELOG\.md$'
-    '^LICENSE$'
-    '^\.github/README\.md$'
-    '^docs/'
-    '^spec/'
-)
+docs_only_patterns=()
+while IFS= read -r pattern; do
+    docs_only_patterns+=("$pattern")
+done < "$(dirname "${BASH_SOURCE[0]}")/ci-docs-only-patterns.txt"
 
 # ─── 解析 base 版本并取一份 `git diff --name-status -M -z` 输出 ──────────────
 docs_only="false"

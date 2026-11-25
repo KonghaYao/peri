@@ -1,0 +1,6 @@
+^README\.md$
+^CHANGELOG\.md$
+^LICENSE$
+^\.github/README\.md$
+^docs/
+^spec/

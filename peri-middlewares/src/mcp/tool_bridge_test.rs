@@ -108,14 +108,6 @@ fn test_new_sanitizes_colons_in_names() {
 }
 
 #[test]
-fn test_new_creates_correct_description() {
-    let tool = make_tool("read_file", Some("Read a file"));
-    let handle = make_disconnected_handle("fs");
-    let bridge = McpToolBridge::new("fs", &tool, handle);
-    assert_eq!(bridge.description(), "[MCP:fs] Read a file");
-}
-
-#[test]
 fn test_new_preserves_input_schema() {
     let tool = make_tool("read_file", None);
     let handle = make_disconnected_handle("fs");

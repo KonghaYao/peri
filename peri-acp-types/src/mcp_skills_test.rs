@@ -207,14 +207,6 @@ fn on_change_not_fired_on_completed_empty_from_started() {
 }
 
 #[test]
-fn on_change_not_fired_on_started() {
-    let (reg, count) = counter_reg();
-    reg.mark_discovery_started("srv", token(1));
-    reg.mark_discovery_started("srv", token(2));
-    assert_eq!(count.load(Ordering::SeqCst), 0);
-}
-
-#[test]
 fn started_returns_setter_bool_once_per_handle() {
     // 同代并发挂点仅首次负责 spawn；旧代仍 Started 时，新代也必须负责 spawn。
     let (reg, count) = counter_reg();

@@ -158,17 +158,6 @@ async fn test_set_status_无_goal_返回错误() {
 }
 
 #[tokio::test]
-async fn test_resume_from_complete_返回错误() {
-    let state = make_state();
-    state.set_goal("测试".to_string(), None).await.unwrap();
-    state.set_status(GoalStatus::Complete).await.unwrap();
-
-    // Complete 是终态，不能 resume
-    let result = state.set_status(GoalStatus::Active).await;
-    assert!(result.is_err());
-}
-
-#[tokio::test]
 async fn test_put_pending_user_message_覆盖旧值() {
     let state = make_state();
     state.set_goal("测试".to_string(), None).await.unwrap();

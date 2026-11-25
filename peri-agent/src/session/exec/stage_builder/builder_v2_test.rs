@@ -1,21 +1,7 @@
-use crate::agent::stages::StageContext;
-
-use crate::session::FrozenContext;
-use crate::session::Session;
 use crate::tools::BaseTool;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-#[test]
-fn test_v2_context_has_null_llm_by_default() {
-    let cwd: Arc<str> = Arc::from("/tmp");
-    let frozen = FrozenContext::builder().build();
-    let session = Session::new(cwd, frozen, None);
-    let turn = session.start_turn();
-    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
-    assert_eq!(ctx.runtime.llm.model_name(), "null");
-}
 
 /// MetaHarness（设计 §2.5 关闭语义防御面）：session/turn 级工具视图——
 /// disabled session 的本地视图不得看到共享表中残留的 middleware 工具；

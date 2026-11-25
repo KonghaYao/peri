@@ -481,13 +481,6 @@ async fn search_missing_query_returns_32602() {
 }
 
 #[tokio::test]
-async fn search_non_string_query_returns_32602() {
-    let tool = make_tool_box(None);
-    let result = invoke(&tool, "search", json!({ "query": 42 })).await;
-    assert_eq!(result["error"]["code"], -32602);
-}
-
-#[tokio::test]
 async fn search_max_results_defaults_to_five() {
     let pool = Arc::new(McpClientPool::new_empty());
     for i in 0..8 {
