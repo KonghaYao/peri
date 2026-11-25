@@ -107,14 +107,18 @@ impl ElicitationRouter {
     }
 
     /// 注册一次 active 工具调用；lease drop 时移除并取消仍在等待的交互。
+    ///
+    /// `parent_cancellation` 是调用方的取消信号；lease 持有其子令牌，Drop 只取消
+    /// 子令牌——否则一次工具结束会连带取消整个 turn 的取消令牌。
     pub(crate) fn register(
         self: &Arc<Self>,
         session_id: impl Into<String>,
         tool: impl Into<String>,
         owner: TrustedInteractionOwner,
         broker: Arc<dyn UserInteractionBroker>,
-        cancellation: CancellationToken,
+        parent_cancellation: CancellationToken,
     ) -> ElicitationLease {
+        let cancellation = parent_cancellation.child_token();
         let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
         tracing::trace!(
             server = %self.server,
@@ -488,6 +492,26 @@ mod tests {
         drop(lease);
         assert!(matches!(router.resolve(), RouteResolution::NoActiveCall));
         assert_eq!(router.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_lease_does_not_cancel_parent_token() {
+        let router = ElicitationRouter::new("srv", 1);
+        let parent = CancellationToken::new();
+        let lease = router.register(
+            "session-1",
+            "tool-1",
+            owner(),
+            StubBroker::new(InteractionResponse::Elicitation(
+                ElicitationDecision::Decline,
+            )),
+            parent.clone(),
+        );
+        drop(lease);
+        assert!(
+            !parent.is_cancelled(),
+            "工具调用结束只能取消本 lease 的子令牌，不得取消调用方的父令牌"
+        );
     }
 
     #[tokio::test]
