@@ -309,3 +309,151 @@ fn click_target_requires_frame_and_gateway_session() {
     no_session.view_session_id = None;
     assert!(click_target(&no_session, area, cell, 20, 8).is_none());
 }
+
+// ── 面板内列表模式（A6：同时打开两个视图的入口）─────────────────────────────
+
+#[test]
+fn list_entry_key_toggles_only_when_views_exist() {
+    let none = KeyModifiers::NONE;
+    assert_eq!(
+        apps_key_action(KeyCode::Char('o'), none, true, false, 1),
+        AppsKeyAction::ToggleList,
+        "有视图时 o 进入列表"
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Char('o'), none, true, true, 1),
+        AppsKeyAction::ToggleList,
+        "列表模式下 o 退出列表"
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Char('o'), none, false, false, 1),
+        AppsKeyAction::Ignored,
+        "无视图时 o 不响应（descriptor 列表已是默认界面）"
+    );
+}
+
+#[test]
+fn list_mode_routes_arrows_and_enter_to_descriptors() {
+    let none = KeyModifiers::NONE;
+    assert_eq!(
+        apps_key_action(KeyCode::Up, none, true, true, 2),
+        AppsKeyAction::SelectPrev
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Down, none, true, true, 2),
+        AppsKeyAction::SelectNext
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Enter, none, true, true, 2),
+        AppsKeyAction::OpenSelected
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Down, none, true, false, 2),
+        AppsKeyAction::Ignored,
+        "非列表模式下方向键不移动被隐藏列表的选中项"
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Enter, none, true, false, 2),
+        AppsKeyAction::Ignored
+    );
+}
+
+#[test]
+fn list_mode_swallows_view_actions_but_not_esc() {
+    let none = KeyModifiers::NONE;
+    for code in [
+        KeyCode::Char('x'),
+        KeyCode::Char('r'),
+        KeyCode::Tab,
+        KeyCode::BackTab,
+    ] {
+        assert_eq!(
+            apps_key_action(code, none, true, true, 2),
+            AppsKeyAction::Swallow,
+            "列表模式的 {code:?} 必须消费但不改变视图（BackTab 不得漏到全局）"
+        );
+    }
+    assert_eq!(
+        apps_key_action(KeyCode::Esc, none, true, true, 2),
+        AppsKeyAction::Ignored,
+        "Esc 必须交全局 handler 关闭面板"
+    );
+}
+
+#[test]
+fn view_mode_keeps_existing_shortcuts() {
+    let none = KeyModifiers::NONE;
+    assert_eq!(
+        apps_key_action(KeyCode::Tab, none, true, false, 2),
+        AppsKeyAction::CycleView(1)
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::BackTab, none, true, false, 2),
+        AppsKeyAction::CycleView(-1)
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Char('x'), none, true, false, 2),
+        AppsKeyAction::CloseCurrent
+    );
+    assert_eq!(
+        apps_key_action(KeyCode::Char('r'), none, true, false, 2),
+        AppsKeyAction::ReopenCurrent
+    );
+}
+
+#[test]
+fn enter_resolves_selected_descriptor_app_id() {
+    let mut state = AppsState::default();
+    state.descriptors.push(entry());
+    let mut second = entry();
+    second.app_id = "app-2".to_string();
+    state.descriptors.push(second);
+
+    assert_eq!(selected_app_id(&state, 0).as_deref(), Some("app-1"));
+    assert_eq!(selected_app_id(&state, 1).as_deref(), Some("app-2"));
+    assert_eq!(
+        selected_app_id(&state, 9).as_deref(),
+        Some("app-2"),
+        "descriptor 收缩后按最后一项收敛"
+    );
+    assert_eq!(selected_app_id(&AppsState::default(), 0), None);
+}
+
+#[test]
+fn descriptor_list_marks_moved_selection() {
+    crate::i18n::init(Some("en"));
+    let mut state = AppsState::default();
+    state.descriptors.push(entry());
+    let mut second = entry();
+    second.app_id = "app-2".to_string();
+    second.instantiating_tool = "get-weather".to_string();
+    state.descriptors.push(second);
+    let (primary, secondary, _, accent) = color_theme();
+    let text = rendered_text(&descriptor_lines(&state, 1, primary, secondary, accent));
+    assert!(text.contains("  get-time"), "{text}");
+    assert!(text.contains("▶ get-weather"), "{text}");
+}
+
+#[test]
+fn apps_footer_hints_localized_in_both_locales() {
+    for lang in ["en", "zh-CN"] {
+        let lc = crate::i18n::LcRegistry::new(Some(lang));
+        let args = vec![("index".to_string(), "1/2".into())];
+        let footer = lc.tr_args("apps-footer-hint", &args);
+        assert_ne!(footer, "apps-footer-hint", "{lang}: 缺少 apps-footer-hint");
+        assert!(
+            footer.contains("o "),
+            "{lang}: 页脚未提示 o 入口（{footer}）"
+        );
+
+        let list_footer = lc.tr("apps-list-footer-hint");
+        assert_ne!(
+            list_footer, "apps-list-footer-hint",
+            "{lang}: 缺少 apps-list-footer-hint"
+        );
+        assert!(
+            list_footer.contains("Enter") && list_footer.contains('o'),
+            "{lang}: 列表页脚缺少 Enter/o 提示（{list_footer}）"
+        );
+    }
+}

@@ -50,12 +50,26 @@ pub fn AppsPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _hb = hooks.use_atom(&crate::kit::atoms::RENDER_HEARTBEAT);
     let theme = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    // 列表模式：有视图时按 `o` 在「当前帧」与「可打开的应用列表」之间切换，
+    // 用于打开第二个 App（工具卡点击在面板打开期间被遮挡，见 mouse_router）。
+    let list_open = hooks.use_state(|| false);
     let (_area_w, _area_h) = hooks.use_terminal_size();
 
     let state = apps.read().clone();
     let descriptor_count = state.descriptors.len();
     let has_views = !state.views.is_empty();
     let runtime_active = state.runtime == crate::kit::apps::AppsRuntimeState::Active;
+    let list_mode = has_views && *list_open.read();
+    // 视图全部关闭（运行时回收/面板 teardown）时复位列表模式：否则下次打开视图
+    // 会直接落回列表。写状态放在 effect 边界，渲染体只读。
+    hooks.use_effect(
+        move || {
+            if *list_open.read() {
+                *list_open.write() = false;
+            }
+        },
+        (has_views,),
+    );
 
     hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
@@ -71,22 +85,27 @@ pub fn AppsPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ) {
             return EventResult::Ignored;
         }
-        match key.code {
-            KeyCode::Tab => {
-                apps::state::cycle_active_view(1);
+        match apps_key_action(
+            key.code,
+            key.modifiers,
+            has_views,
+            list_mode,
+            descriptor_count,
+        ) {
+            AppsKeyAction::Ignored => EventResult::Ignored,
+            // 列表模式消费但不改变视图（详见 `apps_key_action` 文档）。
+            AppsKeyAction::Swallow => EventResult::Consumed,
+            AppsKeyAction::CycleView(delta) => {
+                apps::state::cycle_active_view(delta);
                 EventResult::Consumed
             }
-            KeyCode::BackTab => {
-                apps::state::cycle_active_view(-1);
-                EventResult::Consumed
-            }
-            KeyCode::Char('x') if key.modifiers == KeyModifiers::NONE => {
+            AppsKeyAction::CloseCurrent => {
                 if let Some(view) = APPS_STATE.state().read().active().cloned() {
                     apps::close_view(&view.view_id);
                 }
                 EventResult::Consumed
             }
-            KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+            AppsKeyAction::ReopenCurrent => {
                 if let Some(view) = APPS_STATE.state().read().active().cloned()
                     && matches!(
                         view.phase,
@@ -99,30 +118,35 @@ pub fn AppsPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 EventResult::Consumed
             }
-            KeyCode::Up if !has_views && descriptor_count > 0 => {
+            AppsKeyAction::ToggleList => {
+                *list_open.write() = !list_mode;
+                EventResult::Consumed
+            }
+            AppsKeyAction::SelectPrev => {
                 let current = *selected.read();
                 *selected.write() = current.saturating_sub(1);
                 EventResult::Consumed
             }
-            KeyCode::Down if !has_views && descriptor_count > 0 => {
+            AppsKeyAction::SelectNext => {
                 let current = *selected.read();
                 *selected.write() = (current + 1).min(descriptor_count.saturating_sub(1));
                 EventResult::Consumed
             }
-            KeyCode::Enter if !has_views => {
-                let index = (*selected.read()).min(descriptor_count.saturating_sub(1));
-                let target = APPS_STATE
-                    .state()
-                    .read()
-                    .descriptors
-                    .get(index)
-                    .map(|entry| entry.app_id.clone());
+            AppsKeyAction::OpenSelected => {
+                let target = {
+                    let apps_state = APPS_STATE.state();
+                    let guard = apps_state.read();
+                    selected_app_id(&guard, *selected.read())
+                };
                 if let Some(app_id) = target {
                     apps::open_app(&app_id);
+                    // 选中即返回视图；打开失败由页脚/空态给出错误码，不留在列表。
+                    if list_mode {
+                        *list_open.write() = false;
+                    }
                 }
                 EventResult::Consumed
             }
-            _ => EventResult::Ignored,
         }
     });
 
@@ -156,13 +180,20 @@ pub fn AppsPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         });
     };
     let header = header_lines(&state, &view, primary, secondary, error);
-    let footer = Line::from(Span::styled(
-        i18n::tr_args(
-            "apps-footer-hint",
-            &[("index".into(), index_label(&state).into())],
-        ),
-        Style::default().fg(secondary),
-    ));
+    let footer = if list_mode {
+        Line::from(Span::styled(
+            i18n::tr("apps-list-footer-hint"),
+            Style::default().fg(secondary),
+        ))
+    } else {
+        Line::from(Span::styled(
+            i18n::tr_args(
+                "apps-footer-hint",
+                &[("index".into(), index_label(&state).into())],
+            ),
+            Style::default().fg(secondary),
+        ))
+    };
 
     panel_shell!(PanelKind::McpApps, {
         View(
@@ -173,12 +204,91 @@ pub fn AppsPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(height: Constraint::Length(line_count(&header))) {
                 Text(text: Paragraph::new(ratatui_kit::ratatui::text::Text::from(header)))
             }
-            FrameCanvas()
+            // 列表模式用 descriptor 列表临时替换帧画布（标题/页脚结构不变），
+            // 选中后 `open_app` 返回视图。
+            if list_mode {
+                Text(text: Paragraph::new(ratatui_kit::ratatui::text::Text::from(
+                    descriptor_lines(&state, *selected.read(), primary, secondary, accent),
+                )))
+            } else {
+                FrameCanvas()
+            }
             View(height: Constraint::Length(1)) {
                 Text(text: Paragraph::new(ratatui_kit::ratatui::text::Text::from(vec![footer])))
             }
         }
     })
+}
+
+/// 面板键盘意图：由纯函数 [`apps_key_action`] 产出，事件 handler 只负责执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppsKeyAction {
+    /// 不消费，继续交给全局 handler（`Esc` 走全局关面板）。
+    Ignored,
+    /// 消费但不改变状态（列表模式下隐藏了帧的视图快捷键）。
+    Swallow,
+    CycleView(i32),
+    CloseCurrent,
+    ReopenCurrent,
+    ToggleList,
+    SelectPrev,
+    SelectNext,
+    OpenSelected,
+}
+
+/// 纯函数：按键 + 面板状态 → 意图。事件 handler 与单测共用。
+///
+/// - 无视图：descriptor 列表交互（`Up`/`Down`/`Enter`），`o` 不响应；
+/// - 有视图且列表模式：只认 `Up`/`Down`/`Enter`/`o`；`x`/`r`/`Tab`/`BackTab`
+///   **明确不响应但仍消费**——此时界面显示的是选择列表而不是帧，且 `BackTab`
+///   不能漏到全局权限模式循环；`Esc` 返回 [`AppsKeyAction::Ignored`]，由全局
+///   handler 关闭面板；
+/// - 有视图且非列表模式：`Tab`/`BackTab` 切视图、`x` 关当前、`r` 重开、
+///   `o` 进入列表。
+#[must_use]
+pub(crate) fn apps_key_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    has_views: bool,
+    list_mode: bool,
+    descriptor_count: usize,
+) -> AppsKeyAction {
+    if list_mode {
+        return match code {
+            KeyCode::Char('o') if modifiers == KeyModifiers::NONE => AppsKeyAction::ToggleList,
+            KeyCode::Up if descriptor_count > 0 => AppsKeyAction::SelectPrev,
+            KeyCode::Down if descriptor_count > 0 => AppsKeyAction::SelectNext,
+            KeyCode::Enter if descriptor_count > 0 => AppsKeyAction::OpenSelected,
+            KeyCode::Char('x') | KeyCode::Char('r') | KeyCode::Tab | KeyCode::BackTab => {
+                AppsKeyAction::Swallow
+            }
+            _ => AppsKeyAction::Ignored,
+        };
+    }
+    match code {
+        KeyCode::Tab => AppsKeyAction::CycleView(1),
+        KeyCode::BackTab => AppsKeyAction::CycleView(-1),
+        KeyCode::Char('x') if modifiers == KeyModifiers::NONE => AppsKeyAction::CloseCurrent,
+        KeyCode::Char('r') if modifiers == KeyModifiers::NONE => AppsKeyAction::ReopenCurrent,
+        KeyCode::Char('o') if modifiers == KeyModifiers::NONE && has_views => {
+            AppsKeyAction::ToggleList
+        }
+        KeyCode::Up if !has_views && descriptor_count > 0 => AppsKeyAction::SelectPrev,
+        KeyCode::Down if !has_views && descriptor_count > 0 => AppsKeyAction::SelectNext,
+        KeyCode::Enter if !has_views => AppsKeyAction::OpenSelected,
+        _ => AppsKeyAction::Ignored,
+    }
+}
+
+/// 纯函数：选中下标 → 目标 app_id。descriptor 收缩时收敛到最后一项；
+/// 空列表返回 `None`（调用方不打开、零副作用）。
+#[must_use]
+pub(crate) fn selected_app_id(state: &AppsState, selected: usize) -> Option<String> {
+    let index = selected.min(state.descriptors.len().checked_sub(1)?);
+    state
+        .descriptors
+        .get(index)
+        .map(|entry| entry.app_id.clone())
 }
 
 fn line_count(lines: &[Line<'static>]) -> u16 {
