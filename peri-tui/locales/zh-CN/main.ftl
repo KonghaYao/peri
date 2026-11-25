@@ -1494,12 +1494,13 @@ panel-mcp-control-session-policy = 当前会话已禁用 MCP 运行控制。
 
 # ---- Mermaid 流式预览 ----
 
-mermaid-unclosed = Mermaid 块未闭合，当前展示已收到的源码。
+mermaid-generating = 图表生成中…
+mermaid-unclosed = Mermaid 块未闭合，闭合后会自动重试；源码可在图详情查看。
 mermaid-interrupted = Mermaid 块中断：{ $reason }
 mermaid-render-failed = Mermaid 预览不可用：{ $reason }
-mermaid-unknown-statement = 已展示源码：无法识别的 Mermaid 语句。
-mermaid-too-large = 图源码过大，无法内联排版（{ $bytes } 字节），当前展示源码。
+mermaid-unknown-statement = 存在无法识别的 Mermaid 语句，预览已暂停；源码可在图详情查看。
+mermaid-too-large = 图源码过大，无法内联绘制（{ $bytes } 字节）；源码可在图详情查看。
 mermaid-open-scope = 分组 { $label } · 已确认 { $count } 条语句
-mermaid-unsupported = 当前展示源码：{ $reason }
+mermaid-unsupported = 图未内联绘制：{ $reason }。源码可在图详情查看。
 mermaid-open-diagram = 查看图
 mermaid-detail-copied = 已复制图源码。

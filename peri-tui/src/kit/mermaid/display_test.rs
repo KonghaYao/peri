@@ -36,17 +36,48 @@ fn text(lines: &[Line<'static>]) -> String {
 
 #[test]
 #[serial_test::serial]
-fn source_is_visible_until_the_first_frame_publishes() {
+fn source_is_hidden_until_the_first_frame_publishes() {
     crate::kit::mermaid::reset_for_test();
+    crate::i18n::init(Some("en"));
     let segment = segment("```mermaid\ngraph TD\nA-->B\n```");
     let scope = PreviewScope::for_bubble("session", Some("msg-1"), Some(Instant::now()), 7);
 
-    let before = text(&display_lines(&segment, &scope, 60, false, Color::Reset).lines);
-    assert!(before.contains("graph TD"), "source missing: {before}");
-    assert!(before.contains("A-->B"), "source missing: {before}");
+    let before = text(
+        &display_lines(
+            &segment,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
+    assert!(
+        !before.contains("graph TD") && !before.contains("A-->B"),
+        "chat must not inline the source before a frame exists: {before}"
+    );
+    assert!(
+        before.contains("Diagram is being generated"),
+        "missing generating placeholder: {before}"
+    );
+    assert!(
+        before.contains("View diagram") || before.contains("查看图"),
+        "the diagram action must stay reachable: {before}"
+    );
 
     crate::kit::mermaid::drain_preview_jobs_now();
-    let after = text(&display_lines(&segment, &scope, 60, false, Color::Reset).lines);
+    let after = text(
+        &display_lines(
+            &segment,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
     assert!(
         !after.contains("graph TD"),
         "final frame should replace source: {after}"
@@ -59,20 +90,56 @@ fn source_is_visible_until_the_first_frame_publishes() {
 
 #[test]
 #[serial_test::serial]
-fn unconfirmed_source_stays_below_the_last_frame() {
+fn unconfirmed_source_tail_stays_in_the_detail_surface() {
     crate::kit::mermaid::reset_for_test();
     let scope = PreviewScope::for_bubble("session", Some("msg-2"), Some(Instant::now()), 8);
     let closed = segment("```mermaid\ngraph TD\nA-->B\n```");
-    display_lines(&closed, &scope, 60, false, Color::Reset);
+    display_lines(
+        &closed,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     crate::kit::mermaid::drain_preview_jobs_now();
 
     let open = segment("```mermaid\ngraph TD\nA-->B\nB--");
-    let rendered = display_lines(&open, &scope, 60, false, Color::Reset);
-    let rendered = text(&rendered.lines);
-    assert!(rendered.contains("B--"), "source tail missing: {rendered}");
+    let chat = text(
+        &display_lines(
+            &open,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
     assert!(
-        !rendered.contains("graph TD"),
-        "confirmed source should be replaced by the frame: {rendered}"
+        !chat.contains("B--"),
+        "chat must not inline the unconfirmed tail: {chat}"
+    );
+    assert!(
+        !chat.contains("graph TD"),
+        "confirmed source should be replaced by the frame: {chat}"
+    );
+
+    // 详情面板保留源码回退与尾部，供需要原文的读者查看。
+    let detail = text(
+        &display_lines(
+            &open,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Detail,
+        )
+        .lines,
+    );
+    assert!(
+        detail.contains("B--"),
+        "detail must keep the unconfirmed tail: {detail}"
     );
 }
 
@@ -83,14 +150,241 @@ fn frozen_unclosed_fence_marks_the_preview_unclosed() {
     crate::i18n::init(Some("en"));
     let scope = PreviewScope::for_bubble("session", Some("msg-3"), None, 9);
     let open = segment("```mermaid\ngraph TD\nA-->B\nC--");
-    display_lines(&open, &scope, 60, true, Color::Reset);
+    display_lines(
+        &open,
+        &scope,
+        60,
+        true,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     crate::kit::mermaid::drain_preview_jobs_now();
-    let rendered = text(&display_lines(&open, &scope, 60, true, Color::Reset).lines);
+    let rendered = text(
+        &display_lines(
+            &open,
+            &scope,
+            60,
+            true,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
     assert!(
         rendered.to_lowercase().contains("unclosed"),
         "missing unclosed notice: {rendered}"
     );
-    assert!(rendered.contains("C--"), "source tail missing: {rendered}");
+    assert!(
+        !rendered.contains("C--"),
+        "chat must not inline the unclosed tail: {rendered}"
+    );
+    let detail = text(
+        &display_lines(
+            &open,
+            &scope,
+            60,
+            true,
+            Color::Reset,
+            super::MermaidSurface::Detail,
+        )
+        .lines,
+    );
+    assert!(
+        detail.contains("C--"),
+        "detail must keep the unclosed tail: {detail}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn no_trusted_frame_shows_a_generating_line() {
+    crate::kit::mermaid::reset_for_test();
+    crate::i18n::init(Some("en"));
+    let scope = PreviewScope::for_bubble("session", Some("msg-generating"), None, 11);
+    let open = segment("```mermaid\ngraph TD\nA--");
+    let rendered = text(
+        &display_lines(
+            &open,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
+    assert!(
+        rendered.contains("Diagram is being generated"),
+        "missing generating placeholder: {rendered}"
+    );
+    assert!(
+        !rendered.contains("graph TD") && !rendered.contains("A--"),
+        "chat must stay source-free without a frame: {rendered}"
+    );
+    assert!(
+        rendered.contains("View diagram") || rendered.contains("查看图"),
+        "the diagram action must stay reachable: {rendered}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn streaming_frame_has_no_raw_source_tail() {
+    crate::kit::mermaid::reset_for_test();
+    crate::i18n::init(Some("en"));
+    let scope = PreviewScope::for_bubble("session", Some("msg-stream-tail"), None, 12);
+    let closed = segment("```mermaid\ngraph TD\nA-->B\n```");
+    display_lines(
+        &closed,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
+    crate::kit::mermaid::drain_preview_jobs_now();
+
+    let streaming = segment("```mermaid\ngraph TD\nA-->B\nB--");
+    let rendered = text(
+        &display_lines(
+            &streaming,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
+    assert!(
+        !rendered.contains("B--"),
+        "a streaming frame must not append the raw tail: {rendered}"
+    );
+    assert!(
+        !rendered.contains("graph TD"),
+        "a streaming frame must not inline the source: {rendered}"
+    );
+    assert!(
+        rendered.contains('┌') || rendered.contains('╭'),
+        "the confirmed frame should stay visible: {rendered}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn failed_final_shows_reason_and_view_source() {
+    crate::kit::mermaid::reset_for_test();
+    crate::i18n::init(Some("en"));
+    let scope = PreviewScope::for_bubble("session", Some("msg-failed-final"), None, 13);
+    let broken = segment("```mermaid\ngraph TD\nA-->B\nthis is not valid\n```");
+    display_lines(
+        &broken,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
+    crate::kit::mermaid::drain_preview_jobs_now();
+
+    let chat = text(
+        &display_lines(
+            &broken,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
+    assert!(
+        chat.to_lowercase().contains("unavailable") || chat.contains("不可用"),
+        "a failed final must show a short reason: {chat}"
+    );
+    assert!(
+        !chat.contains("graph TD") && !chat.contains("A-->B"),
+        "chat must not fall back to the source body: {chat}"
+    );
+    assert_eq!(
+        chat.lines().count(),
+        2,
+        "the failed surface is one short reason plus the action line: {chat:?}"
+    );
+    assert!(
+        chat.contains("View diagram") || chat.contains("查看图"),
+        "the diagram action must stay reachable: {chat}"
+    );
+
+    let detail = text(
+        &display_lines(
+            &broken,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Detail,
+        )
+        .lines,
+    );
+    assert!(
+        detail.contains("this is not valid"),
+        "detail keeps the source when the final fails: {detail}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn block_diagram_hides_source_until_detail() {
+    crate::kit::mermaid::reset_for_test();
+    crate::i18n::init(Some("en"));
+    let scope = PreviewScope::for_bubble("session", Some("msg-block"), None, 14);
+    let closed = segment("```mermaid\nblock-beta\n A B\n```");
+    display_lines(
+        &closed,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
+    crate::kit::mermaid::drain_preview_jobs_now();
+
+    let chat = text(
+        &display_lines(
+            &closed,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
+    assert!(
+        !chat.contains("block-beta") && !chat.contains(" A B"),
+        "chat must not inline an unsupported diagram's source: {chat}"
+    );
+    assert!(
+        chat.contains("View diagram") || chat.contains("查看图"),
+        "the diagram action must stay reachable: {chat}"
+    );
+
+    let detail = text(
+        &display_lines(
+            &closed,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Detail,
+        )
+        .lines,
+    );
+    assert!(
+        detail.contains("block-beta"),
+        "detail keeps the source of unsupported diagrams: {detail}"
+    );
 }
 
 #[test]
@@ -136,7 +430,17 @@ fn tab_selection_highlights_the_action_and_invalidates_the_message() {
         .expect("message contains a Mermaid fence");
 
     crate::kit::mermaid::select_action(Some(key.clone()));
-    let rendered = text(&display_lines(&segment, &scope, 60, false, Color::Reset).lines);
+    let rendered = text(
+        &display_lines(
+            &segment,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
     assert!(
         rendered.contains("[View diagram]") || rendered.contains("[查看图]"),
         "Tab 选中后入口应有可见标记: {rendered}"
@@ -149,7 +453,17 @@ fn tab_selection_highlights_the_action_and_invalidates_the_message() {
     );
 
     crate::kit::mermaid::select_action(None);
-    let cleared = text(&display_lines(&segment, &scope, 60, false, Color::Reset).lines);
+    let cleared = text(
+        &display_lines(
+            &segment,
+            &scope,
+            60,
+            false,
+            Color::Reset,
+            super::MermaidSurface::Chat,
+        )
+        .lines,
+    );
     assert!(
         !cleared.contains("[View diagram]") && !cleared.contains("[查看图]"),
         "清除选中后不能保留高亮: {cleared}"
@@ -163,9 +477,23 @@ fn wide_markdown() -> String {
 }
 
 fn published(segment: &MermaidSegment, scope: &PreviewScope, width: usize) -> super::FenceRender {
-    let _ = display_lines(segment, scope, width, false, Color::Reset);
+    let _ = display_lines(
+        segment,
+        scope,
+        width,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     crate::kit::mermaid::drain_preview_jobs_now();
-    display_lines(segment, scope, width, false, Color::Reset)
+    display_lines(
+        segment,
+        scope,
+        width,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    )
 }
 
 fn bar_text(line: &Line<'static>) -> String {
@@ -240,13 +568,27 @@ fn horizontal_offset_slices_the_frame_and_survives_rerender() {
         view.viewport,
         view.viewport + view.max_offset
     ));
-    let after = display_lines(&segment, &scope, 60, false, Color::Reset);
+    let after = display_lines(
+        &segment,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     let first_after = line_text(&after.lines[0]);
     assert_ne!(first_before, first_after, "偏移后首行应显示更靠右的列");
     assert!(after.lines.iter().all(|line| line.width() <= 60));
 
     // 再次渲染同一身份仍保留列位置（不因重绘回到 0）。
-    let again = display_lines(&segment, &scope, 60, false, Color::Reset);
+    let again = display_lines(
+        &segment,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     assert_eq!(line_text(&again.lines[0]), first_after);
 }
 
@@ -266,7 +608,14 @@ fn narrow_viewport_reaches_the_rightmost_column() {
         view.viewport,
         content
     ));
-    let panned = display_lines(&segment, &scope, 60, false, Color::Reset);
+    let panned = display_lines(
+        &segment,
+        &scope,
+        60,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
 
     // 右侧关键列可达：最宽行的末端窗口完整出现。
     let full = crate::kit::mermaid::frame::render_source(WIDE_SEQUENCE_SOURCE, 60)
@@ -313,6 +662,7 @@ fn fitting_frame_clears_a_stale_horizontal_offset() {
             60,
             Color::Reset,
             false,
+            super::MermaidSurface::Chat,
         )
     };
 
@@ -352,7 +702,14 @@ fn resize_clamps_the_offset_to_the_new_maximum() {
         content
     ));
     // 窗口变宽：最大值变小，旧偏移被 clamp 到新的右端。
-    let wider = display_lines(&segment, &scope, 100, false, Color::Reset);
+    let wider = display_lines(
+        &segment,
+        &scope,
+        100,
+        false,
+        Color::Reset,
+        super::MermaidSurface::Chat,
+    );
     let wide_view = wider.h_view.expect("100 列仍放不下");
     assert_eq!(wide_view.viewport, 100);
     let expected = crate::kit::mermaid::frame::render_source(WIDE_SEQUENCE_SOURCE, 100)

@@ -40,7 +40,8 @@ pub(crate) fn action_selected(key: &MermaidFenceKey) -> bool {
         .is_some_and(|selected| selected == key)
 }
 pub(crate) use display::{
-    FenceSpan, PreviewScope, display_lines, display_lines_peek, vm_might_have_mermaid,
+    FenceSpan, MermaidSurface, PreviewScope, display_lines, display_lines_peek,
+    vm_might_have_mermaid,
 };
 #[cfg(test)]
 pub(crate) use hscroll::offset_for as h_offset_for;

@@ -14,8 +14,7 @@ pub enum MarkdownSegment {
     Image(ImageSegment),
     /// 保留结构和动作，宽度与主题变化时由消息渲染器重新布局。
     GenUi(GenUiSegment),
-    /// Mermaid fenced code block：携带原文坐标、闭合状态与源码；
-    /// `lines` 是预览不可用时的源码回退形态。
+    /// Mermaid fenced code block：携带原文坐标、闭合状态与源码。
     Mermaid(MermaidSegment),
 }
 
@@ -23,7 +22,8 @@ pub enum MarkdownSegment {
 pub struct MermaidSegment {
     /// 围栏元数据（范围使用完整消息原文坐标）。
     pub fence: super::fence::MermaidFence,
-    /// 与普通代码块一致的源码回退行；显示层按围栏身份取当前可信帧。
+    /// 与普通代码块一致的源码行；仅详情面板回退源码时使用。消息区显示可信帧、
+    /// 「图表生成中」占位或短原因，不内联围栏源码。
     pub lines: Vec<ratatui::text::Line<'static>>,
 }
 

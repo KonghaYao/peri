@@ -359,6 +359,50 @@ fn ampersand_fan_out_is_recognized() {
     assert!(update.drawable);
 }
 
+/// 流式切分回归：中文标签、`<br/>`、点线边标签与引号内的标点，
+/// 在任意 chunk 边界都只能提交完整语句。
+#[test]
+fn chunked_labels_br_tags_dotted_labels_and_quotes_commit_only_whole_statements() {
+    let body = "graph TD\n  用户[\"中文<br/>标签\"] -.-> 系统\n  系统 -- \"引号, 标签\" --> 用户\n  用户 -. 点线文字 .-> 系统\n";
+    let expected = "graph TD\n用户[\"中文<br/>标签\"] -.-> 系统\n系统 -- \"引号, 标签\" --> 用户\n用户 -. 点线文字 .-> 系统\n";
+    for chunk in [1, 2, 3, 5, 7, 64] {
+        let observed = replay_bytes(body, chunk);
+        assert_eq!(observed.mode, DiagramMode::Flowchart, "chunk {chunk}");
+        assert!(
+            observed.paused.is_none(),
+            "chunk {chunk}: {:?}",
+            observed.paused
+        );
+        assert_eq!(observed.trusted, expected, "chunk {chunk}");
+        assert_eq!(observed.statements, 4, "chunk {chunk}");
+        assert!(observed.drawable, "chunk {chunk}");
+    }
+}
+
+/// 在箭头、引号标签与点线标签内部切分：切点前不得提交半条语句。
+#[test]
+fn cuts_inside_arrows_quotes_and_dotted_labels_never_commit_half_a_statement() {
+    let full = "graph TD\nA[\"开始<br/>结束\"] -.-> B\nB -- \"x, y\" --> C\nC -. 点线 .-> D\n";
+    for cut in 1..full.len() {
+        if !full.is_char_boundary(cut) {
+            continue;
+        }
+        let mut stream = MermaidStream::new();
+        let first = stream.observe(&full[..cut], false);
+        assert!(
+            full.starts_with(first.trusted)
+                && (first.trusted.is_empty() || first.trusted.ends_with('\n')),
+            "cut {cut} committed a partial statement: {:?}",
+            first.trusted
+        );
+        assert!(first.paused.is_none(), "cut {cut}: {:?}", first.paused);
+        let second = stream.observe(full, false);
+        assert_eq!(second.trusted, full, "cut {cut}");
+        assert!(second.paused.is_none(), "cut {cut}: {:?}", second.paused);
+        assert_eq!(second.statements, 4, "cut {cut}");
+    }
+}
+
 #[test]
 fn sequence_title_is_not_committed_because_the_renderer_cannot_consume_it() {
     let mut stream = MermaidStream::new();

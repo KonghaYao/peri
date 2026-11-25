@@ -170,10 +170,11 @@ fn mermaid_block(
     foreground: ratatui_kit::ratatui::style::Color,
     start: usize,
     schedule: bool,
+    surface: crate::kit::mermaid::MermaidSurface,
 ) -> (Vec<Line<'static>>, crate::kit::mermaid::FenceSpan) {
     let (rendered, layout_bytes) = if schedule {
         let rendered =
-            crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
+            crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground, surface);
         (rendered, 0)
     } else {
         crate::kit::mermaid::display_lines_peek(segment, scope, width, frozen, foreground)
@@ -245,6 +246,7 @@ pub(crate) fn vm_to_lines_cached(
         None,
         true,
         true,
+        crate::kit::mermaid::MermaidSurface::Chat,
     );
     (lines, copy_button, interaction, image_lines)
 }
@@ -273,6 +275,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_scheduled(
         None,
         true,
         false,
+        crate::kit::mermaid::MermaidSurface::Detail,
     )
 }
 
@@ -319,6 +322,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_gated(
         frame,
         false,
         true,
+        crate::kit::mermaid::MermaidSurface::Chat,
     )
 }
 
@@ -333,6 +337,7 @@ fn vm_to_lines_impl(
     frame: Option<u64>,
     schedule_mermaid: bool,
     inline_pixels: bool,
+    surface: crate::kit::mermaid::MermaidSurface,
 ) -> RenderOutput {
     let mut md_lines = md_lines;
     if let Some(layout) = md_lines.as_deref_mut() {
@@ -503,6 +508,7 @@ fn vm_to_lines_impl(
                                         md_text_fg,
                                         start,
                                         schedule_mermaid,
+                                        surface,
                                     );
                                     chunk_fences.push(span);
                                     chunk_lines.extend(mermaid_lines.into_iter().map(&body_line));
@@ -550,6 +556,7 @@ fn vm_to_lines_impl(
                                         md_text_fg,
                                         start,
                                         schedule_mermaid,
+                                        surface,
                                     );
                                     mermaid_fences.push(span);
                                     lines.extend(mermaid_lines.into_iter().map(&body_line));
@@ -659,6 +666,7 @@ fn vm_to_lines_impl(
                                     md_text_fg,
                                     start,
                                     schedule_mermaid,
+                                    surface,
                                 );
                                 mermaid_fences.push(span);
                                 for line in mermaid_lines {

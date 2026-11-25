@@ -67,3 +67,28 @@ fn failure_reason_is_single_line_and_bounded() {
     assert!(!failure.reason().contains('\n'));
     assert!(failure.reason().chars().count() <= 161);
 }
+
+/// 流式确认后的中文标签、`<br/>` 与点线标签仍能交给排版器画成帧。
+#[test]
+fn streamed_labels_survive_into_the_frame() {
+    let body = "graph TD\n  用户[\"中文<br/>标签\"] -.-> 系统\n  系统 -- \"引号, 标签\" --> 用户\n  用户 -. 点线文字 .-> 系统\n";
+    let mut stream = crate::mermaid::stream::MermaidStream::new();
+    let mut buffer = Vec::new();
+    for piece in body.as_bytes().chunks(3) {
+        buffer.extend_from_slice(piece);
+        if let Ok(prefix) = std::str::from_utf8(&buffer) {
+            stream.observe(prefix, false);
+        }
+    }
+    let trusted = stream.observe(body, false).trusted.to_string();
+    assert_eq!(
+        trusted,
+        "graph TD\n用户[\"中文<br/>标签\"] -.-> 系统\n系统 -- \"引号, 标签\" --> 用户\n用户 -. 点线文字 .-> 系统\n"
+    );
+
+    let rendered = render_source(&trusted, 80).expect("streamed labels render");
+    let text = rendered.lines().join("\n");
+    for label in ["用户", "系统", "中文"] {
+        assert!(text.contains(label), "{label} missing from frame: {text}");
+    }
+}

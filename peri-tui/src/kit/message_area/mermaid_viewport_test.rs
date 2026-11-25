@@ -10,6 +10,10 @@ use crate::kit::atoms::ViewModelsSnapshot;
 use crate::kit::entry_render_cache::EntrySurface;
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
 use peri_theme::atoms::THEME_ATOM;
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::text::Text;
+use ratatui::widgets::Paragraph;
 
 fn context() -> crate::kit::entry_render_cache::EntryRenderContext {
     crate::kit::atoms::init_atoms();
@@ -70,24 +74,8 @@ impl Harness {
         }
     }
 
-    fn layout(&mut self, scroll_y: usize, height: usize) -> Arc<SlotIndex> {
-        self.transcript.prepare(
-            &self.snapshot,
-            &crate::kit::atoms::TranscriptPublication::default(),
-            &mut self.caches,
-            self.grid,
-            self.grid.line_width(),
-            self.context.clone(),
-            0,
-            0,
-            scroll_y,
-            height,
-            0,
-        );
-        self.transcript
-            .warm_visible(&self.snapshot, &mut self.caches, scroll_y, height);
-        crate::kit::mermaid::drain_preview_jobs_now();
-        // 帧发布后重排一次，使围栏范围与高度进入本轮索引。
+    /// 只重排一次（peek）；`warm` 决定是否同时调度可见围栏。
+    fn prepare(&mut self, scroll_y: usize, height: usize, warm: bool) -> Arc<SlotIndex> {
         let index = self.transcript.prepare(
             &self.snapshot,
             &crate::kit::atoms::TranscriptPublication::default(),
@@ -101,14 +89,62 @@ impl Harness {
             height,
             0,
         );
+        if warm {
+            self.warm(scroll_y, height);
+        }
+        index
+    }
+
+    fn warm(&mut self, scroll_y: usize, height: usize) {
         self.transcript
             .warm_visible(&self.snapshot, &mut self.caches, scroll_y, height);
-        index
+    }
+
+    fn layout(&mut self, scroll_y: usize, height: usize) -> Arc<SlotIndex> {
+        self.prepare(scroll_y, height, true);
+        crate::kit::mermaid::drain_preview_jobs_now();
+        // 帧发布后重排一次，使围栏范围与高度进入本轮索引。
+        self.prepare(scroll_y, height, true)
     }
 
     fn slot_start(&self, index: &SlotIndex, slot: usize) -> usize {
         index.slot_visual_start(slot).unwrap_or(0)
     }
+}
+
+/// 槽位当前全部逻辑行的文本（不经真实 Buffer）。
+fn slot_text(cache: &VmCacheSlot) -> String {
+    let lines = cache.lines.as_ref().expect("slot lines");
+    (0..cache.wrap_map.len())
+        .filter_map(|index| lines.line(index))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 把槽位逻辑行画进真实 Buffer，断言「屏幕上」也没有源码。
+fn slot_buffer(cache: &VmCacheSlot, width: u16) -> Buffer {
+    let lines = cache.lines.as_ref().expect("slot lines");
+    let rows: Vec<_> = (0..cache.wrap_map.len())
+        .filter_map(|index| lines.line(index).cloned())
+        .collect();
+    let height = u16::try_from(rows.len()).expect("test message fits u16 rows");
+    let mut terminal =
+        ratatui::Terminal::new(TestBackend::new(width, height)).expect("test backend");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(Paragraph::new(Text::from(rows)), frame.area());
+        })
+        .expect("render slot");
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_row(buffer: &Buffer, row: u16) -> String {
+    (0..buffer.area.width)
+        .map(|column| buffer[(column, row)].symbol())
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
 }
 
 fn unique_sources(count: usize) -> Vec<String> {
@@ -198,7 +234,10 @@ fn viewport_schedules_only_visible_fences_and_reuses_geometry() {
         2,
         "首屏固定两张图可见"
     );
-    assert_eq!(first, 2, "首屏只排版两张可见图");
+    assert_eq!(
+        first, 3,
+        "首帧无可用帧时围栏只有占位与动作行，第三张图也进入视口并各排一次"
+    );
 
     let scroll_one = harness.slot_start(&index, 1);
     index = harness.layout(scroll_one, height);
@@ -208,7 +247,11 @@ fn viewport_schedules_only_visible_fences_and_reuses_geometry() {
         2,
         "下滚后仍固定两张图可见"
     );
-    assert_eq!(after_scroll - first, 1, "下滚一图只新增一张");
+    assert_eq!(
+        after_scroll - first,
+        0,
+        "首帧已覆盖三张可见图，下滚一图不新增排版"
+    );
 
     let _ = harness.layout(0, height);
     let after_back = crate::kit::mermaid::layout_count();
@@ -504,5 +547,118 @@ fn diagram_width_uses_body_columns_with_a_100_column_cap() {
         fences[0].width,
         grid.process_content_width(),
         "短回复使用过程带收窄后的正文宽度"
+    );
+}
+
+/// 流式 chunk 到达时消息区只 `prepare`（peek）、尚未 `warm`（observe）：
+/// 这一帧必须继续显示上一张可信帧，屏幕与逻辑行都不能出现围栏源码。
+#[test]
+#[serial_test::serial]
+fn streaming_chunk_has_no_raw_source_before_observe() {
+    crate::kit::mermaid::reset_for_test();
+    let height = 40;
+    let mut harness = Harness::new(&["graph TD\nN0-->M0\nN1-->M1".to_string()], 80);
+    let _ = harness.layout(0, height);
+    let layouts = crate::kit::mermaid::layout_count();
+    assert!(layouts >= 1, "首帧应已排版");
+
+    // chunk 到达：围栏仍未闭合，刷新 VM 后只重排一次（peek）。
+    harness.snapshot.items.set(
+        0,
+        TuiRenderUnit::TuiAssistantBubble(Arc::new(TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "```mermaid\ngraph TD\nN0-->M0\nN1-->M1\nN2--".to_string(),
+            reasoning: None,
+            message_id: Some("mermaid-0".to_string()),
+            content_hash: 9001,
+        })),
+    );
+    harness.snapshot.generation += 1;
+    let _ = harness.prepare(0, height, false);
+
+    let cache = &harness.caches[0];
+    let rendered = slot_text(cache);
+    assert!(
+        !rendered.contains("graph TD") && !rendered.contains("N0-->M0"),
+        "chunk 到达帧不得内联围栏源码: {rendered}"
+    );
+    assert!(
+        !rendered.contains("N2--"),
+        "chunk 到达帧不得内联未确认尾部: {rendered}"
+    );
+    assert!(
+        rendered.contains('┌') || rendered.contains('╭'),
+        "上一张可信帧应继续显示: {rendered}"
+    );
+    assert!(
+        rendered.contains("View diagram") || rendered.contains("查看图"),
+        "动作行必须保留: {rendered}"
+    );
+    assert_eq!(
+        crate::kit::mermaid::layout_count(),
+        layouts,
+        "peek 不得排队或重排几何"
+    );
+
+    let buffer = slot_buffer(cache, harness.grid.line_width());
+    let painted: Vec<String> = (0..buffer.area.height)
+        .map(|row| buffer_row(&buffer, row))
+        .collect();
+    let painted = painted.join("\n");
+    assert!(
+        !painted.contains("graph TD") && !painted.contains("N2--"),
+        "真实 Buffer 不得画出源码: {painted}"
+    );
+    assert!(
+        painted.contains('┌') || painted.contains('╭'),
+        "真实 Buffer 应保留可信帧: {painted}"
+    );
+}
+
+/// 列宽变化后的第一帧同样先渲染后观察：复用旧帧，不闪回源码。
+#[test]
+#[serial_test::serial]
+fn resize_reuses_the_previous_frame_until_the_new_one_arrives() {
+    crate::kit::mermaid::reset_for_test();
+    let height = 40;
+    let mut harness = Harness::new(&["graph TD\nN0-->M0\nN1-->M1".to_string()], 80);
+    let _ = harness.layout(0, height);
+    let baseline = crate::kit::mermaid::layout_count();
+    assert!(baseline >= 1, "首帧应已排版");
+
+    harness.grid = GridSpec::grid_for(40);
+    let _ = harness.prepare(0, height, false);
+    let rendered = slot_text(&harness.caches[0]);
+    assert!(
+        !rendered.contains("graph TD"),
+        "resize 首帧不得内联源码: {rendered}"
+    );
+    assert!(
+        rendered.contains('┌') || rendered.contains('╭'),
+        "旧列宽的帧应继续显示: {rendered}"
+    );
+    assert_eq!(
+        crate::kit::mermaid::layout_count(),
+        baseline,
+        "复用旧帧时不得排队新排版"
+    );
+
+    harness.warm(0, height);
+    crate::kit::mermaid::drain_preview_jobs_now();
+    let _ = harness.prepare(0, height, true);
+    assert_eq!(
+        crate::kit::mermaid::layout_count(),
+        baseline + 1,
+        "40 列只新增一份几何"
+    );
+    let resized = slot_text(&harness.caches[0]);
+    assert!(
+        resized.contains('┌') || resized.contains('╭'),
+        "新帧应替换旧帧: {resized}"
+    );
+    assert!(
+        !resized.contains("graph TD"),
+        "resize 后仍不得内联源码: {resized}"
     );
 }

@@ -650,19 +650,24 @@ fn match_labeled_edge(text: &str, index: usize) -> Option<usize> {
     if label.trim().is_empty() {
         return None;
     }
-    let mut best: Option<(usize, usize)> = None;
+    // 同一偏移上可能同时命中互为前缀的闭合串（`.->` 与 `.-`）；
+    // 必须取最长的那一个，否则 `>` 会残留在语句里被当成节点括号。
+    let mut best: Option<(usize, usize, usize)> = None;
     for closer in closers {
         if let Some(offset) = label.find(closer) {
             if offset == 0 {
                 continue;
             }
             let end = open_len + offset + closer.len();
-            if best.is_none_or(|(best_end, _)| end < best_end) {
-                best = Some((end, label[..offset].trim().len()));
+            let better = best.is_none_or(|(best_offset, best_end, _)| {
+                offset < best_offset || (offset == best_offset && end > best_end)
+            });
+            if better {
+                best = Some((offset, end, label[..offset].trim().len()));
             }
         }
     }
-    let Some((end, label_len)) = best else {
+    let Some((_, end, label_len)) = best else {
         // 标签可能还在下一个 token 里：先吞到行尾，让语句保持完整；
         // 换行后的分类会把它判为未知语句，EOF 时仍返回不完整。
         return Some(line_end);

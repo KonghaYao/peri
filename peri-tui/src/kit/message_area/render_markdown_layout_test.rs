@@ -599,8 +599,12 @@ fn test_mermaid_preview_survives_stable_fast_path() {
     let (first, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
     let first_rendered = super::all_text(&first);
     assert!(
-        first_rendered.contains("graph TD") && first_rendered.contains("开始-->结束"),
-        "首帧在排版完成前应显示源码，实际 {first_rendered:?}"
+        first_rendered.contains("Diagram is being generated"),
+        "首帧在排版完成前应显示占位，实际 {first_rendered:?}"
+    );
+    assert!(
+        !first_rendered.contains("graph TD") && !first_rendered.contains("开始-->结束"),
+        "首帧不得内联围栏源码，实际 {first_rendered:?}"
     );
 
     crate::kit::mermaid::drain_preview_jobs_now();
