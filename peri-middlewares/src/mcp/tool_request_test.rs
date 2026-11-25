@@ -588,6 +588,49 @@ async fn elicitation_activity_renews_the_tool_deadline() {
     let _ = server_task;
 }
 
+/// 用户明确拒绝 → 反向 elicitation 回 decline（与 cancel 语义分开）。
+struct DeclineBroker;
+
+#[async_trait]
+impl UserInteractionBroker for DeclineBroker {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
+        InteractionResponse::Elicitation(ElicitationDecision::Decline)
+    }
+}
+
+#[tokio::test]
+async fn reverse_elicitation_decline_stays_decline() {
+    let router = ElicitationRouter::new("reverse-fixture", 1);
+    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
+    let lease = router.register(
+        "s1",
+        "reverse",
+        owner(),
+        Arc::new(DeclineBroker),
+        CancellationToken::new(),
+    );
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("reverse"),
+        Some(Duration::from_secs(1)),
+        Some(&lease),
+    )
+    .await
+    .expect("decline");
+    assert!(matches!(result, CallToolResponse::Complete(_)));
+    assert_eq!(
+        observed.lock().as_slice(),
+        &[serde_json::json!({ "action": "decline" })]
+    );
+    drop(lease);
+    let _ = service;
+    let _ = server_task;
+}
+
 /// 交互通道超时（用户始终不答）→ 反向 elicitation 必须回 cancel，而不是协议错误。
 struct TimeoutBroker;
 
