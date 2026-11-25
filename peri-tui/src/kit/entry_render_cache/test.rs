@@ -615,3 +615,35 @@ fn working_flag_flip_invalidates_content_not_only_animation() {
         "同一帧内标记翻转也要重建"
     );
 }
+
+/// surface → `EntryRenderOptions` 是唯一映射点：两面的差异只允许出现在
+/// 声明的字段上（mermaid / image / md_copy / frame / transition）。
+#[test]
+fn surface_render_options_differ_only_in_declared_fields() {
+    use super::{EntryRenderOptions, ImageMode, MermaidMode};
+
+    let transition = ZoneTransition::EnterProcess(TextLineSource::User);
+    let message = EntrySurface::Message.render_options(transition, Some(7));
+    assert_eq!(message.surface, EntrySurface::Message);
+    assert_eq!(message.transition, transition);
+    assert_eq!(message.frame, Some(7));
+    assert_eq!(message.mermaid, MermaidMode::Peek);
+    assert_eq!(message.image, ImageMode::Inline);
+    assert!(message.md_copy);
+
+    let detail = EntrySurface::Detail.render_options(transition, Some(7));
+    assert_eq!(detail.surface, EntrySurface::Detail);
+    assert_eq!(detail.transition, ZoneTransition::None, "面板无过程区台阶");
+    assert_eq!(detail.frame, None, "面板无 working 扫光相位");
+    assert_eq!(detail.mermaid, MermaidMode::Schedule);
+    assert_eq!(detail.image, ImageMode::TextOnly);
+    assert!(!detail.md_copy);
+
+    let nested = EntryRenderOptions::nested(true);
+    assert_eq!(nested.surface, EntrySurface::Message);
+    assert_eq!(nested.transition, ZoneTransition::None);
+    assert_eq!(nested.frame, None);
+    assert_eq!(nested.mermaid, MermaidMode::Schedule);
+    assert_eq!(nested.image, ImageMode::Inline);
+    assert!(nested.md_copy);
+}

@@ -7,6 +7,7 @@ use super::selection::SlotIndex;
 use super::transcript::Transcript;
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::ViewModelsSnapshot;
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::entry_render_cache::EntrySurface;
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
 use peri_theme::atoms::THEME_ATOM;
@@ -517,13 +518,12 @@ fn diagram_width_uses_body_columns_with_a_100_column_cap() {
         message_id: Some("wide".to_string()),
         content_hash: 8811,
     }));
-    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_cached_with_layout(
+    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_with_options(
         &long,
         &grid,
         &mut markdown,
         None,
-        false,
-        super::grid::ZoneTransition::None,
+        EntryRenderOptions::isolated(super::grid::ZoneTransition::None, false),
     );
     assert_eq!(fences[0].width, 100, "正文列宽上限 100");
 
@@ -535,13 +535,12 @@ fn diagram_width_uses_body_columns_with_a_100_column_cap() {
         message_id: Some("brief".to_string()),
         content_hash: 8812,
     }));
-    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_cached_with_layout(
+    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_with_options(
         &short,
         &grid,
         &mut markdown,
         None,
-        false,
-        super::grid::ZoneTransition::None,
+        EntryRenderOptions::isolated(super::grid::ZoneTransition::None, false),
     );
     assert_eq!(
         fences[0].width,

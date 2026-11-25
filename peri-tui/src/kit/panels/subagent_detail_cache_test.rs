@@ -164,7 +164,7 @@ fn detail_fold_is_local_and_survives_stream_update() {
     cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
     assert!(cache.height() > collapsed_height);
     assert_eq!(
-        super::detail_render_cache::fold_of(&transcript.view_models[1]),
+        crate::kit::tui_render_unit::fold_state_of(&transcript.view_models[1]),
         Some(FoldState::Collapsed)
     );
     transcript
@@ -213,7 +213,7 @@ fn detail_reasoning_expansion_remeasures_height() {
     cache.prepare(&transcript, &grid, theme, 0, Vec::new());
     assert!(cache.height() > collapsed);
     assert_eq!(
-        super::detail_render_cache::fold_of(&transcript.view_models[0]),
+        crate::kit::tui_render_unit::fold_state_of(&transcript.view_models[0]),
         Some(FoldState::Collapsed)
     );
 }
@@ -404,6 +404,108 @@ fn same_length_replacement_and_empty_slots_update_prefix() {
     render(&mut cache, &empty, &grid, theme, 0);
     assert_eq!(cache.prefix[1], 0);
     assert_eq!(cache.slots_for(0..cache.height()), 1..2);
+}
+
+/// 面板本地 fold 与主区共用 `FoldKey::of` 键控：SubAgent / Interaction 条目
+/// 也可展开/收起；面板不新增嵌套打开（Q12 未批准），只切本地 fold。
+#[test]
+#[serial_test::serial]
+fn panel_folds_subagent_and_interaction_with_shared_keys() {
+    use crate::kit::tui_render_unit::{FoldKey, InteractionKind, TuiAskUserBlock};
+
+    let mut transcript = group("panel-keys", "");
+    transcript.view_models = im::vector![
+        TuiRenderUnit::TuiSubAgentGroup(group("nested-1", "child body")),
+        TuiRenderUnit::TuiAskUserBlock(TuiAskUserBlock {
+            items: vec![],
+            is_error: false,
+            kind: InteractionKind::AskUser,
+            pending: false,
+            verb: "AskUser".into(),
+            question: "Which one?".into(),
+            options: vec!["A".into()],
+            result: Some("A".into()),
+            request_id: Some("rid-1".into()),
+            owner: None,
+            question_ids: vec![],
+            fold: FoldState::Collapsed,
+            user_modified: false,
+            content_hash: 0,
+        }),
+    ];
+    let grid = GridSpec::with_content(60);
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let mut cache = DetailRenderCache::default();
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+
+    let subagent_key = FoldKey::of(&transcript.view_models[0]).expect("subagent 条目应可折叠");
+    let interaction_key =
+        FoldKey::of(&transcript.view_models[1]).expect("interaction 条目应可折叠");
+    assert_eq!(subagent_key, FoldKey::SubAgent("nested-1".into()));
+    assert_eq!(interaction_key, FoldKey::Interaction("rid-1".into()));
+
+    // 面板 Enter：只切换本地 fold，不写全局选择、不打开嵌套面板。
+    let original_selection = crate::kit::atoms::SELECTED_SUBAGENT_ID
+        .state()
+        .read()
+        .clone();
+    let previous_selection = Some("outer-agent".to_owned());
+    *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().write() = previous_selection.clone();
+    assert_eq!(
+        cache.focus_next(false),
+        Some(cache.header.len() + cache.prefix[0])
+    );
+    assert!(cache.toggle_focused(false));
+    assert_eq!(cache.folds.get(&subagent_key), Some(&FoldState::Expanded));
+    assert!(cache.focus_next(false).is_some());
+    assert!(cache.toggle_focused(false));
+    assert_eq!(
+        cache.folds.get(&interaction_key),
+        Some(&FoldState::Expanded)
+    );
+    assert_eq!(
+        *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().read(),
+        previous_selection,
+        "面板 fold 不得触发嵌套打开"
+    );
+    *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().write() = original_selection;
+}
+
+/// 面板关闭（`clear`）与 subagent 身份变化必须清空本地 fold——canonical 内容
+/// 只读，临时展开不跨面板实例泄漏。
+#[test]
+#[serial_test::serial]
+fn panel_close_and_instance_switch_clear_local_folds() {
+    let mut cache = DetailRenderCache::default();
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let grid = GridSpec::with_content(60);
+    let transcript = group_with_tool();
+
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    cache.focus_next(false);
+    assert!(cache.toggle_focused(false));
+    let key = FoldKey::Tool("tool-1".into());
+    assert_eq!(cache.folds.get(&key), Some(&FoldState::Expanded));
+
+    // 身份变化：切到另一个 subagent → 本地 fold 清空。
+    cache.prepare(
+        &group("other", "other body"),
+        &grid,
+        theme.clone(),
+        0,
+        Vec::new(),
+    );
+    assert!(cache.folds.is_empty(), "身份变化必须清空本地 fold");
+    assert!(cache.focused.is_none(), "身份变化必须清空焦点");
+
+    // 重新打开并展开，再关闭面板（clear）→ 本地 fold 清空。
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    cache.focus_next(false);
+    assert!(cache.toggle_focused(false));
+    assert!(!cache.folds.is_empty());
+    cache.clear(Vec::new());
+    assert!(cache.folds.is_empty(), "面板关闭必须清空本地 fold");
+    assert!(cache.focused.is_none());
 }
 
 #[test]

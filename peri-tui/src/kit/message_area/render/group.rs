@@ -288,7 +288,7 @@ pub(super) fn render_collapsed_group_lines(
             let (member_lines, ..) = super::vm_to_lines_cached(vm, grid, &mut md_cache, false);
             // 成员标题=首行；无折叠键（如普通通知）或空渲染的成员不参与点击。
             if !member_lines.is_empty()
-                && let Some((key, _)) = super::super::entry_nav::fold_key_of(vm)
+                && let Some(key) = FoldKey::of(vm)
             {
                 fold_hits.push((start, key));
             }

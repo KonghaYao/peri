@@ -19,6 +19,126 @@ pub(crate) enum EntrySurface {
     Detail,
 }
 
+/// Mermaid 围栏的渲染策略。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MermaidMode {
+    /// 只读当前预览帧；可见围栏的生成由宿主（transcript）统一调度。
+    Peek,
+    /// 渲染时同步排队生成帧，并返回围栏范围供命中/调度使用。
+    Schedule,
+}
+
+/// 内联图片的渲染策略。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageMode {
+    /// 只输出文本降级行——没有 draw hook 的 surface 不留空白占位。
+    TextOnly,
+    /// 独占图片段预留像素占位，由宿主 draw hook 绘制。
+    Inline,
+}
+
+/// 单个 entry 的渲染参数——主时间线与详情面板共用的唯一渲染入口参数。
+///
+/// `surface` 同时是缓存身份的一部分（surface 变化必须重渲染）；
+/// `transition` / `frame` 是 slot 的逐帧属性，其余字段来自 surface profile。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EntryRenderOptions {
+    pub(crate) surface: EntrySurface,
+    pub(crate) transition: ZoneTransition,
+    pub(crate) frame: Option<u64>,
+    pub(crate) mermaid: MermaidMode,
+    pub(crate) image: ImageMode,
+    pub(crate) md_copy: bool,
+}
+
+impl EntryRenderOptions {
+    /// 主时间线：可见性驱动 Mermaid、内联像素、md 复制按钮与动画帧。
+    #[must_use]
+    pub(crate) const fn message(transition: ZoneTransition, frame: Option<u64>) -> Self {
+        Self {
+            surface: EntrySurface::Message,
+            transition,
+            frame,
+            mermaid: MermaidMode::Peek,
+            image: ImageMode::Inline,
+            md_copy: true,
+        }
+    }
+
+    /// 详情面板：跟随调度 Mermaid、纯文本图片、无复制按钮、无转场台阶。
+    #[must_use]
+    pub(crate) const fn detail() -> Self {
+        Self {
+            surface: EntrySurface::Detail,
+            transition: ZoneTransition::None,
+            frame: None,
+            mermaid: MermaidMode::Schedule,
+            image: ImageMode::TextOnly,
+            md_copy: false,
+        }
+    }
+
+    /// 嵌套成员（折叠组 / 子 Agent 组内的孤立渲染）：无相邻 entry，因此无转场与帧。
+    #[must_use]
+    pub(crate) const fn nested(md_copy: bool) -> Self {
+        Self {
+            surface: EntrySurface::Message,
+            transition: ZoneTransition::None,
+            frame: None,
+            mermaid: MermaidMode::Schedule,
+            image: ImageMode::Inline,
+            md_copy,
+        }
+    }
+
+    /// 测试用：在详情基线之上单独打开 md 复制按钮。
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_md_copy(mut self, md_copy: bool) -> Self {
+        self.md_copy = md_copy;
+        self
+    }
+
+    /// 测试用：孤立 entry（无相邻 entry、由测试直接注入转场形态）。
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn isolated(transition: ZoneTransition, md_copy: bool) -> Self {
+        Self {
+            transition,
+            md_copy,
+            ..Self::detail()
+        }
+    }
+}
+
+impl EntrySurface {
+    /// surface → 渲染参数的唯一映射点：新增/修改 surface 差异必须先在这里登记，
+    /// 并由 `surface_render_options_differ_only_in_declared_fields` 锁定。
+    ///
+    /// 详情面板没有过程区台阶与 working 扫光——传入的 `transition` / `frame`
+    /// 在 Detail 面被丢弃（面板始终以 `indent = 0` 的基准列渲染）。
+    #[must_use]
+    pub(crate) fn render_options(
+        self,
+        transition: ZoneTransition,
+        frame: Option<u64>,
+    ) -> EntryRenderOptions {
+        match self {
+            Self::Message => EntryRenderOptions::message(transition, frame),
+            Self::Detail => EntryRenderOptions::detail(),
+        }
+    }
+
+    /// Mermaid 围栏的展示面（源码回退/尾部行为，见 `mermaid::MermaidSurface`）。
+    #[must_use]
+    pub(crate) fn mermaid_surface(self) -> crate::kit::mermaid::MermaidSurface {
+        match self {
+            Self::Message => crate::kit::mermaid::MermaidSurface::Chat,
+            Self::Detail => crate::kit::mermaid::MermaidSurface::Detail,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct EntryRenderContext {
     pub(crate) theme: Arc<ThemeDefinition>,
@@ -121,6 +241,8 @@ impl EntryRenderCache {
         if layout_changed || identity_changed {
             self.markdown_lines = MarkdownLineCache::default();
         }
+        // surface profile + 逐帧属性 → 唯一渲染入口参数（surface 差异只在此映射）。
+        let options = context.surface.render_options(transition, Some(frame));
         if invalidation == EntryInvalidation::Animation {
             if let TuiRenderUnit::TuiAssistantBubble(bubble) = vm {
                 if let Some(reasoning) = bubble.reasoning.as_ref().filter(|entry| entry.is_running)
@@ -144,26 +266,13 @@ impl EntryRenderCache {
                     genui_buttons,
                     mermaid_fences,
                     fold_hits,
-                ) = if context.surface == EntrySurface::Message {
-                    crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
-                        vm,
-                        grid,
-                        &mut self.markdown,
-                        None,
-                        true,
-                        transition,
-                        Some(frame),
-                    )
-                } else {
-                    crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
-                        vm,
-                        grid,
-                        &mut self.markdown,
-                        None,
-                        false,
-                        transition,
-                    )
-                };
+                ) = crate::kit::message_area::render::vm_to_lines_with_options(
+                    vm,
+                    grid,
+                    &mut self.markdown,
+                    None,
+                    options,
+                );
                 self.lines = Arc::new(lines);
                 self.copy_button = copy_button;
                 self.interaction = interaction;
@@ -182,26 +291,13 @@ impl EntryRenderCache {
                 genui_buttons,
                 mermaid_fences,
                 fold_hits,
-            ) = if context.surface == EntrySurface::Message {
-                crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
-                    vm,
-                    grid,
-                    &mut self.markdown,
-                    Some(&mut self.markdown_lines),
-                    true,
-                    transition,
-                    Some(frame),
-                )
-            } else {
-                crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
-                    vm,
-                    grid,
-                    &mut self.markdown,
-                    Some(&mut self.markdown_lines),
-                    false,
-                    transition,
-                )
-            };
+            ) = crate::kit::message_area::render::vm_to_lines_with_options(
+                vm,
+                grid,
+                &mut self.markdown,
+                Some(&mut self.markdown_lines),
+                options,
+            );
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
             self.interaction = interaction;

@@ -18,7 +18,9 @@ use crate::kit::entry_render_cache::{
 };
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::selection::WrappedLineInfo;
-use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgentGroup};
+use crate::kit::tui_render_unit::{
+    FoldKey, FoldState, FoldToggle, TuiRenderUnit, TuiSubAgentGroup, fold_state_of, toggle_fold,
+};
 
 pub(super) const DETAIL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -133,7 +135,7 @@ impl DetailRenderCache {
         self.grid = *grid;
         self.source = group.view_models.clone();
         if source_changed {
-            let keys: HashSet<_> = self.source.iter().filter_map(fold_key).collect();
+            let keys: HashSet<_> = self.source.iter().filter_map(FoldKey::of).collect();
             self.folds.retain(|key, _| keys.contains(key));
             if self.focused.as_ref().is_some_and(|key| !keys.contains(key)) {
                 self.focused = None;
@@ -155,7 +157,7 @@ impl DetailRenderCache {
         for index in 0..self.source.len() {
             let vm = projected(
                 &self.source[index],
-                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                FoldKey::of(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
             let slot = &mut self.slots[index];
             if context_changed
@@ -236,7 +238,7 @@ impl DetailRenderCache {
     pub(in super::super) fn focused(&self) -> Option<usize> {
         self.source
             .iter()
-            .position(|vm| fold_key(vm).as_ref() == self.focused.as_ref())
+            .position(|vm| FoldKey::of(vm).as_ref() == self.focused.as_ref())
             .filter(|_| self.focused.is_some())
     }
 
@@ -259,7 +261,7 @@ impl DetailRenderCache {
             } else {
                 (start + step) % len
             };
-            if let Some(key) = fold_key(&self.source[index]) {
+            if let Some(key) = FoldKey::of(&self.source[index]) {
                 self.focused = Some(key);
                 return self
                     .prefix
@@ -274,29 +276,23 @@ impl DetailRenderCache {
         let Some(index) = self.focused() else {
             return false;
         };
-        let Some(key) = fold_key(&self.source[index]) else {
+        let Some(key) = FoldKey::of(&self.source[index]) else {
             return false;
         };
         let Some(current) = self
             .folds
             .get(&key)
             .copied()
-            .or_else(|| fold_of(&self.source[index]))
+            .or_else(|| fold_state_of(&self.source[index]))
         else {
             return false;
         };
-        let next = if preview {
-            if current == crate::kit::tui_render_unit::FoldState::Preview {
-                crate::kit::tui_render_unit::FoldState::Collapsed
-            } else {
-                crate::kit::tui_render_unit::FoldState::Preview
-            }
-        } else if current == crate::kit::tui_render_unit::FoldState::Collapsed {
-            crate::kit::tui_render_unit::FoldState::Expanded
+        let toggle = if preview {
+            FoldToggle::Preview
         } else {
-            crate::kit::tui_render_unit::FoldState::Collapsed
+            FoldToggle::Expand
         };
-        self.folds.insert(key, next);
+        self.folds.insert(key, toggle_fold(current, toggle));
         self.dirty = true;
         true
     }
@@ -312,7 +308,7 @@ impl DetailRenderCache {
         if index >= self.source.len() || self.prefix[index] != content_row {
             return false;
         }
-        let Some(key) = fold_key(&self.source[index]) else {
+        let Some(key) = FoldKey::of(&self.source[index]) else {
             return false;
         };
         self.focused = Some(key);
@@ -342,7 +338,7 @@ impl DetailRenderCache {
             let previous_bytes = slot.bytes();
             let vm = projected(
                 &self.source[index],
-                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                FoldKey::of(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
             slot.ensure(&vm, &self.grid, context.clone(), frame);
             self.resident_bytes = self
@@ -478,30 +474,9 @@ impl DetailRenderCache {
     }
 }
 
-pub(super) fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
-    match vm {
-        TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
-        TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
-        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
-        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
-        _ => None,
-    }
-}
-
-pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
-    match vm {
-        TuiRenderUnit::TuiSystemReminder(reminder) => {
-            Some(FoldKey::SystemReminder(reminder.reminder_id))
-        }
-        TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
-        TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
-            bubble.message_id.clone().map(FoldKey::Reasoning)
-        }
-        TuiRenderUnit::TuiCollapsedGroup(group) => Some(FoldKey::Group(group.key.clone())),
-        _ => None,
-    }
-}
-
+/// 把面板本地 fold 投影到一条 entry 上（canonical 内容只读，面板状态不落
+/// `FOLD_OVERRIDES`）。键控/状态判定由 [`FoldKey::of`] / [`fold_state_of`] 统一；
+/// 这里只负责把选中的 fold 写回副本并重算 hash。
 pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUnit> {
     let Some(fold) = fold else {
         return Cow::Borrowed(vm);
@@ -526,6 +501,16 @@ pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, 
         TuiRenderUnit::TuiCollapsedGroup(group) => {
             group.fold = fold;
             group.recompute_hash();
+        }
+        // 面板对 SubAgent / Interaction 只做本地折叠展示；嵌套打开由消息区
+        // Enter 分派负责（Q12 未批准面板内导航，面板不新增打开语义）。
+        TuiRenderUnit::TuiSubAgentGroup(group) => {
+            group.fold = fold;
+            group.recompute_hash();
+        }
+        TuiRenderUnit::TuiAskUserBlock(block) => {
+            block.fold = fold;
+            block.recompute_hash();
         }
         _ => {}
     }

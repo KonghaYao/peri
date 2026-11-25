@@ -82,6 +82,13 @@ pub(super) fn apply_fold_pass(
     {
         let iteration_items = items.iter().enumerate();
         for (i, vm) in iteration_items {
+            // 覆盖表查找按 `FoldKey::of` 的唯一键控口径；空表短路——热路径
+            // （无手动覆盖）不构造 FoldKey（避免逐 token 克隆 message_id）。
+            let override_fold = if has_overrides {
+                FoldKey::of(vm).and_then(|key| overrides.get(&key).copied())
+            } else {
+                None
+            };
             match vm {
                 TuiAssistantBubble(b) => {
                     // ① reasoning 状态推导：phase 离开 PromptRunning → 全部 Completed。
@@ -103,15 +110,6 @@ pub(super) fn apply_fold_pass(
                             status = EntryStatus::Completed;
                         }
                         // 用户手动展开（覆盖表中存在 Reasoning(message_id)）→ 覆盖优先。
-                        // 空表短路：无手动覆盖时不构造 FoldKey（避免逐 token 克隆
-                        // message_id）。
-                        let override_fold = if has_overrides {
-                            b.message_id.as_ref().and_then(|id| {
-                                overrides.get(&FoldKey::Reasoning(id.clone())).copied()
-                            })
-                        } else {
-                            None
-                        };
                         let target_fold = override_fold.unwrap_or_else(|| {
                             if b.message_id.is_some() {
                                 crate::kit::tui_render_unit::fold_for_status(
@@ -176,11 +174,6 @@ pub(super) fn apply_fold_pass(
                     } else {
                         EntryStatus::Completed
                     };
-                    let override_fold = if has_overrides {
-                        overrides.get(&FoldKey::Tool(t.tool_id.clone())).copied()
-                    } else {
-                        None
-                    };
                     let user_modified = override_fold.is_some() || t.user_modified;
                     let target_fold = override_fold.unwrap_or_else(|| {
                         crate::kit::tui_render_unit::fold_for_status(FoldTarget::Tool, status)
@@ -204,13 +197,6 @@ pub(super) fn apply_fold_pass(
                     } else {
                         EntryStatus::Completed
                     };
-                    let override_fold = if has_overrides {
-                        overrides
-                            .get(&FoldKey::SubAgent(g.instance_id.clone()))
-                            .copied()
-                    } else {
-                        None
-                    };
                     let user_modified = override_fold.is_some() || g.user_modified;
                     let target_fold = override_fold.unwrap_or_else(|| {
                         crate::kit::tui_render_unit::fold_for_status(FoldTarget::SubAgent, status)
@@ -224,22 +210,12 @@ pub(super) fn apply_fold_pass(
                     }
                 }
                 TuiSystemReminder(r) => {
-                    let target_fold = if has_overrides {
-                        overrides
-                            .get(&FoldKey::SystemReminder(r.reminder_id))
-                            .copied()
-                            .unwrap_or_else(|| {
-                                crate::kit::tui_render_unit::fold_for_status(
-                                    FoldTarget::System,
-                                    EntryStatus::Completed,
-                                )
-                            })
-                    } else {
+                    let target_fold = override_fold.unwrap_or_else(|| {
                         crate::kit::tui_render_unit::fold_for_status(
                             FoldTarget::System,
                             EntryStatus::Completed,
                         )
-                    };
+                    });
                     if r.fold != target_fold {
                         let mut updated = r.clone();
                         updated.fold = target_fold;
@@ -260,13 +236,6 @@ pub(super) fn apply_fold_pass(
                         EntryStatus::Completed
                     };
                     // 用户手动展开过（覆盖表存在 Interaction(request_id)）→ 覆盖优先
-                    let override_fold = if has_overrides {
-                        a.request_id.as_ref().and_then(|id| {
-                            overrides.get(&FoldKey::Interaction(id.clone())).copied()
-                        })
-                    } else {
-                        None
-                    };
                     let user_modified = override_fold.is_some() || a.user_modified;
                     let target_fold = override_fold.unwrap_or_else(|| {
                         crate::kit::tui_render_unit::fold_for_status(

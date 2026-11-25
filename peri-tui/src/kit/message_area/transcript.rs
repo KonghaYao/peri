@@ -53,7 +53,7 @@ fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
 }
 
 /// entry 是否产出渲染行——0 行 entry（空 bubble / 空 user prompt）不参与相邻判定（§7）。
-/// 判定条件与 `render::vm_to_lines_cached_with_layout` 的 0 行早返回同源，两处须同步。
+/// 判定条件与 `render::vm_to_lines_with_options` 的 0 行早返回同源，两处须同步。
 #[must_use]
 fn produces_lines(vm: &TuiRenderUnit) -> bool {
     match vm {

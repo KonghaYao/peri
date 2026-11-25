@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::i18n;
 use peri_tui_components::genui::GenUiButtonInfo;
 
+use crate::kit::entry_render_cache::{EntryRenderOptions, ImageMode, MermaidMode};
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_theme::atoms::THEME_ATOM;
@@ -93,7 +94,7 @@ impl PartialEq for ImageLineInfo {
     }
 }
 
-/// `vm_to_lines_cached_with_layout` 的渲染产物：行、复制按钮、交互布局、
+/// `vm_to_lines_with_options` 的渲染产物：行、复制按钮、交互布局、
 /// 图片行、GenUI 按钮、Mermaid 围栏范围、展开组成员标题命中表。元组过长，
 /// 用别名避免调用方被类型签名淹没。
 type RenderOutput = (
@@ -207,12 +208,13 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
     .0
 }
 
-/// 与 [`vm_to_lines`] 同逻辑，但接受 markdown 渲染缓存以支持增量续跑。///
+/// 与 [`vm_to_lines`] 同逻辑，但接受 markdown 渲染缓存以支持增量续跑。
+///
 /// [Phase 2] 流式期间 text 末尾追加 token 时，前缀 blocks（已闭合的 paragraph /
 /// list item / code block）完全不变——cache 通过文本前缀比较复用上次处理到
 /// stable_state 的累积状态，仅处理新增 block。
 ///
-/// `render_copy_button` 为 true 时（顶层 MessageArea），在 AssistantBubble 的
+/// `md_copy` 为 true 时（顶层 MessageArea），在 AssistantBubble 的
 /// markdown 内容末尾追加一行 md 复制按钮，并返回按钮的布局信息（供点击检测）。
 /// 嵌套渲染（历史 SubAgentGroup 递归 / subagent 详情面板）传 false。
 ///
@@ -222,123 +224,59 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
 /// 与消息区内联图片占位（`ImageLineInfo::inline`，绘制由 MessageArea hook 承接）；
 /// 其余变体恒 None / 空 Vec。
 ///
-/// 与 [`vm_to_lines_cached_with_layout`] 同逻辑，不带 markdown stable overlay；
+/// 与 [`vm_to_lines_with_options`] 同逻辑，不带 markdown stable overlay；
 /// 转场形态固定 [`ZoneTransition::None`]：本入口服务嵌套渲染（折叠组内成员 /
 /// 子 Agent 组内成员）与测试，孤立渲染的 entry 没有相邻 entry 可判定转场（§6）。
 pub(crate) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
-    render_copy_button: bool,
+    md_copy: bool,
 ) -> (
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    let (lines, copy_button, interaction, image_lines, _, _, _) = vm_to_lines_impl(
+    let (lines, copy_button, interaction, image_lines, _, _, _) = vm_to_lines_with_options(
         vm,
         grid,
         md_cache,
         None,
-        render_copy_button,
-        ZoneTransition::None,
-        None,
-        true,
-        true,
-        crate::kit::mermaid::MermaidSurface::Chat,
+        EntryRenderOptions::nested(md_copy),
     );
     (lines, copy_button, interaction, image_lines)
 }
 
-/// 直接渲染入口（详情面板/测试）：围栏渲染同时排队。
+/// 渲染单个 entry 的唯一入口——主时间线 / 详情面板 / 嵌套成员只差
+/// [`EntryRenderOptions`]，不再按 surface 分叉入口壳。
 ///
-/// `transition` 为 entry 的过程区转场形态（§6，transcript 按相邻 entry 的起止
-/// zone 判定）：入口台阶行（进入 ` ╰─╮` / 退出 ` ╭─╯`）统一在本入口插入并顺延
-/// 各 layout 索引；`AssistantBubble` 内部 reasoning → 正文的转场由该分支自画
-/// （entry 内部事务）；正文段保持基准列。
-pub(crate) fn vm_to_lines_cached_with_layout_scheduled(
+/// `md_lines` 为 markdown 稳定块缓存（仅消息区增量路径传入；嵌套/面板传
+/// `None`）。转场台阶（§6）由 `options.transition` 决定并统一在末尾插入。
+pub(crate) fn vm_to_lines_with_options(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
-    render_copy_button: bool,
-    transition: ZoneTransition,
+    options: EntryRenderOptions,
 ) -> RenderOutput {
-    vm_to_lines_impl(
-        vm,
-        grid,
-        md_cache,
-        md_lines,
-        render_copy_button,
-        transition,
-        None,
-        true,
-        false,
-        crate::kit::mermaid::MermaidSurface::Detail,
-    )
+    vm_to_lines_impl(vm, grid, md_cache, md_lines, options)
 }
 
-#[cfg(test)]
-pub(crate) fn vm_to_lines_cached_with_layout(
-    vm: &TuiRenderUnit,
-    grid: &GridSpec,
-    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
-    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
-    render_copy_button: bool,
-    transition: ZoneTransition,
-) -> RenderOutput {
-    vm_to_lines_cached_with_layout_scheduled(
-        vm,
-        grid,
-        md_cache,
-        md_lines,
-        render_copy_button,
-        transition,
-    )
-}
-
-/// 消息区缓存路径：渲染只读当前帧；可见围栏由 transcript 统一调度。
-///
-/// `frame` 是 100ms 粒度的壁钟帧序号（与 `EntryRenderCache::ensure` 的缓存键
-/// 同源）：尾部工作组的 Working 扫光相位 = `frame × 100ms`，保证「触发
-/// Animation 重建的帧」与「画出来的相位」是同一个值。
-pub(crate) fn vm_to_lines_cached_with_layout_gated(
-    vm: &TuiRenderUnit,
-    grid: &GridSpec,
-    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
-    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
-    render_copy_button: bool,
-    transition: ZoneTransition,
-    frame: Option<u64>,
-) -> RenderOutput {
-    vm_to_lines_impl(
-        vm,
-        grid,
-        md_cache,
-        md_lines,
-        render_copy_button,
-        transition,
-        frame,
-        false,
-        true,
-        crate::kit::mermaid::MermaidSurface::Chat,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn vm_to_lines_impl(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
-    render_copy_button: bool,
-    transition: ZoneTransition,
-    frame: Option<u64>,
-    schedule_mermaid: bool,
-    inline_pixels: bool,
-    surface: crate::kit::mermaid::MermaidSurface,
+    options: EntryRenderOptions,
 ) -> RenderOutput {
+    let render_copy_button = options.md_copy;
+    let schedule_mermaid = options.mermaid == MermaidMode::Schedule;
+    let inline_pixels = options.image == ImageMode::Inline;
+    let surface = options.surface.mermaid_surface();
+    let frame = options.frame;
+    let transition = options.transition;
+
     let mut md_lines = md_lines;
     if let Some(layout) = md_lines.as_deref_mut() {
         layout.genui_ranges.clear();
