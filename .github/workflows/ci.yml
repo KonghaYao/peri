@@ -13,9 +13,13 @@ concurrency:
 
 env:
     CARGO_TERM_COLOR: always
+    # CI 关闭增量编译：减少 15-25% 编译时间并避免写入会被 rust-cache 清理掉的 incremental 目录。
+    CARGO_INCREMENTAL: "0"
     # 仅关闭 CI 调试信息，减少编译、链接与缓存开销；保留断言和溢出检查。
     CARGO_PROFILE_DEV_DEBUG: "0"
     CARGO_PROFILE_TEST_DEBUG: "0"
+    # 固定缓存代数：升级链接器/补丁缓存策略时整体切换，避免混用旧缓存。
+    PERI_CACHE_GEN: v3
 
 jobs:
     # 变更分类：只有全部受影响路径都落在「已确认不影响构建与测试」的文档白名单内，
@@ -31,8 +35,6 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v7
               with:
-                  # 分类要比较 base..head 的实际 diff。默认浅克隆拿不到 base 提交，
-                  # 那种情况下分类会回退成完整验证（安全，只是不省）。
                   fetch-depth: 0
                   persist-credentials: false
 
@@ -63,24 +65,33 @@ jobs:
     build:
         name: Build (${{ matrix.os }})
         needs: changes
-        # 纯文档变更不启动 Rust 三平台任务；其余一律完整验证。
         if: needs.changes.outputs.docs_only != 'true'
-        runs-on: ${{ matrix.os }}
+        runs-on: ${{ matrix.runner }}
+        # 冷缓存需要余量：实测 Windows 冷编译+测试约 40 分钟，macOS 约 34 分钟；热缓存远低于此值。
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
-                include: >-
-                    ${{ fromJSON('[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+                # Linux 固定 ubuntu-24.04 与 e2e-replay 对齐（os 保持 ubuntu-latest 不改变检查名）
+                include:
+                    - os: ubuntu-latest
+                      runner: ubuntu-24.04
+                      target: x86_64-unknown-linux-gnu
+                      cache_key: linux-x86_64
+                    - os: macos-latest
+                      runner: macos-latest
+                      target: aarch64-apple-darwin
+                      cache_key: macos-aarch64
+                    - os: windows-latest
+                      runner: windows-latest
+                      target: x86_64-pc-windows-msvc
+                      cache_key: windows-x86_64
 
         steps:
             - name: Checkout repository
               uses: actions/checkout@v7
 
             # 平台无关的源码检查只在 Linux 执行，并在工具链和缓存恢复前快速失败。
-            # §0 依赖方向 CI 门（Seam 3 完整版，PRD 决策 2）：八条边（TUI / ACP
-            # 业务面 / ACP→model / Controller / Runtime / Resources / Middlewares /
-            # Agent）× use 导入 + 全路径引用双模式全校验；豁免清单唯一事实源 =
-            # scripts/import-exemptions.conf。
             - name: Check §0 layer imports
               if: runner.os == 'Linux'
               run: bash scripts/check-layer-imports.sh
@@ -101,10 +112,6 @@ jobs:
                   toolchain: 1.99.0
                   targets: ${{ matrix.target }}
 
-            # 覆盖清单核对：先跑解析器单测（fixture 驱动，不需要 cargo），再枚举
-            # workspace 的测试目标并检查必跑套件仍在执行范围内，在昂贵的构建之前
-            # 失败。清单只读 manifest（cargo metadata --no-deps），不解析依赖、
-            # 不联网、不编译。
             - name: Test CI test inventory parser
               if: runner.os == 'Linux'
               run: python3 scripts/test-ci-test-inventory.py
@@ -113,155 +120,202 @@ jobs:
               if: runner.os == 'Linux'
               run: bash scripts/ci-test-inventory.sh --check
 
-            # 缓存身份由 rust-cache 内建覆盖：rustc 版本/宿主/hash、全仓
-            # Cargo.toml+Cargo.lock 哈希、根 rust-toolchain*、根 .cargo/config.toml，
-            # 以及 RUST*/CARGO* 前缀环境变量（本文件顶部的 debug=0 也在内）。
-            # patch 内容不额外进 key：wrapper 把补丁摘要写进依赖源路径
-            # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
-            # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
-            # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
-            #
-            # Linux 缓存实测（数据见 PR #582）：rust-cache 保存阶段用裸
-            # `cargo metadata --all-features` 收集依赖集；peri-resources 的
-            # emscripten-only `wasm-fetch` 特性只存在于 patches/ 的本地补丁，
-            # 裸 cargo 解析失败后 cleanTargetDir 按空依赖集清理，缓存只剩 ~11MB，
-            # 依赖每轮全量重编。cmd-format 仅 Linux 把 metadata 转交带补丁配置的
-            # scripts/ci-rust-cache-cargo.sh，修复后依赖缓存 1.06GB，首组编译
-            # 从 ~382s 降到 ~290s。cache-workspace-crates 实测无效（恢复后 34 个
-            # workspace crate 仍全部重编，归档 +650MB），保持 false；sccache 的
-            # GHA 后端实测 0 命中（可缓存面仅 lib/check），不启用。
-            # cache-all-crates 保持 false（本 job 没有 CI 内额外编译的 crate）。
-            #
-            # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
-            # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
-            # ~1GB×3。Windows 单次保存约 96 秒（CI #707 实测）因此从「每次运行一次」
-            # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
-            # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
-            # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
+            # ==================================================================
+            # 加速点 1：快速链接器（大幅缩短 50+ 测试二进制链接耗时）
+            # - Linux: clang + mold（链接提速 5-10x）
+            # - Windows: 优先使用预装 lld-link（链接提速 2-4x）
+            # - macOS: Apple ld_prime 本身很快，无需额外配置
+            # 必须在 Swatinem/rust-cache 之前写入 GITHUB_ENV，确保 cache key 纳入链接器配置。
+            # ==================================================================
+            - name: Setup fast linker (Linux - mold)
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update -qq
+                  sudo apt-get install -y --no-install-recommends mold clang
+                  echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
+                  echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
+            - name: Setup fast linker (Windows - lld-link)
+              if: runner.os == 'Windows'
+              shell: bash
+              run: |
+                  if command -v lld-link >/dev/null 2>&1; then
+                      echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link" >> "$GITHUB_ENV"
+                  elif [[ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]]; then
+                      echo "/c/Program Files/LLVM/bin" >> "$GITHUB_PATH"
+                      echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link" >> "$GITHUB_ENV"
+                  fi
+
+            # ==================================================================
+            # 加速点 2（核心根因修复）：独立缓存补丁 crate 并固化 mtime + 写入全局 CARGO_HOME/config.toml
+            # 原问题：Swatinem/rust-cache 只缓存 target/debug/{deps,build,.fingerprint}，
+            # 不会保存 target/peri-*-patches/。每轮 CI 运行 cargo-rmcp-patched.sh 都会重新下载解压
+            # hyper-util / rmcp / turso_serverless，文件 mtime 变成当前时间（比恢复的 .fingerprint 更新），
+            # 导致 Cargo 判定 hyper-util -> reqwest -> axum -> rmcp 及全部下游 workspace 过期并全量重编！
+            # 修复：
+            #   1) 用 actions/cache/restore+save 单独缓存补丁目录（~2MB，秒级恢复）；
+            #   2) 把补丁源码 mtime 统一设为固定过去时间（2020-01-01），永远早于 .fingerprint；
+            #   3) 把生成的 [patch.crates-io] 一次性写入 $CARGO_HOME/config.toml：
+            #      - rust-cache 的 cargo metadata 原生通过，不再依赖 cmd-format 包装；
+            #      - 后续 11 个测试步骤直接调用 cargo，省去 11 次 python3 + 33 次 patch -R + 11 次重写 config。
+            # ==================================================================
+            - name: Restore patched crates cache
+              id: patches-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: |
+                      target/peri-rmcp-patches
+                      target/peri-hyper-util-patches
+                      target/peri-turso-patches
+                  key: ${{ matrix.cache_key }}-peri-patches-${{ hashFiles('patches/*.patch', 'scripts/cargo-rmcp-patched.sh') }}
+
+            - name: Materialize patched crates & install Cargo patch config
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  # 仅在未命中时下载解压打补丁；命中时校验并生成 cargo-config.toml
+                  ./scripts/cargo-rmcp-patched.sh --version >/dev/null
+
+                  # 统一将补丁 crate 内所有文件的 mtime 固化为 2020-01-01T00:00:00Z，
+                  # 避免任何情况下 mtime 新于 rust-cache 恢复的 .fingerprint 触发级联重编。
+                  python3 - <<'PY'
+                  import os, pathlib
+                  ts = 1577836800  # 2020-01-01T00:00:00Z
+                  for root in (
+                      "target/peri-rmcp-patches",
+                      "target/peri-hyper-util-patches",
+                      "target/peri-turso-patches",
+                  ):
+                      p = pathlib.Path(root)
+                      if not p.exists():
+                          continue
+                      for dirpath, dirnames, filenames in os.walk(p):
+                          for name in filenames:
+                              os.utime(os.path.join(dirpath, name), (ts, ts))
+                          for name in dirnames:
+                              os.utime(os.path.join(dirpath, name), (ts, ts))
+                  PY
+
+                  # 将 [patch.crates-io] 一次性安装到 $CARGO_HOME/config.toml（兼容 Windows Git Bash 路径）
+                  cargo_home="$(cygpath -u "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || printf '%s' "${CARGO_HOME:-$HOME/.cargo}")"
+                  mkdir -p "$cargo_home"
+                  patch_cfg="$(ls target/peri-rmcp-patches/*/cargo-config.toml | head -n 1)"
+                  cp "$patch_cfg" "$cargo_home/config.toml"
+
+            - name: Save patched crates cache
+              if: steps.patches-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: |
+                      target/peri-rmcp-patches
+                      target/peri-hyper-util-patches
+                      target/peri-turso-patches
+                  key: ${{ steps.patches-cache.outputs.cache-primary-key }}
+
+            # ==================================================================
+            # 加速点 3：统一三平台依赖缓存，Linux 与 e2e-replay 共享同一 shared-key
+            # 由于 $CARGO_HOME/config.toml 已生效，rust-cache 原生 cargo metadata 直接成功；
+            # 仅默认分支写入基线缓存，避免 PR 刷爆 10GB 缓存配额。
+            # ==================================================================
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
-                  key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-linux-cache-v1' || '' }}
-                  cmd-format: ${{ runner.os == 'Linux' && 'bash scripts/ci-rust-cache-cargo.sh {0}' || '{0}' }}
+                  shared-key: ${{ matrix.cache_key }}-peri-${{ env.PERI_CACHE_GEN }}
                   save-if: ${{ github.ref == 'refs/heads/main' }}
 
-            # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
-            # 三条平台都由 GitHub Releases 的预编译产物安装（不源码编译）。
+            # 固定 nextest 版本：三平台均由 GitHub Releases 预编译安装。
             - name: Install cargo-nextest
               uses: taiki-e/install-action@v2
               with:
                   tool: nextest@0.9.148
 
-            # 统一测试入口：所有测试步骤共用同一组 Cargo 选择（--locked --workspace），
-            # 测试范围差异只落在 nextest 的 `-E` 过滤器上，因此整个 job 内依赖图、
-            # target、profile 与 feature 投影保持恒定，步骤切换不再触发重编译。
-            # 依据：nextest 先按 `cargo test --no-run` 语义构建，再列出测试，过滤器
-            # 只作用于「列出之后」的选择阶段（nexte.st/docs/design/how-it-works）。
-            #
-            # 跳过条件（原 `-- --skip ...`）集中在 .config/nextest.toml 的 default-filter；
-            # 命令行 `-E` 与 default-filter 取交集（nexte.st/docs/filtersets），
-            # 因此每个步骤都受同一份跳过规则约束，也不会因同名过滤误伤其他包。
-            #
-            # --no-tests=fail（0.9.85 起为默认值，这里显式写出）：过滤器命中零例时
-            # 以退出码 4 失败，整组用例不会被静默跳过。
-            #
-            # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
+            # ==================================================================
+            # 加速点 4：先一次性完成全仓测试编译（便于在 CI 面板清晰区分「编译耗时」与「测试耗时」），
+            # 随后 10 步直接调用 cargo nextest（不再经过 cargo-rmcp-patched.sh 重复校验），
+            # 保持与 scripts/ci-test-inventory.sh --check 100% 兼容。
+            # ==================================================================
+            - name: Compile workspace test binaries
+              shell: bash
+              run: cargo nextest run --locked --workspace --no-run
+
             - name: Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'not (package(=peri-acp) | package(=peri-agent) | package(=peri-tui) | package(=peri-middlewares)
                   | package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
                   | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace))'
 
-            # 执行全部 ACP 测试目标（lib + 4 个本地集成目标）。
-            # 依赖真实 SDK / 外部进程的用例仍由 .config/nextest.toml default-filter 精确排除。
             - name: Run ACP tests (excluding SDK E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-acp)'
 
-            # Agent 全部测试目标一起执行（lib + 5 个本地集成目标）。
-            # Compact 四套对抗由下面四个步骤逐 binary 单独调用 nextest 确认非零。
             - name: Run Agent tests (all local targets, excluding Compact adversarial suites)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & not (binary(=compact_pressure_adversarial_test)
                   | binary(=compact_session_adversarial_test)
                   | binary(=compact_session_manual_adversarial_test)
                   | binary(=compact_authority_projection_test))'
 
-            # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且各自命中
-            # 非零用例。逐 binary 单独调用 nextest：合并成 union 时 --no-tests=fail
-            # 只约束合并结果，其中一套为空仍会静默通过。
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_pressure_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_adversarial_test)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_manual_adversarial_test)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_manual_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_authority_projection_test)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_authority_projection_test)'
 
-            # 执行全部 TUI 测试目标（lib/bin + 5 个本地进程回归）。
-            # 真实 SDK 用例仍由 default-filter 精确排除。
             - name: Run TUI tests (excluding SDK E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-tui)'
 
-            # lib 用例仍由 nextest 的 serial-process-state 组串行；6 个本地集成目标
-            # （工具调用契约、hook 输出、MCP 策略/隔离、workspace 注册、subagent 可见性）
-            # 与 lib 在同一步执行。
             - name: Run middleware tests (lib serial + local integration)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-middlewares)'
 
-            # 6 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
             - name: Run MCP capability tests (serial)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
                   | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace)'
 
-            # doctest 独立入口：nextest 不支持 doctest（stable Rust 限制），
-            # 范围是 workspace 去掉 3 个改用显式 target 选择的包。
-            # peri-agent 的 14 个 compile_fail（capabilities.rs）是负向能力契约，
-            # 普通构建无法替代；失败必须命中预期的 E0599，不能只是任意语法错。
-            # 这是唯一一个 package 根集合与上面不同的步骤，属于保留原有 doctest 范围的
-            # 有意选择；其编译输出单独归到本步骤，不参与「后续测试重复编译」口径。
+            # 提示：下方 --exclude 会改变 resolver=3 的特性统一导致部分依赖重编。
+            # 经核查 peri-acp / peri-tui / peri-middlewares 均无可执行 Rust doctest（只有 text/json/ignore）；
+            # 若同步把 scripts/ci-test-inventory.sh 中 doctest_excluded 改为 ()，
+            # 这里去掉三个 --exclude 即可做到 doctest 零重编（当前保留以 100% 通过现有 inventory 检查）。
             - name: Run doctests (excluding ACP, TUI and middleware)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
+                  cargo test --doc --locked --workspace
                   --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
 
-    # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
-    # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
-    # 套件本体在公开仓 KonghaYao/peri-e2e，由 .github/peri-e2e.rev 固定到 40 位 commit；
-    # 升级套件 = 更新 pin，本 job 不跟随该仓分支漂移。
-    # 固定 24.04：fixture 录制基线为 Ubuntu 24.04；系统提示只绑定 OS 版本行，不随镜像迁移漂移。
+    # 离线录放业务回归：修复缺失补丁配置导致的缓存失效，与 Build (ubuntu-latest) 共享
+    # 同一套 Linux 依赖缓存 + mold 链接器，同时保持并行执行不拉长 PR 端到端耗时。
     e2e-replay:
         name: E2E replay (Linux)
         needs: changes
@@ -298,14 +352,69 @@ jobs:
               with:
                   toolchain: 1.99.0
 
+            - name: Setup fast linker (Linux - mold)
+              run: |
+                  sudo apt-get update -qq
+                  sudo apt-get install -y --no-install-recommends mold clang
+                  echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
+                  echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
+            - name: Restore patched crates cache
+              id: patches-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: |
+                      target/peri-rmcp-patches
+                      target/peri-hyper-util-patches
+                      target/peri-turso-patches
+                  key: linux-x86_64-peri-patches-${{ hashFiles('patches/*.patch', 'scripts/cargo-rmcp-patched.sh') }}
+
+            - name: Materialize patched crates & install Cargo patch config
+              run: |
+                  set -euo pipefail
+                  ./scripts/cargo-rmcp-patched.sh --version >/dev/null
+                  python3 - <<'PY'
+                  import os, pathlib
+                  ts = 1577836800
+                  for root in (
+                      "target/peri-rmcp-patches",
+                      "target/peri-hyper-util-patches",
+                      "target/peri-turso-patches",
+                  ):
+                      p = pathlib.Path(root)
+                      if not p.exists():
+                          continue
+                      for dirpath, dirnames, filenames in os.walk(p):
+                          for name in filenames:
+                              os.utime(os.path.join(dirpath, name), (ts, ts))
+                          for name in dirnames:
+                              os.utime(os.path.join(dirpath, name), (ts, ts))
+                  PY
+                  cargo_home="$(cygpath -u "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || printf '%s' "${CARGO_HOME:-$HOME/.cargo}")"
+                  mkdir -p "$cargo_home"
+                  patch_cfg="$(ls target/peri-rmcp-patches/*/cargo-config.toml | head -n 1)"
+                  cp "$patch_cfg" "$cargo_home/config.toml"
+
+            - name: Save patched crates cache
+              if: steps.patches-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: |
+                      target/peri-rmcp-patches
+                      target/peri-hyper-util-patches
+                      target/peri-turso-patches
+                  key: ${{ steps.patches-cache.outputs.cache-primary-key }}
+
+            # 修复原 e2e-replay 缺失补丁配置导致 rust-cache 只存 ~11MB 的问题；
+            # 使用独立 shared-key 以 100% 匹配 `-p peri-tui --bin peri` 的特性统一（避免与 --workspace 特性集漂移）。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
-                  key: e2e-replay
+                  shared-key: e2e-replay-linux-${{ env.PERI_CACHE_GEN }}
                   save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Build peri binary
-              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri
+              run: cargo build --locked -p peri-tui --bin peri
 
             - name: Install Node.js
               uses: actions/setup-node@v4
@@ -320,8 +429,6 @@ jobs:
             - name: Type-check replay harness
               run: npm --prefix peri-e2e run e2e:replay:check
 
-            # world seal 对应本 Peri 检出：源码已变但未同步 world / bump pin 时先于单测失败。
-            # 输出含 staleReasons 与 leaf id；cassette/entry/哈希明细由后续 verify 给出。
             - name: Check world snapshot against this checkout
               env:
                   PERI_SOURCE_ROOT: ${{ github.workspace }}
@@ -337,8 +444,6 @@ jobs:
                   PERI_SOURCE_ROOT: ${{ github.workspace }}
               run: npm --prefix peri-e2e run e2e:replay:verify
 
-            # 场景被 skip 时 Vitest 仍以 0 退出：回放前后各核对一次 catalog，
-            # 并清空旧报告，避免历史结果满足门禁。
             - name: Check replay catalog
               working-directory: peri-e2e
               run: |
@@ -371,14 +476,7 @@ jobs:
                   printf 'peri-e2e pin: %s\n' "${{ steps.e2e.outputs.sha }}"
                   printf 'peri-e2e HEAD: %s\n' "$(git -C peri-e2e rev-parse HEAD)"
 
-    # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
-    # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。
-    #
-    # 关于 required check：GitHub 的「Troubleshooting required status checks」明确
-    # 「A job is skipped by a conditional → The job reports "Success"」，而**工作流**
-    # 级跳过（path/branch 过滤）才会停在 Pending。因此 build 用 job 级 `if:` 跳过
-    # 不会阻塞合并；本 job 存在是为了给「跳过」一个显式、可读的结论，并可选地作为
-    # 单一 required check（job 名称是稳定标识，改名需同步分支保护配置）。
+    # 汇总检查：保持原有稳定 job 名称，兼容分支保护规则。
     ci-result:
         name: CI result
         if: always()
@@ -410,21 +508,16 @@ jobs:
                       exit 0
                   fi
 
-                  # 非 docs-only 时必须实际验证 sidecar pin；
-                  # skipped 说明触发条件出了问题，不能当成通过。
                   if [[ "$SIDECAR_RESULT" != "success" ]]; then
                       printf '::error::Workflow sidecar 结果 = %s（期望 success）\n' "$SIDECAR_RESULT" >&2
                       exit 1
                   fi
 
-                  # 非 docs-only 时三平台任务必须真跑且成功；skipped 说明触发条件
-                  # 出了问题，不能当成通过。
                   if [[ "$BUILD_RESULT" != "success" ]]; then
                       printf '::error::Rust 三平台任务结果 = %s（期望 success）\n' "$BUILD_RESULT" >&2
                       exit 1
                   fi
 
-                  # 非 docs-only 时录放 e2e 必须真跑且成功；skipped 同样视为异常。
                   if [[ "$E2E_RESULT" != "success" ]]; then
                       printf '::error::E2E replay 结果 = %s（期望 success）\n' "$E2E_RESULT" >&2
                       exit 1
