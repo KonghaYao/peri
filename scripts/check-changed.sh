@@ -7,10 +7,10 @@
 # 首次要为 test target 付 192.43s。收窄对底层 crate 收益有限（peri-model 的反向依赖
 # 闭包覆盖 26 个 member 中的 19 个），收益主要在上层 crate 与「不编 test target」。
 #
-# 全量门不在这里：`--workspace --all-targets` 与 CI 同款 clippy 由后台验证覆盖
+# 全量类型门及 Clippy 在本地由后台验证覆盖：
 #   bash scripts/verify-async.sh start    # 异步跑，结论写结构化回执
 #   bash scripts/verify-async.sh read     # 开工/汇报前读回执
-# CI（.github/workflows/ci.yml）跑同样范围的全量 build、测试与 clippy，是最终事实源。
+# 普通 CI 负责测试与轻量校验；发布流程验证其各自的打包目标。
 #
 # 用法：
 #   bash scripts/check-changed.sh
@@ -26,7 +26,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 args="$(bash "$repo_root/scripts/changed-crate-args.sh")"
 if [ -z "$args" ]; then
     echo "[check-changed] 改动未命中任何 workspace crate，跳过 cargo check"
-    echo "[check-changed] 全量门：bash scripts/verify-async.sh start（后台）+ CI"
+    echo "[check-changed] 全量类型与 lint：bash scripts/verify-async.sh start（后台）"
     exit 0
 fi
 

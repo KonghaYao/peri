@@ -1,6 +1,6 @@
 name: Workflow Sidecar
 
-# 正式发布（release-agent）与预发布（pre-release）共用的 sidecar 生成前置。
+# 正式发布与预发布共用的 sidecar 生成前置；普通 CI 复用其校验但不上传产物。
 #
 # 两个发布流程的 build 矩阵都 needs 本任务，因此 sidecar 的构建与身份校验只要失败，
 # 六个平台的 Rust 编译根本不会启动 —— 基线里 v4.0.2 那种「六平台编译全成功、全部在
@@ -19,6 +19,11 @@ on:
                 type: string
                 required: false
                 default: none
+            upload_artifact:
+                description: 上传供发布矩阵打包的 sidecar；普通 CI 仅验证 pin
+                type: boolean
+                required: false
+                default: true
         outputs:
             identity:
                 description: sidecar 内容身份（pin 前 12 位），即 peri-resources/workflow/ 下的目录名
@@ -34,6 +39,11 @@ on:
                     - missing-entry
                     - identity-mismatch
                 default: none
+            upload_artifact:
+                description: 上传通过验证的 sidecar 产物
+                type: boolean
+                required: false
+                default: true
 
 permissions:
     contents: read
@@ -67,6 +77,7 @@ jobs:
               run: ./scripts/build-workflow-sidecar.sh --out-dir dist/workflow-sidecar
 
             - name: Upload sidecar artifact
+              if: inputs.upload_artifact
               uses: actions/upload-artifact@v4
               with:
                   name: workflow-sidecar

@@ -23,9 +23,8 @@
 #                  另一半；只取 git diff HEAD 会漏掉新建、尚未 add 的源码文件
 #
 # 边界规则：
-#   a. 构建输入变更 → 输出 --workspace：根 Cargo.toml / Cargo.lock（依赖图可能整体变化），
-#      以及 patches/、.cargo/（前者由 scripts/cargo-rmcp-patched.sh 注入依赖源码，后者改
-#      rustflags）。它们不进 crate 映射，但会改变整体构建结果，按 crate 收窄不安全
+#   a. 共享构建输入变更 → 输出 --workspace：根 manifest/lock、工具链、Cargo 配置、
+#      补丁和 Cargo 构建包装脚本均可能改变 workspace 所有 crate 的结果，不按 crate 收窄
 #   b. 不属于任何 workspace member 的文件（docs/、scripts/、side-projects/* 等；
 #      side-projects 各自声明 [workspace]，是独立工作区）→ 不产生参数
 #   c. 全部输入无 crate 命中 → 无参数输出（调用方据此跳过 cargo）
@@ -41,7 +40,7 @@
 #   3. 默认：git diff --name-only HEAD 与 git ls-files --others --exclude-standard 的并集
 #
 # 输出：单行 cargo 参数（如 "-p peri-agent -p peri-tui" 或 "--workspace"）；无命中时无输出。
-# 退出码：恒为 0。映射失败（metadata 不可用）时回退 --workspace 并 warn——
+# Git 路径读取或 metadata 不可用时回退 --workspace 并 warn——
 #   门控脚本的失败方向必须是「更严」，不能因为算不出收窄就静默跳过检查。
 
 set -euo pipefail
@@ -64,37 +63,59 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-files=""
-if [ "${CHANGED_DIFF_FILES+set}" = "set" ]; then
-    files="$CHANGED_DIFF_FILES"
-elif [ "$staged_only" = "1" ]; then
-    files="$(git diff --cached --name-only 2>/dev/null || true)"
-else
-    nl=$'\n'
-    files="$(git diff --name-only HEAD 2>/dev/null || true)"
-    untracked="$(git ls-files --others --exclude-standard 2>/dev/null || true)"
-    if [ -n "$untracked" ]; then
-        files="${files:+$files$nl}$untracked"
-    fi
-fi
-
-CHANGED_FILES="$files" DIRECT_ONLY="$direct_only" python3 - <<'PY'
+DIRECT_ONLY="$direct_only" STAGED_ONLY="$staged_only" python3 - <<'PYTHON'
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
 root = os.getcwd()
 direct_only = os.environ.get("DIRECT_ONLY") == "1"
-files = [f.strip() for f in os.environ.get("CHANGED_FILES", "").splitlines() if f.strip()]
+staged_only = os.environ.get("STAGED_ONLY") == "1"
+
+
+def git_paths(*args):
+    data = subprocess.check_output(
+        ["git", *args], cwd=root, stderr=subprocess.PIPE
+    )
+    return [os.fsdecode(path) for path in data.split(b"\0") if path]
+
+
+if "CHANGED_DIFF_FILES" in os.environ:
+    # 测试入口按换行分隔，但保留每个路径的空白。
+    files = [path for path in os.environ["CHANGED_DIFF_FILES"].split("\n") if path]
+else:
+    # --no-renames 将重命名拆成删除与新增：移出 crate 或共享构建输入也必须检查旧侧。
+    # -z 让 Git 不给非 ASCII/换行等文件名加引号或转义。
+    try:
+        if staged_only:
+            files = git_paths("diff", "--cached", "--name-only", "-z", "--no-renames")
+        else:
+            files = git_paths("diff", "--name-only", "-z", "--no-renames", "HEAD")
+            files += git_paths("ls-files", "--others", "--exclude-standard", "-z")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[changed-crate-args] 无法读取 Git 路径，回退 --workspace：{exc}", file=sys.stderr)
+        print("--workspace")
+        sys.exit(0)
 
 # 规则 a：构建输入变更 → 全量。patches/ 与 .cargo/ 按目录整体从宽——判到具体文件
 # 会再引入一套「哪个补丁文件真的进构建」的知识，漏一处又是同一种静默收窄。
-BUILD_INPUT_FILES = ("Cargo.toml", "Cargo.lock")
+BUILD_INPUT_FILES = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "Cross.toml",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "scripts/cargo-rmcp-patched.sh",
+)
 BUILD_INPUT_DIRS = ("patches/", ".cargo/")
 
 if any(f in BUILD_INPUT_FILES or f.startswith(BUILD_INPUT_DIRS) for f in files):
     print("--workspace")
+    sys.exit(0)
+
+if not files:
     sys.exit(0)
 
 try:
@@ -109,7 +130,7 @@ except Exception as exc:  # 回退：宁可全量，不乱收窄
 
 members = {}
 for pkg in meta["packages"]:
-    rel = os.path.relpath(os.path.dirname(pkg["manifest_path"]), root)
+    rel = Path(os.path.relpath(Path(pkg["manifest_path"]).parent, root)).as_posix()
     members[pkg["name"]] = "" if rel == "." else rel
 
 # 最长目录前缀优先：peri-acp 不会命中 peri-acp-types/
@@ -151,4 +172,4 @@ if not direct_only:
         sys.exit(0)
 
 print(" ".join(f"-p {name}" for name in direct))
-PY
+PYTHON

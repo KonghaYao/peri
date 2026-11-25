@@ -48,7 +48,7 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 
 主链路为 `peri-tui → peri-acp → peri-agent::run_react_loop`；工作区范围以根 `Cargo.toml` 为准。
 Peri 文档加载器不递归继承父目录。工程任务由上表路由到必要的索引、标准与源码。
-提交前按仓库要求运行 `lefthook run pre-commit`，范围验证见 `scripts/check-changed.sh`。
+本地提交、普通 CI 与发版验证分别遵循 [testing](docs/standards/testing.md) 中的 TEST-GATES-001。
 功能或边界变更须同一变更同步对应权威契约与验收记录。
 
 ## 自我
