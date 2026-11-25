@@ -24,7 +24,7 @@
 | `PERI_REDUCED_MOTION` | `1`、`true`、`yes` 或 `on`（大小写与首尾空白不敏感）时关闭尾部折叠组标题行的扫光，标题保留为静态 muted 文本；spinner 与工具图标节拍不变。缺省开启动画。 | `peri-tui/src/kit/terminal_caps.rs`、`peri-tui/src/kit/entry.rs` |
 | `PERI_MCP_APPS_TUI` | TUI 侧 MCP Apps 开关：仅 `1` / `true` / `yes` / `on`（大小写与首尾空白不敏感）启用；缺省与未知值关闭。同时需要 `PERI_BROWSER_VIEW_URL` 与 `PERI_BROWSER_VIEW_TOKEN` 就绪，否则运行时整体不启动（零轮询、零 ACP、零 HTTP），只输出一行说明缺哪个变量的 warning。 | `peri-tui/src/launch.rs`、`peri-tui/src/kit/apps/{config,runtime}.rs` |
 | `PERI_BROWSER_VIEW_URL` | TUI 消费的 view session 控制面基址；仅接受 `http`/`https` 且不含 userinfo，末尾 `/` 去除；缺省、空白或非法按缺项处理。 | `peri-tui/src/kit/apps/config.rs` |
-| `PERI_BROWSER_VIEW_TOKEN` | view session API 的 bearer token（secret）：只进 `Authorization` 请求头，不打印、不落盘、不进 URL、不入日志与错误信息；缺省或空白时运行时关闭。 | `peri-tui/src/kit/apps/config.rs`、`peri-tui/src/kit/apps/view_client.rs` |
+| `PERI_BROWSER_VIEW_TOKEN` | view session API 的 bearer token（secret）：只进 `Authorization` 请求头，不打印、不落盘、不进 URL、不入日志与错误信息；读入配置后立即从进程环境移除（Bash/MCP stdio 子进程不再继承）；缺省或空白时运行时关闭。 | `peri-tui/src/kit/apps/config.rs`、`peri-tui/src/kit/apps/view_client.rs` |
 | `EDITOR` | 编辑记忆文件时启动的编辑器；缺省 `vi`。 | `peri-tui/src/kit/panels/memory.rs` |
 
 `HOME`、`USERPROFILE`、`PATH` 与 `MALLOC_CONF` 等跨组件 OS 输入仍在[主表](environment-variables.md#操作系统与进程输入)说明；它们并非 TUI 专属开关。

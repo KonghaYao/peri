@@ -74,7 +74,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `KITESURF_CDP_URL` | 新会话的 `browser_status` 建议地址；`--cdp-url` 优先，缺省建议 `http://127.0.0.1:18971`。仅环回 HTTP/WS、显式非零端口、无 userinfo；不启动引擎也不预绑定。 | 同上；`src/onboarding.rs` |
 | `PERI_BROWSER_GATEWAY_SECRET` | monitor token 派生输入；`--secret` 优先，推荐用环境变量，不留 secret 文件。缺省为每进程随机值，空白值非法。 | 同上；`src/token.rs` |
 | `PERI_BROWSER_VIEW_URL` | TUI 消费的 view session 控制面基址（如 `http://127.0.0.1:7391`）；仅接受 `http`/`https` 且不含 userinfo，首尾空白忽略、末尾 `/` 去除，其余路径允许；缺省、空白或非法时按缺项处理，TUI Apps 运行时关闭并输出一行不含配置值的 warning。 | `peri-tui/src/kit/apps/config.rs` |
-| `PERI_BROWSER_VIEW_TOKEN` | view session API（`/view/sessions*`）的 bearer token；`--view-token` 优先，空白值非法；缺省关闭该 API（`403 view_api_disabled`）。TUI 侧只把 token 放进 `Authorization` 请求头，不打印、不入日志、错误信息与 URL。 | `peri-browser-gateway/src/config.rs`、`src/view/api.rs`、`peri-tui/src/kit/apps/config.rs` |
+| `PERI_BROWSER_VIEW_TOKEN` | view session API（`/view/sessions*`）的 bearer token；`--view-token` 优先，空白值非法；缺省关闭该 API（`403 view_api_disabled`）。TUI 侧只把 token 放进 `Authorization` 请求头，不打印、不入日志、错误信息与 URL；读入配置后立即从进程环境移除，Bash 与 MCP stdio 子进程不再继承。 | `peri-browser-gateway/src/config.rs`、`src/view/api.rs`、`peri-tui/src/kit/apps/config.rs` |
 | `PERI_BROWSER_OWNER` | 建/关页的 Browser 端点 owner，非空，默认为 `peri-browser`；不是 MCP 会话权限。 | 同上；`src/provision.rs` |
 | `PERI_BROWSER_SESSION_NAME` | monitor 显示标签前缀，缺省/空白用 `PERI_BROWSER_OWNER`；域 UUID 后缀由网关生成。 | 同上；`src/core.rs` |
 | `KITESURF_INSTALL_DIR` | 安装状态检测目录；缺省/空白用 `$HOME/.kitesurf`，不决定已连接的端点。 | 同上；`src/onboarding.rs` |
