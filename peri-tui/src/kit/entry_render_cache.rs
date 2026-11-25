@@ -65,12 +65,15 @@ impl EntryRenderOptions {
         }
     }
 
-    /// 详情面板：跟随调度 Mermaid、纯文本图片、无复制按钮、无转场台阶。
+    /// 详情面板：跟随调度 Mermaid、纯文本图片、无复制按钮、无 working 扫光。
+    ///
+    /// 转场/缩进口径与主时间线同源（C2）：`transition` 由相邻 entry 的 zone
+    /// 判定后传入，面板不再固定 `None`、也不再把网格缩进清零。
     #[must_use]
-    pub(crate) const fn detail() -> Self {
+    pub(crate) const fn detail(transition: ZoneTransition) -> Self {
         Self {
             surface: EntrySurface::Detail,
-            transition: ZoneTransition::None,
+            transition,
             frame: None,
             mermaid: MermaidMode::Schedule,
             image: ImageMode::TextOnly,
@@ -106,7 +109,7 @@ impl EntryRenderOptions {
         Self {
             transition,
             md_copy,
-            ..Self::detail()
+            ..Self::detail(transition)
         }
     }
 }
@@ -115,8 +118,8 @@ impl EntrySurface {
     /// surface → 渲染参数的唯一映射点：新增/修改 surface 差异必须先在这里登记，
     /// 并由 `surface_render_options_differ_only_in_declared_fields` 锁定。
     ///
-    /// 详情面板没有过程区台阶与 working 扫光——传入的 `transition` / `frame`
-    /// 在 Detail 面被丢弃（面板始终以 `indent = 0` 的基准列渲染）。
+    /// 详情面板没有 working 扫光——传入的 `frame` 在 Detail 面被丢弃；转场
+    /// （含缩进台阶）与主时间线同源，按相邻 entry 的 zone 判定后传入。
     #[must_use]
     pub(crate) fn render_options(
         self,
@@ -125,7 +128,7 @@ impl EntrySurface {
     ) -> EntryRenderOptions {
         match self {
             Self::Message => EntryRenderOptions::message(transition, frame),
-            Self::Detail => EntryRenderOptions::detail(),
+            Self::Detail => EntryRenderOptions::detail(transition),
         }
     }
 

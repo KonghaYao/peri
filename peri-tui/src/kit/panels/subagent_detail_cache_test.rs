@@ -93,6 +93,47 @@ fn replacing_evicted_preview_releases_body_and_obsolete_fold_state() {
     assert_eq!(cache.source.len(), 0);
 }
 
+/// C2：面板与主时间线同用过程区缩进与转场台阶。80 列下面板网格 indent=2，
+/// 文本区之后的工具卡片入口绘制共享的进入台阶（`╰─╮`）。
+#[test]
+#[serial_test::serial]
+fn panel_shares_main_timeline_indent_and_zone_transition() {
+    let grid = GridSpec::grid_for(80);
+    assert_eq!(grid.indent, 2, "80 列网格与主时间线同用过程区缩进");
+
+    let long_text = "这是一段足够长的助手正文，用来确保它落在文本区而不是短回复过程区。\
+它需要超过短回复阈值，因此这里再补一段说明：面板与主时间线应当共用同一套 zone 判定，\
+后面的工具卡片因此需要由同一套规则生成进入台阶，而不是面板自造的缩进形态。\
+再补一句，确保字符数明确越过短回复阈值，避免断言依赖阈值边界。";
+    let mut transcript = group("zone-run", long_text);
+    transcript
+        .view_models
+        .push_back(group_with_tool().view_models[1].clone());
+
+    let mut cache = DetailRenderCache::default();
+    cache.prepare(
+        &transcript,
+        &grid,
+        Arc::new(peri_theme::builtin::dark_theme()),
+        0,
+        Vec::new(),
+    );
+    let rendered: Vec<String> = cache
+        .visible_lines(0..cache.height())
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        rendered.iter().any(|line| line.contains("╰─╮")),
+        "工具卡片入口应有共享进入台阶：{rendered:#?}"
+    );
+}
+
 #[test]
 #[serial_test::serial]
 fn entering_history_releases_the_previous_preview_source() {

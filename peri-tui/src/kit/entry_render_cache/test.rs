@@ -633,7 +633,10 @@ fn surface_render_options_differ_only_in_declared_fields() {
 
     let detail = EntrySurface::Detail.render_options(transition, Some(7));
     assert_eq!(detail.surface, EntrySurface::Detail);
-    assert_eq!(detail.transition, ZoneTransition::None, "面板无过程区台阶");
+    assert_eq!(
+        detail.transition, transition,
+        "转场/缩进与主时间线同源（C2）"
+    );
     assert_eq!(detail.frame, None, "面板无 working 扫光相位");
     assert_eq!(detail.mermaid, MermaidMode::Schedule);
     assert_eq!(detail.image, ImageMode::TextOnly);

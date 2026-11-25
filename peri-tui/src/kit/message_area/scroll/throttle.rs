@@ -1,4 +1,5 @@
 use crate::kit::message_area::props::ScrollbarFields;
+use crate::kit::message_area::viewport_policy;
 use ratatui_kit::prelude::*;
 
 use super::ScrollPos;
@@ -91,7 +92,7 @@ pub(super) fn apply_scroll(
         return;
     }
     let fields = *scrollbar_fields.read();
-    let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
+    let max_scroll = viewport_policy::max_scroll(fields.content_length, fields.viewport_length);
     let mut state = scroll_state.write_no_update();
     // 跟随态下 offset 可能是 usize::MAX 哨兵（scroll_to_bottom 设置、渲染 clamp
     // 前）——先归一化到当帧底部，否则滚轮上滚要先"滚空气"。

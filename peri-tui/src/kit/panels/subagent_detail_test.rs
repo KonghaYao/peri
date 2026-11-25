@@ -76,14 +76,6 @@ fn test_subagent_detail_content_height_is_non_zero_and_saturating() {
 }
 
 #[test]
-fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
-    assert_eq!(super::clamp_detail_offset(90_000, 100_000, 20), 90_000);
-    assert_eq!(super::clamp_detail_offset(100_000, 100_000, 20), 99_980);
-    assert_eq!(super::clamp_detail_offset(99_980, 100_000, 100), 99_900);
-    assert_eq!(super::clamp_detail_offset(50, 10, 20), 0);
-}
-
-#[test]
 fn detail_viewport_reserves_scrollbar_column_inside_content_area() {
     // 面板外框 → 内容区（扣上下边框/标题）→ 视口（再让出最右滚动条列）。
     let content = super::detail_content_area(Rect::new(4, 3, 60, 12));
@@ -236,9 +228,12 @@ fn detail_prepare_waits_for_measured_content_geometry() {
     let layout = geometry
         .prepare_layout()
         .expect("记录内容区后 prepare 布局可用");
-    let mut expected = GridSpec::grid_for(80);
-    expected.indent = 0;
+    let expected = GridSpec::grid_for(80);
     assert_eq!(layout.grid, expected, "网格宽度取记录的内容区宽度");
+    assert_eq!(
+        layout.grid.indent, 2,
+        "80 列面板与主时间线同用过程区缩进（C2）"
+    );
     assert_eq!(layout.viewport_height, 22, "视口高度取内容区高度");
 }
 

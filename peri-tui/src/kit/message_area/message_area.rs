@@ -55,6 +55,7 @@ use self::vm_cache::VmCacheSlot;
 use self::vm_cache::total_visual_rows;
 
 use super::mermaid_scroll::MermaidBarDrag;
+use super::viewport_policy;
 
 use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
@@ -563,9 +564,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(false);
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
-    let max_scroll = total_visual_rows.saturating_sub(vis_height as usize);
+    let max_scroll = viewport_policy::max_scroll(total_visual_rows, vis_height as usize);
     let scroll_y_raw = scroll_state.read().offset();
-    let scroll_y = scroll_y_raw.min(max_scroll);
+    let scroll_y = viewport_policy::clamp_top(scroll_y_raw, total_visual_rows, vis_height as usize);
 
     // [Fix] 每帧钳制 scroll_state.offset 到 [0, max_scroll]。
     // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直

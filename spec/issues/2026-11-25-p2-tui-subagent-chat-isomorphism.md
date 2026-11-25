@@ -175,6 +175,7 @@ trait FoldStore {
 | 本地 fold、退出即清 | canonical 内容只读，面板可临时展开 |
 | SubAgent 组不作面板 fold 目标 | 详情渲染恒为紧凑形态（≤3 工具行/单行摘要），展开无可见差异；嵌套导航见 Q12 |
 | running→尾 / completed→头 | 打开时的阅读位置语义 |
+| 面板无阅读锚点重定位 / 无新内容指示 | 面板没有分页（`h` 历史是整页替换），上缘只需 clamp/初始/吸底；主区身份锚点（`viewport_anchor`）形状不同，合并留给 C1 |
 | 预览有界（数值现状） | 内存策略 |
 | 不提供 user 气泡/divider/todo 摘要 | 子 turn 数据模型不含这些段 |
 | 不渲染 md 复制按钮（暂定） | 与选区能力绑定，待批准 |
@@ -192,7 +193,7 @@ trait FoldStore {
 | B fold 单点 | `FoldKey::of`/状态机唯一 | 10 个变体键一致；面板接入 Interaction（SubAgent 组无可展开内容） | 低 |
 | C1 `TimelineStore`（主区先行） | 抽槽向量/前缀/预算/artifacts，行为不变 | 全量 `peri-tui --lib`、`updated_slots` 不退化 | 高，独立 PR |
 | C2 面板切内核 + 主时间线布局 | 删 `indent=0`，共享 transition | 80 列 indent=2、台阶行、首帧几何正确 | 可见变化，需批准 |
-| D 共享视口 | `viewport_policy` + 面板 ViewportState | 纯函数单测；主区锚点/滚动回归 | 中 |
+| D 共享视口 | `viewport_policy`（max_scroll/clamp/初始/吸底）+ 面板与主区共用；阅读锚点仍归主区 `viewport_anchor` | 纯函数单测；主区锚点/滚动回归 | 中 |
 | E 数据装配同构 | 单构造器/定位器；预览语义单点 | 组构造/定位一致性测试；数值不变 | 中 |
 | F1–F4 富内容/命中 | mermaid、GenUI、copy、image | 死交互消失；命中几何测试 | 中 |
 | G 收敛与文档 | 删旧壳、修 code-index、升格设计 | 静态验收清单全过 | 低 |

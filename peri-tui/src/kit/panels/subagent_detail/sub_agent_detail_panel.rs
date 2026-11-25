@@ -20,8 +20,8 @@ use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::render::{
     status_symbol_and_color, subagent_error_reason, subagent_error_reason_lines,
 };
+use crate::kit::message_area::viewport_policy;
 use crate::kit::tui_render_unit::EntryStatus;
-use crate::kit::tui_render_unit::FoldTarget;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiSubAgentGroup;
 use peri_theme::atoms::THEME_ATOM;
@@ -520,9 +520,9 @@ impl DetailGeometry {
         let content = self.content?;
         // 1 列退化几何仍按 2 列取网格（既有下限钳制）；这不是未知几何的兜底——
         // 未知时根本不会走到这里。
-        let mut grid = GridSpec::grid_for(content.width.max(2));
-        // 嵌套面板沿用基准列：过程区缩进只作用于消息区主时间轴。
-        grid.indent = 0;
+        // 面板与主时间线共用断点/缩进（C2）：content 宽度 >= 60 时 indent = 2，
+        // 过程区台阶由 render_options 的 transition 驱动，不再清零。
+        let grid = GridSpec::grid_for(content.width.max(2));
         Some(DetailPrepareLayout {
             grid,
             viewport_height: content.height as usize,
@@ -561,11 +561,6 @@ pub(super) struct DetailPrepareLayout {
     pub(super) viewport_height: usize,
 }
 
-#[must_use]
-pub(super) fn clamp_detail_offset(top: usize, height: usize, viewport_height: usize) -> usize {
-    top.min(height.saturating_sub(viewport_height))
-}
-
 pub(super) fn focus_detail_row(scroll: State<usize>, row: usize, viewport: usize) {
     let current = *scroll.read();
     let next = if row < current {
@@ -580,15 +575,13 @@ pub(super) fn focus_detail_row(scroll: State<usize>, row: usize, viewport: usize
     }
 }
 
+/// 视口上缘口径与主时间线共用一份实现（[`viewport_policy`]）：初始位置。
 #[must_use]
 pub(super) fn initial_detail_offset(running: bool, height: usize, viewport: usize) -> usize {
-    if running {
-        height.saturating_sub(viewport)
-    } else {
-        0
-    }
+    viewport_policy::initial_top(running, height, viewport)
 }
 
+/// 视口上缘口径与主时间线共用一份实现（[`viewport_policy`]）：吸底跟随。
 pub(super) fn follow_detail_offset(
     top: usize,
     previous_height: usize,
@@ -597,15 +590,14 @@ pub(super) fn follow_detail_offset(
     viewport: usize,
     source_changed: bool,
 ) -> usize {
-    if source_changed
-        && previous_height > 0
-        && height > previous_height
-        && top >= previous_height.saturating_sub(previous_viewport)
-    {
-        height.saturating_sub(viewport)
-    } else {
-        clamp_detail_offset(top, height, viewport)
-    }
+    viewport_policy::follow_top(
+        top,
+        previous_height,
+        previous_viewport,
+        height,
+        viewport,
+        source_changed,
+    )
 }
 
 /// 面板内容区——`panel_shell!` 的上下边框/标题之后的那块区域。
@@ -704,26 +696,21 @@ pub(super) fn find_live_detail_subagent(
     } else {
         EntryStatus::Completed
     };
-    let group = TuiSubAgentGroup {
-        instance_id: task_id.to_string(),
-        agent_id: detail
+    let group = TuiSubAgentGroup::new(
+        task_id.to_string(),
+        detail
             .agent_id
             .clone()
             .unwrap_or_else(|| selected_id.to_string()),
-        agent_name: detail
+        detail
             .agent_name
             .clone()
             .unwrap_or_else(|| detail.summary.clone()),
-        view_models: detail.nested_units.clone(),
-        collapsed: false,
-        is_running: detail.status == crate::kit::atoms::BgLiveStatus::Running,
-        is_error: detail.subagent_is_error,
-        error_reason: detail.subagent_result.clone(),
-        preview_omitted: detail.preview_omitted,
-        fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::SubAgent, status),
-        user_modified: false,
-        content_hash: 0,
-    };
+        detail.nested_units.clone(),
+        detail.preview_omitted,
+        status,
+        detail.subagent_result.clone(),
+    );
     Some(group)
 }
 

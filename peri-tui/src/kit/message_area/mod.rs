@@ -22,10 +22,13 @@ pub(crate) mod scroll;
 pub(crate) mod selection;
 mod slot_index;
 mod transcript;
-use self::slot_index as transcript_index;
 mod viewport_anchor;
+pub(crate) mod viewport_policy;
 mod vm_cache_slot;
+
+use self::slot_index as transcript_index;
 use self::vm_cache_slot as vm_cache;
+pub(crate) use transcript::zone_transition;
 
 #[cfg(test)]
 #[path = "center_band_test.rs"]
@@ -58,6 +61,10 @@ mod mermaid_viewport_tests;
 #[cfg(test)]
 #[path = "artifact_hits_test.rs"]
 mod artifact_hits_tests;
+
+#[cfg(test)]
+#[path = "viewport_policy_test.rs"]
+mod viewport_policy_tests;
 
 #[cfg(test)]
 #[path = "mermaid_hscroll_test.rs"]

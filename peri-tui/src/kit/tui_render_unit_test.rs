@@ -1101,3 +1101,48 @@ mod reminder_tests;
 use super::ReminderInfo;
 use super::ReminderType;
 use super::i18n;
+
+/// 组构造唯一入口：状态 → running/error/fold 与内容哈希一次算清；
+/// 消息区累计器与详情面板共用，避免两处各写一遍映射。
+#[test]
+fn subagent_group_constructor_maps_status_and_hash_once() {
+    let child = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "child note".into(),
+        level: TuiNoteLevel::Info,
+        content_hash: 7,
+    });
+    let group = TuiSubAgentGroup::new(
+        "inst-1".into(),
+        "agent-1".into(),
+        "coder".into(),
+        im::vector![child],
+        true,
+        EntryStatus::Error,
+        Some("boom".into()),
+    );
+    assert!(!group.is_running);
+    assert!(group.is_error);
+    assert_eq!(group.error_reason.as_deref(), Some("boom"));
+    assert_eq!(group.fold, FoldState::Expanded, "error 组按 §7 展开");
+    assert!(!group.user_modified);
+    assert_ne!(group.content_hash, 0, "构造器已算好 hash");
+
+    let mut again = group.clone();
+    again.recompute_hash();
+    assert_eq!(
+        again.content_hash, group.content_hash,
+        "hash 只在构造点计算"
+    );
+
+    let running = TuiSubAgentGroup::new(
+        "inst-2".into(),
+        "agent-2".into(),
+        "coder".into(),
+        im::Vector::new(),
+        false,
+        EntryStatus::Running,
+        None,
+    );
+    assert!(running.is_running && !running.is_error);
+    assert_eq!(running.fold, FoldState::Collapsed);
+}

@@ -93,7 +93,7 @@ fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
 /// 区间首 slot 也读 `items[slot - 1]`——相邻关系不因重建区间而变。
 ///
 /// transcript_index 的按需物化同用此判定，保证按需重渲染与常驻渲染同列。
-pub(super) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ZoneTransition {
+pub(crate) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ZoneTransition {
     let Some(vm) = items.get(slot) else {
         return ZoneTransition::None;
     };

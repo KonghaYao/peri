@@ -87,11 +87,10 @@ impl DetailSlot {
         grid: &GridSpec,
         context: EntryRenderContext,
         frame: u64,
+        transition: ZoneTransition,
     ) {
-        // 面板沿用基准列（`indent = 0`），无过程区转场台阶形态。
-        let invalidation = self
-            .entry
-            .ensure(vm, grid, context, frame, ZoneTransition::None);
+        // 面板与主时间线共用转场/缩进口径（C2）；surface 差异见 EntrySurface。
+        let invalidation = self.entry.ensure(vm, grid, context, frame, transition);
         if !self.resident
             || matches!(
                 invalidation,
@@ -179,6 +178,7 @@ impl DetailRenderCache {
                 &self.source[index],
                 panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
+            let transition = crate::kit::message_area::zone_transition(&self.source, index);
             let slot = &mut self.slots[index];
             if context_changed
                 || genui_changed
@@ -193,6 +193,7 @@ impl DetailRenderCache {
                         .expect("detail cache preparation installs context before materialization")
                         .clone(),
                     frame,
+                    transition,
                 );
             }
             self.prefix.push(
@@ -377,7 +378,8 @@ impl DetailRenderCache {
                 &self.source[index],
                 panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
-            slot.ensure(&vm, &self.grid, context.clone(), frame);
+            let transition = crate::kit::message_area::zone_transition(&self.source, index);
+            slot.ensure(&vm, &self.grid, context.clone(), frame, transition);
             if slot.height != previous_height {
                 resized_from.get_or_insert(index);
             }
