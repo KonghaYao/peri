@@ -217,6 +217,11 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             owner: snapshot.owner.clone(),
                             request_id_str: snapshot.request_id_json.clone(),
                             answers,
+                            first_question_id: snapshot
+                                .payload
+                                .questions
+                                .first()
+                                .map(|q| q.id.clone()),
                         });
                         panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
                     }

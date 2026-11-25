@@ -240,6 +240,7 @@ pub(crate) fn submit_interaction_option_with(
                 owner: owner.clone(),
                 request_id_str: id_str.clone(),
                 answers,
+                first_question_id: block.question_ids.first().cloned(),
             });
             crate::kit::panel_registry::close_ask_user_panel_for_owner(&owner);
         }

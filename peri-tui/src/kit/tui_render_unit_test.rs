@@ -818,12 +818,21 @@ fn test_ask_user_block_hash_includes_pending_options_result() {
         "request_id 不进 content_hash"
     );
 
+    // question_ids 数量进 hash（completed block 渲染 `已答复 N 问` 依赖它）；
+    // ID 字符串本身是身份字段，不参与。
     let mut g = ask_user_block_base();
     g.question_ids = vec!["q1".into()];
     g.recompute_hash();
-    assert_eq!(
+    assert_ne!(
         a.content_hash, g.content_hash,
-        "question_ids 不进可见内容 hash"
+        "question_ids 数量必须进 hash（已答复 N 问依赖）"
+    );
+    let mut h = ask_user_block_base();
+    h.question_ids = vec!["q2".into()];
+    h.recompute_hash();
+    assert_eq!(
+        g.content_hash, h.content_hash,
+        "question_id 字符串不进 hash"
     );
     assert_ne!(a, g, "question_ids 参与结构相等比较");
 }

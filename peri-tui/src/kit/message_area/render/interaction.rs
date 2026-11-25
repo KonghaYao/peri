@@ -2,6 +2,7 @@ use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, TuiAskUserBlock};
 
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use peri_tui_components::button::ButtonChrome;
 use ratatui_kit::ratatui::style::{Modifier, Style};
@@ -119,15 +120,44 @@ pub(super) fn render_ask_user_block_lines(
         return (lines, Some(layout));
     }
 
-    // ── 已答复（§6.8 完整展示：结果行 + 问题 + 选项（选中 ✓）+ 历史 items；
-    // 仅用户手动折叠（Collapsed）收束为单行结果）──
+    // ── 已答复（§6.8 完整展示）──
+    //
+    // 标题归属按 kind 区分：
+    // - AskUser：标题 = 问题 header（`data.question`，空时回退 i18n）；答案是
+    //   回答，不作为标题。Collapsed 收束为单行 `✓ header：result`（result
+    //   非空时），保持单行截断。
+    // - Permission：保持原状（标题 = Allowed/Denied 等 result 文案）。
     let result = data.result.as_deref().unwrap_or("");
+    let is_ask_user = data.kind == crate::kit::tui_render_unit::InteractionKind::AskUser;
     let (symbol, color) = if data.is_error {
         (super::helpers::sym().error, sem.status.error)
     } else {
         (super::helpers::sym().success, sem.status.success)
     };
-    let title = if !result.is_empty() {
+    let header = if data.question.is_empty() {
+        i18n::tr("render-user-answered")
+    } else {
+        data.question.clone()
+    };
+    let title = if is_ask_user {
+        match data.fold {
+            FoldState::Collapsed if !result.is_empty() && !data.question.is_empty() => {
+                i18n::tr_args(
+                    "render-interaction-collapsed-ask-user",
+                    &[
+                        (
+                            "header".to_string(),
+                            FluentValue::from(data.question.as_str()),
+                        ),
+                        ("result".to_string(), FluentValue::from(result)),
+                    ],
+                )
+            }
+            // header 缺失（防御路径）：Collapsed 仍展示答案，避免空标题。
+            FoldState::Collapsed if !result.is_empty() => result.to_string(),
+            _ => header,
+        }
+    } else if !result.is_empty() {
         result.to_string()
     } else if !data.question.is_empty() {
         data.question.clone()
@@ -143,12 +173,14 @@ pub(super) fn render_ask_user_block_lines(
         ));
         spans
     }));
-    // Collapsed（仅来自用户手动 Space 折叠）→ 单行结果；默认 Expanded
-    // 完整展示问题 + 选项（选中项 ✓ 标记）+ 历史问答对。
+    // Collapsed（仅来自用户手动 Space 折叠）→ 单行（AskUser：`header：result`；
+    // Permission：result）；默认 Expanded 完整展示 + 选项（选中项 ✓）+ 历史问答对。
     if data.fold == FoldState::Collapsed {
         return (lines, None);
     }
-    if !data.question.is_empty() {
+    // AskUser 的 `data.question` 已是标题（首问 header），不再重复一行；
+    // Permission 保留问题摘要行。
+    if !is_ask_user && !data.question.is_empty() {
         let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             crate::truncate::truncate_to_width(&data.question, content),
@@ -205,6 +237,39 @@ pub(super) fn render_ask_user_block_lines(
             spans.push(Span::styled(
                 crate::truncate::truncate_to_width(&text, content),
                 Style::default().fg(sem.text.primary),
+            ));
+            lines.push(Line::from(spans));
+        }
+    }
+    if is_ask_user {
+        // 自由文本 / 多选拼接：result 非空且不等于任何 option label → 在选项
+        // 行之后追加 `已选：<result>`（预设项已由行内 ✓ 表达，不重复）。
+        if !result.is_empty() && !data.options.iter().any(|o| o == result) {
+            let text = i18n::tr_args(
+                "render-interaction-selected",
+                &[("result".to_string(), FluentValue::from(result))],
+            );
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
+            spans.push(Span::styled(
+                crate::truncate::truncate_to_width(&text, content),
+                Style::default().fg(sem.text.muted),
+            ));
+            lines.push(Line::from(spans));
+        }
+        // 多问调用：inline block 只展示首问；补一行已答复问数（其余问题的
+        // 逐项展开不在本次范围）。
+        if data.question_ids.len() > 1 {
+            let text = i18n::tr_args(
+                "render-interaction-answered-questions",
+                &[(
+                    "count".to_string(),
+                    FluentValue::from(data.question_ids.len()),
+                )],
+            );
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
+            spans.push(Span::styled(
+                crate::truncate::truncate_to_width(&text, content),
+                Style::default().fg(sem.text.muted),
             ));
             lines.push(Line::from(spans));
         }
