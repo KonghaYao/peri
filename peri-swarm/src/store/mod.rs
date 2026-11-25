@@ -344,6 +344,20 @@ pub trait SwarmStore: Send + Sync {
     async fn swarm_delete_session(&self, logical_id: &str) -> Result<(), StoreError>;
 
     async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), StoreError>;
+    /// Append a contiguous run of items in one write unit.
+    ///
+    /// The caller has assigned consecutive `seq` values. `progress`, when
+    /// present, records the session's item cursor and activity in the same
+    /// unit, so a reader that observes the progress cannot be shown a cursor
+    /// beyond the items that are durable. A failure must leave none of the run
+    /// persisted; a seq/`item_id` conflict is reported as
+    /// [`StoreError::Conflict`] so the caller can reload `MAX(seq)` and retry
+    /// the whole run (a partial run would leave a hole in the log).
+    async fn swarm_append_items(
+        &self,
+        rows: &[SwarmItemRow],
+        progress: Option<SwarmSessionUpdate>,
+    ) -> Result<(), StoreError>;
     /// Ascending page with `seq > after`.
     async fn swarm_items_after(
         &self,

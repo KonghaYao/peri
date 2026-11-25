@@ -21,6 +21,9 @@ pub struct MemorySwarmStore {
     /// that must fail before the row is accepted.
     #[cfg(test)]
     settlement_failures: std::sync::atomic::AtomicUsize,
+    /// Fault injection for unit tests: item batches rejected before any write.
+    #[cfg(test)]
+    append_failures: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +46,13 @@ impl MemorySwarmStore {
     #[cfg(test)]
     pub(crate) fn fail_next_settlement_appends(&self, count: usize) {
         self.settlement_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: make the next `count` item batches fail before any write.
+    #[cfg(test)]
+    pub(crate) fn fail_next_appends(&self, count: usize) {
+        self.append_failures
             .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -254,6 +264,99 @@ impl SwarmStore for MemorySwarmStore {
             )));
         }
         items.insert(row.seq, row);
+        Ok(())
+    }
+
+    async fn swarm_append_items(
+        &self,
+        rows: &[SwarmItemRow],
+        progress: Option<SwarmSessionUpdate>,
+    ) -> Result<(), StoreError> {
+        // Test-only fault injection: one batch counts as one append, and it
+        // rejects before any row is written.
+        #[cfg(test)]
+        if self
+            .append_failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            let remaining = self
+                .append_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            self.append_failures
+                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Unavailable(
+                "injected append failure".to_owned(),
+            ));
+        }
+        // Test-only fault injection: a settlement row rejects the batch before
+        // any row is written.
+        #[cfg(test)]
+        if self
+            .settlement_failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            && rows
+                .iter()
+                .any(|row| row.payload.get("state").and_then(Value::as_str) == Some("settled"))
+        {
+            let remaining = self
+                .settlement_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            self.settlement_failures
+                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Unavailable(
+                "injected approval settlement append failure".to_owned(),
+            ));
+        }
+        // One lock scope for validation and mutation: the caller retries a
+        // conflict with a reloaded `MAX(seq)`, which is only sound if a
+        // rejected run left no row behind, and a missing progress session must
+        // not commit the rows either.
+        let mut state = self.lock();
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            if !seen.insert((row.logical_id.clone(), row.seq)) {
+                return Err(StoreError::Conflict(format!(
+                    "seq {} is duplicated inside the run for {}",
+                    row.seq, row.logical_id
+                )));
+            }
+            if state
+                .items
+                .get(&row.logical_id)
+                .is_some_and(|items| items.contains_key(&row.seq))
+            {
+                return Err(StoreError::Conflict(format!(
+                    "seq {} already exists for {}",
+                    row.seq, row.logical_id
+                )));
+            }
+        }
+        if let Some(update) = progress.as_ref() {
+            if !state.sessions.contains_key(&update.logical_id) {
+                return Err(StoreError::NotFound(format!(
+                    "session {}",
+                    update.logical_id
+                )));
+            }
+        }
+        for row in rows {
+            state
+                .items
+                .entry(row.logical_id.clone())
+                .or_default()
+                .insert(row.seq, row.clone());
+        }
+        if let Some(update) = progress {
+            let session = state
+                .sessions
+                .get_mut(&update.logical_id)
+                .ok_or_else(|| StoreError::NotFound(format!("session {}", update.logical_id)))?;
+            session.state = update.state;
+            session.last_item_seq = update.last_item_seq;
+            session.last_activity_at = update.last_activity_at;
+        }
         Ok(())
     }
 

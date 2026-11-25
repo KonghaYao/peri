@@ -1018,6 +1018,15 @@ fn decode_session(values: &[Value]) -> Result<SwarmSessionRow, StoreError> {
     })
 }
 
+fn session_update_params(update: &SwarmSessionUpdate) -> Result<Vec<Value>, StoreError> {
+    Ok(vec![
+        Value::Text(update.logical_id.clone()),
+        Value::Text(update.state.as_str().to_owned()),
+        seq_param(update.last_item_seq, "last item seq")?,
+        Value::Text(update.last_activity_at.clone()),
+    ])
+}
+
 fn item_params(row: &SwarmItemRow) -> Result<Vec<Value>, StoreError> {
     Ok(vec![
         Value::Text(row.logical_id.clone()),
@@ -1250,12 +1259,7 @@ impl SwarmStore for SwarmStateStore {
             .execute(
                 "update_session",
                 UPDATE_SESSION_SQL,
-                vec![
-                    Value::Text(update.logical_id.clone()),
-                    Value::Text(update.state.as_str().to_owned()),
-                    seq_param(update.last_item_seq, "last item seq")?,
-                    Value::Text(update.last_activity_at),
-                ],
+                session_update_params(&update)?,
             )
             .await?;
         match affected {
@@ -1370,6 +1374,55 @@ impl SwarmStore for SwarmStateStore {
             1 => Ok(()),
             other => Err(unexplained("append_item", other)),
         }
+    }
+
+    async fn swarm_append_items(
+        &self,
+        rows: &[SwarmItemRow],
+        progress: Option<SwarmSessionUpdate>,
+    ) -> Result<(), StoreError> {
+        let has_progress = progress.is_some();
+        let session_id = progress
+            .as_ref()
+            .map(|update| update.logical_id.clone())
+            .unwrap_or_default();
+        let mut statements = Vec::with_capacity(rows.len() + usize::from(has_progress));
+        for row in rows {
+            statements.push(
+                BatchStatement::new(INSERT_ITEM_SQL, item_params(row)?)
+                    .map_err(|error| classify("append_items", error))?,
+            );
+        }
+        if let Some(update) = progress {
+            statements.push(
+                BatchStatement::new(UPDATE_SESSION_SQL, session_update_params(&update)?)
+                    .map_err(|error| classify("append_items", error))?,
+            );
+        }
+        if statements.is_empty() {
+            return Ok(());
+        }
+        // One transaction: a viewer never sees an item the session cursor has
+        // not reached, and a failed run leaves no hole for the retry to skip.
+        let results = within_budget(
+            "append_items",
+            self.connection
+                .transactional_batch(statements, TransactionBehavior::Immediate),
+        )
+        .await?;
+        for (index, result) in results.iter().enumerate() {
+            if result.rows_affected() == 1 {
+                continue;
+            }
+            // The last statement is the progress update when one was sent; a
+            // zero there means the session row disappeared mid-turn.
+            return Err(if has_progress && index + 1 == results.len() {
+                StoreError::NotFound(format!("swarm session {session_id} does not exist"))
+            } else {
+                unexplained("append_items", result.rows_affected())
+            });
+        }
+        Ok(())
     }
 
     async fn swarm_items_after(

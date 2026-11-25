@@ -233,6 +233,55 @@ async fn duplicate_seq_is_a_visible_conflict() {
 }
 
 #[tokio::test]
+async fn append_items_rejects_a_run_that_conflicts_without_writing_any_row() {
+    let store = MemorySwarmStore::new();
+    store
+        .swarm_append_item(item_row("agent", 1))
+        .await
+        .expect("append");
+    let error = store
+        .swarm_append_items(&[item_row("agent", 2), item_row("agent", 1)], None)
+        .await
+        .expect_err("the second row conflicts with the existing seq");
+    assert!(matches!(error, StoreError::Conflict(_)), "{error:?}");
+    let rows = store
+        .swarm_items_after("agent", 0, 10)
+        .await
+        .expect("read rows");
+    assert_eq!(
+        rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1],
+        "a rejected run must leave no row behind: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn append_items_with_a_missing_progress_session_writes_nothing() {
+    let store = MemorySwarmStore::new();
+    let error = store
+        .swarm_append_items(
+            &[item_row("agent", 1), item_row("agent", 2)],
+            Some(SwarmSessionUpdate {
+                logical_id: "agent".to_owned(),
+                state: SessionState::Running,
+                last_item_seq: 2,
+                last_activity_at: "2026-01-01T00:00:01.000000Z".to_owned(),
+            }),
+        )
+        .await
+        .expect_err("the progress session does not exist");
+    assert!(matches!(error, StoreError::NotFound(_)), "{error:?}");
+    let rows = store
+        .swarm_items_after("agent", 0, 10)
+        .await
+        .expect("read rows");
+    assert!(
+        rows.is_empty(),
+        "a missing progress session must roll back the run: {rows:?}"
+    );
+}
+
+#[tokio::test]
 async fn put_input_is_insert_if_absent() {
     let store = MemorySwarmStore::new();
     let inserted = store

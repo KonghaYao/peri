@@ -22,7 +22,7 @@
 //! `cancelled`, the queued run resumes the same transcript, and the turn stays
 //! open until that run terminates (`design §2.5` input/append path).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -181,6 +181,29 @@ pub enum TurnOutcome {
 /// fix the stream kind and swallow the later answer text.
 type StreamKey = (String, String, &'static str);
 
+/// Payload bytes one item transaction may carry.
+///
+/// Loom answers a statement batch above `max_sql_bytes` (64 KiB in the v1.1.24
+/// dev profile) with `413`. The bound parameter is the payload JSON *as a JSON
+/// string*, so escaping can double it; a quarter of the cap plus the per-row
+/// overhead below keeps a full batch under the limit even for text full of
+/// quotes and newlines.
+/// Payload bytes one append group may carry.
+///
+/// The limit is set by the remote store, not by this reader. Loom enforces a
+/// project `max_sql_bytes` (64 KiB by default) as an HTTP 413, and hrana makes
+/// any non-200 response fatal for the stream: the next statement opens a *new*
+/// session, and Loom counts opened sessions against a fixed project quota. A
+/// single oversized append therefore costs a permanent session, so the budget
+/// here stays well below the backend limit and leaves room for the wire
+/// overhead (SQL text, ids, source JSON, JSON escaping) which runs several
+/// times the payload bytes.
+const APPEND_BATCH_BYTES: usize = 8 * 1024;
+
+/// Non-payload bytes one row adds to the statement batch (SQL text, ids, source
+/// JSON, timestamps). Estimated high on purpose.
+const APPEND_ROW_OVERHEAD: usize = 256;
+
 struct MessageStream {
     kind: ItemKind,
     item_id: String,
@@ -192,6 +215,40 @@ struct MessageStream {
     /// messages, so the `final_answer`/`commentary` decision uses it instead of
     /// a map or arrival order.
     first_seq: Option<u64>,
+}
+
+/// Whether an append also moves the session's durable cursor/state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProgressWrite {
+    /// Mark the session `running` unconditionally: accepting input is progress
+    /// even before the turn starts, and the deferred-turn test depends on it.
+    Running,
+    /// Mark `running` only while a turn is open. A straggler item after the
+    /// terminal must not rewrite `idle` back to `running`, which would strand
+    /// the session in `in_progress` with no turn to close.
+    WhileTurnOpen,
+}
+
+/// One item prepared for a batched append: payload already fitted to the item
+/// budget, identity already minted, so the batch loop only assigns seqs.
+struct PreparedItem {
+    kind: ItemKind,
+    source: ItemSource,
+    payload: Value,
+    truncated: bool,
+    item_id: String,
+    /// Serialized payload size, used to keep one store transaction under the
+    /// backend's request budget.
+    payload_bytes: usize,
+}
+
+/// Items staged by [`ItemLog::ingest_batch`] between two non-item events.
+#[derive(Default)]
+struct StagedItems {
+    items: Vec<(ProjectedItem, Option<String>)>,
+    /// `(index into `items`, stream key)` of delta chunks whose `first_seq` the
+    /// append must fill in.
+    streams: Vec<(usize, StreamKey)>,
 }
 
 /// User item whose `turn.created`/`turn.item.added` frames are published when
@@ -208,9 +265,25 @@ struct PendingUserItem {
 #[derive(Clone, Debug, PartialEq)]
 struct ContinuationRun {
     request_id: String,
-    /// [`LogState::steer_epoch`] observed when this run started. A run whose
-    /// epoch is older has already been superseded by a newer steer.
-    epoch: u64,
+    /// Steer generation this run claimed when it started: the oldest
+    /// generation that no earlier run had claimed and that had not been rolled
+    /// back. A run older than a steer that is still unresolved has been
+    /// superseded by that steer, so its terminal is not the turn's.
+    generation: u64,
+}
+
+/// A terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can close
+/// the turn when the handoff fails.
+#[derive(Debug)]
+struct SuppressedTerminal {
+    /// Request id of the turn the deferred terminal belongs to.
+    request_id: String,
+    outcome: TurnOutcome,
+    /// Request id of the continuation run that produced the terminal, or
+    /// `None` for the prompt attempt of the turn. A rollback may only replay a
+    /// terminal whose source still owns the turn: a prompt `cancelled` must not
+    /// close a turn a live queued run owns.
+    source: Option<String>,
 }
 
 #[derive(Default)]
@@ -240,11 +313,154 @@ struct LogState {
     failure: Option<String>,
     /// Monotonic count of ingested notifications; used as a drain fence.
     ingested: u64,
-    /// Steers handed to the running turn. Each one cancels the in-flight
-    /// attempt, so the turn is not finished by that attempt's terminal.
-    steer_epoch: u64,
+    /// Last seq this log appended, cached so a batched append does not pay a
+    /// `MAX(seq)` read per batch. Cleared on a seq conflict, which is the only
+    /// way another writer can advance it.
+    next_seq: Option<u64>,
+    /// Monotonic generation of the steers handed to the session. Each steer
+    /// cancels the in-flight attempt, so the turn is not finished by that
+    /// attempt's terminal. A failed handoff rolls back the outstanding entry but
+    /// never this counter: a closer may already have observed the value, and
+    /// reusing it would let a stale closer close a turn a later steer owns.
+    ///
+    /// The counter is global to the log, not per turn: a late `abandon_steer`
+    /// from a closed turn must never match the first steer of the next turn.
+    /// Ownership itself is [`Self::max_unresolved`], not this counter: the
+    /// counter only never reuses a value, while the unresolved set says which
+    /// steers still wait for their run.
+    steer_generation: u64,
+    /// Steers whose handoff has been dispatched but that no queued run claimed
+    /// yet and that were not rolled back. A single flag would forget how many
+    /// steers still own the turn, so rolling back the second one would close a
+    /// turn the first one still owns.
+    ///
+    /// A queued run claims the smallest generation left here when its
+    /// `user_input_run_started` is ingested. Run starts arrive in claim order:
+    /// the service serializes each steer's reservation with its enqueue and
+    /// dispatch on one per-session lock, and the host starts a queued run in
+    /// enqueue order, so the oldest unclaimed steer is the one that run was
+    /// dispatched for.
+    outstanding_steers: BTreeSet<u64>,
     /// Latest queued run adopted by the open turn.
     continuation: Option<ContinuationRun>,
+    /// Terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can
+    /// close the turn if the handoff fails.
+    suppressed_terminal: Option<SuppressedTerminal>,
+}
+
+/// Whether a steer's generation could be reserved for the turn the input was
+/// admitted into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SteerReservation {
+    /// The admitted turn is still open; this generation waits for its run.
+    Reserved(u64),
+    /// No turn is open: the input runs as a normal turn.
+    NoTurn,
+    /// Another turn owns the session now: the input must not be dispatched into
+    /// it.
+    OtherTurn,
+}
+
+impl LogState {
+    /// Whether a steer still owns the open turn: an unrolled-back steer is
+    /// outstanding, or a queued run was adopted as the turn's continuation.
+    ///
+    /// A rolled-back steer owns nothing. This decides whether a terminal is
+    /// kept at all; whether a closer must yield is decided by
+    /// [`Self::max_unresolved`] and the continuation identity, so a steer noted
+    /// and rolled back while the closer settles does not defer the close to a
+    /// safety net that only fires minutes later.
+    fn steer_owns_turn(&self) -> bool {
+        !self.outstanding_steers.is_empty() || self.continuation.is_some()
+    }
+
+    /// Reserve one steer generation for the open turn.
+    ///
+    /// The admission check and the insert share this lock on purpose: a caller
+    /// that checked the turn elsewhere could find it closed and its replacement
+    /// open, and its generation would then be claimed by that replacement's
+    /// run. `admitted: None` accepts any open turn (the `note_steer` test
+    /// helper); production callers name the turn the input was admitted into.
+    fn reserve_steer(&mut self, admitted: Option<&str>) -> SteerReservation {
+        let matches_admitted = match self.active.as_deref() {
+            None => return SteerReservation::NoTurn,
+            Some(active) => admitted.is_none_or(|turn| turn == active),
+        };
+        if !matches_admitted {
+            return SteerReservation::OtherTurn;
+        }
+        let generation = self.steer_generation.saturating_add(1);
+        self.steer_generation = generation;
+        self.outstanding_steers.insert(generation);
+        SteerReservation::Reserved(generation)
+    }
+
+    /// Generation of the newest steer that is still unresolved; `0` when none
+    /// is.
+    ///
+    /// "Unresolved" means handed to the session but neither claimed by a queued
+    /// run that started for it ([`ContinuationRun::generation`]) nor rolled
+    /// back. A terminal belongs to the turn only while its run is at least this
+    /// new: a run older than a steer that is still unresolved has been
+    /// superseded by that steer.
+    fn max_unresolved(&self) -> u64 {
+        self.outstanding_steers.last().copied().unwrap_or(0)
+    }
+
+    /// Keep the terminal deferred by a steer.
+    ///
+    /// A continuation's terminal (`source: Some(_)`) is the turn's real
+    /// terminal, the prompt attempt's terminal (`source: None`) only a fallback
+    /// for a failed handoff, so a retained prompt terminal is replaced by a
+    /// continuation's.
+    ///
+    /// A retained continuation terminal is replaced too when it comes from a
+    /// run the turn no longer continues: the newer continuation's terminal is
+    /// the only one [`ItemLog::abandon_steer`] may replay (a rollback only
+    /// replays a terminal whose source still owns the turn). Keeping the first
+    /// one would drop the newer run's terminal and leave a failed handoff to
+    /// the safety net. Every other case keeps the first outcome, so a `Failed`
+    /// timeout already queued as the turn's outcome is not overwritten by a
+    /// later `Completed` from the same attempt.
+    fn suppress_terminal(&mut self, request_id: &str, outcome: TurnOutcome, source: Option<&str>) {
+        let replaces = match self.suppressed_terminal.as_ref() {
+            None => true,
+            Some(terminal) => match (terminal.source.as_deref(), source) {
+                (None, Some(_)) => true,
+                (Some(retained), Some(new)) => {
+                    retained != new
+                        && self
+                            .continuation
+                            .as_ref()
+                            .is_some_and(|run| run.request_id == new)
+                }
+                _ => false,
+            },
+        };
+        if replaces {
+            self.suppressed_terminal = Some(SuppressedTerminal {
+                request_id: request_id.to_owned(),
+                outcome,
+                source: source.map(str::to_owned),
+            });
+        }
+    }
+
+    /// Whether a terminal produced by `source` still belongs to the turn's
+    /// owner.
+    ///
+    /// The prompt attempt (`source: None`) owns the turn only while no queued
+    /// run continues it; a continuation's terminal (`source: Some(run)`) only
+    /// while that same run is the current continuation.
+    fn terminal_owner_matches(&self, source: Option<&str>) -> bool {
+        match source {
+            Some(run) => self
+                .continuation
+                .as_ref()
+                .is_some_and(|continuation| continuation.request_id == run),
+            None => self.continuation.is_none(),
+        }
+    }
 }
 
 /// Persisted per-session item log shared by the reader, the gateway and SSE.
@@ -356,7 +572,7 @@ impl ItemLog {
             .map(|input_id| format!("itim_input_{input_id}"))
             .unwrap_or_else(ItemView::new_item_id);
         let seq = self
-            .append_item(
+            .append_starting_item(
                 ProjectedItem {
                     kind: ItemKind::Message,
                     source: ItemSource::root(),
@@ -407,81 +623,180 @@ impl ItemLog {
     /// Consume one host notification. Projection errors are impossible by
     /// construction; persistence errors are logged and never abort the reader.
     pub async fn ingest(&self, method: &str, params: &Value) {
-        let projected = projection::project(method, params);
-        {
-            let mut state = self.state.lock();
-            state.ingested = state.ingested.wrapping_add(1);
+        self.ingest_batch(vec![(method.to_owned(), params.clone())])
+            .await;
+    }
+
+    /// Consume a run of notifications in arrival order.
+    ///
+    /// Consecutive projected items are staged and appended as one store write,
+    /// so a burst of stream deltas costs one transaction instead of one per
+    /// chunk. A non-item projection flushes the staged run first: turn state and
+    /// item order must stay exactly as the host emitted them.
+    pub async fn ingest_batch(&self, messages: Vec<(String, Value)>) {
+        let mut staged = StagedItems::default();
+        for (method, params) in messages {
+            let projected = projection::project(&method, &params);
+            {
+                let mut state = self.state.lock();
+                state.ingested = state.ingested.wrapping_add(1);
+            }
+            for event in projected {
+                match event {
+                    Projected::Item(item) => self.stage_item(item, &mut staged),
+                    event => {
+                        self.flush_staged(&mut staged).await;
+                        self.dispatch_event(event).await;
+                    }
+                }
+            }
         }
-        for event in projected {
-            match event {
-                Projected::Item(item) => self.push_item(item).await,
-                // The gateway opens the turn before `session/prompt`, so the
-                // host's own start frame only confirms the generation. A queued
-                // (MQ) run has its own request id: it is adopted as the
-                // continuation of the open turn, never a second Swarm turn.
-                Projected::TurnStarted {
-                    request_id,
-                    generation,
-                    queued,
-                } => {
-                    let mut state = self.state.lock();
-                    if state.active.as_deref() == Some(request_id.as_str())
-                        && state.generation.is_none()
-                    {
-                        state.generation = generation;
-                    } else if queued && state.active.is_some() && state.steer_epoch > 0 {
+        self.flush_staged(&mut staged).await;
+    }
+
+    /// Apply one non-item projection in host order.
+    async fn dispatch_event(&self, event: Projected) {
+        match event {
+            // `ingest_batch` stages items; this arm keeps the match total for
+            // callers that hand over a single projected event.
+            Projected::Item(item) => self.push_item(item).await,
+            // The gateway opens the turn before `session/prompt`, so the
+            // host's own start frame only confirms the generation. A queued
+            // (MQ) run has its own request id: it is adopted as the
+            // continuation of the open turn, never a second Swarm turn.
+            Projected::TurnStarted {
+                request_id,
+                generation,
+                queued,
+            } => {
+                let mut state = self.state.lock();
+                if state.active.as_deref() == Some(request_id.as_str())
+                    && state.generation.is_none()
+                {
+                    state.generation = generation;
+                } else if queued && state.active.is_some() {
+                    // A queued run continues the turn only while a steer still
+                    // waits to be adopted: an adopted run alone does not adopt a
+                    // second one, so a run that starts after the last handoff
+                    // was rolled back is late and stays ignored.
+                    //
+                    // It claims the OLDEST unresolved generation, not the
+                    // current counter. The ordering that makes "oldest" mean
+                    // "this run's steer" is established before the host sees
+                    // the input: the service serializes reservation with
+                    // enqueue and dispatch per session, and the host starts a
+                    // queued run in enqueue order, so run starts reach the
+                    // reader in claim order. A run_started can reach the reader
+                    // after a later steer was noted (`runtime` coalesces frames
+                    // for up to 60ms); inheriting the counter would hand that
+                    // older run the newer steer's generation, and its
+                    // `cancelled` terminal would then close a turn the newer
+                    // steer owns.
+                    if let Some(claimed) = state.outstanding_steers.first().copied() {
+                        state.outstanding_steers.remove(&claimed);
                         state.continuation = Some(ContinuationRun {
                             request_id,
-                            epoch: state.steer_epoch,
+                            generation: claimed,
                         });
                     }
                 }
-                Projected::QueueChanged { .. } => {}
-                Projected::TurnCompleted {
-                    request_id,
-                    stop_reason,
-                } => {
-                    let closes = {
-                        let state = self.state.lock();
-                        let Some(active) = state.active.clone() else {
-                            continue;
-                        };
-                        match request_id.as_deref() {
-                            // The prompt attempt of the open turn. A steer
-                            // cancels it on purpose: the turn continues in the
-                            // queued run, so this terminal is not the turn's.
-                            Some(running) if running == active => {
-                                if state.steer_epoch == 0 {
-                                    Some((active, stop_reason))
-                                } else {
-                                    None
-                                }
+            }
+            Projected::QueueChanged { .. } => {}
+            Projected::TurnCompleted {
+                request_id,
+                stop_reason,
+            } => {
+                let closes = {
+                    let mut state = self.state.lock();
+                    let Some(active) = state.active.clone() else {
+                        // A terminal for a turn that is already closed: the
+                        // turn was finished early and this one is stranded.
+                        tracing::debug!(?request_id, "turn terminal ignored: no active turn");
+                        return;
+                    };
+                    let max_unresolved = state.max_unresolved();
+                    let steer_owns = state.steer_owns_turn();
+                    match request_id.as_deref() {
+                        // The prompt attempt of the open turn. A steer
+                        // cancels it on purpose: the turn continues in the
+                        // queued run, so this terminal is not the turn's.
+                        Some(running) if running == active => {
+                            if !steer_owns {
+                                // No steer and no continuation own the turn,
+                                // so the unresolved maximum is `0`.
+                                Some((
+                                    active,
+                                    TurnOutcome::Completed(stop_reason),
+                                    max_unresolved,
+                                    None,
+                                ))
+                            } else {
+                                // Keep the prompt outcome in case the handoff
+                                // fails. It carries no source: only a replay
+                                // with no queued run owning the turn may use it.
+                                state.suppress_terminal(
+                                    running,
+                                    TurnOutcome::Completed(stop_reason),
+                                    None,
+                                );
+                                None
                             }
-                            // The queued run continuing the turn. A newer steer
-                            // supersedes it, so only the latest run closes it.
-                            Some(running) => state
+                        }
+                        // The queued run continuing the turn. Only the run the
+                        // turn currently continues may terminate it; an older
+                        // run's terminal is stranded.
+                        //
+                        // A continuation older than a steer that is still
+                        // unresolved has been superseded by that steer: its
+                        // terminal is kept (with its source) instead of
+                        // dropped, because the newer steer's handoff may still
+                        // fail and then this run's terminal is the turn's. A
+                        // dropped terminal could never be replayed.
+                        Some(running) => {
+                            let continuation = state
                                 .continuation
                                 .as_ref()
-                                .filter(|run| {
-                                    run.request_id == running && run.epoch == state.steer_epoch
-                                })
-                                .map(|_| (active, stop_reason)),
-                            // Legacy/terminal frames without a request id only
-                            // close a turn that no steer has taken over.
-                            None if state.steer_epoch == 0 => Some((active, stop_reason)),
-                            None => None,
+                                .filter(|run| run.request_id == running);
+                            match continuation.map(|run| run.generation) {
+                                Some(generation) if generation < max_unresolved => {
+                                    // `active` is the turn the terminal would
+                                    // close; the run id is only its source.
+                                    state.suppress_terminal(
+                                        &active,
+                                        TurnOutcome::Completed(stop_reason),
+                                        Some(running),
+                                    );
+                                    None
+                                }
+                                Some(_) => Some((
+                                    active,
+                                    TurnOutcome::Completed(stop_reason),
+                                    max_unresolved,
+                                    Some(running.to_owned()),
+                                )),
+                                None => None,
+                            }
                         }
-                    };
-                    if let Some((active, stop_reason)) = closes {
-                        self.finish_turn(&active, TurnOutcome::Completed(stop_reason))
-                            .await;
+                        // Legacy/terminal frames without a request id only
+                        // close a turn that no steer has taken over.
+                        None if !steer_owns => Some((
+                            active,
+                            TurnOutcome::Completed(stop_reason),
+                            max_unresolved,
+                            None,
+                        )),
+                        None => None,
                     }
+                };
+                if let Some((closed, outcome, expected, source)) = closes {
+                    self.finish_turn_observed(&closed, outcome, Some(expected), source.as_deref())
+                        .await;
                 }
-                Projected::ExecutionFailed { message } => {
-                    let mut state = self.state.lock();
-                    if state.active.is_some() {
-                        state.failure = Some(message);
-                    }
+            }
+            Projected::ExecutionFailed { message } => {
+                let mut state = self.state.lock();
+                if state.active.is_some() {
+                    state.failure = Some(message);
                 }
             }
         }
@@ -570,8 +885,11 @@ impl ItemLog {
             state.generation = None;
             state.failure = None;
             state.streams.clear();
-            state.steer_epoch = 0;
+            // `steer_generation` keeps counting across turns: a late rollback
+            // from the previous turn must not match this turn's first steer.
+            state.outstanding_steers.clear();
             state.continuation = None;
+            state.suppressed_terminal = None;
             state.turn_started_at = Some(started_at);
             (created, added)
         };
@@ -670,13 +988,67 @@ impl ItemLog {
     /// Idempotent: a terminal for a turn that is no longer active (late
     /// `peri/agent_event_done`, or the prompt response after an early cancel)
     /// is a no-op, so a cancel bound to turn N can never terminate turn N+1.
+    ///
+    /// If a steer takes over during `settle`, keep the full `outcome` for a
+    /// failed handoff instead of closing the turn immediately.
     pub async fn finish_turn(&self, request_id: &str, outcome: TurnOutcome) {
-        {
-            let state = self.state.lock();
+        self.finish_turn_observed(request_id, outcome, None, None)
+            .await;
+    }
+
+    /// Close the turn whose terminal was observed under `request_id`, unless a
+    /// steer that is still unresolved owns it.
+    ///
+    /// `expected_max_unresolved` is the [`LogState::max_unresolved`] the caller
+    /// based its decision on; `None` means the caller decided unconditionally (a
+    /// timeout or a lost terminal). `source` names the continuation run that
+    /// produced `outcome` (`None` for the prompt attempt) and is only stored
+    /// when the terminal is deferred.
+    ///
+    /// When the caller decided from an observation (`Some`), `source` must
+    /// still own the turn when the close actually happens: the caller's decision
+    /// and this method are separate critical sections, and a run adopted in
+    /// between claims the generation the caller's expected value counted. The
+    /// unresolved maximum then falls back to what the caller saw while a new
+    /// continuation owns the turn, so closing would end that run's turn with a
+    /// superseded terminal.
+    ///
+    /// That owner check runs once, immediately before the turn is cleared: the
+    /// decision value and the snapshot come from separate earlier critical
+    /// sections, so the close is the only place where ownership is still
+    /// current. The entry block does not repeat it — one rule, one maintenance
+    /// location.
+    async fn finish_turn_observed(
+        &self,
+        request_id: &str,
+        outcome: TurnOutcome,
+        expected_max_unresolved: Option<u64>,
+        source: Option<&str>,
+    ) {
+        let snapshot = {
+            let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
                 return;
             }
-        }
+            // A steer that is still unresolved owns the turn; keep the terminal
+            // for a failed handoff instead of closing it. The token is the
+            // maximum unresolved generation, not the counter: a steer noted and
+            // rolled back before this closer wakes up leaves nothing unresolved,
+            // and deferring on it would leave the turn to a safety net that only
+            // fires minutes later.
+            let snapshot = (
+                state.max_unresolved(),
+                state
+                    .continuation
+                    .as_ref()
+                    .map(|run| run.request_id.clone()),
+            );
+            if expected_max_unresolved.is_some_and(|expected| snapshot.0 > expected) {
+                state.suppress_terminal(request_id, outcome, source);
+                return;
+            }
+            snapshot
+        };
         // Notifications and JSON-RPC responses leave the host on the same
         // transport but are dispatched to the reader and the request router
         // separately; wait for the reader to go quiet so the completion item
@@ -687,10 +1059,44 @@ impl ItemLog {
             if state.active.as_deref() != Some(request_id) {
                 return;
             }
+            // Same rule after settle: only a steer that still owns the turn when
+            // the closer wakes up keeps its duty. A steer noted and rolled back
+            // during `settle` leaves the maximum at its snapshot, so this closer
+            // closes the turn now.
+            //
+            // A continuation adopted during `settle` claims its generation out
+            // of the unresolved set, so the maximum can fall back to the
+            // snapshot even though a queued run now owns the turn: the
+            // continuation identity is part of the snapshot for that reason.
+            //
+            // The owner check lives only here, immediately before the close: the
+            // decision value and the snapshot come from earlier critical
+            // sections, so this is the last point where the terminal's source can
+            // still be compared with a live owner. A run adopted between them
+            // claims the generation the caller's `expected` counted, so the
+            // maximum falls back to the caller's value and the entry snapshot
+            // already carries the new continuation — the two snapshot comparisons
+            // then see no change, and only the owner check still catches the
+            // superseded terminal. An unconditional closer (`None`) skips the
+            // check: a timeout or lost terminal must still close the turn.
+            let unresolved = state.max_unresolved();
+            let continuation = state
+                .continuation
+                .as_ref()
+                .map(|run| run.request_id.as_str());
+            let superseded = (expected_max_unresolved.is_some()
+                && !state.terminal_owner_matches(source))
+                || unresolved > snapshot.0
+                || continuation != snapshot.1.as_deref();
+            if superseded {
+                state.suppress_terminal(request_id, outcome, source);
+                return;
+            }
             state.active = None;
             state.generation = None;
-            state.steer_epoch = 0;
+            state.outstanding_steers.clear();
             state.continuation = None;
+            state.suppressed_terminal = None;
             (std::mem::take(&mut state.streams), state.failure.take())
         };
         // Approvals owned by this turn can no longer be answered: the prompt
@@ -971,36 +1377,117 @@ impl ItemLog {
         self.state.lock().active.clone()
     }
 
-    /// Record a steer handed to the running turn and return its epoch.
+    /// Record a steer handed to the running turn and return its generation.
+    ///
+    /// Test helper: it accepts any open turn, while the service names the turn
+    /// it admitted the input into ([`Self::note_steer_for`]). Returns `0` when
+    /// no turn is open, so the caller runs the input as a normal turn.
+    #[cfg(test)]
+    #[must_use]
+    pub fn note_steer(&self) -> u64 {
+        match self.state.lock().reserve_steer(None) {
+            SteerReservation::Reserved(generation) => generation,
+            SteerReservation::NoTurn => 0,
+            // `None` accepts any open turn, so there is nothing to disagree
+            // with.
+            SteerReservation::OtherTurn => unreachable!("no admitted turn to reject"),
+        }
+    }
+
+    /// Record a steer handed to `admitted_turn` and reserve its generation.
     ///
     /// The host answers a dispatched steer by cancelling the in-flight attempt,
-    /// so the turn must survive that attempt's `cancelled` terminal. The epoch
-    /// is passed to [`Self::abandon_steer`] when the handoff fails.
-    pub fn note_steer(&self) -> u64 {
-        let mut state = self.state.lock();
-        if state.active.is_some() {
-            state.steer_epoch = state.steer_epoch.saturating_add(1);
-        }
-        state.steer_epoch
-    }
-
-    /// Undo [`Self::note_steer`] after a failed handoff. Skipped when a queued
-    /// run was already adopted for that epoch: that run owns the turn now.
-    pub fn abandon_steer(&self, epoch: u64) {
-        let mut state = self.state.lock();
-        let adopted = state
-            .continuation
-            .as_ref()
-            .is_some_and(|run| run.epoch >= epoch);
-        if state.steer_epoch == epoch && !adopted {
-            state.steer_epoch = epoch.saturating_sub(1);
-        }
-    }
-
-    /// Number of steers handed to the open turn.
+    /// so the turn must survive that attempt's `cancelled` terminal. The
+    /// generation stays in [`LogState::outstanding_steers`] until a queued run
+    /// claims it or the caller passes it to [`Self::abandon_steer`].
+    ///
+    /// The previous `note_steer` only asked whether *a* turn was active. A caller
+    /// waiting for the service's steer lock could find that turn closed and its
+    /// replacement open, and the dispatch then landed in the replacement. The
+    /// admission check and the insert happen in one `state.lock()`, so a turn
+    /// that is no longer `admitted_turn` yields [`SteerReservation::OtherTurn`]
+    /// and no generation at all.
     #[must_use]
-    pub fn steer_epoch(&self) -> u64 {
-        self.state.lock().steer_epoch
+    pub(crate) fn note_steer_for(&self, admitted_turn: &str) -> SteerReservation {
+        self.state.lock().reserve_steer(Some(admitted_turn))
+    }
+
+    /// Undo [`Self::note_steer_for`] after a failed handoff.
+    ///
+    /// Only the rolled-back generation leaves the unresolved set, so an
+    /// out-of-order rollback (a later steer first) never releases an earlier
+    /// one. A generation already claimed by a queued run is no longer in the
+    /// set, so rolling back a superseded steer cannot hand that run's ownership
+    /// to the next one: the claim, not the rollback, decides which generation a
+    /// run owns.
+    ///
+    /// A retained terminal is replayed only while it still belongs to the
+    /// turn's owner: the prompt attempt's terminal (`source: None`) when no
+    /// queued run took over and no earlier steer is still unresolved, or a
+    /// continuation's own terminal while that same run still owns the turn and
+    /// no newer steer supersedes it. A prompt `cancelled` must never close a
+    /// turn a live run owns, and a superseded run's terminal must not close a
+    /// turn a newer steer owns.
+    pub async fn abandon_steer(&self, generation: u64) {
+        let terminal = {
+            let mut state = self.state.lock();
+            if !state.outstanding_steers.remove(&generation) {
+                // Already rolled back, already claimed by a queued run, or never
+                // noted here (a late rollback from a closed turn): the current
+                // steer set stays untouched.
+                return;
+            }
+            let replayable = match state.suppressed_terminal.as_ref() {
+                // No queued run took the turn over, so the prompt attempt's own
+                // terminal is still the turn's. An earlier steer that is still
+                // unresolved may yet hand the turn to its run, so the prompt
+                // terminal has to wait for that steer to resolve too.
+                Some(SuppressedTerminal { source: None, .. }) => {
+                    state.continuation.is_none() && state.outstanding_steers.is_empty()
+                }
+                // A continuation's terminal closes the turn only while that
+                // same run still owns it and no newer unresolved steer has
+                // superseded it.
+                Some(SuppressedTerminal {
+                    source: Some(source),
+                    ..
+                }) => state.continuation.as_ref().is_some_and(|run| {
+                    run.request_id == *source && run.generation >= state.max_unresolved()
+                }),
+                None => false,
+            };
+            if !replayable {
+                return;
+            }
+            state.suppressed_terminal.take()
+        };
+        if let Some(suppressed) = terminal {
+            // Replay with no steer unresolved: the rollback removed the last
+            // one, and a retained continuation terminal implies its own
+            // generation was claimed out of the set when its run started. A
+            // steer admitted in the meantime makes the guard yield and retain
+            // the terminal again, with the same source.
+            self.finish_turn_observed(
+                &suppressed.request_id,
+                suppressed.outcome,
+                Some(0),
+                suppressed.source.as_deref(),
+            )
+            .await;
+        }
+    }
+
+    /// Monotonic generation of the session's steers (`0` before the first).
+    #[must_use]
+    pub fn steer_generation(&self) -> u64 {
+        self.state.lock().steer_generation
+    }
+
+    /// Whether a steer still owns the open turn: one is outstanding, or a
+    /// queued run was adopted as its continuation.
+    #[must_use]
+    pub fn steer_pending(&self) -> bool {
+        self.state.lock().steer_owns_turn()
     }
 
     /// Wait until `request_id` is no longer the open turn.
@@ -1018,6 +1505,47 @@ impl ItemLog {
         )
         .await;
         waited.is_ok()
+    }
+
+    /// Close a turn whose run no longer reports a terminal.
+    ///
+    /// [`Self::finish_turn`] defers the close while a steer admitted during
+    /// `settle` owns the turn. Wait up to `within` between retries so a host
+    /// that accepts the steer and then goes silent cannot leave the turn open
+    /// forever.
+    ///
+    /// The caller should run this on its own task: the retries must outlive the
+    /// future that triggered them.
+    pub async fn close_lost_turn(&self, request_id: &str, outcome: TurnOutcome, within: Duration) {
+        self.finish_turn(request_id, outcome.clone()).await;
+        while self.active_turn().as_deref() == Some(request_id) {
+            if self.wait_turn_closed(request_id, within).await {
+                return;
+            }
+            self.finish_turn(request_id, outcome.clone()).await;
+        }
+    }
+
+    /// Close a turn whose run stopped reporting, but only after a grace period.
+    ///
+    /// A steer hands the turn to a queued run that may still be executing; an
+    /// immediate [`Self::finish_turn`] would pre-empt it with one settle window
+    /// and drop its terminal. Wait up to `within` for the continuation to close
+    /// the turn itself; only a turn still open after that grace is force-closed
+    /// (then retried like [`Self::close_lost_turn`]).
+    ///
+    /// The caller should run this on its own task: the grace and retries must
+    /// outlive the future that triggered them.
+    pub async fn close_lost_turn_after_grace(
+        &self,
+        request_id: &str,
+        outcome: TurnOutcome,
+        within: Duration,
+    ) {
+        if self.wait_turn_closed(request_id, within).await {
+            return;
+        }
+        self.close_lost_turn(request_id, outcome, within).await;
     }
 
     // ── MCP approvals (`requires_action`) ──────────────────────────────────
@@ -1685,8 +2213,12 @@ impl ItemLog {
         )));
     }
 
-    /// Persist one projected item, then broadcast it.
-    async fn push_item(&self, item: ProjectedItem) {
+    /// Stage one projected item for the next batched append.
+    ///
+    /// Stream deltas first update the in-memory text (the turn flush uses it)
+    /// and keep one identity per `(agent, messageId, kind)`; the delta itself is
+    /// staged with that identity. Non-stream items are staged as they are.
+    fn stage_item(&self, item: ProjectedItem, staged: &mut StagedItems) {
         if let Some((key, message_id, text)) = stream_parts(&item) {
             let item_id = {
                 let mut state = self.state.lock();
@@ -1722,23 +2254,52 @@ impl ItemLog {
                 source: item.source,
                 payload,
             };
-            match self.append_item(projected, Some(item_id)).await {
-                Ok(seq) => {
-                    // Persisted: the first chunk's seq orders this message among
-                    // the turn's outputs. A later chunk never rewrites it.
-                    let mut state = self.state.lock();
-                    if let Some(stream) = state.streams.get_mut(&key) {
-                        stream.first_seq.get_or_insert(seq);
-                    }
-                }
-                Err(error) => self.report_append_failure("item", error).await,
-            }
+            staged.streams.push((staged.items.len(), key));
+            staged.items.push((projected, Some(item_id)));
             return;
         }
-        let kind = item.kind;
-        if let Err(error) = self.append_item(item, None).await {
-            self.report_append_failure(kind.as_str(), error).await;
+        staged.items.push((item, None));
+    }
+
+    /// Persist and publish the staged run in one write.
+    async fn flush_staged(&self, staged: &mut StagedItems) {
+        if staged.items.is_empty() {
+            return;
         }
+        let streams = std::mem::take(&mut staged.streams);
+        let mut committed = BTreeMap::new();
+        let result = self
+            .append_items_tracked(
+                std::mem::take(&mut staged.items),
+                ProgressWrite::WhileTurnOpen,
+                &mut committed,
+            )
+            .await;
+        // A run may need several durable groups; a failed group must not
+        // discard the seqs the others already own, or `finish_turn` would order
+        // those messages by key instead of by their persisted position.
+        {
+            // Persisted: the first chunk's seq orders this message among the
+            // turn's outputs. A later chunk never rewrites it.
+            let mut state = self.state.lock();
+            for (index, key) in streams {
+                if let (Some(seq), Some(stream)) =
+                    (committed.get(&index), state.streams.get_mut(&key))
+                {
+                    stream.first_seq.get_or_insert(*seq);
+                }
+            }
+        }
+        if let Err(error) = result {
+            self.report_append_failure("item", error).await;
+        }
+    }
+
+    /// Append and publish one item (completion flushes; single-frame paths).
+    async fn push_item(&self, item: ProjectedItem) {
+        let mut staged = StagedItems::default();
+        self.stage_item(item, &mut staged);
+        self.flush_staged(&mut staged).await;
     }
 
     async fn append_item(
@@ -1746,36 +2307,173 @@ impl ItemLog {
         item: ProjectedItem,
         stable_item_id: Option<String>,
     ) -> Result<u64, SwarmError> {
-        let (payload, truncated) = ItemView::fit_payload(item.payload);
-        let item_id = stable_item_id.unwrap_or_else(ItemView::new_item_id);
+        let mut seqs = self
+            .append_items(vec![(item, stable_item_id)], ProgressWrite::WhileTurnOpen)
+            .await?;
+        Ok(seqs.remove(0))
+    }
+
+    /// Append a projected item and mark the session running (acceptance path).
+    async fn append_starting_item(
+        &self,
+        item: ProjectedItem,
+        stable_item_id: Option<String>,
+    ) -> Result<u64, SwarmError> {
+        let mut seqs = self
+            .append_items(vec![(item, stable_item_id)], ProgressWrite::Running)
+            .await?;
+        Ok(seqs.remove(0))
+    }
+
+    /// Persist a run of items with consecutive seqs in one store write.
+    ///
+    /// The reader owns the sequence: `next_seq` is cached after the first
+    /// append and only re-read when a conflict proves another writer advanced
+    /// it. One transaction means a viewer never observes the second item of a
+    /// batch before the first is durable, and the session cursor moves with the
+    /// items instead of one round trip behind them.
+    async fn append_items(
+        &self,
+        items: Vec<(ProjectedItem, Option<String>)>,
+        progress: ProgressWrite,
+    ) -> Result<Vec<u64>, SwarmError> {
+        let mut committed = BTreeMap::new();
+        self.append_items_tracked(items, progress, &mut committed)
+            .await?;
+        Ok(committed.into_values().collect())
+    }
+
+    /// [`Self::append_items`], recording each durable item's seq in
+    /// `committed` under its index in `items`.
+    ///
+    /// Every group is attempted even when an earlier one fails. An item whose
+    /// payload exceeds the store budget sits alone in its group (see
+    /// [`Self::batch_end`]), so one rejected row must not discard the rest of
+    /// the run; the first failure is reported once the remaining groups have
+    /// been tried.
+    async fn append_items_tracked(
+        &self,
+        items: Vec<(ProjectedItem, Option<String>)>,
+        progress: ProgressWrite,
+        committed: &mut BTreeMap<usize, u64>,
+    ) -> Result<(), SwarmError> {
+        if items.is_empty() {
+            return Ok(());
+        }
         let created_at = peri_time::now_utc_rfc3339();
-        let mut appended = None;
+        let prepared: Vec<PreparedItem> = items
+            .into_iter()
+            .map(|(item, stable_item_id)| {
+                let (payload, truncated) = ItemView::fit_payload(item.payload);
+                let payload_bytes = serde_json::to_vec(&payload).map_or(0, |bytes| bytes.len());
+                PreparedItem {
+                    kind: item.kind,
+                    source: item.source,
+                    payload,
+                    truncated,
+                    item_id: stable_item_id.unwrap_or_else(ItemView::new_item_id),
+                    payload_bytes,
+                }
+            })
+            .collect();
+        let mut first_error = None;
+        let mut start = 0;
+        while start < prepared.len() {
+            let end = Self::batch_end(&prepared, start);
+            let group = &prepared[start..end];
+            let payload_bytes: usize = group.iter().map(|item| item.payload_bytes).sum();
+            let largest = group
+                .iter()
+                .map(|item| item.payload_bytes)
+                .max()
+                .unwrap_or(0);
+            tracing::debug!(
+                logical_id = %self.logical_id,
+                rows = group.len(),
+                payload_bytes,
+                largest_row_bytes = largest,
+                "append_items group"
+            );
+            match self.append_group(group, &created_at, progress).await {
+                Ok(seqs) => committed.extend(
+                    seqs.into_iter()
+                        .enumerate()
+                        .map(|(offset, seq)| (start + offset, seq)),
+                ),
+                Err(error) => first_error = first_error.or(Some(error)),
+            }
+            start = end;
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// End index of the group that starts at `start`.
+    ///
+    /// One durable write must stay under the store's per-request budget: Loom
+    /// rejects a statement batch above `max_sql_bytes` with 413, and an item's
+    /// fitted payload alone can reach 1 MiB. A group always takes at least one
+    /// item so an oversized item still fails on its own rather than stalling.
+    fn batch_end(prepared: &[PreparedItem], start: usize) -> usize {
+        let mut end = start + 1;
+        let mut bytes = prepared[start].payload_bytes + APPEND_ROW_OVERHEAD;
+        while end < prepared.len()
+            && bytes + prepared[end].payload_bytes + APPEND_ROW_OVERHEAD <= APPEND_BATCH_BYTES
+        {
+            bytes += prepared[end].payload_bytes + APPEND_ROW_OVERHEAD;
+            end += 1;
+        }
+        end
+    }
+
+    /// Persist and broadcast one group of items with consecutive seqs.
+    async fn append_group(
+        &self,
+        prepared: &[PreparedItem],
+        created_at: &str,
+        progress: ProgressWrite,
+    ) -> Result<Vec<u64>, SwarmError> {
+        let mut appended: Option<Vec<u64>> = None;
 
         for attempt in 0..2 {
-            let guard = self.seq_lock.lock().await;
-            let last = self
-                .store
-                .swarm_last_seq(&self.logical_id)
-                .await
-                .map_err(|error| store_failure("last_seq", error))?;
-            let seq = last + 1;
-            let result = self
-                .store
-                .swarm_append_item(SwarmItemRow {
+            // Held through the commit **and** the cache update below: an
+            // append that reloaded `MAX(seq)` in the gap between the commit and
+            // the cache write could otherwise be overwritten by a stale value,
+            // costing the next writer a second conflict and its items.
+            let _guard = self.seq_lock.lock().await;
+            let last = self.next_seq().await?;
+            let rows: Vec<SwarmItemRow> = prepared
+                .iter()
+                .enumerate()
+                .map(|(index, item)| SwarmItemRow {
                     logical_id: self.logical_id.clone(),
-                    seq,
-                    item_id: item_id.clone(),
+                    seq: last + 1 + index as u64,
+                    item_id: item.item_id.clone(),
                     kind: item.kind,
                     source: item.source.clone(),
-                    payload: payload.clone(),
-                    created_at: created_at.clone(),
-                    truncated,
+                    payload: item.payload.clone(),
+                    created_at: created_at.to_owned(),
+                    truncated: item.truncated,
                 })
-                .await;
-            drop(guard);
+                .collect();
+            let write_progress = match progress {
+                ProgressWrite::Running => true,
+                ProgressWrite::WhileTurnOpen => self.state.lock().active.is_some(),
+            };
+            let update = write_progress.then(|| SwarmSessionUpdate {
+                logical_id: self.logical_id.clone(),
+                state: SessionState::Running,
+                last_item_seq: last + rows.len() as u64,
+                last_activity_at: created_at.to_owned(),
+            });
+            let result = self.store.swarm_append_items(&rows, update).await;
             match result {
                 Ok(()) => {
-                    appended = Some(seq);
+                    let end = last + rows.len() as u64;
+                    self.state.lock().next_seq = Some(end);
+                    appended = Some(((last + 1)..=end).collect());
                     break;
                 }
                 Err(crate::store::StoreError::Conflict(reason)) if attempt == 0 => {
@@ -1784,12 +2482,13 @@ impl ItemLog {
                         reason = %reason,
                         "swarm seq conflict; reloading MAX(seq) and retrying once"
                     );
+                    self.state.lock().next_seq = None;
                 }
-                Err(error) => return Err(store_failure("append_item", error)),
+                Err(error) => return Err(store_failure("append_items", error)),
             }
         }
 
-        let Some(seq) = appended else {
+        let Some(seqs) = appended else {
             self.update_state_quiet(SessionState::Failed).await;
             return Err(SwarmError::new(
                 ErrorKind::Unavailable,
@@ -1801,24 +2500,44 @@ impl ItemLog {
         // Persisted before the broadcast: a heartbeat may report this seq
         // before a viewer has rendered the item, which is the intended
         // "session progressed" meaning.
-        self.tail.fetch_max(seq, Ordering::Relaxed);
-        self.set_session_state(SessionState::Running, Some(seq))
-            .await?;
-        let view = ItemView {
-            id: item_id.clone(),
-            seq,
-            item_id,
-            kind: item.kind,
-            source: item.source,
-            payload,
-            created_at,
-            truncated,
-        };
-        self.broadcast(StreamEvent::Item(view.clone()));
-        for event in self.official_frames(&view) {
-            self.broadcast(StreamEvent::Official(event));
+        if let Some(last_seq) = seqs.last() {
+            self.tail.fetch_max(*last_seq, Ordering::Relaxed);
         }
-        Ok(seq)
+        for (seq, item) in seqs.iter().zip(prepared) {
+            let view = ItemView {
+                id: item.item_id.clone(),
+                seq: *seq,
+                item_id: item.item_id.clone(),
+                kind: item.kind,
+                source: item.source.clone(),
+                payload: item.payload.clone(),
+                created_at: created_at.to_owned(),
+                truncated: item.truncated,
+            };
+            self.broadcast(StreamEvent::Item(view.clone()));
+            for event in self.official_frames(&view) {
+                self.broadcast(StreamEvent::Official(event));
+            }
+        }
+        Ok(seqs)
+    }
+
+    /// Last persisted seq, read from the store only when the cache is cold.
+    async fn next_seq(&self) -> Result<u64, SwarmError> {
+        if let Some(seq) = self.state.lock().next_seq {
+            return Ok(seq);
+        }
+        let last = self
+            .store
+            .swarm_last_seq(&self.logical_id)
+            .await
+            .map_err(|error| store_failure("last_seq", error))?;
+        let mut state = self.state.lock();
+        // A concurrent appender under the same `seq_lock` cannot interleave, so
+        // the store value is still the cache's missing entry rather than a
+        // value to overwrite.
+        state.next_seq = Some(last);
+        Ok(last)
     }
 
     /// Official frames one persisted message frame implies.
@@ -1953,6 +2672,12 @@ impl ItemLog {
         state: SessionState,
         last_item_seq: Option<u64>,
     ) -> Result<(), SwarmError> {
+        // Serialized with item appends: an append decides whether to write
+        // `running` and commits that decision under `seq_lock`, so the closing
+        // `idle`/`failed` write takes the same lock. Otherwise a progress write
+        // decided while the turn was open could land after the terminal and
+        // leave the session `running` with no active turn.
+        let _guard = self.seq_lock.lock().await;
         let last = match last_item_seq {
             Some(seq) => seq,
             None => self

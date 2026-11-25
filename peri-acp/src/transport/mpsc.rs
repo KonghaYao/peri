@@ -24,7 +24,7 @@ use super::AcpTransport;
 
 /// 进程内传输队列容量。内容与控制共用同一条 FIFO；满时写端只等待有限时间，
 /// 超时后显式关闭连接，避免慢消费者把无界内存增长伪装成“还在运行”。
-const MPSC_QUEUE_CAPACITY: usize = 1024;
+const MPSC_QUEUE_CAPACITY: usize = 16_384;
 
 /// 写端等待上限。超时视为对端停滞：关闭连接并返回明确的背压错误，
 /// 不静默丢帧，也不无限 await（取消/关闭必须仍能推进）。
@@ -204,6 +204,34 @@ impl MpscClientTransport {
     /// 显式关闭两端共享 router，使保留 transport Arc 的 pump 和 pending 请求退出。
     pub fn close(&self) {
         self.router.close();
+    }
+
+    /// 接收首帧后，无等待地取走已排队的后续帧（最多 `max` 帧）。
+    ///
+    /// 队列空闲时先等首帧（阻塞），再给随后的一帧一个 `coalesce` 窗口，让一次
+    /// 突发落进同一批；队列已有积压时立即取走，不再追加等待。调用方因此能把
+    /// 一次突发写成一个持久化批次，同时不改变逐帧的 FIFO 顺序。
+    pub async fn recv_batch(&self, max: usize, coalesce: Duration) -> Option<Vec<IncomingMessage>> {
+        let mut receiver = self.incoming_rx.lock().await;
+        let mut batch = Vec::with_capacity(max.min(64));
+        match receiver.try_recv() {
+            Ok(message) => batch.push(message),
+            Err(mpsc::error::TryRecvError::Disconnected) => return None,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                let first = receiver.recv().await?;
+                batch.push(first);
+                if !coalesce.is_zero() {
+                    tokio::time::sleep(coalesce).await;
+                }
+            }
+        }
+        while batch.len() < max {
+            match receiver.try_recv() {
+                Ok(message) => batch.push(message),
+                Err(_) => break,
+            }
+        }
+        Some(batch)
     }
 
     fn new(

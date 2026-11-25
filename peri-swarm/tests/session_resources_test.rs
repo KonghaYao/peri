@@ -1416,6 +1416,19 @@ async fn a_failed_turn_persists_its_customer_safe_error() {
             }
             self.inner.swarm_append_item(row).await
         }
+        async fn swarm_append_items(
+            &self,
+            rows: &[SwarmItemRow],
+            progress: Option<SwarmSessionUpdate>,
+        ) -> Result<(), StoreError> {
+            if rows
+                .iter()
+                .any(|row| row.payload.get("role").and_then(Value::as_str) == Some("assistant"))
+            {
+                return Err(StoreError::Unavailable("append disabled".to_owned()));
+            }
+            self.inner.swarm_append_items(rows, progress).await
+        }
         async fn swarm_items_after(
             &self,
             logical_id: &str,

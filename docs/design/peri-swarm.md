@@ -371,6 +371,10 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   `turns.list`/`turns.retrieve` 使用同一状态。受理但未执行
   （`abandon_pending_turn`）不写行：它与「不发 `turn.created`」一致，因此不会留下
   `queued`/`in_progress` 的 phantom 行。
+  非 steer 的 `session/prompt` 回包只表示 agent 接受了输入，不代表事件流已终止：
+  网关在回包后等待该 turn 的终止事件（`wait_turn_closed`，1800 秒兜底），只有
+  超时才记录 `agent turn reported no terminal` 并以失败关闭。因此 turn 终结与
+  最后一批 item 的持久化同批发生，不会先关 turn 再把剩余流按完成态冲刷。
 - `agent.session.in_progress`/`idle`/`failed` 的 `metadata` 来自会话行；官方
   `AgentSession.prompt_cache_options` 是可选项，网关只在有持久值时发送它（没有值
   时字段不出现，而不是伪造 `null`）。实时与回放使用同一会话行投影，字段不静默分叉。

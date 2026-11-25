@@ -258,6 +258,15 @@ impl SwarmError {
     }
 
     #[must_use]
+    pub fn turn_superseded() -> Self {
+        Self::new(
+            ErrorKind::Conflict,
+            ErrorCode::TurnInProgress,
+            "the admitted turn has ended; retry with the same inputId",
+        )
+    }
+
+    #[must_use]
     pub fn input_conflict(input_id: &str) -> Self {
         Self::new(
             ErrorKind::Conflict,

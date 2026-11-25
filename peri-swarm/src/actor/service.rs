@@ -30,7 +30,9 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-use super::reader::{ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, TurnOutcome};
+use super::reader::{
+    ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, SteerReservation, TurnOutcome,
+};
 use super::runtime::{
     local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
     WORKSPACE_MCP_SERVER_NAME,
@@ -57,6 +59,11 @@ use crate::store::{
 /// The continuation is a full agent run (tools, child agents), so the bound is
 /// only a safety net against a lost terminal, not a turn deadline.
 const STEER_CONTINUATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Upper bound while an attempt-level prompt reply (no `stopReason`) waits for
+/// the turn's real terminal. The agent may legitimately run for minutes, so
+/// this is only a safety net against a lost `peri/agent_event_done`.
+const ATTEMPT_REPLY_TERMINAL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Turn identity visible to `GET /sessions` while the turn runs.
 #[derive(Clone, Debug)]
@@ -130,6 +137,26 @@ struct SessionRuntime {
     channel: broadcast::Sender<StreamEvent>,
     /// Serializes turn admission checks; never held across a model turn.
     admission: AsyncMutex<()>,
+    /// Serializes one steer's reservation with its handoff: `note_steer_for` →
+    /// `session/input/enqueue` → `session/input/dispatch`, and the rollback
+    /// when the handoff fails. The reader claims the oldest unclaimed
+    /// generation for the next run that starts, so the reservation order must
+    /// be the enqueue order; without this lock two concurrent steers can
+    /// enqueue in the opposite order and the earlier dispatch's rollback can
+    /// no longer release the generation the later run claimed, leaving that
+    /// generation unresolved forever.
+    ///
+    /// The reservation also names the turn the input was admitted into, and
+    /// the check runs under this lock, because the turn can close and a
+    /// replacement start while a steer waits here; a steer admitted for the
+    /// closed turn must not be dispatched into its replacement.
+    ///
+    /// 调用方在释放 `admission` 后排队取锁，再把 guard 交给独立任务。
+    /// 此锁不覆盖模型 turn；`NoTurn` 也要先释放它才能重新进入 `admission`。
+    steer: Arc<AsyncMutex<()>>,
+    /// 仅供测试观察准入快照已读取；生产路径没有此通知，不改变生产时序。
+    #[cfg(test)]
+    steer_waiting: tokio::sync::Notify,
     /// Active turn identity. `Some` means "a turn is running"; the value is
     /// cleared by the turn owner only.
     turn: watch::Sender<Option<TurnSlot>>,
@@ -147,6 +174,9 @@ impl SessionRuntime {
             log,
             channel,
             admission: AsyncMutex::new(()),
+            steer: Arc::new(AsyncMutex::new(())),
+            #[cfg(test)]
+            steer_waiting: tokio::sync::Notify::new(),
             turn,
         }
     }
@@ -165,6 +195,24 @@ impl SessionRuntime {
     fn is_running(&self) -> bool {
         self.turn.borrow().is_some()
     }
+}
+
+/// Keep the safety net alive when `finish_turn` deferred the close to a steer.
+/// The retry runs detached, so cancelling the prompt future cannot drop the
+/// only closer of the turn. It first waits one grace period for a continuation
+/// terminal, so a steer that already took over is not pre-empted.
+fn arm_deferred_close(runtime: &Arc<SessionRuntime>, request_id: &str, outcome: TurnOutcome) {
+    if runtime.log.active_turn().as_deref() != Some(request_id) {
+        return;
+    }
+    let runtime = Arc::clone(runtime);
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move {
+        runtime
+            .log
+            .close_lost_turn_after_grace(&request_id, outcome, STEER_CONTINUATION_TIMEOUT)
+            .await;
+    });
 }
 
 /// Clears the turn slot on drop so a failed/panicked turn cannot wedge the
@@ -270,6 +318,22 @@ impl AcpSwarmService {
             .ok_or_else(|| SwarmError::unknown_agent(logical_id.as_str()))
     }
 
+    fn require_current_runtime(
+        &self,
+        logical_id: &LogicalId,
+        admitted: &Arc<SessionRuntime>,
+    ) -> Result<(), SwarmError> {
+        if self
+            .sessions
+            .lock()
+            .get(logical_id.as_str())
+            .is_some_and(|current| Arc::ptr_eq(current, admitted))
+        {
+            return Ok(());
+        }
+        Err(SwarmError::upstream_unavailable("session_not_live"))
+    }
+
     /// Attach the persisted identity on an explicit interaction. A lost
     /// synchronous turn fails and only ACP-owned durable work can continue.
     pub async fn ensure_live(&self, logical_id: &LogicalId) -> Result<bool, SwarmError> {
@@ -356,14 +420,13 @@ impl AcpSwarmService {
     }
 
     async fn existing_input(
-        &self,
+        store: &dyn SwarmStore,
         logical_id: &LogicalId,
         submission: &InputSubmission,
         fingerprint: &str,
     ) -> Result<Option<AcceptedInput>, SwarmError> {
         let input_id = &submission.input_id;
-        let Some(existing) = self
-            .store
+        let Some(existing) = store
             .swarm_get_input(logical_id.as_str(), input_id)
             .await
             .map_err(|error| store_failure("get_input", error))?
@@ -373,12 +436,49 @@ impl AcpSwarmService {
         if existing.fingerprint != fingerprint {
             return Err(SwarmError::input_conflict(input_id));
         }
-        Ok(Some(AcceptedInput::settled(InputOutcome::new(
-            input_id.clone(),
-            Disposition::Existing,
+        let outcome =
+            Self::input_outcome(store, logical_id, submission, Disposition::Existing).await?;
+        Ok(Some(AcceptedInput::settled(outcome)))
+    }
+
+    async fn put_input(
+        store: &dyn SwarmStore,
+        logical_id: &LogicalId,
+        submission: &InputSubmission,
+        fingerprint: &str,
+    ) -> Result<Disposition, SwarmError> {
+        let receipt = SwarmInputRow {
+            logical_id: logical_id.as_str().to_owned(),
+            input_id: submission.input_id.clone(),
+            fingerprint: fingerprint.to_owned(),
+            state: InputState::Accepted,
+            created_at: peri_time::now_utc_rfc3339(),
+        };
+        match store.swarm_put_input(receipt).await {
+            Ok(InputPut::Inserted) => Ok(Disposition::Inserted),
+            Ok(InputPut::Existing(existing)) if existing.fingerprint == fingerprint => {
+                Ok(Disposition::Existing)
+            }
+            Ok(InputPut::Existing(_)) => Err(SwarmError::input_conflict(&submission.input_id)),
+            Err(error) => {
+                tracing::warn!(error = %error, "swarm input receipt write failed");
+                Err(SwarmError::queue_unavailable("put_input"))
+            }
+        }
+    }
+
+    async fn input_outcome(
+        store: &dyn SwarmStore,
+        logical_id: &LogicalId,
+        submission: &InputSubmission,
+        disposition: Disposition,
+    ) -> Result<InputOutcome, SwarmError> {
+        Ok(InputOutcome::new(
+            submission.input_id.clone(),
+            disposition,
             submission.mode,
-            self.last_seq(logical_id).await?,
-        ))))
+            Self::last_seq_in(store, logical_id).await?,
+        ))
     }
 
     /// Rebuild the internal workspace binding from the stored row (S9a4b).
@@ -440,7 +540,14 @@ impl AcpSwarmService {
     }
 
     async fn last_seq(&self, logical_id: &LogicalId) -> Result<u64, SwarmError> {
-        self.store
+        Self::last_seq_in(self.store.as_ref(), logical_id).await
+    }
+
+    async fn last_seq_in(
+        store: &dyn SwarmStore,
+        logical_id: &LogicalId,
+    ) -> Result<u64, SwarmError> {
+        store
             .swarm_last_seq(logical_id.as_str())
             .await
             .map_err(|error| store_failure("last_seq", error))
@@ -549,10 +656,11 @@ impl AcpSwarmService {
         }
         match runtime.child.prompt(text, &request_id).await {
             Ok(reply) => {
+                let steered = runtime.log.steer_pending();
                 // A steer cancels this attempt on purpose and the host continues
                 // the turn as a queued run; that run owns the terminal now, so
                 // the turn slot stays occupied until it reports one.
-                if runtime.log.steer_epoch() > 0
+                if steered
                     && !runtime
                         .log
                         .wait_turn_closed(&request_id, STEER_CONTINUATION_TIMEOUT)
@@ -563,11 +671,63 @@ impl AcpSwarmService {
                         request_id = %request_id,
                         "steer continuation reported no terminal; closing the turn"
                     );
+                    // A steered attempt that was cancelled reports no stop
+                    // reason; leaving the turn open would reject every later
+                    // input with `turn_in_progress`, so close it the same way
+                    // the unsteered timeout does.
+                    let outcome = match reply.stop_reason.clone() {
+                        Some(stop_reason) => TurnOutcome::Completed(stop_reason),
+                        None => TurnOutcome::Failed {
+                            code: -32603,
+                            message: "steer continuation reported no terminal".to_owned(),
+                        },
+                    };
+                    // Arm the detached closer before the first
+                    // `finish_turn().await`: if `settle` is dropped with this
+                    // future, the turn still has a closer. The task waits for a
+                    // continuation terminal first and only force-closes after
+                    // its grace.
+                    //
+                    // This does not cover the `wait_turn_closed` above: a
+                    // cancel during that (300s/1800s) wait leaves the turn with
+                    // no closer, an older window this change does not widen.
+                    arm_deferred_close(runtime, &request_id, outcome.clone());
+                    runtime.log.finish_turn(&request_id, outcome).await;
+                } else if !steered {
+                    // The prompt reply is **not** the turn terminal:
+                    // `peri/agent_event_done`, ingested in item order, is.
+                    // Closing on the reply flushed live streams as
+                    // `complete:true` while the session's items were still
+                    // queued, then discarded the real terminal as late and left
+                    // the session `in_progress` forever. Wait for the reader's
+                    // terminal; only a lost one trips the safety net.
+                    tracing::debug!(
+                        logical_id = %runtime.log.logical_id(),
+                        request_id = %request_id,
+                        stop_reason = ?reply.stop_reason,
+                        pending_tasks = reply.pending_tasks,
+                        "session/prompt replied; waiting for the turn terminal"
+                    );
+                    if !runtime
+                        .log
+                        .wait_turn_closed(&request_id, ATTEMPT_REPLY_TERMINAL_TIMEOUT)
+                        .await
+                    {
+                        tracing::warn!(
+                            logical_id = %runtime.log.logical_id(),
+                            request_id = %request_id,
+                            "agent turn reported no terminal"
+                        );
+                        let outcome = TurnOutcome::Failed {
+                            code: -32603,
+                            message: "agent turn reported no terminal".to_owned(),
+                        };
+                        // Arm before the cancellable close, same as the steer
+                        // path above.
+                        arm_deferred_close(runtime, &request_id, outcome.clone());
+                        runtime.log.finish_turn(&request_id, outcome).await;
+                    }
                 }
-                runtime
-                    .log
-                    .finish_turn(&request_id, TurnOutcome::Completed(reply.stop_reason))
-                    .await;
                 if reply.pending_tasks > 0 {
                     tracing::debug!(
                         logical_id = %runtime.log.logical_id(),
@@ -587,10 +747,12 @@ impl AcpSwarmService {
                     ChildError::Local(_) => (-32603, "agent runtime failed locally".to_owned()),
                     ChildError::Closed => (-32603, "agent transport is closed".to_owned()),
                 };
-                runtime
-                    .log
-                    .finish_turn(&request_id, TurnOutcome::Failed { code, message })
-                    .await;
+                let outcome = TurnOutcome::Failed { code, message };
+                // Arm before the cancellable close: a steer may defer this
+                // terminal, and dropping the prompt future must not drop the
+                // only closer of the turn.
+                arm_deferred_close(runtime, &request_id, outcome.clone());
+                runtime.log.finish_turn(&request_id, outcome).await;
                 Err(child_error(error))
             }
         }
@@ -643,51 +805,63 @@ impl AcpSwarmService {
         Ok(None)
     }
 
-    /// Append an input to the running turn through the host user-input queue.
-    ///
-    /// `turn_id` belongs to the accepted user item; it is only used by the
-    /// `epoch == 0` fallback, where the turn ended before the handoff and the
-    /// input runs as a normal turn.
-    async fn steer(
-        &self,
-        runtime: &Arc<SessionRuntime>,
+    /// 在调用方交出的 guard 内检查幂等、预留 generation 并派发。
+    /// 返回 `None` 表示 turn 已关闭且没有替换者；由调用方重新准入。
+    async fn handoff_steer(
+        store: &dyn SwarmStore,
+        runtime: &SessionRuntime,
         submission: &InputSubmission,
         logical_id: &LogicalId,
-        turn_id: &str,
+        fingerprint: &str,
+        admitted_turn: &str,
+    ) -> Result<Option<AcceptedInput>, SwarmError> {
+        if let Some(accepted) =
+            Self::existing_input(store, logical_id, submission, fingerprint).await?
+        {
+            return Ok(Some(accepted));
+        }
+
+        // 先预留，才能阻止被 dispatch 取消的原 attempt 提前关闭 turn。
+        let epoch = match runtime.log.note_steer_for(admitted_turn) {
+            SteerReservation::Reserved(epoch) => epoch,
+            SteerReservation::NoTurn => return Ok(None),
+            SteerReservation::OtherTurn => return Err(SwarmError::turn_superseded()),
+        };
+        let result =
+            Self::persist_and_dispatch_steer(store, runtime, logical_id, submission, fingerprint)
+                .await;
+        if !matches!(&result, Ok(outcome) if outcome.disposition == Disposition::Inserted) {
+            // 必须在释放 guard 前回滚，避免下一次派发的 run 认领错误的 generation。
+            runtime.log.abandon_steer(epoch).await;
+        }
+        result.map(|outcome| Some(AcceptedInput::settled(outcome)))
+    }
+
+    async fn persist_and_dispatch_steer(
+        store: &dyn SwarmStore,
+        runtime: &SessionRuntime,
+        logical_id: &LogicalId,
+        submission: &InputSubmission,
+        fingerprint: &str,
     ) -> Result<InputOutcome, SwarmError> {
+        let disposition = Self::put_input(store, logical_id, submission, fingerprint).await?;
+        if disposition != Disposition::Inserted {
+            return Self::input_outcome(store, logical_id, submission, disposition).await;
+        }
         let text = submission.effective_text();
-        // Record the handoff before dispatch: the dispatched input cancels the
-        // in-flight attempt, and that attempt's `cancelled` terminal must not
-        // close the turn. `0` means the turn ended before the handoff — the
-        // input then runs as a normal turn instead of vanishing into the queue.
-        let epoch = runtime.log.note_steer();
-        if epoch == 0 {
-            self.run_turn(runtime, &text, turn_id).await?;
-            let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(InputOutcome::new(
-                submission.input_id.clone(),
-                Disposition::Inserted,
-                submission.mode,
-                last_item_seq,
-            ));
-        }
-        if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
-            runtime.log.abandon_steer(epoch);
-            return Err(error);
-        }
-        let last_item_seq = self.last_seq(logical_id).await?;
-        Ok(InputOutcome::new(
-            submission.input_id.clone(),
-            Disposition::Inserted,
-            submission.mode,
-            last_item_seq,
-        ))
+        runtime
+            .log
+            .record_user_input(Some(&submission.input_id), &text)
+            .await?;
+        // 在最后一个可能失败的本地步骤完成后才派发，避免在已派发后回滚。
+        let outcome = Self::input_outcome(store, logical_id, submission, disposition).await?;
+        Self::dispatch_steer(runtime, submission, &text).await?;
+        Ok(outcome)
     }
 
     /// Enqueue and dispatch one input into the host's user-input queue.
     async fn dispatch_steer(
-        &self,
-        runtime: &Arc<SessionRuntime>,
+        runtime: &SessionRuntime,
         submission: &InputSubmission,
         text: &str,
     ) -> Result<(), SwarmError> {
@@ -1697,11 +1871,13 @@ impl SwarmService for AcpSwarmService {
             return Err(SwarmError::empty_input());
         }
         let fingerprint = submission.fingerprint();
-        let input_id = submission.input_id.clone();
+        let store = self.store.as_ref();
 
-        if let Some(outcome) = self
-            .existing_input(logical_id, &submission, &fingerprint)
-            .await?
+        // 幂等重放必须早于 `ensure_live`：接管中断会话会失败丢失的 turn，
+        // 让一次重复受理产生持久化副作用（`actor_runtime_test` 的
+        // `interrupted::*` 三条断言正是这个契约）。
+        if let Some(outcome) =
+            Self::existing_input(store, logical_id, &submission, &fingerprint).await?
         {
             return Ok(outcome);
         }
@@ -1716,135 +1892,115 @@ impl SwarmService for AcpSwarmService {
         } else {
             self.sessions.lock().get(logical_id.as_str()).cloned()
         };
-        let _admission = match &runtime {
+        let mut admission = match &runtime {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
         };
         if let Some(admitted) = &runtime {
-            if !self
-                .sessions
-                .lock()
-                .get(logical_id.as_str())
-                .is_some_and(|current| Arc::ptr_eq(current, admitted))
-            {
-                return Err(SwarmError::upstream_unavailable("session_not_live"));
-            }
+            self.require_current_runtime(logical_id, admitted)?;
         }
-        let running = runtime.as_ref().is_some_and(|runtime| runtime.is_running());
-        if submission.kind == InputKind::User
-            && ((running && submission.mode == InputMode::Turn)
-                || (!running
-                    && runtime
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.log.has_open_turn())))
-        {
-            if let Some(outcome) = self
-                .existing_input(logical_id, &submission, &fingerprint)
-                .await?
+        // 在 admission 内只读一次 slot；旧 turn 可以不取 admission 就清理 slot。
+        let admitted_slot = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.turn.borrow().clone());
+        if submission.kind == InputKind::User {
+            let runtime = runtime.as_ref().expect("user input attached a host");
+            if let Some(slot) = admitted_slot
+                .as_ref()
+                .filter(|_| submission.mode == InputMode::Steer)
             {
-                return Ok(outcome);
-            }
-            return Err(SwarmError::turn_in_progress());
-        }
-        let receipt = SwarmInputRow {
-            logical_id: logical_id.as_str().to_owned(),
-            input_id: input_id.clone(),
-            fingerprint: fingerprint.clone(),
-            state: InputState::Accepted,
-            created_at: peri_time::now_utc_rfc3339(),
-        };
-        match self.store.swarm_put_input(receipt).await {
-            Ok(InputPut::Inserted) => {}
-            Ok(InputPut::Existing(existing)) => {
-                if existing.fingerprint != fingerprint {
-                    return Err(SwarmError::input_conflict(&input_id));
+                drop(admission);
+                #[cfg(test)]
+                runtime.steer_waiting.notify_one();
+                // 在调用方排队，不能让 spawn 调度重排取锁顺序。
+                let guard = Arc::clone(&runtime.steer).lock_owned().await;
+                let handle = {
+                    let store = Arc::clone(&self.store);
+                    let runtime = Arc::clone(runtime);
+                    let submission = submission.clone();
+                    let logical_id = logical_id.clone();
+                    let fingerprint = fingerprint.clone();
+                    let admitted_turn = slot.request_id.clone();
+                    tokio::spawn(async move {
+                        // 丢弃 JoinHandle 不会取消任务；guard 随任务保留至派发或回滚结束。
+                        let _steer = guard;
+                        Self::handoff_steer(
+                            store.as_ref(),
+                            &runtime,
+                            &submission,
+                            &logical_id,
+                            &fingerprint,
+                            &admitted_turn,
+                        )
+                        .await
+                    })
+                };
+                if let Some(accepted) = handle.await.map_err(|_| {
+                    SwarmError::new(
+                        ErrorKind::Unavailable,
+                        ErrorCode::AgentError,
+                        "steer handoff task terminated",
+                    )
+                    .with_details(json!({ "operation": "steer_handoff" }))
+                })?? {
+                    return Ok(accepted);
                 }
-                let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(AcceptedInput::settled(InputOutcome::new(
-                    input_id,
-                    Disposition::Existing,
-                    submission.mode,
-                    last_item_seq,
-                )));
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "swarm input receipt write failed");
-                return Err(SwarmError::queue_unavailable("put_input"));
+                // NoTurn：任务已经释放 steer，回退必须重新获得普通 turn 的准入权。
+                admission = Some(runtime.admission.lock().await);
+                self.require_current_runtime(logical_id, runtime)?;
+                if runtime.is_running() || runtime.log.has_open_turn() {
+                    return Self::existing_input(store, logical_id, &submission, &fingerprint)
+                        .await?
+                        .ok_or_else(SwarmError::turn_in_progress);
+                }
+            } else if admitted_slot.is_some() || runtime.log.has_open_turn() {
+                return Self::existing_input(store, logical_id, &submission, &fingerprint)
+                    .await?
+                    .ok_or_else(SwarmError::turn_in_progress);
             }
         }
 
-        let target = runtime
+        let disposition = Self::put_input(store, logical_id, &submission, &fingerprint).await?;
+        if disposition == Disposition::Existing {
+            let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
+            return Ok(AcceptedInput::settled(outcome));
+        }
+        let pending_turn = if let Some(runtime) = runtime
             .as_ref()
-            .and_then(|runtime| runtime.turn.borrow().clone());
-        let mut turn_id = None;
-        if submission.kind == InputKind::User {
-            let runtime = runtime.as_ref().expect("user input attached a host");
+            .filter(|_| submission.kind == InputKind::User)
+        {
+            let text = submission.effective_text();
             let (_, item_id) = runtime
                 .log
-                .record_user_input(Some(&input_id), &submission.effective_text())
+                .record_user_input(Some(&submission.input_id), &text)
                 .await?;
-            turn_id = Some(turn_id_for_item(&item_id));
-        }
-        drop(_admission);
-        if submission.kind == InputKind::Control {
-            // `kind=control` is recorded only; `cancel` is the one control
-            // command S4 defines (`design §2.4`).
-            if submission
+            Some(PendingTurn {
+                logical_id: logical_id.clone(),
+                text,
+                turn_id: turn_id_for_item(&item_id),
+            })
+        } else {
+            None
+        };
+        drop(admission);
+
+        // 控制输入只记录收据；cancel 仍绑定在准入时看到的 turn。
+        if submission.kind == InputKind::Control
+            && submission
                 .effective_text()
                 .trim()
                 .eq_ignore_ascii_case("cancel")
-            {
-                if let Some(target) = target {
-                    self.cancel_turn(logical_id, Some(&target.request_id))
-                        .await?;
-                }
+        {
+            if let Some(admitted) = admitted_slot.as_ref() {
+                self.cancel_turn(logical_id, Some(&admitted.request_id))
+                    .await?;
             }
-            let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(AcceptedInput::settled(InputOutcome::new(
-                input_id,
-                Disposition::Inserted,
-                submission.mode,
-                last_item_seq,
-            )));
         }
-
-        if running {
-            let turn_id = turn_id.as_deref().unwrap_or_default();
-            let outcome = self
-                .steer(
-                    runtime.as_ref().expect("running input has a host"),
-                    &submission,
-                    logical_id,
-                    turn_id,
-                )
-                .await?;
-            return Ok(AcceptedInput::settled(outcome));
-        }
-
-        let Some(turn_id) = turn_id else {
-            // A non-user input never opens a turn; the branch above returned it.
-            let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(AcceptedInput::settled(InputOutcome::new(
-                input_id,
-                Disposition::Inserted,
-                submission.mode,
-                last_item_seq,
-            )));
-        };
-        // `202` is sent now; the execution runs out-of-band.
-        let last_item_seq = self.last_seq(logical_id).await?;
+        let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
+        // 普通 turn 仍由调用方在 202 后运行，不能在受理时等待模型。
         Ok(AcceptedInput {
-            outcome: InputOutcome::new(
-                input_id,
-                Disposition::Inserted,
-                submission.mode,
-                last_item_seq,
-            ),
-            pending_turn: Some(PendingTurn {
-                logical_id: logical_id.clone(),
-                text: submission.effective_text(),
-                turn_id,
-            }),
+            outcome,
+            pending_turn,
         })
     }
 

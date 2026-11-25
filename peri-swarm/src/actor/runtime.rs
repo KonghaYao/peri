@@ -190,7 +190,11 @@ pub struct CancelTarget {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PromptReply {
-    pub stop_reason: String,
+    /// `None` means the host answered the attempt without closing the turn
+    /// (for example a prompt injected into an idle-suspended turn, or an
+    /// attempt superseded before it attached). Such a reply is **not** a turn
+    /// terminal: the caller must wait for `peri/agent_event_done`.
+    pub stop_reason: Option<String>,
     pub pending_tasks: u32,
 }
 
@@ -650,17 +654,27 @@ impl AcpChild {
             )
             .await
             .map_err(ChildError::rpc)?;
+        // ACP answers some prompts at *attempt* granularity without a
+        // `stopReason` (injected into a suspended turn, superseded attempt).
+        // Faking `end_turn` here turns those into a turn terminal and closes a
+        // turn whose streams are still live.
         let stop_reason = response
             .get("stopReason")
             .and_then(Value::as_str)
-            .unwrap_or("end_turn")
-            .to_owned();
+            .map(str::to_owned);
         let pending_tasks = response
             .get("_meta")
             .and_then(|meta| meta.get("peri"))
             .and_then(|peri| peri.get("pendingTasks"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32;
+        tracing::debug!(
+            session_id = %self.session_id,
+            request_id,
+            stop_reason = ?stop_reason,
+            pending_tasks,
+            "session/prompt replied"
+        );
         Ok(PromptReply {
             stop_reason,
             pending_tasks,
@@ -864,6 +878,22 @@ fn build_config_source(config: &ChildConfig) -> Result<Arc<ConfigSource>, ChildE
     }
 }
 
+/// Maximum notifications handed to the item log as one batch.
+///
+/// One transaction for a burst turns per-chunk store round trips into
+/// per-batch ones; the cap keeps a single transaction short enough that a
+/// reconnecting viewer is not held behind a multi-second write.
+const READ_BATCH: usize = 128;
+
+/// Grace window before a burst is closed.
+///
+/// Host stream chunks arrive roughly one per model token interval. Waiting one
+/// short interval after an otherwise isolated frame lets the next chunk join the
+/// same batch, so live streaming keeps up with the store instead of falling one
+/// round trip behind per chunk. A queue that already holds frames is never
+/// delayed.
+const READ_COALESCE: Duration = Duration::from_millis(60);
+
 /// Drain host notifications into the item log.
 ///
 /// Server→client requests are refused explicitly: S4 advertises no filesystem,
@@ -878,74 +908,89 @@ async fn read_loop(
     recovered_root: oneshot::Receiver<bool>,
 ) {
     let mut recovered_root = Some(recovered_root);
-    while let Some(message) = client.recv().await {
-        match message {
-            IncomingMessage::Notification { method, params } => {
-                if method == super::projection::AGENT_EVENT_DONE {
-                    if params.get("sessionId").and_then(Value::as_str) != Some(root) {
+    while let Some(messages) = client.recv_batch(READ_BATCH, READ_COALESCE).await {
+        // Notifications are staged per burst; a host request or the root's
+        // terminal is a barrier that must see everything before it (and be seen
+        // after it) in host order.
+        let mut pending: Vec<(String, Value)> = Vec::new();
+        for message in messages {
+            match message {
+                IncomingMessage::Notification { method, params } => {
+                    if method == super::projection::AGENT_EVENT_DONE {
+                        // A subagent's done event is its own lifecycle fact; the
+                        // turn terminal is the root's.
+                        if params.get("sessionId").and_then(Value::as_str) != Some(root) {
+                            continue;
+                        }
+                        pending.push((method, params));
+                        log.ingest_batch(std::mem::take(&mut pending)).await;
+                        if let Some(expected) = recovered_root.take() {
+                            if expected.await.unwrap_or(false) {
+                                log.finish_recovered_root().await;
+                            }
+                            root_done.send_replace(true);
+                        }
                         continue;
                     }
-                    log.ingest(&method, &params).await;
-                    if let Some(expected) = recovered_root.take() {
-                        if expected.await.unwrap_or(false) {
-                            log.finish_recovered_root().await;
-                        }
-                        root_done.send_replace(true);
+                    pending.push((method, params));
+                }
+                IncomingMessage::Request { id, method, params } => {
+                    if !pending.is_empty() {
+                        log.ingest_batch(std::mem::take(&mut pending)).await;
                     }
-                } else {
-                    log.ingest(&method, &params).await;
-                }
-            }
-            IncomingMessage::Request { id, method, params } => {
-                if method == "session/request_permission" {
-                    let request_id = serde_json::to_value(&id).unwrap_or(Value::Null);
-                    match log.begin_permission(&request_id, &params).await {
-                        Ok(PermissionStart::Pending) => {
-                            // Answered later through `AcpChild::respond_permission`
-                            // with this same JSON-RPC id; the reader never blocks.
-                        }
-                        Ok(PermissionStart::Refuse) => {
-                            tracing::warn!(
-                                "swarm approval request has no open turn; refusing the call"
-                            );
-                            let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
-                            if let Err(error) = client.send_response(id, refusal).await {
-                                tracing::warn!(%error, "swarm approval refusal delivery failed");
+                    if method == "session/request_permission" {
+                        let request_id = serde_json::to_value(&id).unwrap_or(Value::Null);
+                        match log.begin_permission(&request_id, &params).await {
+                            Ok(PermissionStart::Pending) => {
+                                // Answered later through `AcpChild::respond_permission`
+                                // with this same JSON-RPC id; the reader never blocks.
+                            }
+                            Ok(PermissionStart::Refuse) => {
+                                tracing::warn!(
+                                    "swarm approval request has no open turn; refusing the call"
+                                );
+                                let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
+                                if let Err(error) = client.send_response(id, refusal).await {
+                                    tracing::warn!(%error, "swarm approval refusal delivery failed");
+                                }
+                            }
+                            Ok(PermissionStart::AutoApprove) => {
+                                if let Err(error) = client
+                                    .send_response(id, Ok(ApprovalDecision::Approve.acp_response()))
+                                    .await
+                                {
+                                    tracing::warn!(%error, "swarm auto-approval delivery failed");
+                                }
+                            }
+                            Err(error) => {
+                                // The approval fact could not be persisted. Refuse the
+                                // call explicitly instead of leaving the host waiting;
+                                // this is a gateway failure, not a user rejection.
+                                tracing::warn!(
+                                    %error,
+                                    "swarm approval could not be recorded; refusing the call"
+                                );
+                                let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
+                                if let Err(error) = client.send_response(id, refusal).await {
+                                    tracing::warn!(%error, "swarm approval refusal delivery failed");
+                                }
                             }
                         }
-                        Ok(PermissionStart::AutoApprove) => {
-                            if let Err(error) = client
-                                .send_response(id, Ok(ApprovalDecision::Approve.acp_response()))
-                                .await
-                            {
-                                tracing::warn!(%error, "swarm auto-approval delivery failed");
-                            }
-                        }
-                        Err(error) => {
-                            // The approval fact could not be persisted. Refuse the
-                            // call explicitly instead of leaving the host waiting;
-                            // this is a gateway failure, not a user rejection.
-                            tracing::warn!(
-                                %error,
-                                "swarm approval could not be recorded; refusing the call"
-                            );
-                            let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
-                            if let Err(error) = client.send_response(id, refusal).await {
-                                tracing::warn!(%error, "swarm approval refusal delivery failed");
-                            }
-                        }
+                        continue;
                     }
-                    continue;
+                    let refusal = Err(AcpError::new(
+                        -32601,
+                        format!("{method} is not supported by the Swarm gateway"),
+                    ));
+                    if let Err(error) = client.send_response(id, refusal).await {
+                        tracing::warn!(%error, "swarm ACP refusal delivery failed");
+                    }
                 }
-                let refusal = Err(AcpError::new(
-                    -32601,
-                    format!("{method} is not supported by the Swarm gateway"),
-                ));
-                if let Err(error) = client.send_response(id, refusal).await {
-                    tracing::warn!(%error, "swarm ACP refusal delivery failed");
-                }
+                IncomingMessage::Response { .. } => {}
             }
-            IncomingMessage::Response { .. } => {}
+        }
+        if !pending.is_empty() {
+            log.ingest_batch(pending).await;
         }
     }
 }
