@@ -67,7 +67,8 @@ jobs:
         needs: changes
         if: needs.changes.outputs.docs_only != 'true'
         runs-on: ${{ matrix.runner }}
-        timeout-minutes: 35
+        # 冷缓存需要余量：实测 Windows 冷编译+测试约 40 分钟，macOS 约 34 分钟；热缓存远低于此值。
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
@@ -220,7 +221,7 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: ${{ matrix.cache_key }}-peri-${{ env.PERI_CACHE_GEN }}
-                  save-if: true  # 播种运行：验证后恢复 main-only
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             # 固定 nextest 版本：三平台均由 GitHub Releases 预编译安装。
             - name: Install cargo-nextest
@@ -410,7 +411,7 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: e2e-replay-linux-${{ env.PERI_CACHE_GEN }}
-                  save-if: true  # 播种运行：验证后恢复 main-only
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             - name: Build peri binary
               run: cargo build --locked -p peri-tui --bin peri
