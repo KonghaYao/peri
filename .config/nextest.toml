@@ -10,9 +10,9 @@
 # .github/workflows/ci.yml 对应步骤的 `-E` 里，便于就地 review。
 # scripts/ci-test-inventory.sh --check 会核对两侧一致。
 #
-# 版本下限：default-filter 需要 0.9.84，`--no-tests` 默认 fail 需要 0.9.85。
-# CI 固定安装 0.9.148，并且每个步骤显式传 `--no-tests=fail`，不依赖默认值。
-nextest-version = "0.9.85"
+# 版本下限：default-filter 需要 0.9.84，`--no-tests` 默认 fail 需要 0.9.85，
+# `[profile.ci]` 的继承与 global-timeout 需要 0.9.148。CI 与本地均用 0.9.148。
+nextest-version = "0.9.148"
 
 [profile.default]
 # 原有 E2E 跳过条件按 package + test 精确迁移，不用裸 `test(...)`：裸匹配会连带
@@ -54,6 +54,13 @@ default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl
 #     不要放宽断言。
 [test-groups]
 serial-process-state = { max-threads = 1 }
+# 真实子进程 / 监听器 / 独立 state 文件的用例：主调用把它们和新并入的 ACP、TUI、
+# middlewares 放进同一个进程池后，这些用例会同时拉起子进程和本地监听器。它们各自
+# 用 127.0.0.1:0 与临时 HOME 隔离，不共享固定端口，但并发回收进程树（尤其 Windows）
+# 与竞争文件句柄会让失败原因不可区分；串起来后失败只指向用例本身。
+# 规模：peri-process 的 4 个 PTY 用例、peri-browser-gateway 全部目标、
+# peri-swarm 里绑定真实监听器的 5 个集成目标。其余 peri-swarm 单元测试仍在池内并行。
+process-isolation = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(=peri-middlewares) & kind(lib)'
@@ -62,3 +69,38 @@ test-group = 'serial-process-state'
 [[profile.default.overrides]]
 filter = 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact) | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace)'
 test-group = 'serial-process-state'
+
+[[profile.default.overrides]]
+filter = '(package(=peri-process) | package(=peri-browser-gateway) | (package(=peri-swarm) & (binary(=actor_runtime_test) | binary(=loom_store_test) | binary(=mcp_injection_test) | binary(=openai_hosted_test) | binary(=rivet_actor_test))))'
+test-group = 'process-isolation'
+
+# CI 专用 profile：继承 [profile.default] 的 default-filter、overrides 与 test-groups，
+# 只追加挂起防护。单个测试超过 period=60s 标记 slow，再跑满 terminate-after=2 个
+# period（约 120s）后被终止，随后留 grace-period=10s 收集输出并关闭进程树
+# （Windows 不支持 grace，按 120s 计）。整轮 50m 封顶，job 的 timeout-minutes: 60
+# 仍是最后兜底。retries=0 避免重试掩盖 flake；fail-fast=false 让一次挂起不遮挡其余
+# 用例的失败，评审能看到完整失败面。
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2, grace-period = "10s" }
+retries = 0
+fail-fast = false
+global-timeout = "50m"
+
+# 已知长测试：单用例在 CI（Windows 冷缓存、单核调度）会稳定超过 120s，放宽到
+# 2×120s。按测试名定位（`#[path]` 引入的模块名不等于文件名），避免连带放宽同包
+# 其他用例；新增 override 前先确认过滤表达式实际命中的测试。
+[[profile.ci.overrides]]
+filter = 'package(=peri-tui) & test(/^kit::steer_consumer::tests::/)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'package(=peri-agent) & test(/^session::subagent::child_runner::tests::/)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'package(=peri-agent) & test(/^session::subagent::tests::parked_inbox::/)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'package(=peri-acp) & test(/^host::requests::tests::activation_tests::budget_activation_tests::/)'
+slow-timeout = { period = "120s", terminate-after = 2 }
