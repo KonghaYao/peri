@@ -467,10 +467,11 @@ impl SseClient {
                 let start = self.buffer[..found]
                     .rfind('\n')
                     .map_or(0, |index| index + 1);
-                let end = self.buffer[found..]
-                    .find('\n')
-                    .map_or(self.buffer.len(), |index| found + index);
-                return Ok(self.buffer[start..end].to_owned());
+                // 只返回收全整行的匹配：TCP 分片可能在命中位置后立即结束，
+                // 此时 `viewportWidth` 的值还在下一段字节里。
+                if let Some(index) = self.buffer[found..].find('\n') {
+                    return Ok(self.buffer[start..found + index].to_owned());
+                }
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             anyhow::ensure!(!remaining.is_zero(), "timed out waiting for {needle:?}");

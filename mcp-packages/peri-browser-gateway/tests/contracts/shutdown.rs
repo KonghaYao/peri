@@ -121,6 +121,31 @@ async fn sse_resume_replays_an_already_dispatched_reply_from_the_completed_cache
         .collect::<Result<_, _>>()?;
     assert_eq!(replies.len(), 1, "迟到恢复必须恰好重放一次: {replayed}");
     assert_eq!(replies[0]["id"], request_id);
+    assert!(
+        replies[0].get("error").is_none(),
+        "重放必须是成功回复，不能是 JSON-RPC error: {}",
+        replies[0]
+    );
+    assert!(
+        replies[0].get("result").is_some(),
+        "重放必须带 result: {}",
+        replies[0]
+    );
+    // 重放的不是「同 id 的任意回复」，而是与原始 reply 完全一致的结果。
+    let original: Vec<Value> = delivered
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter(|data| !data.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let original_reply = original
+        .iter()
+        .find(|message| message["id"] == request_id)
+        .expect("POST SSE 应包含原始 reply");
+    assert_eq!(
+        replies[0]["result"], original_reply["result"],
+        "重放结果必须与原始结果一致"
+    );
     assert_ne!(replies[0]["result"]["isError"], true);
     assert_eq!(
         engine
