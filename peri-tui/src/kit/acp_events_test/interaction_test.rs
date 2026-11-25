@@ -150,13 +150,17 @@ fn test_ask_user_injects_pending_ask_user_block() {
                     QuestionOption {
                         label: "Fast".into(),
                         description: String::new(),
+                        value: None,
                     },
                     QuestionOption {
                         label: "Careful".into(),
                         description: String::new(),
+                        value: None,
                     },
                 ],
                 multi_select: false,
+                field_type: None,
+                required: false,
             },
             Question {
                 id: "q2".into(),
@@ -164,8 +168,11 @@ fn test_ask_user_injects_pending_ask_user_block() {
                 question: "Second question".into(),
                 options: vec![],
                 multi_select: false,
+                field_type: None,
+                required: false,
             },
         ],
+        elicitation: None,
     };
     super::dispatch_and_notify(&mut state, &ask_user_event(au));
 
@@ -190,7 +197,10 @@ fn test_ask_user_handler_publishes_same_composite_and_question_ids() {
             question: "Q".into(),
             options: vec![],
             multi_select: false,
+            field_type: None,
+            required: false,
         }],
+        elicitation: None,
     };
     super::dispatch_and_notify(&mut state, &ask_user_event(payload));
     let atom_id = crate::kit::atoms::ASK_USER_PENDING

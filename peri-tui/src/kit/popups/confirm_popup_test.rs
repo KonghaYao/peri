@@ -100,7 +100,10 @@ fn ask_user_pending(owner: &InteractionOwner, request_id: &str) {
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: owner.clone(),
         request_id_json: request_id.into(),
-        payload: peri_acp_types::event_data::AskUser { questions: vec![] },
+        payload: peri_acp_types::event_data::AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     });
     *OPEN_PANELS.state().write() = vec![PanelKind::AskUser];
     *ACTIVE_PANEL.state().write() = Some(PanelKind::AskUser);
@@ -333,7 +336,10 @@ fn test_confirm_reject_a_preserves_active_b_panel() {
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
         request_id_json: "B".into(),
-        payload: peri_acp_types::event_data::AskUser { questions: vec![] },
+        payload: peri_acp_types::event_data::AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     });
     *OPEN_PANELS.state().write() = vec![PanelKind::AskUser];
     *ACTIVE_PANEL.state().write() = Some(PanelKind::AskUser);

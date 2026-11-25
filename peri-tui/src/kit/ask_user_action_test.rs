@@ -61,6 +61,7 @@ async fn submit_once(
         request_id_str: request_id_json,
         answers,
         first_question_id: first_question_id.map(str::to_string),
+        open_url: None,
     })
     .expect("submit fixture: response channel must accept the action");
     let response = request
@@ -176,6 +177,7 @@ fn test_ask_user_response_action_variants_carry_owner() {
         request_id_str: "\"abc\"".into(),
         answers: json!({"q1":"yes"}),
         first_question_id: Some("q1".into()),
+        open_url: None,
     };
     let AskUserResponseAction::Submit {
         owner: actual,

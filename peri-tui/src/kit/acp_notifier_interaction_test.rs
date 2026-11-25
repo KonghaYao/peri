@@ -172,7 +172,10 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
     *crate::kit::atoms::ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
         request_id_json: "\"sentinel-ask\"".into(),
-        payload: AskUser { questions: vec![] },
+        payload: AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     });
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
     notif_tx
@@ -220,4 +223,162 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
     shutdown.cancel();
     *crate::kit::atoms::HITL_PENDING.state().write() = old_hitl;
     *crate::kit::atoms::ASK_USER_PENDING.state().write() = old_ask;
+}
+
+/// 外部 MCP form：`_meta` marker 触发 typed field，不再落回内置 AskUser 解析。
+#[tokio::test]
+async fn test_mcp_form_elicitation_keeps_types_and_origin() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    notif_tx
+        .send(AcpNotification::Elicitation {
+            owner: Default::default(),
+            request_id_json: "\"mcp-1\"".into(),
+            params: json!({
+                "mode": "form",
+                "sessionId": "s1",
+                "message": "Approve this expense?",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "approve": {"type": "boolean", "title": "Approve"},
+                        "note": {"type": "string", "title": "Note"},
+                        "amount": {"type": "integer", "title": "Amount"},
+                        "colors": {
+                            "type": "array",
+                            "title": "Colors",
+                            "items": {"enum": ["red", "blue"]}
+                        }
+                    },
+                    "required": ["approve"]
+                },
+                "_meta": {
+                    "io.peri/mcpElicitation": {"server": "expense", "tool": "submit"}
+                }
+            }),
+        })
+        .await
+        .expect("send mcp elicitation");
+
+    let event = bridge_rx.recv().await.expect("bridge 应收到 AskUser");
+    let AcpEventData::AskUser(pending) = event.event else {
+        panic!("expected AskUser")
+    };
+    assert!(matches!(
+        pending.payload.elicitation,
+        Some(peri_acp_types::event_data::ElicitationPresentation::Form {
+            ref server,
+            ref tool
+        }) if server == "expense" && tool == "submit"
+    ));
+    let by_id = |id: &str| {
+        pending
+            .payload
+            .questions
+            .iter()
+            .find(|q| q.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    };
+    let approve = by_id("approve");
+    assert_eq!(approve.field_type.as_deref(), Some("boolean"));
+    assert!(approve.required);
+    assert_eq!(approve.options.len(), 2);
+    assert_eq!(approve.options[0].value, Some(json!(true)));
+    assert!(!approve.allows_custom_text());
+
+    let note = by_id("note");
+    assert_eq!(note.field_type.as_deref(), Some("string"));
+    assert!(!note.required);
+    assert!(note.allows_custom_text());
+
+    let amount = by_id("amount");
+    assert_eq!(amount.field_type.as_deref(), Some("integer"));
+    assert!(amount.options.is_empty());
+
+    let colors = by_id("colors");
+    assert_eq!(colors.field_type.as_deref(), Some("array"));
+    assert!(colors.multi_select);
+    assert_eq!(colors.options[1].value, Some(json!("blue")));
+
+    shutdown.cancel();
+}
+
+/// 外部 MCP URL：单确认项 + 完整 URL/域名，TUI 不自动打开。
+#[tokio::test]
+async fn test_mcp_url_elicitation_carries_server_and_url() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    notif_tx
+        .send(AcpNotification::Elicitation {
+            owner: Default::default(),
+            request_id_json: "\"mcp-2\"".into(),
+            params: json!({
+                "mode": "url",
+                "sessionId": "s1",
+                "message": "Authorize in browser",
+                "url": "https://example.com/connect?token=secret",
+                "elicitationId": "e-1",
+                "_meta": {
+                    "io.peri/mcpElicitation": {"server": "oauth", "tool": "connect"}
+                }
+            }),
+        })
+        .await
+        .expect("send mcp url elicitation");
+    let event = bridge_rx.recv().await.expect("bridge 应收到 AskUser");
+    let AcpEventData::AskUser(pending) = event.event else {
+        panic!("expected AskUser")
+    };
+    match pending.payload.elicitation {
+        Some(peri_acp_types::event_data::ElicitationPresentation::Url {
+            server,
+            tool,
+            url,
+            elicitation_id,
+            ..
+        }) => {
+            assert_eq!(server, "oauth");
+            assert_eq!(tool, "connect");
+            assert_eq!(url, "https://example.com/connect?token=secret");
+            assert_eq!(elicitation_id, "e-1");
+        }
+        other => panic!("expected URL presentation, got {other:?}"),
+    }
+    assert_eq!(pending.payload.questions.len(), 1);
+    assert_eq!(
+        pending.payload.questions[0].field_type.as_deref(),
+        Some("url")
+    );
+    shutdown.cancel();
+}
+
+/// 无 marker 的内置 AskUserQuestion 仍走原路径（不误标 elicitation）。
+#[tokio::test]
+async fn test_builtin_ask_user_without_marker_stays_legacy() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    notif_tx
+        .send(AcpNotification::Elicitation {
+            owner: Default::default(),
+            request_id_json: "\"ask-1\"".into(),
+            params: json!({
+                "mode": "form",
+                "sessionId": "s1",
+                "message": "Pick",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "q": {"type": "string", "oneOf": [{"const": "a", "title": "A"}]}
+                    }
+                }
+            }),
+        })
+        .await
+        .expect("send legacy elicitation");
+    let event = bridge_rx.recv().await.expect("bridge 应收到 AskUser");
+    let AcpEventData::AskUser(pending) = event.event else {
+        panic!("expected AskUser")
+    };
+    assert!(pending.payload.elicitation.is_none());
+    assert_eq!(pending.payload.questions[0].field_type, None);
+    assert_eq!(pending.payload.questions[0].options[0].label, "a");
+    assert_eq!(pending.payload.questions[0].options[0].value, None);
+    shutdown.cancel();
 }

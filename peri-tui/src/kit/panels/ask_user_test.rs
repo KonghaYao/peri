@@ -5,6 +5,7 @@ use super::FormState;
 use super::PendingInteraction;
 use ratatui_kit::prelude::*;
 
+use ratatui_kit::crossterm::event::KeyCode;
 use serde_json::json;
 
 #[test]
@@ -29,12 +30,16 @@ fn test_ask_user_same_question_ids_new_owner_resets_answers() {
         request_id_json: "\"same-wire-id\"".into(),
         payload: AskUser {
             questions: questions.clone(),
+            elicitation: None,
         },
     };
     let b = PendingInteraction {
         owner: owner_b,
         request_id_json: "\"same-wire-id\"".into(),
-        payload: AskUser { questions },
+        payload: AskUser {
+            questions,
+            elicitation: None,
+        },
     };
 
     let mut form = FormState::default();
@@ -94,15 +99,21 @@ fn make_question(id: &str, multi_select: bool, labels: &[&str]) -> Question {
             .map(|l| QuestionOption {
                 label: l.to_string(),
                 description: String::new(),
+                value: None,
             })
             .collect(),
         multi_select,
+        field_type: None,
+        required: false,
     }
 }
 
 #[must_use]
 fn make_ask_user(questions: Vec<Question>) -> AskUser {
-    AskUser { questions }
+    AskUser {
+        questions,
+        elicitation: None,
+    }
 }
 
 // ─── build_answers_map ──────────────────────────────────────────
@@ -449,3 +460,112 @@ fn form_empty_questions_and_unrelated_keys_have_explicit_decisions() {
 use peri_acp_types::event_data::AskUser;
 
 use peri_acp_types::event_data::Question;
+
+fn mcp_question(
+    id: &str,
+    field_type: &str,
+    required: bool,
+    options: &[(&str, serde_json::Value)],
+) -> Question {
+    use peri_acp_types::event_data::QuestionOption;
+    Question {
+        id: id.to_string(),
+        header: id.to_string(),
+        question: String::new(),
+        options: options
+            .iter()
+            .map(|(label, value)| QuestionOption {
+                label: (*label).to_string(),
+                description: String::new(),
+                value: Some(value.clone()),
+            })
+            .collect(),
+        multi_select: field_type == "array",
+        field_type: Some(field_type.to_string()),
+        required,
+    }
+}
+
+#[test]
+fn mcp_form_values_keep_schema_types_and_omit_optional_blanks() {
+    let payload = AskUser {
+        questions: vec![
+            mcp_question(
+                "approve",
+                "boolean",
+                true,
+                &[("Yes", json!(true)), ("No", json!(false))],
+            ),
+            mcp_question("note", "string", false, &[]),
+            mcp_question("amount", "integer", false, &[]),
+            mcp_question(
+                "colors",
+                "array",
+                false,
+                &[("red", json!("red")), ("blue", json!("blue"))],
+            ),
+            mcp_question("url", "url", false, &[]),
+        ],
+        elicitation: Some(peri_acp_types::event_data::ElicitationPresentation::Form {
+            server: "srv".into(),
+            tool: "tool".into(),
+        }),
+    };
+    let answers = vec![vec![1], vec![], vec![], vec![0, 1], vec![]];
+    let custom = vec![None, None, Some("42".to_string()), None, None];
+    let map = super::build_answers_map(Some(&payload), &answers, &custom);
+    assert_eq!(
+        map,
+        json!({
+            "approve": false,
+            "amount": 42,
+            "colors": ["red", "blue"]
+        }),
+        "optional empty fields must be omitted; boolean/integer/array keep their JSON types"
+    );
+}
+
+#[test]
+fn mcp_required_text_must_be_non_empty_before_submit() {
+    let payload = AskUser {
+        questions: vec![mcp_question("note", "string", true, &[])],
+        elicitation: Some(peri_acp_types::event_data::ElicitationPresentation::Form {
+            server: "srv".into(),
+            tool: "tool".into(),
+        }),
+    };
+    let mut form = form_for(&payload);
+    assert_ne!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Submit(json!({}))
+    );
+    form.begin_custom_input(0);
+    form.custom_answers[0] = Some("ready".to_string());
+    form.is_typing = false;
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Enter),
+        FormOutcome::Submit(json!({ "note": "ready" }))
+    );
+}
+
+#[test]
+fn mcp_boolean_field_does_not_offer_custom_text() {
+    let payload = AskUser {
+        questions: vec![mcp_question(
+            "approve",
+            "boolean",
+            true,
+            &[("Yes", json!(true)), ("No", json!(false))],
+        )],
+        elicitation: None,
+    };
+    let q = &payload.questions[0];
+    assert!(!q.allows_custom_text());
+    let mut form = form_for(&payload);
+    form.focused_option = q.options.len();
+    assert_eq!(
+        press(&mut form, &payload, KeyCode::Char(' ')),
+        FormOutcome::Consumed
+    );
+    assert!(!form.is_typing);
+}

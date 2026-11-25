@@ -158,31 +158,33 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
 
-                    // 自定义输入区
-                    let custom_rows = {
-                        let has_custom = form
-                            .read()
-                            .custom_answers
-                            .get(q_idx)
-                            .map(|ca| ca.is_some())
-                            .unwrap_or(false);
-                        if has_custom {
-                            let existing = form
+                    // 自定义输入区（MCP 布尔/枚举字段只允许选预设值）
+                    if q.allows_custom_text() {
+                        let custom_rows = {
+                            let has_custom = form
                                 .read()
                                 .custom_answers
                                 .get(q_idx)
-                                .cloned()
-                                .flatten()
-                                .unwrap_or_default();
-                            wrap_text(&existing, wrap_width.saturating_sub(4)).len() as u16
-                        } else {
-                            1
+                                .map(|ca| ca.is_some())
+                                .unwrap_or(false);
+                            if has_custom {
+                                let existing = form
+                                    .read()
+                                    .custom_answers
+                                    .get(q_idx)
+                                    .cloned()
+                                    .flatten()
+                                    .unwrap_or_default();
+                                wrap_text(&existing, wrap_width.saturating_sub(4)).len() as u16
+                            } else {
+                                1
+                            }
+                        };
+                        if visual >= cur && visual < cur + custom_rows {
+                            // Space 在自定义选项的语义：进入 typing
+                            form.write().begin_custom_input(q_idx);
+                            return EventResult::Consumed;
                         }
-                    };
-                    if visual >= cur && visual < cur + custom_rows {
-                        // Space 在自定义选项的语义：进入 typing
-                        form.write().begin_custom_input(q_idx);
-                        return EventResult::Consumed;
                     }
                 }
                 // 区域内点击（未命中行）也消费，防止穿透
@@ -213,6 +215,13 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if let Some(snapshot) = interaction_for_closure.as_ref()
                         && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                     {
+                        let open_url = match snapshot.payload.elicitation.as_ref() {
+                            Some(peri_acp_types::event_data::ElicitationPresentation::Url {
+                                url,
+                                ..
+                            }) => Some(url.clone()),
+                            _ => None,
+                        };
                         let _ = tx.send(AskUserResponseAction::Submit {
                             owner: snapshot.owner.clone(),
                             request_id_str: snapshot.request_id_json.clone(),
@@ -222,6 +231,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .questions
                                 .first()
                                 .map(|q| q.id.clone()),
+                            open_url,
                         });
                         panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
                     }
@@ -274,6 +284,54 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let focused_idx = (form_read.focused).min(au.questions.len() - 1);
             let answers_read = &form_read.answers;
             let typing = form_read.is_typing;
+
+            // 外部 MCP 来源/URL 确认：先展示 server 与目标域名，再展示字段。
+            if let Some(elicitation) = &au.elicitation {
+                match elicitation {
+                    peri_acp_types::event_data::ElicitationPresentation::Form { server, tool } => {
+                        lines.push(Line::from(""));
+                        lines.push(
+                            Line::from(format!("  MCP {} · {}", server, tool))
+                                .fg(semantic.text.dim),
+                        );
+                    }
+                    peri_acp_types::event_data::ElicitationPresentation::Url {
+                        server,
+                        tool,
+                        message,
+                        url,
+                        ..
+                    } => {
+                        lines.push(Line::from(""));
+                        lines.push(
+                            Line::from(format!("  MCP {} · {}", server, tool))
+                                .fg(semantic.text.dim),
+                        );
+                        lines.push(
+                            Line::from(format!("  {}", i18n::tr("panel-ask-user-url-title")))
+                                .fg(semantic.status.warning)
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        if !message.is_empty() {
+                            for wrapped in wrap_text(&format!("  {message}"), wrap_width) {
+                                lines.push(Line::from(wrapped).fg(semantic.text.primary));
+                            }
+                        }
+                        lines.push(
+                            Line::from(format!(
+                                "  {}: {}",
+                                i18n::tr("panel-ask-user-url-host"),
+                                url_host(url)
+                            ))
+                            .fg(popup_tokens.action_primary)
+                            .add_modifier(Modifier::BOLD),
+                        );
+                        lines.push(
+                            Line::from(format!("  {}", displayable_url(url))).fg(semantic.text.dim),
+                        );
+                    }
+                }
+            }
 
             // Tab 行：反色高亮当前 tab（accent 底色 + surface 字色），禁用 [ ]
             lines.push(Line::from(""));
@@ -377,83 +435,86 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 }
 
-                // ── 自定义输入入口 ──
-                let custom_option_index = q.options.len();
-                let is_custom_focused = !typing && fopt == custom_option_index;
+                // ── 自定义输入入口（MCP 布尔/枚举字段不提供自由文本） ──
+                if q.allows_custom_text() {
+                    let custom_option_index = q.options.len();
+                    let is_custom_focused = !typing && fopt == custom_option_index;
 
-                if typing {
-                    // Typing 模式：使用 TextArea 渲染
-                    let st_read = &form_read.typing_state;
-                    let wrap = peri_tui_components::textarea::wrap_text(
-                        &st_read.text,
-                        st_read.cursor,
-                        wrap_width,
-                    );
-                    let total_rows = wrap.total_visual_rows.max(1);
-                    let viewport = total_rows.min(TYPING_VIEWPORT_ROWS);
+                    if typing {
+                        // Typing 模式：使用 TextArea 渲染
+                        let st_read = &form_read.typing_state;
+                        let wrap = peri_tui_components::textarea::wrap_text(
+                            &st_read.text,
+                            st_read.cursor,
+                            wrap_width,
+                        );
+                        let total_rows = wrap.total_visual_rows.max(1);
+                        let viewport = total_rows.min(TYPING_VIEWPORT_ROWS);
 
-                    let cursor_style = Style::default()
-                        .fg(Color::Reset)
-                        .bg(popup_tokens.action_primary)
-                        .add_modifier(Modifier::BOLD);
-                    let placeholder_style = Style::default().fg(semantic.text.dim);
-                    let default_style = Style::default().bg(Color::Reset);
+                        let cursor_style = Style::default()
+                            .fg(Color::Reset)
+                            .bg(popup_tokens.action_primary)
+                            .add_modifier(Modifier::BOLD);
+                        let placeholder_style = Style::default().fg(semantic.text.dim);
+                        let default_style = Style::default().bg(Color::Reset);
 
-                    let typed_lines = peri_tui_components::textarea::render_multiline_with_cursor(
-                        TextAreaRenderOptions {
-                            text: &st_read.text,
-                            cursor: st_read.cursor,
-                            selection_range: None,
-                            placeholder: Some(&i18n::tr("ask-user-placeholder")),
-                            styles: TextAreaStyles {
-                                cursor: cursor_style,
-                                selection: cursor_style,
-                                placeholder: placeholder_style,
-                                base: default_style,
-                            },
-                            max_width: wrap_width,
-                            viewport_height: viewport,
-                            show_cursor: true,
-                        },
-                    );
-                    for line in typed_lines {
-                        // 保留 textarea 返回的 Span 级样式（含光标高亮），仅前置缩进
-                        let indent = ratatui::text::Span::from("    ");
-                        let mut spans = vec![indent];
-                        spans.extend(line.spans.iter().cloned());
-                        lines.push(Line::from(spans));
-                    }
-                } else if has_custom_answer_current {
-                    // 已有自定义答案：显示为选中状态
-                    let existing = form_read
-                        .custom_answers
-                        .get(focused_idx)
-                        .cloned()
-                        .flatten()
-                        .unwrap_or_default();
-                    let mark = if q.multi_select { "☑" } else { "●" };
-                    let custom_style = Style::new().fg(popup_tokens.action_primary).bold();
-                    for wrapped in wrap_text(&existing, wrap_width.saturating_sub(4)) {
+                        let typed_lines =
+                            peri_tui_components::textarea::render_multiline_with_cursor(
+                                TextAreaRenderOptions {
+                                    text: &st_read.text,
+                                    cursor: st_read.cursor,
+                                    selection_range: None,
+                                    placeholder: Some(&i18n::tr("ask-user-placeholder")),
+                                    styles: TextAreaStyles {
+                                        cursor: cursor_style,
+                                        selection: cursor_style,
+                                        placeholder: placeholder_style,
+                                        base: default_style,
+                                    },
+                                    max_width: wrap_width,
+                                    viewport_height: viewport,
+                                    show_cursor: true,
+                                },
+                            );
+                        for line in typed_lines {
+                            // 保留 textarea 返回的 Span 级样式（含光标高亮），仅前置缩进
+                            let indent = ratatui::text::Span::from("    ");
+                            let mut spans = vec![indent];
+                            spans.extend(line.spans.iter().cloned());
+                            lines.push(Line::from(spans));
+                        }
+                    } else if has_custom_answer_current {
+                        // 已有自定义答案：显示为选中状态
+                        let existing = form_read
+                            .custom_answers
+                            .get(focused_idx)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or_default();
+                        let mark = if q.multi_select { "☑" } else { "●" };
+                        let custom_style = Style::new().fg(popup_tokens.action_primary).bold();
+                        for wrapped in wrap_text(&existing, wrap_width.saturating_sub(4)) {
+                            lines.push(
+                                Line::from(format!("    {} {}", mark, wrapped)).style(custom_style),
+                            );
+                        }
+                    } else {
+                        // 未输入：显示占位提示
+                        let custom_style = if is_custom_focused {
+                            Style::new()
+                                .fg(popup_tokens.action_primary)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::new().fg(semantic.text.dim)
+                        };
                         lines.push(
-                            Line::from(format!("    {} {}", mark, wrapped)).style(custom_style),
+                            Line::from(format!("    {}", i18n::tr("ask-user-placeholder")))
+                                .style(custom_style),
                         );
                     }
-                } else {
-                    // 未输入：显示占位提示
-                    let custom_style = if is_custom_focused {
-                        Style::new()
-                            .fg(popup_tokens.action_primary)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::new().fg(semantic.text.dim)
-                    };
-                    lines.push(
-                        Line::from(format!("    {}", i18n::tr("ask-user-placeholder")))
-                            .style(custom_style),
-                    );
                 }
 
-                if q.options.is_empty() {
+                if q.options.is_empty() && q.allows_custom_text() {
                     lines.push(
                         Line::from(i18n::tr("panel-ask-user-no-options")).fg(semantic.text.dim),
                     );
@@ -617,3 +678,18 @@ use crate::kit::atoms::ASK_USER_PENDING;
 use crate::kit::atoms::ASK_USER_RESPONSE_TX;
 
 use crate::kit::atoms::LANG_VERSION;
+
+/// URL 的目标主机（用于用户确认域名；不解析 query）。
+fn url_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme)
+        .to_string()
+}
+
+/// 展示时不带 query/fragment：server 可能把一次性 token 放进 query，避免泄漏。
+fn displayable_url(url: &str) -> String {
+    url.split(['?', '#']).next().unwrap_or(url).to_string()
+}

@@ -88,7 +88,10 @@ fn test_close_popup_clears_payload_atoms() {
                 question: "q".to_string(),
                 options: vec![],
                 multi_select: false,
+                field_type: None,
+                required: false,
             }],
+            elicitation: None,
         },
     });
     *atoms::REWIND_PREVIEW.state().write() = Some(RewindPreview {
