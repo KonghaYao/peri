@@ -172,36 +172,7 @@ jobs:
 
             - name: Materialize patched crates & install Cargo patch config
               shell: bash
-              run: |
-                  set -euo pipefail
-                  # 仅在未命中时下载解压打补丁；命中时校验并生成 cargo-config.toml
-                  ./scripts/cargo-rmcp-patched.sh --version >/dev/null
-
-                  # 统一将补丁 crate 内所有文件的 mtime 固化为 2020-01-01T00:00:00Z，
-                  # 避免任何情况下 mtime 新于 rust-cache 恢复的 .fingerprint 触发级联重编。
-                  python3 - <<'PY'
-                  import os, pathlib
-                  ts = 1577836800  # 2020-01-01T00:00:00Z
-                  for root in (
-                      "target/peri-rmcp-patches",
-                      "target/peri-hyper-util-patches",
-                      "target/peri-turso-patches",
-                  ):
-                      p = pathlib.Path(root)
-                      if not p.exists():
-                          continue
-                      for dirpath, dirnames, filenames in os.walk(p):
-                          for name in filenames:
-                              os.utime(os.path.join(dirpath, name), (ts, ts))
-                          for name in dirnames:
-                              os.utime(os.path.join(dirpath, name), (ts, ts))
-                  PY
-
-                  # 将 [patch.crates-io] 一次性安装到 $CARGO_HOME/config.toml（兼容 Windows Git Bash 路径）
-                  cargo_home="$(cygpath -u "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || printf '%s' "${CARGO_HOME:-$HOME/.cargo}")"
-                  mkdir -p "$cargo_home"
-                  patch_cfg="$(ls target/peri-rmcp-patches/*/cargo-config.toml | head -n 1)"
-                  cp "$patch_cfg" "$cargo_home/config.toml"
+              run: bash scripts/ci-materialize-patches.sh
 
             - name: Save patched crates cache
               if: steps.patches-cache.outputs.cache-hit != 'true'
@@ -223,6 +194,12 @@ jobs:
               with:
                   shared-key: ${{ matrix.cache_key }}-peri-${{ env.PERI_CACHE_GEN }}
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+
+            # rust-cache 恢复 target/ 后 target/peri-*-patches 会消失，而 config.toml
+            # 指向这些目录；不重新物化则 cargo metadata 报 patch location 不含对应 crate。
+            - name: Re-materialize patched crates after cache restore
+              shell: bash
+              run: bash scripts/ci-materialize-patches.sh
 
             # 固定 nextest 版本：三平台均由 GitHub Releases 预编译安装。
             - name: Install cargo-nextest
@@ -335,30 +312,7 @@ jobs:
                   key: linux-x86_64-peri-patches-${{ hashFiles('patches/*.patch', 'scripts/cargo-rmcp-patched.sh') }}
 
             - name: Materialize patched crates & install Cargo patch config
-              run: |
-                  set -euo pipefail
-                  ./scripts/cargo-rmcp-patched.sh --version >/dev/null
-                  python3 - <<'PY'
-                  import os, pathlib
-                  ts = 1577836800
-                  for root in (
-                      "target/peri-rmcp-patches",
-                      "target/peri-hyper-util-patches",
-                      "target/peri-turso-patches",
-                  ):
-                      p = pathlib.Path(root)
-                      if not p.exists():
-                          continue
-                      for dirpath, dirnames, filenames in os.walk(p):
-                          for name in filenames:
-                              os.utime(os.path.join(dirpath, name), (ts, ts))
-                          for name in dirnames:
-                              os.utime(os.path.join(dirpath, name), (ts, ts))
-                  PY
-                  cargo_home="$(cygpath -u "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || printf '%s' "${CARGO_HOME:-$HOME/.cargo}")"
-                  mkdir -p "$cargo_home"
-                  patch_cfg="$(ls target/peri-rmcp-patches/*/cargo-config.toml | head -n 1)"
-                  cp "$patch_cfg" "$cargo_home/config.toml"
+              run: bash scripts/ci-materialize-patches.sh
 
             - name: Save patched crates cache
               if: steps.patches-cache.outputs.cache-hit != 'true'
@@ -377,6 +331,10 @@ jobs:
               with:
                   shared-key: e2e-replay-linux-${{ env.PERI_CACHE_GEN }}
                   save-if: ${{ github.ref == 'refs/heads/main' }}
+
+            # 同上：rust-cache 恢复 target/ 后补丁目录消失，构建前需重新物化。
+            - name: Re-materialize patched crates after cache restore
+              run: bash scripts/ci-materialize-patches.sh
 
             - name: Build peri binary
               run: cargo build --locked -p peri-tui --bin peri
