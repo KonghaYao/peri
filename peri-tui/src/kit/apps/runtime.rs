@@ -258,7 +258,7 @@ pub fn spawn_if_enabled(
     shutdown: CancellationToken,
 ) -> Option<AppsRuntimeHandle> {
     spawn_with_availability(
-        config::from_env(),
+        config::take_from_env(),
         Arc::new(AcpAppsRpc::new(client)),
         shutdown,
     )

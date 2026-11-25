@@ -148,6 +148,24 @@ pub fn from_env() -> AppsAvailability {
     )
 }
 
+/// 生产入口：读取配置后立即把 token 从进程环境移除。
+///
+/// token 已进入 [`AppsConfig`] 的内存；继续留在环境里会被模型可执行的子进程
+/// （Bash 工具、MCP stdio server）继承，等同把宿主私有的 view 控制面凭据交给
+/// 不可信代码（A4：模型侧脚本不得枚举/执行浏览器私有工具）。`from_env` 保持
+/// 纯解析，供配置矩阵单测使用。
+pub fn take_from_env() -> AppsAvailability {
+    let availability = from_env();
+    // 只要环境里存在 token 就移除（不依赖开关）：它是宿主私有凭据，
+    // 即使本次 Apps 入口关闭，网关仍可能用同一 token 运行。
+    if std::env::var_os(VIEW_TOKEN_ENV).is_some() {
+        // SAFETY: 唯一读取点就是上面的 `from_env`；调用发生在创建 ACP 会话与
+        // 任何 MCP/Bash 子进程之前，此后进程内不再需要该变量。
+        unsafe { std::env::remove_var(VIEW_TOKEN_ENV) };
+    }
+    availability
+}
+
 /// 启动时唯一的 warning 出口：只说明缺哪个变量，不输出任何配置值。
 pub(crate) fn warn_if_unconfigured(availability: &AppsAvailability) {
     if let AppsAvailability::Unconfigured { missing } = availability {
