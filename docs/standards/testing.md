@@ -16,7 +16,10 @@
 | **单元测试** | 同目录 `_test.rs` 文件（如 `config_test.rs`） | 测试代码 ≥ 30 行 |
 | **单元测试** | 同文件末尾 `#[cfg(test)] mod tests { ... }` | 测试代码 < 30 行 |
 | **集成测试** | crate 根目录 `tests/` 目录（如 `tests/integration_test.rs`） | 跨模块端到端验证，只能访问 crate 的 `pub` API |
+| **集成测试（合并）** | `tests/it/main.rs` 根 + `tests/it/<stem>.rs` 模块 | 未被 CI 逐 binary 门禁的端到端文件，合用一个 target 以减少链接成本；`scripts/ci-test-inventory.sh` 的 `required_suites` / `per_binary_suites` 命中者保持独立 target 与文件名 |
 | **测试辅助代码** | 各测试文件内部局部定义 | 不设共享 test_helpers 模块 |
+
+无 `#[test]` 的 bin target 在 `[[bin]]` 设 `test = false`，不为空测试 harness 支付链接成本；有测试则保持默认。
 
 ### 文件命名
 
@@ -37,6 +40,8 @@ mod tests;        // 或 mod foo_tests;（见下）
 ```
 
 模块名参与 `cargo test -- <过滤词>` 匹配，因此当某个测试文件是 canonical 命令的命中目标时，模块名必须让该过滤词成立：过滤 `mcp::mcp_v4_seam` 的文件要挂成 `mod mcp_v4_seam_tests;`，沿用 `mod tests;` 会让过滤词命中不到（`cargo test` 仍以 0 tests 退出 0）。
+
+合并的集成测试在 `tests/it/main.rs` 用文件 stem 声明模块，用例全名变为 `<stem>::<test>`：canonical 命令、`--exact` 子进程自调用与 nextest 过滤器（`-E 'test(...)'`、`default-filter`、测试组）都必须用完整新名。子进程 `current_exe()` 重新执行自身时改传完整名，否则 `--exact` 命中零用例而假绿。
 
 过滤词同时必须是**精确**模块路径：过宽前缀会连带命中同目录的其他测试模块（例：`mcp::builtin` 会一并命中 `mcp::builtin_apply_tests`、`mcp::builtin_runtime_tests` 与 `mcp::builtin::tests`），使命令覆盖范围与意图不符；需要单个模块时写完整路径（如 `mcp::builtin::tests`）。
 
@@ -253,7 +258,7 @@ impl ReactLLM for EchoLLM {
 | crate | 用途 |
 |-------|------|
 | `tempfile::TempDir` | 几乎所有 crate——文件系统操作隔离 |
-| `serial_test` / `#[serial]` | PTY、全局 atom——需要独占资源的测试 |
+| `serial_test` / `#[serial]` | 进程内全局状态（env、全局 atom）的本地 `cargo test` 互斥；nextest 一测试一进程，迁移到 nextest 的目标无需再依赖它 |
 | `filetime` | 文件时间戳修改 |
 | `mockito` | HTTP mock server（langfuse-client、peri-acp） |
 | `temp-env` | 临时环境变量设置 |
@@ -276,7 +281,7 @@ impl ReactLLM for EchoLLM {
 | **结构** | **Arrange-Act-Assert 三段，段间无空行** |
 | **文件命名** | `_test.rs` 后缀 |
 | **异步测试** | `#[tokio::test]` |
-| **全局状态测试** | `#[serial]`（依赖全局 atom 的测试）或用 `Mutex<()>` 加锁 |
+| **全局状态测试** | `#[serial]`（兜住本地 `cargo test` 的进程内并发）或用 `Mutex<()>` 加锁；CI 的 nextest 逐测试独立进程，不依赖它 |
 | **不使用** | 自定义 test harness、`mockall`、`#[cfg(feature = "test-utils")]` |
 
 ---
@@ -341,8 +346,11 @@ cargo test -p peri-acp --lib -- host::requests::tests::meta_resources
 # 集成测试目标（crate 根 tests/，只访问 crate 的 pub API）
 cargo test -p <crate> --test <target>
 
-# 改进程级环境变量或起真实子进程/真实 wire 的目标：目标内不保证互斥，需串行
-cargo test -p <crate> --test <target> -- --test-threads=1
+# 改进程级环境变量或起真实子进程/真实 wire 的目标
+# nextest 一测试一进程，跨测试互斥由进程隔离保证；本地 cargo test 在同一二进制内多线程
+# 并发，才需要 --test-threads=1 兜住进程内共享状态
+cargo nextest run -p <crate> --test <target>
+cargo test -p <crate> --test <target> -- --test-threads=1    # 仅本地 cargo test 兜底
 
 # pre-commit（本地；不运行 workspace Rust 测试套件）
 lefthook run pre-commit    # 实际检查范围见 lefthook.yml
@@ -444,6 +452,18 @@ worldDrift 压到 0。通用 re-anchor 脚本已被 ref + source-anchored 取代
 - `side-projects/` 下项目有各自的 `Cargo.toml` 或 `package.json`，不由 `cargo test --workspace` 覆盖。只在任务涉及对应项目时进入目录，按其 manifest scripts 或 README 执行。
 - 仓库顶层出现目录不等于属于根 workspace。`peri-theme/` 虽未写入根 `Cargo.toml` 的显式 members 列表，但当前 `cargo metadata` 将其识别为 workspace package，因此使用 `cargo test -p peri-theme`；分类以命令输出为准。
 - `acp-hub/` 与 `agm/` 当前工作树中不存在 manifest；不得保留或执行旧测试矩阵命令，也不得从历史 issue 猜测迁移位置。仅在当前代码重新出现 manifest 后，按其实际归属补回命令。
+
+### 8.4 CI nextest profile 与超时护栏
+
+CI 的 Rust 测试是「一次主调用（`--workspace --profile ci`，排除 Compact 四套对抗）+ 四次逐 binary 门禁」；配置在 [.config/nextest.toml](../../.config/nextest.toml)，执行范围由 `scripts/ci-test-inventory.sh --check` 与 workflow 双向核对。`[profile.ci]` 继承 `[profile.default]` 的 `default-filter`、`overrides` 与 `test-groups`，只追加护栏：
+
+- `slow-timeout = { period = "60s", terminate-after = 2, grace-period = "10s" }`：单测试超过 60s 标记 slow，累计约 120s 后终止，再留 10s 收集输出（Windows 忽略 grace）。挂起用例按失败暴露，不等到 job 的 `timeout-minutes`。
+- `global-timeout = "50m"`：整轮测试上限；job 的 60 分钟仍是最后兜底。
+- `retries = 0`、`fail-fast = false`：不用重试掩盖 flake，一次挂起也不遮蔽其余用例的失败。
+
+已确认超过 120s 的用例在 `[[profile.ci.overrides]]` 放宽到 2×120s，按测试名精确匹配（`#[path]` 引入的模块名不等于文件名，例如 `kit::steer_consumer::tests`）。新增 override 前先确认过滤器实际命中的测试，不要按包整体放宽。
+
+隔离：`serial-process-state`（middlewares lib + 6 个 MCP 能力包）与 `process-isolation`（`peri-process`、`peri-browser-gateway`、`peri-swarm` 中绑定真实监听器的集成目标）都是 `max-threads = 1` 的互斥组。nextest 一个测试一个进程，`#[serial]` 只保护本地 `cargo test` 的进程内并发，在 CI 下是 no-op；跨进程共享资源（文件锁、固定端口）仍需代码自身保证。
 
 ---
 

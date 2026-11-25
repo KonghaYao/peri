@@ -8,9 +8,11 @@ description = "Emscripten ACP Host deployment"
 [features]
 cloudflare = ["peri-model/cloudflare"]
 
+# 进程入口没有单元测试，关掉空的测试 harness 链接。
 [[bin]]
 name = "peri-wasm"
 path = "src/main.rs"
+test = false
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 peri-model = { path = "../peri-model" }

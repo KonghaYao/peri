@@ -33,11 +33,52 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
     }
 }
 
+/// 有界汇合点：`parties` 个调用都到达后一起放行；任一调用缺席时最多等 10s 就继续，
+/// 让用例以断言失败收场，而不是只能等 CI 的超时看门狗强杀整个测试进程。
+struct BoundedGate {
+    arrived: std::sync::Mutex<usize>,
+    released: std::sync::Condvar,
+    parties: usize,
+    timeout: std::time::Duration,
+}
+
+impl BoundedGate {
+    fn new(parties: usize) -> Self {
+        Self {
+            arrived: std::sync::Mutex::new(0),
+            released: std::sync::Condvar::new(),
+            parties,
+            timeout: std::time::Duration::from_secs(10),
+        }
+    }
+
+    fn wait(&self) {
+        let mut arrived = self.arrived.lock().expect("gate mutex poisoned");
+        *arrived += 1;
+        if *arrived >= self.parties {
+            self.released.notify_all();
+            return;
+        }
+        let deadline = std::time::Instant::now() + self.timeout;
+        while *arrived < self.parties {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            arrived = self
+                .released
+                .wait_timeout(arrived, remaining)
+                .expect("gate condvar poisoned")
+                .0;
+        }
+    }
+}
+
 /// [回归测试] S3.1 幽灵任务：spawn 前失败（session execution scope 已关闭）的
 /// 任务必须不执行。
 ///
 /// 触发点：`TaskManager::shutdown()` 关闭 scope 后，后台挂载 admission 被拒——
-/// 4 个并发 invoke 在 llm_factory 同步汇合（barrier 制造确定性并发窗口）后全部
+/// 4 个并发 invoke 在 llm_factory 同步汇合（有界汇合点制造确定性并发窗口）后全部
 /// 失败，每个必须：
 /// - invoke 如实返回错误（带关闭原因）
 /// - 不执行 run_react_loop（零 LLM 推理调用）
@@ -56,7 +97,6 @@ fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::Backgrou
 async fn test_bg_register_failure_does_not_execute_task() {
     use peri_agent::agent::events::ExecutorEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
     use tokio::sync::mpsc;
 
     let dir = tempfile::tempdir().unwrap();
@@ -76,8 +116,9 @@ async fn test_bg_register_failure_does_not_execute_task() {
     );
     assert_eq!(registry.active_count(), 0);
 
-    // barrier：4 个 invoke 全部到达 llm_factory 后放行（确定性并发窗口）
-    let gate = Arc::new(Barrier::new(4));
+    // 有界汇合：4 个 invoke 全部到达 llm_factory 后放行（确定性并发窗口），
+    // 若有调用没能走到这里，10s 后继续并以断言失败暴露，而不是无限等待。
+    let gate = Arc::new(BoundedGate::new(4));
     let llm_calls = Arc::new(AtomicUsize::new(0));
     let llm_calls_clone = Arc::clone(&llm_calls);
     let gate_clone = Arc::clone(&gate);
@@ -157,9 +198,9 @@ async fn test_bg_register_failure_does_not_execute_task() {
     .with_deregister_runtime(deregister_cb);
     let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
 
-    // 4 个并发 invoke——必须各自 tokio::spawn（llm_factory 内的 Barrier::wait()
-    // 是同步阻塞：若在 join_all 单任务内逐个 poll，第一个 future 会卡死当前
-    // worker，其余 3 个永远不被 poll，barrier 凑不齐 4 个参与者而死锁）。
+    // 4 个并发 invoke——必须各自 tokio::spawn（llm_factory 内的 BoundedGate::wait()
+    // 会同步阻塞：若在 join_all 单任务内逐个 poll，第一个 future 会卡死当前 worker，
+    // 其余 3 个永远不被 poll，汇合点凑不齐 4 个参与者而只能等超时）。
     let tool = Arc::new(tool);
     let mut handles = Vec::new();
     for index in 0..4 {

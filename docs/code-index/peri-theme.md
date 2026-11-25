@@ -58,8 +58,8 @@
 | 父子覆盖和来源优先级 | `peri-theme/src/loader/source_test.rs` | `inherits_before_resolving_references_and_preserves_child_identity`、`user_sources_override_builtins_for_root_and_parent_lookups` |
 | 循环、缺失和最大继承深度 | `peri-theme/src/loader/source_test.rs` | `rejects_cyclic_missing_and_overdeep_parents` |
 | 路径与 dotfiles 兼容性 | `peri-theme/src/loader/source_test.rs` | `rejects_paths_in_inherited_theme_names`、`root_lookup_retains_relative_and_absolute_paths`、`user_sources_retain_dotfiles_symlinks_for_root_and_parent` |
-| 公共 API 与用户主题 | `peri-theme/tests/test_loader.rs` | `public_loader_uses_isolated_home`；子进程 HOME 指向测试目录，不访问真实用户配置 |
-| 默认主题和 bridge | `peri-theme/tests/test_builtin.rs` | dark/light 字段与默认映射断言 |
+| 公共 API 与用户主题 | `peri-theme/tests/it/test_loader.rs` | `public_loader_uses_isolated_home`；子进程 HOME 指向测试目录，不访问真实用户配置 |
+| 默认主题和 bridge | `peri-theme/tests/it/test_builtin.rs` | dark/light 字段与默认映射断言 |
 
 ## 跨模块契约
 

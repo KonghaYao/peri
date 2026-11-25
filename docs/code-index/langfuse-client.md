@@ -60,8 +60,8 @@
 - `src/spool/{native_test,types_test,cleanup_test}.rs`：原子发布、跨进程 claim/quota、8 MiB 配额含 writing 与失败删除、分页扫描与残留回收；取锁语义（不可领取判定、并发删除不被升级为 IO 故障、能力探针竞争）在 `src/spool/native_test/lock.rs`，由 `native_test.rs` 显式 `#[path]` 挂载。
 - `src/batcher/{freeze_test,prepare_test,split_test,spool_test,recovery_test,pending_test,send_test}.rs`：阈值边界、编码膨胀拆批、超大单条拒收、前缀屏障、TTL/恢复与 Pending 计数。
 - `src/spool_test.rs`、`src/client_send_test.rs`：route 指纹与凭据轮换隔离、文件正文从 0 重开、attempt checkpoint。
-- `tests/otel_contract.rs`：真实 HTTP mock 验证认证、OTLP 载荷、身份映射、父关系与 Session record 过滤，不代表真实服务端验收。
-- `tests/spool_http.rs`：真实 TCP 连接上验证中途断连后第二次 attempt 从字节 0 重开、gzip/none 正文与长度、spool 文件正文不出现 chunked 传输；用 TCP 断流而不是 503 代替。
+- `tests/it/otel_contract.rs`：真实 HTTP mock 验证认证、OTLP 载荷、身份映射、父关系与 Session record 过滤，不代表真实服务端验收。
+- `tests/it/spool_http.rs`：真实 TCP 连接上验证中途断连后第二次 attempt 从字节 0 重开、gzip/none 正文与长度、spool 文件正文不出现 chunked 传输；用 TCP 断流而不是 503 代替。
 - 重型验收（1000 次调用长会话、512 MiB 积压、断网 10 分钟恢复、四边界崩溃注入）尚无离线用例文件。
 - 命令：`cargo test -p langfuse-client --lib`、`cargo test -p langfuse-client --doc`、`cargo clippy -p langfuse-client --all-targets -- -D warnings`。
 

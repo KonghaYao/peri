@@ -56,7 +56,7 @@ const WAIT: Duration = Duration::from_secs(20);
 const CHILD_WAIT: Duration = Duration::from_secs(30);
 
 // 子进程协议：同一测试二进制以这些环境变量重新执行自身，扮演 [`child_helper`]。
-const CHILD_HELPER: &str = "child_helper";
+const CHILD_HELPER: &str = "spool_recovery::child_helper";
 const CHILD_ROOT: &str = "PERI_SPOOL_RECOVERY_ROOT";
 const CHILD_URL: &str = "PERI_SPOOL_RECOVERY_URL";
 const CHILD_RELEASE: &str = "PERI_SPOOL_RECOVERY_RELEASE";
