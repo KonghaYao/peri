@@ -190,6 +190,28 @@ impl ElicitationRouter {
     pub(crate) fn active_count(&self) -> usize {
         self.state.lock().active.len()
     }
+
+    /// 标记「本连接有一轮 elicitation 正在等待用户」；guard drop 即结束。
+    ///
+    /// 反向路径（handler）与 MRTR 路径共用同一活动计数，工具 deadline 续期
+    /// 才能同时覆盖两条协议。
+    pub(crate) fn begin_asking(&self) -> ElicitationAsking<'_> {
+        self.activity.enter();
+        ElicitationAsking {
+            activity: &self.activity,
+        }
+    }
+}
+
+/// elicitation 活动 guard：Drop 时结束，保证取消/早退也复位。
+pub(crate) struct ElicitationAsking<'a> {
+    activity: &'a ElicitationActivity,
+}
+
+impl Drop for ElicitationAsking<'_> {
+    fn drop(&mut self) {
+        self.activity.leave();
+    }
 }
 
 /// 一次工具调用持有的 elicitation 路由租约。
@@ -219,7 +241,6 @@ impl ElicitationLease {
     /// `cancellation` 来自本次工具调用（父令牌 + 本 lease 的取消）；工具结束、
     /// 切会话或连接关闭时取消，broker future 立即丢弃并让 ACP transport 通过
     /// `$/cancel_request` 撤销客户端提示。
-    #[allow(dead_code)] // MRTR 轮次在后续 commit 接入；反向路径必须保留同一入口。
     pub(crate) async fn ask(
         &self,
         params: &ElicitRequestParams,
@@ -232,10 +253,11 @@ impl ElicitationLease {
             return Ok(MappedElicitation {
                 decision: ElicitationDecision::Cancel,
                 unavailable: None,
+                url_mode: false,
             });
         };
-        self.activity.enter();
-        let answer = ask_elicitation(
+        let _asking = self.router.begin_asking();
+        ask_elicitation(
             &*route.broker,
             route.owner.clone(),
             &self.router.server,
@@ -243,9 +265,7 @@ impl ElicitationLease {
             params,
             &route.cancellation,
         )
-        .await;
-        self.activity.leave();
-        answer
+        .await
     }
 }
 
@@ -263,6 +283,8 @@ impl Drop for ElicitationLease {
 pub(crate) struct MappedElicitation {
     pub decision: ElicitationDecision,
     pub unavailable: Option<UnansweredCause>,
+    /// URL 模式的 accept 只表示同意导航，MCP 结果不得携带 content。
+    url_mode: bool,
 }
 
 /// 交互通道本身失败（非用户决定）。
@@ -280,6 +302,7 @@ pub(crate) async fn ask_elicitation(
     params: &ElicitRequestParams,
     cancellation: &CancellationToken,
 ) -> Result<MappedElicitation, ElicitationChannelFailure> {
+    let url_mode = matches!(params, ElicitRequestParams::UrlElicitationParams { .. });
     let request = match params {
         ElicitRequestParams::FormElicitationParams {
             message,
@@ -323,6 +346,7 @@ pub(crate) async fn ask_elicitation(
             return Ok(MappedElicitation {
                 decision: ElicitationDecision::Cancel,
                 unavailable: None,
+                url_mode: false,
             });
         }
     };
@@ -331,14 +355,17 @@ pub(crate) async fn ask_elicitation(
         InteractionResponse::Elicitation(decision) => MappedElicitation {
             decision,
             unavailable: None,
+            url_mode,
         },
         InteractionResponse::Rejected => MappedElicitation {
             decision: ElicitationDecision::Decline,
             unavailable: None,
+            url_mode,
         },
         InteractionResponse::Unanswered { cause } => MappedElicitation {
             decision: ElicitationDecision::Decline,
             unavailable: Some(cause),
+            url_mode,
         },
         // 超时是「这次提问没有被回答」的用户侧中止，不是协议失败：按 cancel 回包。
         InteractionResponse::Failed {
@@ -346,6 +373,7 @@ pub(crate) async fn ask_elicitation(
         } => MappedElicitation {
             decision: ElicitationDecision::Cancel,
             unavailable: None,
+            url_mode,
         },
         InteractionResponse::Failed { failure } => {
             return Err(ElicitationChannelFailure {
@@ -363,9 +391,10 @@ pub(crate) async fn ask_elicitation(
 impl MappedElicitation {
     pub(crate) fn into_result(self) -> ElicitResult {
         let result = match self.decision {
-            ElicitationDecision::Accept { content } => {
+            ElicitationDecision::Accept { content } if !self.url_mode => {
                 ElicitResult::new(ElicitationAction::Accept).with_content(content)
             }
+            ElicitationDecision::Accept { .. } => ElicitResult::new(ElicitationAction::Accept),
             ElicitationDecision::Decline => ElicitResult::new(ElicitationAction::Decline),
             ElicitationDecision::Cancel => ElicitResult::new(ElicitationAction::Cancel),
         };
@@ -612,6 +641,37 @@ mod tests {
         assert_eq!(
             result.meta.expect("meta").0[ELICITATION_UNAVAILABLE_META_KEY],
             serde_json::json!("non_interactive_client")
+        );
+    }
+
+    #[tokio::test]
+    async fn url_accept_omits_content_in_mcp_result() {
+        let broker = StubBroker::new(InteractionResponse::Elicitation(
+            ElicitationDecision::Accept {
+                content: serde_json::json!({ "unexpected": true }),
+            },
+        ));
+        let params = ElicitRequestParams::UrlElicitationParams {
+            meta: None,
+            message: "authorize".into(),
+            url: "https://example.com/connect".into(),
+            elicitation_id: "e-1".into(),
+        };
+        let mapped = ask_elicitation(
+            &*broker,
+            owner(),
+            "srv",
+            "tool",
+            &params,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("mapped");
+        let result = mapped.into_result();
+        assert_eq!(result.action, ElicitationAction::Accept);
+        assert!(
+            result.content.is_none(),
+            "URL accept only means consent to navigate; content must be omitted"
         );
     }
 

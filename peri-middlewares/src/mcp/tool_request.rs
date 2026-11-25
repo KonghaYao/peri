@@ -5,8 +5,12 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResponse;
 use rmcp::model::CancelledNotificationParam;
 use rmcp::model::ClientRequest;
+use rmcp::model::ErrorData as McpError;
+use rmcp::model::InputRequest;
+use rmcp::model::InputResponses;
 use rmcp::model::RequestId;
 use rmcp::model::ServerResult;
+use rmcp::model::DEFAULT_MRTR_MAX_ROUNDS;
 use rmcp::service::Peer;
 use rmcp::service::PeerRequestOptions;
 use rmcp::service::RoleClient;
@@ -60,6 +64,83 @@ pub(super) async fn call_tool(
     timeout: Option<Duration>,
     elicitation: Option<&ElicitationLease>,
 ) -> Result<CallToolResponse, ServiceError> {
+    // 每轮尝试独立 deadline；跨轮只保留 inputResponses 与 server 的 requestState。
+    let mut input_responses: Option<InputResponses> = None;
+    let mut request_state: Option<String> = None;
+
+    for round in 0..=DEFAULT_MRTR_MAX_ROUNDS {
+        let mut attempt = params.clone();
+        attempt.input_responses = input_responses.clone();
+        attempt.request_state = request_state.clone();
+        let result = call_tool_once(peer, attempt, timeout, elicitation).await?;
+        match result {
+            ServerResult::InputRequiredResult(required) => {
+                if round == DEFAULT_MRTR_MAX_ROUNDS {
+                    return Err(ServiceError::InputRequiredRoundsExceeded {
+                        max_rounds: DEFAULT_MRTR_MAX_ROUNDS,
+                    });
+                }
+                let requests = required.input_requests.unwrap_or_default();
+                let Some(lease) = elicitation else {
+                    // 没有交互入口时不能伪造 inputResponses：显式失败，由工具层转述。
+                    return Err(ServiceError::McpError(McpError::invalid_params(
+                        "server requires elicitation input but this call has no interaction route",
+                        None,
+                    )));
+                };
+                let mut responses = input_responses.take().unwrap_or_default();
+                for (key, request) in requests {
+                    match request {
+                        InputRequest::Elicitation(request) => {
+                            let mapped = lease.ask(&request.params).await.map_err(|failure| {
+                                ServiceError::McpError(McpError::internal_error(
+                                    "MCP elicitation channel failed",
+                                    Some(serde_json::json!({ "detail": failure.detail })),
+                                ))
+                            })?;
+                            let value =
+                                serde_json::to_value(mapped.into_result()).map_err(|error| {
+                                    ServiceError::McpError(McpError::internal_error(
+                                        "failed to serialize elicitation result",
+                                        Some(serde_json::json!({ "detail": error.to_string() })),
+                                    ))
+                                })?;
+                            responses.insert(key, value);
+                        }
+                        // sampling / roots 不在本 PR 的交互能力内：显式失败，不伪造答案。
+                        _ => {
+                            return Err(ServiceError::McpError(McpError::invalid_params(
+                                "unsupported input request: sampling/roots",
+                                None,
+                            )));
+                        }
+                    }
+                }
+                input_responses = Some(responses);
+                // requestState 逐字回传（不解释、不修改、不推测内容）。
+                request_state = required.request_state;
+            }
+            ServerResult::CallToolResult(result) => {
+                return Ok(CallToolResponse::Complete(result));
+            }
+            ServerResult::CreateTaskResult(result) => {
+                return Ok(CallToolResponse::Task(result));
+            }
+            _ => return Err(ServiceError::UnexpectedResponse),
+        }
+    }
+    Err(ServiceError::InputRequiredRoundsExceeded {
+        max_rounds: DEFAULT_MRTR_MAX_ROUNDS,
+    })
+}
+
+/// 单轮 `tools/call`：发送 + 响应等待（用户作答期间续期）。
+async fn call_tool_once(
+    peer: &Peer<RoleClient>,
+    params: CallToolRequestParams,
+    timeout: Option<Duration>,
+    elicitation: Option<&ElicitationLease>,
+) -> Result<ServerResult, ServiceError> {
     // 每轮尝试独立 deadline：发送与响应各自有界，等待用户的时间不吞掉
     // 工具本身的传输预算。
     let send_deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
@@ -126,9 +207,9 @@ pub(super) async fn call_tool(
         }
     };
     pending.id.take();
-    match result {
-        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
-        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
-        _ => Err(ServiceError::UnexpectedResponse),
-    }
+    Ok(result)
 }
+
+#[cfg(test)]
+#[path = "tool_request_test.rs"]
+mod tests;

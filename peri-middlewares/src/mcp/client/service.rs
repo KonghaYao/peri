@@ -173,6 +173,7 @@ impl ClientHandler for PeriClientHandler {
                 }
             };
             let cancellation = route.cancellation.clone();
+            let _asking = router.begin_asking();
             let answer = tokio::select! {
                 answer = ask_elicitation(
                     &*route.broker,
