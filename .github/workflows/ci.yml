@@ -70,7 +70,7 @@ jobs:
             fail-fast: false
             matrix:
                 include: >-
-                    ${{ fromJSON('[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","cache_suffix":"linux-cache-v1"},{"os":"macos-latest","target":"aarch64-apple-darwin","cache_suffix":"macos-cache-v1"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","cache_suffix":"windows-cache-v1"}]') }}
+                    ${{ fromJSON('[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","cache_suffix":"linux-cache-v1"},{"os":"macos-latest","target":"aarch64-apple-darwin","cache_suffix":"macos-cache-v2"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","cache_suffix":"windows-cache-v1"}]') }}
 
         steps:
             - name: Checkout repository
@@ -140,14 +140,14 @@ jobs:
             # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
             # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
             # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
-            # 实验期间临时允许本分支的 macOS/Windows 写缓存并允许失败时保存；
-            # 最终提交恢复为仅 main、默认 cache-on-failure=false。
+            # 实验期间临时允许本分支的 macOS/Windows 写缓存；失败不保存，
+            # 避免 flake 留下只含 test-profile 依赖的不完整缓存。
+            # 最终提交恢复为仅 main。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
                   key: ${{ matrix.target }}-${{ matrix.cache_suffix }}
                   cmd-format: bash scripts/ci-rust-cache-cargo.sh {0}
-                  cache-on-failure: true
                   save-if: ${{ github.ref == 'refs/heads/main' || (github.head_ref == 'ci/cache-macos-windows' && runner.os != 'Linux') }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
