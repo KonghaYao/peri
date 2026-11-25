@@ -520,6 +520,9 @@ impl DetailRenderCache {
 /// 把面板本地 fold 投影到一条 entry 上（canonical 内容只读，面板状态不落
 /// `FOLD_OVERRIDES`）。键控/状态判定由 [`FoldKey::of`] / [`fold_state_of`] 统一；
 /// 这里只负责把选中的 fold 写回副本并重算 hash。
+///
+/// SubAgent 组不在投影范围内：详情渲染下它恒为紧凑形态，[`panel_fold_key`]
+/// 也不会返回它的键，因此不会传入 fold（嵌套导航见 Q12）。
 pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUnit> {
     let Some(fold) = fold else {
         return Cow::Borrowed(vm);
@@ -542,12 +545,6 @@ pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, 
             }
         }
         TuiRenderUnit::TuiCollapsedGroup(group) => {
-            group.fold = fold;
-            group.recompute_hash();
-        }
-        // 面板对 SubAgent / Interaction 只做本地折叠展示；嵌套打开由消息区
-        // Enter 分派负责（Q12 未批准面板内导航，面板不新增打开语义）。
-        TuiRenderUnit::TuiSubAgentGroup(group) => {
             group.fold = fold;
             group.recompute_hash();
         }
