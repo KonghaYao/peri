@@ -119,11 +119,7 @@ pub(super) fn update_mermaid_action_hits(
     let mut hits: Vec<MermaidActionHit> = Vec::new();
     if let Some(area) = area_rect {
         let vp_end = area.y.saturating_add(vis_height);
-        let x_start = area
-            .x
-            .saturating_add(grid.cont_prefix_width().min(u16::MAX as usize) as u16)
-            .min(area.x.saturating_add(area.width.saturating_sub(1)));
-        let x_end = area.x.saturating_add(area.width.saturating_sub(1));
+        let (x_start, x_end) = super::artifact_hits::mermaid_action_columns(grid, area);
         let caches = vm_caches.read();
         let vms = view_models.read();
         for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
@@ -147,19 +143,15 @@ pub(super) fn update_mermaid_action_hits(
                 })
                 .unwrap_or(slot.content_hash);
             for span in &slot.mermaid_fences {
-                let Some(action) = span.logical.end.checked_sub(1) else {
-                    continue;
-                };
-                if action < span.logical.start {
-                    continue;
-                }
-                let Some(entry) = slot.wrap_map.get(action) else {
+                let Some(visual) =
+                    super::artifact_hits::mermaid_action_visual(span, &slot.wrap_map)
+                else {
                     continue;
                 };
                 let vis_row = index
                     .slot_visual_start(slot_index)
                     .unwrap_or(0)
-                    .saturating_add(entry.visual_start);
+                    .saturating_add(visual);
                 let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
                 if row < area.y as i64 || row >= vp_end as i64 {
                     continue;

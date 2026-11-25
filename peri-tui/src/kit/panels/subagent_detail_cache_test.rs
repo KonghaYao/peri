@@ -8,6 +8,8 @@ use super::Rect;
 use super::ThemeDefinition;
 use super::TuiSubAgentGroup;
 
+use crate::kit::atoms::{ACTIVE_PANEL, BRIDGE_RESET_COUNTER, INPUT_RESTORE_TEXT};
+use crate::kit::mermaid::MERMAID_DETAIL;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiToolCard,
     TuiToolPresentation,
@@ -536,4 +538,200 @@ fn detail_draw_shows_nested_record_in_terminal_buffer() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(rendered.contains("nested record"), "{rendered}");
+}
+
+// ── 面板副产物命中：GenUI 按钮 / Mermaid「查看图」 ────────────────────────
+
+const ARTIFACT_TEXT: &str = r#"intro
+
+```gen-ui
+$count = 1
+root = Stack([Text("count=" + $count), Button("add", @Set($count, $count + 1))])
+```
+
+```mermaid
+graph TD
+A-->B
+```"#;
+
+/// 动作测试的全局状态隔离：会话 epoch、输入恢复文本、面板栈与图详情。
+struct ArtifactGuard {
+    restore: Option<String>,
+    epoch: u64,
+    active_panel: Option<crate::app::panel_types::PanelKind>,
+    mermaid: Option<crate::kit::mermaid::MermaidDetail>,
+}
+
+impl ArtifactGuard {
+    fn new() -> Self {
+        crate::kit::atoms::init_atoms();
+        let guard = Self {
+            restore: INPUT_RESTORE_TEXT
+                .get_or_init(Default::default)
+                .lock()
+                .take(),
+            epoch: BRIDGE_RESET_COUNTER.get(),
+            active_panel: *ACTIVE_PANEL.state().read(),
+            mermaid: MERMAID_DETAIL.state().read().clone(),
+        };
+        crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::MermaidDiagram);
+        *MERMAID_DETAIL.state().write() = None;
+        BRIDGE_RESET_COUNTER.set(guard.epoch.wrapping_add(1));
+        guard
+    }
+}
+
+impl Drop for ArtifactGuard {
+    fn drop(&mut self) {
+        crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::MermaidDiagram);
+        *MERMAID_DETAIL.state().write() = self.mermaid.take();
+        ACTIVE_PANEL.set(self.active_panel);
+        *INPUT_RESTORE_TEXT.get_or_init(Default::default).lock() = self.restore.take();
+        BRIDGE_RESET_COUNTER.set(self.epoch);
+    }
+}
+
+fn artifact_cache(
+    transcript: &TuiSubAgentGroup,
+    grid: &GridSpec,
+) -> (DetailRenderCache, Vec<Line<'static>>, Arc<ThemeDefinition>) {
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let header = vec![Line::from("header")];
+    let mut cache = DetailRenderCache::default();
+    cache.prepare(transcript, grid, theme.clone(), 0, header.clone());
+    (cache, header, theme)
+}
+
+#[test]
+#[serial_test::serial]
+fn panel_artifacts_keep_genui_and_mermaid_hits_with_content_geometry() {
+    let transcript = group("artifact-run", ARTIFACT_TEXT);
+    let grid = GridSpec::grid_for(80);
+    let (cache, _, _) = artifact_cache(&transcript, &grid);
+    let area = Rect::new(4, 7, grid.line_width(), 30);
+    let artifacts = super::collect_artifacts(&cache, area, 0);
+
+    assert_eq!(artifacts.genui.len(), 1, "genui button must keep a hit");
+    assert_eq!(artifacts.mermaid.len(), 1, "mermaid action must keep a hit");
+
+    let button = &cache.slots[0].entry.genui_buttons()[0];
+    let hit = &artifacts.genui[0];
+    let expected_row = area.y as usize
+        + cache.header.len()
+        + cache.prefix[0]
+        + cache.slots[0].wrap_map[button.line_start].visual_start;
+    assert_eq!(hit.row as usize, expected_row, "content row → button row");
+    assert_eq!(hit.x_start, area.x + button.x_start);
+    assert_eq!(hit.x_end, area.x + button.x_end);
+
+    let span = &cache.slots[0].entry.mermaid_fences()[0];
+    let action_row = span.logical.end - 1;
+    let expected_row = area.y as usize
+        + cache.header.len()
+        + cache.prefix[0]
+        + cache.slots[0].wrap_map[action_row].visual_start;
+    let mermaid = &artifacts.mermaid[0];
+    assert_eq!(
+        mermaid.row as usize, expected_row,
+        "fence tail → action row"
+    );
+    assert_eq!(mermaid.x_start, area.x + grid.cont_prefix_width() as u16);
+    assert_eq!(mermaid.x_end, area.x + area.width - 1);
+
+    // 滚动偏移与 draw 同口径：命中行随 top 上移。
+    let scrolled = super::collect_artifacts(&cache, area, 2);
+    assert_eq!(scrolled.genui[0].row + 2, hit.row);
+    assert_eq!(scrolled.mermaid[0].row + 2, mermaid.row);
+}
+
+#[test]
+#[serial_test::serial]
+fn panel_artifact_clicks_reuse_main_genui_and_mermaid_actions() {
+    let _guard = ArtifactGuard::new();
+    let transcript = group("artifact-click", ARTIFACT_TEXT);
+    let grid = GridSpec::grid_for(80);
+    let (mut cache, header, theme) = artifact_cache(&transcript, &grid);
+    let area = Rect::new(0, 0, grid.line_width(), 40);
+    let artifacts = super::collect_artifacts(&cache, area, 0);
+
+    let button = cache.slots[0].entry.genui_buttons()[0].clone();
+    let block = button.block.expect("complete gen-ui block");
+    let before = crate::kit::genui::view_state::block_revision(block);
+    let hit = artifacts
+        .genui
+        .iter()
+        .find(|hit| hit.button == button)
+        .expect("button hit");
+    assert!(super::apply_artifact_click(super::resolve_artifact_click(
+        &cache,
+        &artifacts,
+        hit.row,
+        hit.x_start
+    )));
+    assert!(
+        crate::kit::genui::view_state::block_revision(block) > before,
+        "panel click must execute the same Set action"
+    );
+
+    // Set 改变按钮/正文后，prepare 必须重算行高并刷新渲染，而不是停在旧帧。
+    let prepared = cache.prepare(&transcript, &grid, theme, 0, header);
+    assert!(!prepared, "same instance: no scroll reset");
+    let text: String = (0..cache.slots[0].height)
+        .filter_map(|row| cache.slots[0].entry.line(row))
+        .map(|line| line.to_string())
+        .collect();
+    assert!(
+        text.contains("count=2"),
+        "panel body must follow gen-ui state"
+    );
+
+    // Mermaid 动作行走主区同一打开入口；面板不携带主区 slot 身份。
+    // Set 后 slot 已重建，先按新帧重建命中（真实路径由 post_draw 完成）。
+    let artifacts = super::collect_artifacts(&cache, area, 0);
+    let mermaid = artifacts.mermaid[0].clone();
+    assert!(super::apply_artifact_click(super::resolve_artifact_click(
+        &cache,
+        &artifacts,
+        mermaid.row,
+        mermaid.x_start
+    )));
+    let detail = MERMAID_DETAIL
+        .state()
+        .read()
+        .clone()
+        .expect("mermaid detail opened from panel");
+    assert!(detail.source.contains("A-->B"));
+    assert_eq!(detail.slot, None);
+    assert_eq!(detail.vm_hash, None);
+}
+
+#[test]
+#[serial_test::serial]
+fn panel_artifact_click_is_rejected_after_cache_rebuild() {
+    let _guard = ArtifactGuard::new();
+    let transcript = group("artifact-stale", ARTIFACT_TEXT);
+    let grid = GridSpec::grid_for(80);
+    let (mut cache, header, theme) = artifact_cache(&transcript, &grid);
+    let area = Rect::new(0, 0, grid.line_width(), 40);
+    let artifacts = super::collect_artifacts(&cache, area, 0);
+    let hit = artifacts.genui[0].clone();
+    let block = hit.button.block.expect("complete gen-ui block");
+    let before = crate::kit::genui::view_state::block_revision(block);
+
+    let mut rebuilt = group("artifact-stale", "intro only");
+    rebuilt.instance_id = transcript.instance_id.clone();
+    cache.prepare(&rebuilt, &grid, theme, 0, header);
+
+    // 旧热区仍被认领（不让点击落到下层），但不执行动作。
+    assert!(super::apply_artifact_click(super::resolve_artifact_click(
+        &cache,
+        &artifacts,
+        hit.row,
+        hit.x_start
+    )));
+    assert_eq!(
+        crate::kit::genui::view_state::block_revision(block),
+        before,
+        "stale hit must not dispatch"
+    );
 }

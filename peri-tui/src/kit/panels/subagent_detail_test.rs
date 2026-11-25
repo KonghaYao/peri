@@ -29,6 +29,35 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
     }
 }
 
+/// Q11：身份头几何取 Q9 记录的同一份内容区——prepare 网格与绘制视口同源。
+fn measured_detail(width: u16) -> (GridSpec, usize) {
+    let mut geometry = super::DetailGeometry::default();
+    geometry.observe(Rect::new(0, 2, width, 24));
+    let content = geometry.content().expect("measured content area");
+    let layout = geometry.prepare_layout().expect("measured prepare layout");
+    (layout.grid, super::detail_viewport(content).width as usize)
+}
+
+fn lines_text(lines: &[ratatui_kit::ratatui::text::Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// running 符号帧判定：braille 动画帧或 ASCII 降级 `*`（与主区测试同口径）。
+fn is_running_frame(symbol: &str) -> bool {
+    symbol.chars().any(|c| {
+        c == '*' || crate::components::spinner::animation::BRAILLE_LOADING_FRAMES.contains(&c)
+    })
+}
+
 #[test]
 fn test_subagent_detail_content_height_exposes_scroll_overflow() {
     let viewport_height = 20u16;
@@ -77,6 +106,118 @@ fn detail_width_budget_matches_drawn_viewport() {
             );
         }
     }
+}
+
+/// Q11：身份头复用主时间线组头的状态符号映射（`status_symbol_and_color`），
+/// running/completed/failed 三态符号与色彩一致；不新增第二套映射。
+#[test]
+fn detail_header_status_symbol_matches_shared_group_head_mapping() {
+    let theme = peri_theme::builtin::dark_theme();
+    let (grid, width) = measured_detail(80);
+    for (running, error) in [(true, false), (false, false), (false, true)] {
+        let mut group = make_subagent("alpha", "Alpha");
+        group.is_running = running;
+        group.is_error = error;
+        let lines = super::detail_header_lines(&group, &grid, width, &theme);
+        let text = lines_text(&lines);
+        assert!(text.contains("Alpha"), "身份头含名称，实际 {text:?}");
+        assert!(text.contains("[alpha]"), "身份头含 agent id，实际 {text:?}");
+
+        let symbol_span = &lines[0].spans[0];
+        let (expected_symbol, expected_color) =
+            crate::kit::message_area::render::status_symbol_and_color(
+                running,
+                error,
+                &theme.semantic,
+            );
+        assert_eq!(
+            symbol_span.style.fg,
+            Some(expected_color),
+            "符号色取共享映射（running={running}, error={error}）"
+        );
+        if running {
+            assert!(
+                is_running_frame(&symbol_span.content),
+                "running 使用动画符号，实际 {:?}",
+                symbol_span.content
+            );
+        } else {
+            assert_eq!(
+                symbol_span.content.trim_end(),
+                expected_symbol,
+                "completed/failed 符号取共享映射（error={error}）"
+            );
+        }
+    }
+}
+
+/// Q11：failed 且有原因时追加原因行；无原因不追加空行；completed 的 result
+/// 文本（subagent_result 投影）不得显示为失败原因。
+#[test]
+fn detail_header_renders_failure_reason_only_for_failed_with_reason() {
+    let theme = peri_theme::builtin::dark_theme();
+    let (grid, width) = measured_detail(80);
+
+    let mut failed = make_subagent("alpha", "Alpha");
+    failed.is_error = true;
+    failed.error_reason = Some("permission denied".into());
+    let lines = super::detail_header_lines(&failed, &grid, width, &theme);
+    assert!(
+        lines.len() > 2,
+        "failed 有原因须有原因行，实际 {} 行",
+        lines.len()
+    );
+    assert!(
+        lines_text(&lines).contains("permission denied"),
+        "原因行显示 canonical error_reason，实际 {:?}",
+        lines_text(&lines)
+    );
+
+    let mut bare = make_subagent("alpha", "Alpha");
+    bare.is_error = true;
+    let lines = super::detail_header_lines(&bare, &grid, width, &theme);
+    assert_eq!(lines.len(), 2, "failed 无原因只保留身份两行");
+    assert!(
+        lines.iter().all(|line| !line.to_string().trim().is_empty()),
+        "无原因不得渲染空行，实际 {lines:?}"
+    );
+
+    let mut completed = make_subagent("alpha", "Alpha");
+    completed.error_reason = Some("done".into());
+    let lines = super::detail_header_lines(&completed, &grid, width, &theme);
+    assert_eq!(lines.len(), 2, "completed 不追加原因行");
+    assert!(
+        !lines_text(&lines).contains("done"),
+        "成功 result 不作为失败原因显示，实际 {:?}",
+        lines_text(&lines)
+    );
+}
+
+/// Q11 数据源：bg live 明细的 `subagent_result` 经面板合成组进入身份头；
+/// `subagent_is_error` 决定 failed 符号。
+#[test]
+fn detail_header_shows_live_subagent_failure_result_as_reason() {
+    let theme = peri_theme::builtin::dark_theme();
+    let (grid, width) = measured_detail(80);
+    let mut detail = live_detail_for("bg-agent", "subagent-1", "partial");
+    detail.subagent_result = Some("tool denied".into());
+    detail.subagent_is_error = true;
+    detail.status = crate::kit::atoms::BgLiveStatus::Failed;
+    let live = std::collections::HashMap::from([("task-1".to_string(), detail)]);
+    let group =
+        super::find_live_detail_subagent(&live, &[], Some("task-1")).expect("live detail group");
+
+    let lines = super::detail_header_lines(&group, &grid, width, &theme);
+    assert!(
+        lines_text(&lines).contains("tool denied"),
+        "live detail 的 subagent_result 须出现在原因行，实际 {:?}",
+        lines_text(&lines)
+    );
+    assert!(
+        lines[0].spans[0].content.contains('\u{d7}'),
+        "failed 状态符号须出现，实际 {:?}",
+        lines[0].spans[0].content
+    );
 }
 
 /// 首帧几何未知时不得按兜底宽度 prepare（旧路径 `Rect::default()` → 2 列）；

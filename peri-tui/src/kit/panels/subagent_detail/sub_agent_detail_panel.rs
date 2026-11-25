@@ -11,15 +11,21 @@
 
 use super::{child_history, render_cache};
 
+use std::sync::Arc;
+
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render::{
+    status_symbol_and_color, subagent_error_reason, subagent_error_reason_lines,
+};
 use crate::kit::tui_render_unit::EntryStatus;
 use crate::kit::tui_render_unit::FoldTarget;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiSubAgentGroup;
 use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
@@ -34,6 +40,48 @@ use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
+use unicode_width::UnicodeWidthStr;
+
+/// 身份头（面板自有 chrome）：状态符号 + agent 名称 + agent id；failed 时追加
+/// 失败原因行。
+///
+/// 状态符号复用主时间线组头映射 [`status_symbol_and_color`]，失败原因复用
+/// [`subagent_error_reason`] / [`subagent_error_reason_lines`]——面板不维护第二套
+/// 映射。`width` 是 Q9 记录的内容区让出滚动条列后的视口宽，`grid` 由同一份内容
+/// 区派生（`indent = 0`）；原因行沿用主区组头的缩进/换行预算。
+#[must_use]
+pub(super) fn detail_header_lines(
+    group: &TuiSubAgentGroup,
+    grid: &GridSpec,
+    width: usize,
+    theme: &ThemeDefinition,
+) -> Vec<Line<'static>> {
+    let (symbol, color) =
+        status_symbol_and_color(group.is_running, group.is_error, &theme.semantic);
+    let symbol_text = format!("{symbol} ");
+    let name = crate::truncate::truncate_to_width(
+        &group.agent_name,
+        width.saturating_sub(symbol_text.width()).max(1),
+    );
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(symbol_text, Style::default().fg(color)),
+            Span::styled(name, Style::new().fg(theme.component.panel.title).bold()),
+        ]),
+        Line::from(vec![Span::styled(
+            crate::truncate::truncate_to_width(&format!("  [{}]", group.agent_id), width),
+            Style::new().fg(theme.semantic.text.dim),
+        )]),
+    ];
+    // 只有真实 failed 且有原因（canonical error_reason 或子工具错误兜底）才
+    // 追加；completed/running 不把 result 文本当失败原因，也不留空行。
+    if group.is_error
+        && let Some(reason) = subagent_error_reason(group)
+    {
+        lines.extend(subagent_error_reason_lines(grid, reason));
+    }
+    lines
+}
 
 #[component]
 pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -43,9 +91,15 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sv = hooks.use_state(|| 0usize);
     let scrollbar_grab = hooks.use_state(|| None::<u16>);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
+    // 副产物命中（GenUI 按钮 / Mermaid 查看图）——draw 期按内容区几何重建，
+    // 事件处理器读取最近一帧（与消息区 hits 同模式）。
+    let artifacts = hooks.use_state(|| Arc::new(render_cache::DetailArtifacts::default()));
     let history = hooks.use_state(child_history::ChildHistoryView::default);
     let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
     let _ = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    // GenUI 动作只 bump heartbeat（不直接改 VIEW_MODELS）；面板订阅它才能把
+    // Set/Reset 后的按钮外观与高度刷新出来。
+    let _ = hooks.use_atom(&RENDER_HEARTBEAT);
     let _ = hooks.use_atom(&SELECTED_SUBAGENT_ID);
     // 面板内容区几何——draw 期记录（`DetailGeometry`），prepare、鼠标命中与滚轮
     // 仲裁读取同一份。首帧 update 尚未测量（`content == None`），此时不 prepare；
@@ -57,6 +111,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         geometry: DetailGeometry::default(),
         last_height: 0,
         last_viewport_height: 0,
+        artifacts,
     });
     let content = draw_hook.geometry.content();
     let prepare_layout = draw_hook.geometry.prepare_layout();
@@ -88,6 +143,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             move || {
                 history.write().reset(scope);
                 render_cache.write().clear(Vec::new());
+                *artifacts.write() = Arc::default();
                 *sv.write() = 0;
             }
         },
@@ -173,6 +229,17 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             && mouse.column >= viewport.x
                             && mouse.column < scrollbar_col =>
                     {
+                        // 缓存读锁内只做命中解析；动作（GenUI 分发 / 打开图面板）
+                        // 在锁外执行，避免动作触发重渲染时与缓存写入互相等待。
+                        let click = render_cache::resolve_artifact_click(
+                            &render_cache.read(),
+                            &artifacts.read(),
+                            mouse.row,
+                            mouse.column,
+                        );
+                        if render_cache::apply_artifact_click(click) {
+                            return EventResult::Consumed;
+                        }
                         let row = (*sv.read())
                             .saturating_add(mouse.row.saturating_sub(viewport.y) as usize);
                         render_cache.write().click_fold_header(row);
@@ -316,28 +383,18 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         } else {
             match &group {
                 Some(g) => {
-                    lines.push(Line::from(vec![Span::styled(
-                        crate::truncate::truncate_to_width(
-                            &g.agent_name,
-                            content.width.saturating_sub(1) as usize,
-                        ),
-                        Style::new()
-                            .fg(theme_def.read().component.panel.title)
-                            .bold(),
-                    )]));
-                    lines.push(Line::from(vec![Span::styled(
-                        crate::truncate::truncate_to_width(
-                            &format!("  [{}]", g.agent_id),
-                            content.width.saturating_sub(1) as usize,
-                        ),
-                        Style::new().fg(theme_def.read().semantic.text.dim),
-                    )]));
+                    let theme = theme_def.read().clone();
+                    lines.extend(detail_header_lines(
+                        g,
+                        &layout.grid,
+                        content.width.saturating_sub(1) as usize,
+                        &theme,
+                    ));
                     lines.push(Line::from(""));
                     if g.preview_omitted {
                         lines.push(Line::from(i18n::tr("subagent-preview-omitted")));
                     }
                     lines.push(Line::from(i18n::tr("subagent-history-open-hint")));
-                    let theme = theme_def.read().clone();
                     let mut cache = render_cache.write_no_update();
                     if cache.prepare(g, &layout.grid, theme, LANG_VERSION.get(), lines) {
                         *sv.write_no_update() = initial_detail_offset(
@@ -380,6 +437,7 @@ pub(super) struct DetailViewportHook {
     pub(super) geometry: DetailGeometry,
     pub(super) last_height: usize,
     pub(super) last_viewport_height: usize,
+    pub(super) artifacts: State<Arc<render_cache::DetailArtifacts>>,
 }
 
 impl Hook for DetailViewportHook {
@@ -418,6 +476,10 @@ impl Hook for DetailViewportHook {
         self.last_height = height;
         self.last_viewport_height = viewport.height as usize;
         cache.draw(drawer, viewport, top);
+        // 副产物命中与 draw 同源几何、同一次 ensure_visible 结果；滚动或内容
+        // 变化后热区随帧更新。
+        let hits = render_cache::collect_artifacts(&cache, viewport, top);
+        *self.artifacts.write_no_update() = Arc::new(hits);
         crate::kit::scrollbar_chrome::draw_scrollbar(
             drawer,
             Rect {
@@ -706,6 +768,8 @@ use crate::kit::atoms::BRIDGE_RESET_COUNTER;
 use crate::kit::atoms::BgDisplayEntry;
 
 use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
 
 use crate::kit::atoms::SELECTED_SUBAGENT_ID;
 

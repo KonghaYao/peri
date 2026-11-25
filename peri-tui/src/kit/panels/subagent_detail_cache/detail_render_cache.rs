@@ -40,6 +40,9 @@ pub(in super::super) struct DetailRenderCache {
     pub(super) focused: Option<FoldKey>,
     pub(super) dirty: bool,
     pub(super) source_changed: bool,
+    /// 上次 prepare 时的 GenUI 会话状态版本；按钮 Set/Reset 可能改变行高，
+    /// 必须重算 prefix/wrap，不能只靠 draw 期的逐槽失效。
+    genui_revision: u64,
 }
 
 #[derive(Default)]
@@ -106,6 +109,11 @@ impl DetailRenderCache {
     ) -> bool {
         let switched = self.instance_id != group.instance_id || self.plain.is_some();
         self.plain = None;
+        // GenUI 按钮状态（Set/Reset）可能改变正文行高：会话级版本变化时按
+        // Layout 重渲染所有槽位并重建 prefix，避免高度表停在旧值。
+        let genui_revision = crate::kit::genui::view_state::revision();
+        let genui_changed = self.genui_revision != genui_revision;
+        self.genui_revision = genui_revision;
         let context_changed = switched
             || self.grid != *grid
             || self.context.as_ref().is_none_or(|context| {
@@ -114,7 +122,7 @@ impl DetailRenderCache {
         self.header = header;
         let source_changed = !self.source.ptr_eq(&group.view_models);
         self.source_changed = source_changed && !switched && !self.dirty;
-        if !context_changed && !self.dirty && !source_changed {
+        if !context_changed && !self.dirty && !source_changed && !genui_changed {
             return false;
         }
         if switched {
@@ -161,6 +169,7 @@ impl DetailRenderCache {
             );
             let slot = &mut self.slots[index];
             if context_changed
+                || genui_changed
                 || slot.hash != Some(vm.content_hash())
                 || slot.variant != Some(std::mem::discriminant(&vm))
             {

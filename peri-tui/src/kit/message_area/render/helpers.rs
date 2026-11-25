@@ -76,7 +76,7 @@ pub(super) fn sym() -> SymbolSet {
 
 /// 状态符号 + 状态色：running/success/error 三元组。
 /// running 符号为动态 braille 动画帧（§8.2），返回 String。
-pub(super) fn status_symbol_and_color(
+pub(crate) fn status_symbol_and_color(
     is_running: bool,
     is_error: bool,
     sem: &peri_theme::semantic::SemanticTokens,

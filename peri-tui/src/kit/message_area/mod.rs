@@ -6,6 +6,7 @@
 //! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
 //! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
 
+pub(crate) mod artifact_hits;
 mod entry_nav;
 mod footer;
 mod genui_action;
@@ -102,6 +103,7 @@ use scroll::GesturePending;
 mod message_area;
 pub use message_area::*;
 
+pub(crate) use self::genui_action::dispatch_action as dispatch_genui_action;
 pub(crate) use self::hits::ImageHoverState;
 pub(crate) use footer::hash_todo_items;
 pub use footer::{TodoItem, TodoStatus};
