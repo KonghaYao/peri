@@ -93,12 +93,26 @@ pub(crate) fn mermaid_action_visual(
     wrap_map.get(action).map(|entry| entry.visual_start)
 }
 
-/// 动作行的横向命中列——从正文前缀到视口右缘（不含滚动条列）。
+/// 主区内容区：扣掉最右侧滚动条列。
+///
+/// 主区把含滚动条的整块区域交给命中计算；共享几何只接受内容区，
+/// 因此这里集中换算一次，避免每个副产物各减一列。
+pub(crate) fn content_area(area: Rect) -> Rect {
+    Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    }
+}
+
+/// 动作行的横向命中列——从正文前缀到内容区右缘（开区间）。
+///
+/// `area` 必须是内容区（不含滚动条列）：主区传入 [`content_area`]，
+/// 面板传入已扣除滚动条的视口。右缘按开区间返回，最后一列正文仍可命中。
 pub(crate) fn mermaid_action_columns(grid: GridSpec, area: Rect) -> (u16, u16) {
+    let x_end = area.x.saturating_add(area.width);
     let x_start = area
         .x
         .saturating_add(grid.cont_prefix_width().min(u16::MAX as usize) as u16)
-        .min(area.x.saturating_add(area.width.saturating_sub(1)));
-    let x_end = area.x.saturating_add(area.width.saturating_sub(1));
+        .min(x_end);
     (x_start, x_end)
 }

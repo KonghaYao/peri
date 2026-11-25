@@ -408,11 +408,12 @@ fn same_length_replacement_and_empty_slots_update_prefix() {
     assert_eq!(cache.slots_for(0..cache.height()), 1..2);
 }
 
-/// 面板本地 fold 与主区共用 `FoldKey::of` 键控：SubAgent / Interaction 条目
-/// 也可展开/收起；面板不新增嵌套打开（Q12 未批准），只切本地 fold。
+/// 面板本地 fold 与主区共用 `FoldKey::of` 键控，但只有「展开会改变可见内容」
+/// 的条目才是面板 fold 目标：SubAgent 组在详情渲染下始终是紧凑形态（§6.7），
+/// 展开没有可见差异，嵌套导航另案（Q12 未批准）；Interaction 仍可本地展开。
 #[test]
 #[serial_test::serial]
-fn panel_folds_subagent_and_interaction_with_shared_keys() {
+fn panel_folds_interaction_but_not_compact_subagent_groups() {
     use crate::kit::tui_render_unit::{FoldKey, InteractionKind, TuiAskUserBlock};
 
     let mut transcript = group("panel-keys", "");
@@ -440,11 +441,16 @@ fn panel_folds_subagent_and_interaction_with_shared_keys() {
     let mut cache = DetailRenderCache::default();
     cache.prepare(&transcript, &grid, theme, 0, Vec::new());
 
-    let subagent_key = FoldKey::of(&transcript.view_models[0]).expect("subagent 条目应可折叠");
+    let subagent_key = FoldKey::of(&transcript.view_models[0]).expect("主区已有 SubAgent fold 键");
     let interaction_key =
         FoldKey::of(&transcript.view_models[1]).expect("interaction 条目应可折叠");
     assert_eq!(subagent_key, FoldKey::SubAgent("nested-1".into()));
     assert_eq!(interaction_key, FoldKey::Interaction("rid-1".into()));
+
+    // 紧凑组不是面板 fold 目标：点击折叠头不认领、不设焦点、不产生 fold。
+    assert!(!cache.click_fold_header(cache.header.len() + cache.prefix[0]));
+    assert!(cache.folds.is_empty(), "SubAgent 不产生无可见效果 fold");
+    assert!(cache.focused.is_none(), "折叠头点击不得设焦点");
 
     // 面板 Enter：只切换本地 fold，不写全局选择、不打开嵌套面板。
     let original_selection = crate::kit::atoms::SELECTED_SUBAGENT_ID
@@ -455,15 +461,17 @@ fn panel_folds_subagent_and_interaction_with_shared_keys() {
     *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().write() = previous_selection.clone();
     assert_eq!(
         cache.focus_next(false),
-        Some(cache.header.len() + cache.prefix[0])
+        Some(cache.header.len() + cache.prefix[1]),
+        "焦点跳过没有可见展开效果的 SubAgent 组"
     );
-    assert!(cache.toggle_focused(false));
-    assert_eq!(cache.folds.get(&subagent_key), Some(&FoldState::Expanded));
-    assert!(cache.focus_next(false).is_some());
     assert!(cache.toggle_focused(false));
     assert_eq!(
         cache.folds.get(&interaction_key),
         Some(&FoldState::Expanded)
+    );
+    assert!(
+        !cache.folds.contains_key(&subagent_key),
+        "不得记录无可见效果的 SubAgent fold"
     );
     assert_eq!(
         *crate::kit::atoms::SELECTED_SUBAGENT_ID.state().read(),
@@ -636,7 +644,11 @@ fn panel_artifacts_keep_genui_and_mermaid_hits_with_content_geometry() {
         "fence tail → action row"
     );
     assert_eq!(mermaid.x_start, area.x + grid.cont_prefix_width() as u16);
-    assert_eq!(mermaid.x_end, area.x + area.width - 1);
+    assert_eq!(
+        mermaid.x_end,
+        area.x + area.width,
+        "右缘是开区间：最后一列正文仍可命中"
+    );
 
     // 滚动偏移与 draw 同口径：命中行随 top 上移。
     let scrolled = super::collect_artifacts(&cache, area, 2);
@@ -703,6 +715,88 @@ fn panel_artifact_clicks_reuse_main_genui_and_mermaid_actions() {
     assert!(detail.source.contains("A-->B"));
     assert_eq!(detail.slot, None);
     assert_eq!(detail.vm_hash, None);
+}
+
+/// 面板没有滚动条列：动作行命中区右缘是开区间，最后一列正文必须可点。
+#[test]
+#[serial_test::serial]
+fn panel_mermaid_hit_covers_last_content_column() {
+    let _guard = ArtifactGuard::new();
+    let transcript = group("artifact-edge", ARTIFACT_TEXT);
+    let grid = GridSpec::grid_for(80);
+    let (cache, _, _) = artifact_cache(&transcript, &grid);
+    let area = Rect::new(0, 0, grid.line_width(), 40);
+    let artifacts = super::collect_artifacts(&cache, area, 0);
+    let hit = artifacts.mermaid[0].clone();
+    assert_eq!(hit.x_end, area.x + area.width, "右缘是开区间");
+
+    let last_content_column = area.x + area.width - 1;
+    assert!(
+        super::apply_artifact_click(super::resolve_artifact_click(
+            &cache,
+            &artifacts,
+            hit.row,
+            last_content_column,
+        )),
+        "最后一列正文必须命中（收敛前该列落在半开区间外）"
+    );
+    assert!(
+        MERMAID_DETAIL.state().read().is_some(),
+        "命中必须走主区同一打开入口"
+    );
+}
+
+/// 异步 Mermaid 帧只经 `ensure_visible` 到达槽位：槽位身高变化后，面板的
+/// 前缀表与总高必须同步，否则后续条目仍按旧起点绘制、滚动总高偏大或偏小。
+#[test]
+#[serial_test::serial]
+fn panel_prefix_follows_async_mermaid_frame_resize() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::mermaid::reset_for_test();
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let grid = GridSpec::with_content(60);
+
+    let mut bubble = TuiAssistantBubble {
+        text: "```mermaid\ngraph TD\nA-->B\nB-->C\nC-->D\nD-->E\n```".into(),
+        reasoning: None,
+        message_id: Some("mermaid-growth".into()),
+        // 运行中的消息不冻结预览：帧由排版任务异步到达。
+        started_at: Some(std::time::Instant::now()),
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    let mut transcript = group("mermaid-growth", "");
+    transcript.view_models = im::vector![
+        TuiRenderUnit::TuiAssistantBubble(bubble.into()),
+        group("mermaid-growth-tail", "tail entry").view_models[0].clone(),
+    ];
+
+    let mut cache = DetailRenderCache::default();
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    let placeholder = cache.slots[0].height;
+    let stale_total = cache.height();
+
+    crate::kit::mermaid::drain_preview_jobs_now();
+    cache.ensure_visible(0..stale_total);
+
+    assert_ne!(
+        cache.slots[0].height, placeholder,
+        "帧到达后围栏封口身高变化（源码回退 → 帧）：{placeholder}"
+    );
+    for index in 0..cache.slots.len() {
+        assert_eq!(
+            cache.prefix[index + 1],
+            cache.prefix[index] + cache.slots[index].height,
+            "slot {index} 之后的前缀必须随身高同步"
+        );
+    }
+    assert_eq!(
+        cache.height(),
+        cache.header.len() + cache.prefix.last().copied().unwrap_or(0),
+        "滚动总高必须与帧身高一致"
+    );
+    assert_ne!(cache.height(), stale_total, "后续条目的起点必须后移或前移");
 }
 
 #[test]

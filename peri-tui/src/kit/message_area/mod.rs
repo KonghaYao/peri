@@ -56,6 +56,10 @@ mod inline_image_draw_tests;
 mod mermaid_viewport_tests;
 
 #[cfg(test)]
+#[path = "artifact_hits_test.rs"]
+mod artifact_hits_tests;
+
+#[cfg(test)]
 #[path = "mermaid_hscroll_test.rs"]
 mod mermaid_hscroll_tests;
 

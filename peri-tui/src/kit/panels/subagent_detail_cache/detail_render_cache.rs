@@ -56,6 +56,18 @@ pub(super) struct DetailSlot {
     pub(super) retained_bytes: usize,
 }
 
+/// 面板本地 fold 的可见目标。
+///
+/// SubAgent 组在详情渲染下始终是「≤3 个工具行 / 单行摘要」（`render/group.rs`
+/// §6.7），展开没有可见差异；嵌套导航另案（Q12）。面板不把 SubAgent 暴露为
+/// fold 目标，避免 Enter/点击产生无效果的状态变化。
+fn panel_fold_key(unit: &TuiRenderUnit) -> Option<FoldKey> {
+    match FoldKey::of(unit) {
+        Some(FoldKey::SubAgent(_)) => None,
+        key => key,
+    }
+}
+
 impl DetailSlot {
     pub(super) fn evict(&mut self) {
         self.entry.evict();
@@ -165,7 +177,7 @@ impl DetailRenderCache {
         for index in 0..self.source.len() {
             let vm = projected(
                 &self.source[index],
-                FoldKey::of(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
             let slot = &mut self.slots[index];
             if context_changed
@@ -270,7 +282,7 @@ impl DetailRenderCache {
             } else {
                 (start + step) % len
             };
-            if let Some(key) = FoldKey::of(&self.source[index]) {
+            if let Some(key) = panel_fold_key(&self.source[index]) {
                 self.focused = Some(key);
                 return self
                     .prefix
@@ -285,7 +297,7 @@ impl DetailRenderCache {
         let Some(index) = self.focused() else {
             return false;
         };
-        let Some(key) = FoldKey::of(&self.source[index]) else {
+        let Some(key) = panel_fold_key(&self.source[index]) else {
             return false;
         };
         let Some(current) = self
@@ -317,7 +329,7 @@ impl DetailRenderCache {
         if index >= self.source.len() || self.prefix[index] != content_row {
             return false;
         }
-        let Some(key) = FoldKey::of(&self.source[index]) else {
+        let Some(key) = panel_fold_key(&self.source[index]) else {
             return false;
         };
         self.focused = Some(key);
@@ -336,25 +348,47 @@ impl DetailRenderCache {
         start.min(self.slots.len())..end.max(start.min(self.slots.len()))
     }
 
+    /// 高度变化后从 `from` 起重建前缀表。`ensure_visible` 的异步重排（例如
+    /// Mermaid 布局到达）只更新槽位自身高度；总高与后续槽位起点必须同步，
+    /// 否则下一条消息仍按旧位置绘制，滚动总高也偏小。
+    fn rebuild_prefix_from(&mut self, from: usize) {
+        let from = from.min(self.slots.len());
+        for index in from..self.slots.len() {
+            let next = self.prefix[index].saturating_add(self.slots[index].height);
+            let Some(entry) = self.prefix.get_mut(index + 1) else {
+                break;
+            };
+            *entry = next;
+        }
+    }
+
     pub(super) fn ensure_visible(&mut self, rows: Range<usize>) -> Range<usize> {
         let visible = self.slots_for(rows);
         let Some(context) = self.context.as_ref() else {
             return visible;
         };
         let frame = current_frame();
+        let mut resized_from: Option<usize> = None;
         for index in visible.clone() {
             let slot = &mut self.slots[index];
             let previous_bytes = slot.bytes();
+            let previous_height = slot.height;
             let vm = projected(
                 &self.source[index],
-                FoldKey::of(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
             slot.ensure(&vm, &self.grid, context.clone(), frame);
+            if slot.height != previous_height {
+                resized_from.get_or_insert(index);
+            }
             self.resident_bytes = self
                 .resident_bytes
                 .saturating_sub(previous_bytes)
                 .saturating_add(slot.bytes());
             self.resident_slots.insert(index);
+        }
+        if let Some(from) = resized_from {
+            self.rebuild_prefix_from(from);
         }
         if self.resident_bytes > DETAIL_CACHE_BYTES {
             let cold: Vec<_> = self

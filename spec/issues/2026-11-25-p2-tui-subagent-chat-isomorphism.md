@@ -173,6 +173,7 @@ trait FoldStore {
 | 面板外框/标题/身份头/`h` 历史提示 | 详情 surface 需要身份与入口 |
 | 全宽、不进居中带 | 现状产品选择（见开放问题 Q10） |
 | 本地 fold、退出即清 | canonical 内容只读，面板可临时展开 |
+| SubAgent 组不作面板 fold 目标 | 详情渲染恒为紧凑形态（≤3 工具行/单行摘要），展开无可见差异；嵌套导航见 Q12 |
 | running→尾 / completed→头 | 打开时的阅读位置语义 |
 | 预览有界（数值现状） | 内存策略 |
 | 不提供 user 气泡/divider/todo 摘要 | 子 turn 数据模型不含这些段 |
@@ -188,7 +189,7 @@ trait FoldStore {
 | A1 参数集中 | `EntryRenderOptions` + `SurfaceProfile` | 两入口壳合一；偏差白名单测试 | 低 |
 | A2 NO_COLOR 单点 | 根级 post-draw 整帧剥离 | 全界面无色；主区不回退 | 中低 |
 | A3 `RenderEnv` | 移除渲染器 ambient atom 读取 | 不同 env 产出不同样式；无行为变化 | 机械面广 |
-| B fold 单点 | `FoldKey::of`/状态机唯一 | 10 个变体键一致；面板补 SubAgent/Interaction | 低 |
+| B fold 单点 | `FoldKey::of`/状态机唯一 | 10 个变体键一致；面板接入 Interaction（SubAgent 组无可展开内容） | 低 |
 | C1 `TimelineStore`（主区先行） | 抽槽向量/前缀/预算/artifacts，行为不变 | 全量 `peri-tui --lib`、`updated_slots` 不退化 | 高，独立 PR |
 | C2 面板切内核 + 主时间线布局 | 删 `indent=0`，共享 transition | 80 列 indent=2、台阶行、首帧几何正确 | 可见变化，需批准 |
 | D 共享视口 | `viewport_policy` + 面板 ViewportState | 纯函数单测；主区锚点/滚动回归 | 中 |
@@ -214,7 +215,7 @@ trait FoldStore {
 | Q10 | 面板是否进居中带 | 保持现状、范围外 | 需批准登记 |
 | Q11 | 组头状态/失败原因 | 身份头加状态符号 + 失败原因 | 可直接决定 |
 | Q12 | 嵌套 subagent 打开 | 面板内导航栈（Esc 弹栈） | 需架构批准 |
-| Q13 | fold 作用域 | 主区全局、面板本地；只统一键/状态机 | 可直接决定 |
+| Q13 | fold 作用域 | 主区全局、面板本地；只统一键/状态机；紧凑 SubAgent 组不作面板 fold 目标 | 可直接决定 |
 
 ## 7. 与既有设计的关系
 
@@ -232,6 +233,7 @@ trait FoldStore {
 - [ ] `profile_deviation_whitelist` 通过，且与本指南偏差表逐项一致。
 - [ ] `fold_key_parity_all_variants` 通过（10 个 `TuiRenderUnit` 变体）。
 - [ ] `zone_transition`/`viewport_policy`/`FoldKey::of` 各仅一份实现。
+- [ ] 面板 Mermaid 入口命中按内容区开区间计算（最后一列正文可点），且异步帧身高变化后面板前缀表/总高同步。
 - [ ] NO_COLOR 缓冲区测试覆盖面板区域。
 - [ ] `TimelineStore` 保留 publication 后缀与 `SlotIndex`，`updated_slots` 不退化。
 - [ ] code-index 路径修正、模块注释与实现一致。

@@ -119,7 +119,11 @@ pub(super) fn update_mermaid_action_hits(
     let mut hits: Vec<MermaidActionHit> = Vec::new();
     if let Some(area) = area_rect {
         let vp_end = area.y.saturating_add(vis_height);
-        let (x_start, x_end) = super::artifact_hits::mermaid_action_columns(grid, area);
+        // 主区 `area` 含滚动条列；共享命中列只接受内容区。
+        let (x_start, x_end) = super::artifact_hits::mermaid_action_columns(
+            grid,
+            super::artifact_hits::content_area(area),
+        );
         let caches = vm_caches.read();
         let vms = view_models.read();
         for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
