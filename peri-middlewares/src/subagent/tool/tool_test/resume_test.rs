@@ -902,7 +902,11 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
     assert!(receipt.contains("Background task"), "{receipt}");
 
     // 迭代上限耗尽 → max_iterations（fork resume 上限 = DEFAULT_SUBAGENT_MAX_ITERATIONS）
-    let completed = capture.wait().await;
+    // 本用例必须跑满 400 轮并逐轮落库，Windows 并发调度下会超过共享等待器的
+    // 10s 窗口；只在此处放宽，避免掩盖其它用例的真实阻塞。
+    let completed = capture
+        .wait_within(std::time::Duration::from_secs(30))
+        .await;
     assert!(!completed.success, "预算耗尽必须落为失败终态");
     assert_eq!(completed.child_thread_id.as_deref(), Some(id.as_str()));
     let failure = completed

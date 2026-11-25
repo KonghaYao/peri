@@ -796,7 +796,18 @@ impl BackgroundCapture {
 
     /// 等待下一次后台完成并返回结果；超时即判失败。
     pub(crate) async fn wait(&self) -> peri_acp_types::event::BackgroundTaskResult {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        self.wait_within(std::time::Duration::from_secs(10)).await
+    }
+
+    /// 同 [`Self::wait`]，由调用方决定等待窗口。
+    ///
+    /// 驱动满迭代预算的用例每轮都要落库，Windows 并发调度下会超过 10s；
+    /// 只放宽这类用例，保持其它用例对真实阻塞的检测灵敏度。
+    pub(crate) async fn wait_within(
+        &self,
+        timeout: std::time::Duration,
+    ) -> peri_acp_types::event::BackgroundTaskResult {
+        tokio::time::timeout(timeout, async {
             loop {
                 if let Some(result) = self.completions.lock().unwrap().pop() {
                     return result;
