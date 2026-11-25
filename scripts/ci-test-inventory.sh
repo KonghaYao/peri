@@ -52,44 +52,27 @@ workflow=".github/workflows/ci.yml"
 # 执行范围的事实源：与 ci.yml 各测试步骤的 `-E` 一一对应。改任一侧都会让
 # `--check` 失败，因此两边必须同时更新。
 #
-# 第一个步骤是「workspace 减去下面 10 个包」，其余步骤按包执行全部目标；
-# Compact 四套对抗额外用 binary 具名，保证逐套命中非零用例。
-# 两者合起来构成全部执行范围。
-workspace_excluded=(
-    peri-acp
-    peri-agent
-    peri-tui
-    peri-middlewares
-    peri-mcp-common
-    peri-mcp-web
-    peri-mcp-artifact
-    peri-mcp-cron
-    peri-mcp-monitor
-    peri-mcp-workspace
+# 第一个步骤是「workspace 全量减去下面 4 个 target」；4 个 target 各自再用一条
+# 只选中它的过滤器单独执行，保证逐套命中非零用例。两者合起来构成全部执行范围。
+main_excluded=(
+    'peri-agent:test:compact_pressure_adversarial_test'
+    'peri-agent:test:compact_session_adversarial_test'
+    'peri-agent:test:compact_session_manual_adversarial_test'
+    'peri-agent:test:compact_authority_projection_test'
 )
 
 # 其余步骤的期望执行范围，形如 `<package>:<target-kind>:<target-name>`；
 # kind 或 name 为 `*` 表示该 package 的全部测试目标。这里声明的是期望集合，
 # 实际 executed 由 ci.yml 的过滤器语义计算后与之比对。
 step_includes=(
-    'peri-acp:*:*'
-    'peri-agent:*:*'
     'peri-agent:test:compact_pressure_adversarial_test'
     'peri-agent:test:compact_session_adversarial_test'
     'peri-agent:test:compact_session_manual_adversarial_test'
     'peri-agent:test:compact_authority_projection_test'
-    'peri-tui:*:*'
-    'peri-middlewares:*:*'
-    'peri-mcp-common:*:*'
-    'peri-mcp-web:*:*'
-    'peri-mcp-artifact:*:*'
-    'peri-mcp-cron:*:*'
-    'peri-mcp-monitor:*:*'
-    'peri-mcp-workspace:*:*'
 )
 
 # doctest 步骤的范围：`cargo test --doc --workspace --exclude ...`。
-# nextest 不支持 doctest，因此单独一个入口，与原 `cargo test` 的范围保持一致。
+# nextest 不支持 doctest，因此单独一个入口，与 nextest 同 job 内共享编译。
 doctest_excluded=(
     peri-acp
     peri-tui
@@ -153,7 +136,7 @@ trap 'rm -f "$metadata_file"' EXIT
 cargo metadata --no-deps --format-version 1 > "$metadata_file"
 
 WORKFLOW="$workflow" \
-EXCLUDED_SET="$(printf '%s\n' "${workspace_excluded[@]}")" \
+EXCLUDED_TARGETS="$(printf '%s\n' "${main_excluded[@]}")" \
 INCLUDES="$(printf '%s\n' "${step_includes[@]}")" \
 DOCTEST_EXCLUDED="$(printf '%s\n' "${doctest_excluded[@]}")" \
 REQUIRED="$(printf '%s\n' "${required_suites[@]}")" \

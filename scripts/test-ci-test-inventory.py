@@ -19,16 +19,17 @@ sys.path.insert(0, str(SCRIPTS))
 import ci_test_inventory as ci  # noqa: E402
 
 
-EXCLUDED = ["peri-acp", "peri-agent", "peri-tui", "peri-middlewares", "peri-mcp-common"]
-INCLUDES = [f"{package}:*:*" for package in EXCLUDED]
 COMPACTS = [
     "compact_pressure_adversarial_test",
     "compact_session_adversarial_test",
     "compact_session_manual_adversarial_test",
     "compact_authority_projection_test",
 ]
+# 主调用排除的 target 与后续逐 binary 门禁的期望覆盖都只涉及这四套对抗。
+EXCLUDED = [f"peri-agent:test:{compact}" for compact in COMPACTS]
+INCLUDES = list(EXCLUDED)
 REQUIRED = [
-    *(f"peri-agent:test:{compact}" for compact in COMPACTS),
+    *EXCLUDED,
     "peri-agent:test:middleware_tests",
     "peri-agent:lib:*",
     "peri-acp:lib:*",
@@ -37,13 +38,8 @@ REQUIRED = [
     "peri-middlewares:test:mcp_isolation_contract",
     "peri-model:test:responses_wire_test",
 ]
-PER_BINARY = [f"peri-agent:test:{compact}" for compact in COMPACTS]
+PER_BINARY = list(EXCLUDED)
 DOCTEST_EXCLUDED = {"peri-acp", "peri-tui"}
-
-ACP_STEP = "package(=peri-acp)"
-COMPACT_STEPS = {
-    f"package(=peri-agent) & binary(={compact})" for compact in COMPACTS
-}
 
 
 def render_workflow(expressions: list[str], doctest: bool = True) -> str:
@@ -78,7 +74,7 @@ class InventoryEvaluationTests(unittest.TestCase):
         return ci.evaluate(
             metadata=metadata or self.metadata,
             workflow_text=workflow_text or self.normal_text,
-            workspace_excluded=set(EXCLUDED),
+            excluded_targets=EXCLUDED,
             include_entries=INCLUDES,
             doctest_excluded=DOCTEST_EXCLUDED,
             required=REQUIRED,
@@ -175,68 +171,87 @@ class InventoryEvaluationTests(unittest.TestCase):
             },
         )
 
-    def test_narrowed_filter_is_rejected(self):
+    def test_narrowed_gate_filter_is_rejected(self):
+        # 门禁收窄成同时要求 kind(=lib) 后命中零例；主调用又把它排除在外，
+        # 于是该 target 既不执行、也不满足逐 binary 门禁与必跑套件。
+        gate = "package(=peri-agent) & binary(=compact_authority_projection_test)"
         expressions = [
-            f"{ACP_STEP} & kind(=lib)" if expression == ACP_STEP else expression
+            expression + " & kind(=lib)" if expression == gate else expression
             for expression in self.normal_expressions
         ]
         result = self.evaluate(render_workflow(expressions))
         self.assertTrue(
             any(
                 "后续步骤的实际选择与 step_includes 不一致" in error
-                and "peri-acp:test:integration_test" in error
+                and "peri-agent:test:compact_authority_projection_test" in error
                 for error in result.errors
             ),
             result.errors,
         )
         self.assertTrue(
             any(
-                "没有任何后续步骤执行" in error
-                and "peri-acp:test:integration_test" in error
+                "没有任何测试步骤执行的目标" in error
+                and "peri-agent:test:compact_authority_projection_test" in error
                 for error in result.errors
             ),
             result.errors,
         )
         self.assertTrue(
             any(
-                "必跑套件缺失" in error and "peri-acp:test:integration_test" in error
+                "逐 binary 非零门禁" in error
+                and "peri-agent:test:compact_authority_projection_test" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+        self.assertTrue(
+            any(
+                "必跑套件缺失" in error
+                and "peri-agent:test:compact_authority_projection_test" in error
                 for error in result.errors
             ),
             result.errors,
         )
 
-    def test_broad_negation_must_exclude_every_manifest_package(self):
-        expressions = list(self.normal_expressions)
-        broad_index = next(
-            index for index, expression in enumerate(expressions) if expression.startswith("not (")
-        )
-        expressions[broad_index] = "not (package(=peri-acp))"
+    def test_main_negation_must_exclude_every_declared_target(self):
+        expressions = [
+            "not (package(=peri-agent) & binary(=compact_pressure_adversarial_test))",
+            *self.normal_expressions[1:],
+        ]
         result = self.evaluate(render_workflow(expressions))
         self.assertTrue(
             any(
-                "第一个测试步骤的排除范围与 workspace_excluded 不一致" in error
-                and "peri-agent" in error
+                "排除范围与 main_excluded 不一致" in error
+                and "compact_session_adversarial_test" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+
+    def test_main_negation_must_not_skip_ungated_targets(self):
+        main = self.normal_expressions[0][:-1] + " | package(=peri-model))"
+        result = self.evaluate(render_workflow([main, *self.normal_expressions[1:]]))
+        self.assertTrue(
+            any(
+                "排除范围与 main_excluded 不一致" in error and "多出" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+        self.assertTrue(
+            any(
+                "没有任何测试步骤执行的目标" in error
+                and "peri-model:lib:peri_model" in error
                 for error in result.errors
             ),
             result.errors,
         )
 
     def test_union_of_compact_suites_fails_per_binary_gate(self):
-        expressions = [
-            expression
-            for expression in self.normal_expressions
-            if expression not in COMPACT_STEPS
-        ]
         union = "package(=peri-agent) & (" + " | ".join(
             f"binary(={compact})" for compact in COMPACTS
         ) + ")"
-        agent_index = next(
-            index
-            for index, expression in enumerate(expressions)
-            if expression.startswith("package(=peri-agent) & not (")
-        )
-        expressions.insert(agent_index + 1, union)
-        result = self.evaluate(render_workflow(expressions))
+        result = self.evaluate(render_workflow([self.normal_expressions[0], union]))
         per_binary_errors = [
             error for error in result.errors if "逐 binary 非零门禁" in error
         ]
@@ -282,7 +297,7 @@ class InventoryEvaluationTests(unittest.TestCase):
         result = self.evaluate(render_workflow(expressions))
         self.assertTrue(
             any(
-                "没有任何后续步骤执行" in error
+                "没有任何测试步骤执行的目标" in error
                 and "compact_authority_projection_test" in error
                 for error in result.errors
             ),
@@ -392,7 +407,7 @@ class CommandLineTests(unittest.TestCase):
         env.update(
             {
                 "WORKFLOW": str(FIXTURES / "workflow-normal.yml"),
-                "EXCLUDED_SET": "\n".join(EXCLUDED),
+                "EXCLUDED_TARGETS": "\n".join(EXCLUDED),
                 "INCLUDES": "\n".join(INCLUDES),
                 "DOCTEST_EXCLUDED": "\n".join(sorted(DOCTEST_EXCLUDED)),
                 "REQUIRED": "\n".join(REQUIRED),

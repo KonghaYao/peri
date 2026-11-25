@@ -313,7 +313,7 @@ def _ident_list(targets: Iterable[Target]) -> str:
 def evaluate(
     metadata: dict,
     workflow_text: str,
-    workspace_excluded: set[str],
+    excluded_targets: Sequence[str],
     include_entries: Sequence[str],
     doctest_excluded: set[str],
     required: Sequence[str],
@@ -328,9 +328,19 @@ def evaluate(
     all_targets = set(targets)
     workspace_packages = {target.package for target in targets}
 
-    unknown = workspace_excluded - workspace_packages
-    if unknown:
-        fail(f"workspace_excluded 里有不是 workspace 包的名字: {sorted(unknown)}")
+    excludes: list[tuple[str, str, str]] = []
+    for entry in excluded_targets:
+        parsed_entry = _split_entry(entry)
+        if parsed_entry is None:
+            fail(f"main_excluded 条目格式应为 package:kind:name: {entry}")
+            continue
+        if parsed_entry[0] not in workspace_packages:
+            fail(f"main_excluded 里有不是 workspace 包的名字: {entry}")
+            continue
+        if not any(matches_entry(target, parsed_entry) for target in all_targets):
+            fail(f"main_excluded 条目没有命中任何测试目标: {entry}")
+            continue
+        excludes.append(parsed_entry)
 
     includes: list[tuple[str, str, str]] = []
     for entry in include_entries:
@@ -341,14 +351,6 @@ def evaluate(
         if parsed_entry[0] not in workspace_packages:
             fail(f"step_includes 里有不是 workspace 包的名字: {entry}")
         includes.append(parsed_entry)
-
-    include_packages = {entry[0] for entry in includes}
-    if include_packages != workspace_excluded:
-        fail(
-            "step_includes 的包与 workspace_excluded 不一致: "
-            f"缺 {sorted(workspace_excluded - include_packages)} "
-            f"多 {sorted(include_packages - workspace_excluded)}"
-        )
 
     # ---- 解析 ci.yml 的过滤器，按真实选择结果计算执行范围 ------------------
 
@@ -378,12 +380,23 @@ def evaluate(
     if len(broad_steps) != 1:
         fail(f"应当恰好有一个 not (...) 排除步骤，实际 {len(broad_steps)} 个")
 
+    if not parse_failed:
+        skipped = all_targets - executed
+        if skipped:
+            fail(f"没有任何测试步骤执行的目标: {_ident_list(skipped)}")
+
     expected_excluded_targets = {
-        target for target in all_targets if target.package in workspace_excluded
+        target for target in all_targets if any(matches_entry(target, entry) for entry in excludes)
     }
     expected_followup = {
         target for target in all_targets if any(matches_entry(target, entry) for entry in includes)
     }
+    uncovered_exclusions = expected_excluded_targets - expected_followup
+    if uncovered_exclusions:
+        fail(
+            "main_excluded 的目标没有任何后续步骤声明覆盖: "
+            f"{_ident_list(uncovered_exclusions)}"
+        )
 
     if not parse_failed and len(broad_steps) == 1:
         broad_ast = broad_steps[0][1]
@@ -391,7 +404,7 @@ def evaluate(
         broad_excluded = all_targets - broad_selected
         if broad_excluded != expected_excluded_targets:
             fail(
-                "第一个测试步骤的排除范围与 workspace_excluded 不一致（必须排除这些包的全部目标）: "
+                "主调用（唯一的 not (...) 步骤）排除范围与 main_excluded 不一致: "
                 f"缺少 {_ident_list(expected_excluded_targets - broad_excluded)} "
                 f"多出 {_ident_list(broad_excluded - expected_excluded_targets)}"
             )
@@ -513,7 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = evaluate(
             metadata=metadata,
             workflow_text=workflow_text,
-            workspace_excluded=set(os.environ.get("EXCLUDED_SET", "").split()),
+            excluded_targets=_read_env_list("EXCLUDED_TARGETS"),
             include_entries=_read_env_list("INCLUDES"),
             doctest_excluded=set(os.environ.get("DOCTEST_EXCLUDED", "").split()),
             required=_read_env_list("REQUIRED"),

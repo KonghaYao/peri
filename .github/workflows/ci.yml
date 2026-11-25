@@ -157,7 +157,8 @@ jobs:
             #   2) 把补丁源码 mtime 统一设为固定过去时间（2020-01-01），永远早于 .fingerprint；
             #   3) 把生成的 [patch.crates-io] 一次性写入 $CARGO_HOME/config.toml：
             #      - rust-cache 的 cargo metadata 原生通过，不再依赖 cmd-format 包装；
-            #      - 后续 11 个测试步骤直接调用 cargo，省去 11 次 python3 + 33 次 patch -R + 11 次重写 config。
+            #      - 后续 5 个测试步骤（1 次主调用 + 4 次逐 binary 门禁）直接调用 cargo，
+            #        省去逐步骤重复的 python3 + patch -R + config 重写。
             # ==================================================================
             - name: Restore patched crates cache
               id: patches-cache
@@ -230,79 +231,46 @@ jobs:
                   tool: nextest@0.9.148
 
             # ==================================================================
-            # 加速点 4：先一次性完成全仓测试编译（便于在 CI 面板清晰区分「编译耗时」与「测试耗时」），
-            # 随后 10 步直接调用 cargo nextest（不再经过 cargo-rmcp-patched.sh 重复校验），
-            # 保持与 scripts/ci-test-inventory.sh --check 100% 兼容。
+            # 测试执行：1 次主调用跑全部目标（除 Compact 四套对抗），4 套对抗各自再跑
+            # 一次作为逐 binary 非零门禁——合并成 union 时 `--no-tests=fail` 只约束合并
+            # 结果，其中一套命中零例会静默通过。不再单独 `--no-run` 预编译：nextest 的
+            # 构建阶段不参与过滤，主调用自身会完成同一份编译，预编译只是重复一次 cargo
+            # 选择校验，不减少工作量。
+            # `--profile ci` 提供单测试超时、50m 全局上限与不重试，见 .config/nextest.toml。
+            # 执行范围与 scripts/ci-test-inventory.sh --check 相互校验。
             # ==================================================================
-            - name: Compile workspace test binaries
-              shell: bash
-              run: cargo nextest run --locked --workspace --no-run
-
-            - name: Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)
+            - name: Run workspace tests (all targets except Compact adversarial suites)
               shell: bash
               run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'not (package(=peri-acp) | package(=peri-agent) | package(=peri-tui) | package(=peri-middlewares)
-                  | package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
-                  | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace))'
-
-            - name: Run ACP tests (excluding SDK E2E)
-              shell: bash
-              run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-acp)'
-
-            - name: Run Agent tests (all local targets, excluding Compact adversarial suites)
-              shell: bash
-              run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-agent) & not (binary(=compact_pressure_adversarial_test)
-                  | binary(=compact_session_adversarial_test)
-                  | binary(=compact_session_manual_adversarial_test)
-                  | binary(=compact_authority_projection_test))'
+                  cargo nextest run --locked --workspace --profile ci --no-tests=fail
+                  -E 'not (package(=peri-agent) & binary(=compact_pressure_adversarial_test)
+                  | package(=peri-agent) & binary(=compact_session_adversarial_test)
+                  | package(=peri-agent) & binary(=compact_session_manual_adversarial_test)
+                  | package(=peri-agent) & binary(=compact_authority_projection_test))'
 
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash
               run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_pressure_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_adversarial_test)
               shell: bash
               run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_manual_adversarial_test)
               shell: bash
               run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_manual_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_authority_projection_test)
               shell: bash
               run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
+                  cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_authority_projection_test)'
-
-            - name: Run TUI tests (excluding SDK E2E)
-              shell: bash
-              run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-tui)'
-
-            - name: Run middleware tests (lib serial + local integration)
-              shell: bash
-              run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-middlewares)'
-
-            - name: Run MCP capability tests (serial)
-              shell: bash
-              run: >-
-                  cargo nextest run --locked --workspace --no-tests=fail
-                  -E 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
-                  | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace)'
 
             # 提示：下方 --exclude 会改变 resolver=3 的特性统一导致部分依赖重编。
             # 经核查 peri-acp / peri-tui / peri-middlewares 均无可执行 Rust doctest（只有 text/json/ignore）；
