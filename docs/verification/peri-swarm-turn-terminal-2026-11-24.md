@@ -1182,3 +1182,164 @@ actor::service::service_test::<测试名>`；返工后 `a_steer_admitted_for_a_c
   `turn_in_progress()`（`service.rs:576`-`578`），若旧 `TurnLease` 仍持有 slot，结果是 receipt 已
   `Accepted`、user item 已记录、输入没有执行也没有执行者。
 - 已修复项（第 10 轮）：等待 per-session 锁期间 turn 换代导致的输入归属错误；顺序测试对固定 150ms 的依赖。
+
+## 评审回合补充（2026-11-24，第 12 轮）
+
+基线 `5918c7702`；以下是该 worktree 运行的 Rust 回归，不是端到端复验。CodeRabbit 在该 head 上提出
+2 条 Major 与 1 条 Minor（Minor 编号 4688328773），均确认成立并修正。代码改动只落在
+`peri-swarm/src/actor/service.rs`、`peri-swarm/src/actor/service_test.rs`、
+`peri-swarm/src/domain/error.rs`，另加本记录与 issue；`reader.rs`、store trait/schema、`Cargo.toml`、
+`InputState` 与 `docs/design/peri-swarm.md` 零改动。设计文档 §4.4 只承诺「同键同内容重放返回
+`existing`」与「受理回执前 receipt、user item 与 turn 预留都已持久化」，两条的前提都是输入已被受理；
+C3 的拒绝返回 409 且不写 receipt，不在该承诺范围内。设计文档没有陈述旧的写入顺序，故不改。
+本记录与代码随本轮改动同一提交，head 见 PR #578。
+
+第 12 轮是第 10-11 轮改动集的返工：沿用 `note_steer_for(admitted_turn)` 的准入绑定，改的是**谁在什么
+时候持有 steer 锁**、**拒绝时写不写**，以及**调用方被取消后的归属**。
+
+### 两条 Major 与一条 Minor
+
+| # | 问题 | 可达交错 | 定案 |
+|---|---|---|---|
+| Major（交接后继续执行，B1） | 预留、enqueue、dispatch 全在 `accept_input` 的 future 里执行。HTTP 层在 `202` 后 spawn 该 future，客户端断开或任务被 abort 会让它停在预留之后：`abandon_steer` 不执行，generation 悬空到兜底 closer；若停在 dispatch 失败与回滚之间，service 也不再回滚 | `accept_input` 被 abort：已 `note_steer_for` 并写 receipt+item，却没派发也没回滚；turn 只能等 300 秒兜底关闭 | `lock_owned()` 仍在**调用方**排队（顺序即调用顺序），guard 移入 `tokio::spawn` 的 handoff 任务；调用方只 await 结果。调用方被 abort 时任务继续到派发或回滚结束（guard 随任务保留）。`JoinError` 映射为 `Unavailable` + `AgentError`，不新增 `ErrorCode` |
+| Major（拒绝不留痕，C3） | `OtherTurn`（准入 turn 已结束、由另一 turn 接管）原实现先写 receipt 与 user item 再判定 turn。拒绝时留下 `Accepted` 但永不执行的收据，同一 `inputId` 重试命中 `existing_input` 返回 `Disposition::Existing` 而不执行——重试被"毒化" | steer 等待锁期间 `req-1` 关闭、`req-2` 打开；拒绝后调用方按契约重试同一 `inputId`，得到 `existing` 且输入永不执行 | task 内顺序固定为「同 id 预检查 → `note_steer_for(admitted_turn)` → `Reserved` 才写 receipt → user item → dispatch」；`OtherTurn` 零写入、零 host RPC，返回新的 `SwarmError::turn_superseded()`（`Conflict` + `TurnInProgress`，message 指向「admitted turn 已结束，可用同一 inputId 重试」，不带 `suggest=steer`） |
+| Minor（4688328773） | 顺序测试的反向验证不能把 timeout 当成"已观察"：若不在调用方取锁，必须先真的收到第二个输入的 dispatch，才能放行第一个 handoff 的 executor，否则"等不到就放行"会掩盖顺序反转 | 变异验证里 `bounded(...)` 超时被当成通过 | `concurrent_steers_dispatch_in_call_order` 先以 `runtime.steer.try_lock()` 判断锁是否由调用方持有；不在调用方持有时，先 `session/input/dispatch` 收到 `u2`（`assert_eq!(dispatched, "u2")`）并回包，之后才驱动第一个 handoff 的 executor；enqueue 与 dispatch 顺序都断言为 `["u1","u2"]` |
+
+### 用户决策
+
+- 交接（handoff）后继续执行：调用方被取消不撤销已预留的 steer；guard 由独立任务持有到派发或回滚结束。
+- 拒绝不留痕：`OtherTurn` 不写 receipt、不写 user item、不发 host RPC；同一 `inputId` 可重试。
+- 不兼容历史收据：旧实现留下的 `Accepted`-但未执行的收据不迁移、不特殊识别，重放仍按
+  `Disposition::Existing` 返回（登记为残留风险）。
+- `JoinError` 复用 `ErrorCode::AgentError`（`Kind::Unavailable`，`details.operation=steer_handoff`），
+  不新增错误码。
+
+### 设计（B1 + C3）
+
+1. `accept_input` 在调用方取锁：顺序是「释放 `admission` → `steer_waiting`（仅测试）→
+   `Arc::clone(&runtime.steer).lock_owned().await`（`service.rs:1916`）→ `tokio::spawn`（`service.rs:1924`），
+   guard 移入任务（`service.rs:1926`）。调用方被 abort 不会重排取锁顺序，也不会撤销 handoff。
+2. task 内顺序：同 id 预检查（`service.rs:818`-`819`）→ `note_steer_for(admitted_turn)`（`service.rs:825`）→
+   `Reserved` 才 `put_input`（`service.rs:847`）→ `record_user_input`（`service.rs:854`）→
+   `input_outcome`（`service.rs:857`）→ `dispatch_steer`（`service.rs:858`）。任何错误或结果为
+   `Existing` 都在 guard 内 `abandon_steer(epoch)`（`service.rs:833`-`835`）。`OtherTurn`（`service.rs:828`）与
+   `NoTurn`（`service.rs:827`）在写入之前返回。
+3. task 内不取 `admission`；`NoTurn` 回退在 `handle.await` 返回、guard 释放后重新取 `admission`
+   （`service.rs:1949`），`require_current_runtime` 后按 `is_running() || has_open_turn()`（`service.rs:1951`）
+   决定：先按 `existing_input` 返回 `Existing`，否则 `turn_in_progress`，两条都不写；无 turn 时才写
+   receipt + user item 并返回 `pending_turn: Some(..)`（`service.rs:1963`-），不在 `accept_input` 内联跑模型 turn。
+4. `steer_waiting`（`service.rs:159`）是 `#[cfg(test)]` 的 `Notify`，只用于测试观察"准入快照已读、
+   调用方已停在锁上"；生产构建里不存在该字段，不改变生产时序。
+5. `turn_superseded()`（`domain/error.rs:261`）新增；`turn_in_progress()` 与既有 409 语义不变。
+6. 幂等重放仍早于 `ensure_live`（`service.rs:1879`-`1880`）：接管中断会话会失败丢失的 turn，重复受理因此
+   不能有持久化副作用。本轮曾试删该早返回，`actor_runtime_test` 的两条
+   `interrupted::*` 在 `interrupted.rs:114` 失败（持久 turn 被改成 `failed`），故保留，并把原因写进注释。
+
+### 定向回归
+
+命令为 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib -- --exact
+actor::service::service_test::<测试名>`。
+
+| 测试 | 覆盖 | 结果 |
+|---|---|---|
+| `concurrent_steers_dispatch_in_call_order`（`service_test.rs:583`，普通 `#[test]`，双 runtime + gated） | B1：调用顺序 = enqueue/dispatch 顺序；`try_lock` 证明 handoff 期间锁被持有（`service_test.rs:611`、`:631`）；无锁时先等 u2 的真实 dispatch（`service_test.rs:617`-`620`）。抓 M1 | 10/10 exit 0 |
+| `a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances`（`:671`） | dispatch 回 RPC 错误 → `QueueUnavailable`、`steer_pending() == false`、generation 1；下一次 steer 推进到 2 | 10/10 exit 0 |
+| `aborting_after_handoff_still_rolls_back_a_dispatch_error`（`:715`） | B1：调用方被 abort 后，detached handoff 仍会在 dispatch 失败时回滚；`steer.lock()` 只能在处理完之后取得 | 10/10 exit 0 |
+| `aborting_before_steer_handoff_leaves_no_trace_and_can_retry`（`:748`） | 取消发生在取锁前：零写入、generation 0、无 host RPC，同一 `inputId` 重试 `Inserted` | 10/10 exit 0 |
+| `aborting_after_steer_handoff_still_dispatches_and_continues_the_turn`（`:785`） | B1：调用方被 abort 后 handoff 继续到 dispatch，receipt 保留，generation 1，后续 run 的终态正常关闭 turn | 10/10 exit 0 |
+| `an_accepted_steer_is_dispatched_with_the_admission_turn`（`:819`） | 正例（接线）：`accept_input` 把准入快照的 turn 传给 handoff；`Inserted`、`pending_turn` 空、generation 1、`steer_pending()` 真、active 仍 `req-live`。抓 M5（admitted turn 常量） | 10/10 exit 0 |
+| `a_steer_accepted_into_a_turn_that_is_replaced_while_waiting_is_rejected`（`:859`，重写） | C3 负例：停在锁上 → 关闭 `req-1`、打开并发布 `req-2` → 拒绝为 `TurnInProgress`/`Conflict`（无 `suggest`）、`assert_unwritten`、无 host RPC、generation 0、active 仍 `req-2`；随后同一 `inputId`/fingerprint 在 `req-2` 上重试并真正派发（`Inserted`、receipt 写入、generation 1）。抓 M4 | 10/10 exit 0 |
+| `concurrent_duplicates_of_one_input_dispatch_once`（`:944`，新增） | 同 id 并发对：恰好一个 `Inserted`、一个 `Existing`；一条 receipt、一条 user item、一次 enqueue/dispatch；`steer_generation() == 1`。抓 M3 | 10/10 exit 0 |
+| `a_steer_whose_turn_ends_before_the_handoff_becomes_a_pending_turn`（`:998`，新增） | `NoTurn` 回退：返回 `pending_turn: Some(..)`、receipt+item 写入、generation 0、无 host RPC、不内联执行 | 10/10 exit 0 |
+| `a_steer_whose_turn_ends_while_a_replacement_starts_is_rejected_without_writing`（`:1041`，新增） | 回退与后继 turn 竞争：测试持 `admission`，期间 `begin_turn("req-2")` 并发布 slot → `turn_in_progress`（`details.suggest=steer`）、零写入、无 host RPC、generation 0、active 仍 `req-2` | 10/10 exit 0 |
+
+10 条各连跑 10 次（共 100 次）全部 `1 passed; 0 failed`，无 flake；`concurrent_steers_dispatch_in_call_order`
+每次 `finished in 0.00s`（有锁路径不依赖 sleep 或超时；M1 还原后的单跑为 `0.01s`）。`a_steer_whose_turn_ends_while_a_replacement_starts_...`
+用「持有 `admission` + 取到 `steer` 锁」证明 handoff 已结束，没有固定 sleep。
+
+新增测试说明：
+
+- 重写后的负例不再等待"锁之前写 receipt"（C3 之后 receipt 只在 handoff 拿到锁后写）。握手改为
+  `steer_waiting` 通知 + `runtime.admission.try_lock().is_ok()`：通知发生在释放 `admission` 之后、
+  `lock_owned()` 之前，测试持有 `runtime.steer`，因此通知到达即证明调用方已读完准入快照并停在锁上。
+- `NoTurn` 回退竞争用例的顺序是「先持 `admission` → 放 `steer` → 取 `steer` 锁证明 handoff 结束 →
+  `begin_turn("req-2")` → 放 `admission`」。tokio `Mutex` 是 FIFO，调用方先排队，取锁权先给调用方；
+  测试随后取到锁即证明 handoff 已返回，此时才启动后继 turn，因此没有"谁先跑"的竞态。
+- 同 id 并发对只断言"恰好一次 dispatch"与"恰好一个 generation"，不断言哪个请求赢：`put_input` 的
+  `Inserted`/`Existing` 由锁内顺序决定，两个结果都合法。重复受理不产生第二次 dispatch/item 是因为
+  `put_input` 本身幂等；task 内预检查的作用是**不预留多余 generation**（M3 的实际失败点）。
+
+### 反向验证（第 12 轮，真实执行）
+
+每个变异都用 `cp` 备份 `service.rs`、临时修改、跑指定测试、`cp` 还原，并核对 SHA-256
+（变异前/还原后均 `3f27ebf9d6d9a5b9a60b42fd48c8cee7551976c58d8f680ea4d86c13494e3276`）；还原后
+`service_test.rs` 的 SHA-256 仍为 `0cebaaa4c5564f57bd991f8f3f37d81569c6734f5a75fbbd1aa0befdf4491d28`。
+变异都在本 worktree 内进行，未新建副本。
+
+| 变异 | 改动 | 期望失败测试 | 实际失败位置与断言 |
+|---|---|---|---|
+| M1 | `lock_owned()` 搬进 spawned task（调用方不再排队取锁） | `concurrent_steers_dispatch_in_call_order` | FAILED，exit 101，`panicked at peri-swarm/src/actor/service_test.rs:656`，`left: ["u2", "u1"] right: ["u1", "u2"]`，`dispatch order must follow call order`。失败前已在该测试的 `!caller_locked_first` 分支真实收到 u2 的 `session/input/dispatch`（`dispatched == "u2"` 断言通过）并回包，未用 timeout 代替观察 |
+| M2 | 删除 `handoff_steer` 中 dispatch 失败后的 `abandon_steer`（`service.rs:833` 的 `if !matches!` 体，`abandon_steer` 在 `:835`） | `a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances` | FAILED，exit 101，`panicked at peri-swarm/src/actor/service_test.rs:689`，`assertion failed: !runtime.log.steer_pending()` |
+| M3 | 跳过 task 内的同 id 预检查（`service.rs:818`-`819`） | `concurrent_duplicates_of_one_input_dispatch_once` | FAILED，exit 101，`panicked at peri-swarm/src/actor/service_test.rs:985`，`left: 2 right: 1`，`a same-id replay must not reserve a second generation`。**与预期不同**：没有出现第二次 dispatch/item——`put_input` 本身幂等，重复受理在锁内必然看到 `Existing`；预检查的可观察差异是多余的 generation 预留 |
+| M4 | 把 receipt/item 写到 `note_steer_for` 之前（旧顺序，`NoTurn` 也返回已写结果） | `a_steer_accepted_into_a_turn_that_is_replaced_while_waiting_is_rejected` | FAILED，exit 101，`panicked at peri-swarm/src/actor/service_test.rs:519`，`the input must not leave an accepted receipt`（`assert_unwritten`） |
+| M5 | `admitted_turn` 换成常量 `"mutation-admitted"` | `an_accepted_steer_is_dispatched_with_the_admission_turn` | FAILED，exit 101，`panicked at peri-swarm/src/actor/service_test.rs:837`，`an input admitted into the open turn is accepted: SwarmError { kind: Conflict, code: TurnInProgress, message: "the admitted turn has ended; retry with the same inputId", details: Null }` |
+
+M1-M5 全部被杀死。还原后：M1 与 M5 各自单跑对应测试通过（M1 `1 passed; 0 failed; 0 ignored; 0 measured;
+336 filtered out; finished in 0.01s`）；M2/M3/M4 还原后先由全量 `--lib` 回到 `337 passed; 0 failed`，
+再定向复跑 5 条受影响用例，全部 `1 passed; 0 failed; ... 336 filtered out`（M2 `0.02s`、M3 `0.00s`、
+M4 `0.02s`、顺序测试 `0.00s`、正例 `0.00s`）。
+
+### 全量门禁
+
+- `./scripts/cargo-rmcp-patched.sh fmt -p peri-swarm -- --check` → exit 0。
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -D warnings` → exit 0，
+  末行 `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 10.87s`。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib` → exit 0：
+
+  ```text
+  test result: ok. 337 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+  ```
+
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0，合计 435 passed、0 failed、
+  6 ignored：lib 337、main 0、`actor_runtime` 17（1 ignored）、`http_contract` 25、`items_pagination` 13、
+  `loom_store` 0（3 ignored）、`mcp_injection` 4、`openai_hosted` 7、`rivet_actor` 0（2 ignored）、
+  `session_resources` 17、`streaming` 15、Doc-tests 0。
+- `git diff --check` → exit 0。`bash scripts/check-changed.sh` → exit 0（检查 `-p peri-swarm`，只改该 crate
+  与文档）。
+- `git status --short` 只有 3 个已修改文件（`service.rs`、`service_test.rs`、`domain/error.rs`）加本轮两条
+  文档，无未跟踪文件。`service_test.rs` 的测试数相对 HEAD 由 11 条变为 16 条（净增 5 条）：删除 1 条
+  closed-turn 白盒用例 `a_steer_admitted_for_a_closed_turn_is_rejected_instead_of_dispatched`（`service.steer`
+  直调入口本轮并入 handoff；同一 `OtherTurn` 拒绝场景由重写后的负例在公共入口覆盖，`NoTurn` 回退由
+  本轮两条新用例覆盖）；新增 6 条（3 条 abort/取消、1 条同 id 并发对、2 条 `NoTurn`）；其余 4 条保留或
+  重写：`concurrent_steers_dispatch_in_reservation_order` 改名重写为
+  `concurrent_steers_dispatch_in_call_order`，`a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances`
+  与 `a_steer_accepted_into_a_turn_that_is_replaced_while_waiting_is_rejected` 重写，
+  `an_accepted_steer_is_dispatched_with_the_admission_turn` 保留。
+
+### 本次未覆盖与残留窗口
+
+- **`Accepted` 但未执行**：receipt 写入之后、user item 写入或 host dispatch 失败时，输入留下
+  `InputState::Accepted` 收据但不会执行。这不是本轮新引入：HEAD 的顺序也是 receipt → item → dispatch，
+  dispatch 失败同样留下收据；本轮的新语义只有 C3 的 `OtherTurn` 零写入。本轮另外把 `last_seq` 读取
+  前移到 dispatch 之前（`persist_and_dispatch_steer` 里 `input_outcome` 在 `dispatch_steer` 之前调用，
+  `service.rs:857`-`858`），因此该步失败也会留下 `Accepted` 收据。store 没有更新/删除 input 收据的
+  API（本轮未改 trait），因此这只能靠同一 `inputId` 的重放语义体现为 `Existing`；登记而非修复。
+- **reserve 之后 panic（新）**：handoff 任务在 `note_steer_for` 之后、`abandon_steer` 之前 panic 时，
+  generation 留在 `outstanding_steers` 里，由 300 秒兜底 closer 关闭；服务层没有 `Drop` 清理。
+- **handoff 持锁等待无总超时的 host RPC（新）**：handoff 任务在持有 `steer` 锁时等待 host 的
+  `session/input/*` RPC（snapshot / enqueue / dispatch），这些 RPC 没有总超时；若宿主挂起，调用方
+  abort 也不会释放锁，该会话后续 steer 会一直排队（HEAD 中调用方 abort 会释放锁）。这是 B1（交接后
+  继续执行）的 liveness 取舍，暂未加总超时；加超时也无法安全撤回已 enqueue 的 input。
+- **`NoTurn` 回退的 202 语义（新）**：回退写 receipt + user item 并返回 `pending_turn`，模型 turn 由
+  调用方在 `202` 之后执行；调用方消失（进程退出）时该输入不会执行。这与普通 `mode=Turn` 的受理相同，
+  但 steer 输入现在也走这条路径（旧实现会在 `accept_input` 内联跑 turn）。
+- 不兼容历史收据（决策）：旧实现留下的 `Accepted`-未执行收据仍按 `Existing` 返回，重试不会执行；
+  本轮没有迁移脚本。
+- 第 10-11 轮残留不变：`OtherTurn` 判定的帧后果由 C3 消除（不再写 item），但「enqueue 成功、dispatch
+  失败、宿主之后仍启动该 input」的矛盾状态仍未复现与修复；「每个 dispatched input 恰好一个
+  `run_started`」仍是假设（测试只断言 dispatch RPC 顺序）。
+- 没有真实 host / Rivet actor 并发 RPC 的端到端复验，也没有随机/压力交错；10 次连跑是确定性时序下的
+  重复，不构成并发压力证明。
+- `NoTurn` 回退分支没有验证"回退写完后调用方真的执行 `run_pending_turn`"；本轮只断言
+  `pending_turn.is_some()` 与 receipt/item 存在，`actor_runtime_test` 的 `interrupted::*` 覆盖了普通受理的
+  执行路径，但未覆盖 steer 回退的这一次。
