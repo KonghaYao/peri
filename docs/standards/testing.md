@@ -16,7 +16,10 @@
 | **单元测试** | 同目录 `_test.rs` 文件（如 `config_test.rs`） | 测试代码 ≥ 30 行 |
 | **单元测试** | 同文件末尾 `#[cfg(test)] mod tests { ... }` | 测试代码 < 30 行 |
 | **集成测试** | crate 根目录 `tests/` 目录（如 `tests/integration_test.rs`） | 跨模块端到端验证，只能访问 crate 的 `pub` API |
+| **集成测试（合并）** | `tests/it/main.rs` 根 + `tests/it/<stem>.rs` 模块 | 未被 CI 逐 binary 门禁的端到端文件，合用一个 target 以减少链接成本；`scripts/ci-test-inventory.sh` 的 `required_suites` / `per_binary_suites` 命中者保持独立 target 与文件名 |
 | **测试辅助代码** | 各测试文件内部局部定义 | 不设共享 test_helpers 模块 |
+
+无 `#[test]` 的 bin target 在 `[[bin]]` 设 `test = false`，不为空测试 harness 支付链接成本；有测试则保持默认。
 
 ### 文件命名
 
@@ -37,6 +40,8 @@ mod tests;        // 或 mod foo_tests;（见下）
 ```
 
 模块名参与 `cargo test -- <过滤词>` 匹配，因此当某个测试文件是 canonical 命令的命中目标时，模块名必须让该过滤词成立：过滤 `mcp::mcp_v4_seam` 的文件要挂成 `mod mcp_v4_seam_tests;`，沿用 `mod tests;` 会让过滤词命中不到（`cargo test` 仍以 0 tests 退出 0）。
+
+合并的集成测试在 `tests/it/main.rs` 用文件 stem 声明模块，用例全名变为 `<stem>::<test>`：canonical 命令、`--exact` 子进程自调用与 nextest 过滤器（`-E 'test(...)'`、`default-filter`、测试组）都必须用完整新名。子进程 `current_exe()` 重新执行自身时改传完整名，否则 `--exact` 命中零用例而假绿。
 
 过滤词同时必须是**精确**模块路径：过宽前缀会连带命中同目录的其他测试模块（例：`mcp::builtin` 会一并命中 `mcp::builtin_apply_tests`、`mcp::builtin_runtime_tests` 与 `mcp::builtin::tests`），使命令覆盖范围与意图不符；需要单个模块时写完整路径（如 `mcp::builtin::tests`）。
 

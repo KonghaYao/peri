@@ -1,4 +1,4 @@
-// peri-controller/tests/langfuse_e2e.rs
+// peri-controller/tests/it/langfuse_e2e.rs
 // e2e mock 端到端测试：验证完整 turn 序列从 tracer → batcher → HTTP 的链路。
 //
 // 注意：`on_turn_end()` 内部调用 `tokio::spawn`，因此需要 `#[tokio::test]`
