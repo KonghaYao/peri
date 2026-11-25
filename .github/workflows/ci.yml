@@ -121,16 +121,16 @@ jobs:
             # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
             # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
             #
-            # Linux 试验（Ubuntu 缓存提速，数据见 PR 正文）：rust-cache 保存阶段用裸
+            # Linux 缓存实测（数据见 PR #582）：rust-cache 保存阶段用裸
             # `cargo metadata --all-features` 收集依赖集；peri-resources 的
             # emscripten-only `wasm-fetch` 特性只存在于 patches/ 的本地补丁，
             # 裸 cargo 解析失败后 cleanTargetDir 按空依赖集清理，缓存只剩 ~11MB，
             # 依赖每轮全量重编。cmd-format 仅 Linux 把 metadata 转交带补丁配置的
-            # scripts/ci-rust-cache-cargo.sh，其余平台保持 {0}。
-            # cache-workspace-crates 已在 Linux 实测：恢复的 workspace 产物会被源码
-            # mtime 指纹全部作废（首次 nextest 仍重编 34 个 crate），只增加归档与
-            # 解包成本，故维持默认 false；cache-all-crates 三平台保持 false
-            # （本 job 没有 CI 内额外编译的 crate）。
+            # scripts/ci-rust-cache-cargo.sh，修复后依赖缓存 1.06GB，首组编译
+            # 从 ~382s 降到 ~290s。cache-workspace-crates 实测无效（恢复后 34 个
+            # workspace crate 仍全部重编，归档 +650MB），保持 false；sccache 的
+            # GHA 后端实测 0 命中（可缓存面仅 lib/check），不启用。
+            # cache-all-crates 保持 false（本 job 没有 CI 内额外编译的 crate）。
             #
             # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
             # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
@@ -138,13 +138,12 @@ jobs:
             # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
             # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
             # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
-            # 实验期间临时允许本分支写缓存；最终提交恢复为仅 main。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
                   key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-linux-cache-v1' || '' }}
                   cmd-format: ${{ runner.os == 'Linux' && 'bash scripts/ci-rust-cache-cargo.sh {0}' || '{0}' }}
-                  save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/ubuntu-build-cache' }}
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
             # 三条平台都由 GitHub Releases 的预编译产物安装（不源码编译）。
@@ -152,34 +151,6 @@ jobs:
               uses: taiki-e/install-action@v2
               with:
                   tool: nextest@0.9.148
-
-            # 实验：Linux 用 sccache 的 GitHub Actions 后端缓存 rustc 产物。
-            # sccache 只缓存 lib/check 单元（test/bin/proc-macro 与最终链接不可缓存），
-            # 并与 rust-cache 共用 10 GB 缓存池；是否保留由冷/热两跑净收益决定。
-            # 环境变量放在缓存步骤之后，避免 RUSTC_WRAPPER 进入 rust-cache 的 env hash。
-            - name: Install sccache
-              if: runner.os == 'Linux'
-              uses: taiki-e/install-action@v2
-              with:
-                  tool: sccache@0.20.1
-
-            - name: Configure sccache storage tokens
-              if: runner.os == 'Linux'
-              uses: actions/github-script@v7
-              with:
-                  script: |
-                      core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-                      core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-            - name: Enable sccache
-              if: runner.os == 'Linux'
-              run: |
-                  {
-                      echo "RUSTC_WRAPPER=sccache"
-                      echo "SCCACHE_GHA_ENABLED=true"
-                      echo "SCCACHE_GHA_VERSION=v1"
-                      echo "SCCACHE_GHA_RW_MODE=${{ (github.ref == 'refs/heads/main' || github.head_ref == 'ci/ubuntu-build-cache') && 'READ_WRITE' || 'READ_ONLY' }}"
-                  } >> "$GITHUB_ENV"
 
             # 统一测试入口：所有测试步骤共用同一组 Cargo 选择（--locked --workspace），
             # 测试范围差异只落在 nextest 的 `-E` 过滤器上，因此整个 job 内依赖图、
@@ -285,10 +256,6 @@ jobs:
               run: >-
                   ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
                   --exclude peri-acp --exclude peri-tui --exclude peri-middlewares
-
-            - name: Show sccache stats
-              if: always() && runner.os == 'Linux'
-              run: sccache --show-stats || true
 
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
