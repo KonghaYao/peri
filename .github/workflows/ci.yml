@@ -120,11 +120,17 @@ jobs:
             # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
             # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
             # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
-            # cache-workspace-crates 与 cache-all-crates 均保持默认 false（已评估，不启用）：
-            # 前者恢复来的产物会被源码指纹立刻作废（本工作区的 crate 几乎每次提交都在变），
-            # 却把清理、压缩、上传的成本按整个 target 计（现 Windows 单平台已约 1.1GB）；
-            # 后者只对本仓在 CI 内额外编译的 crate 有意义，而本 job 没有这类编译
-            # （跨平台工具链由预编译产物安装），故无收益。
+            #
+            # Linux 缓存实测（数据见 PR #582）：rust-cache 保存阶段用裸
+            # `cargo metadata --all-features` 收集依赖集；peri-resources 的
+            # emscripten-only `wasm-fetch` 特性只存在于 patches/ 的本地补丁，
+            # 裸 cargo 解析失败后 cleanTargetDir 按空依赖集清理，缓存只剩 ~11MB，
+            # 依赖每轮全量重编。cmd-format 仅 Linux 把 metadata 转交带补丁配置的
+            # scripts/ci-rust-cache-cargo.sh，修复后依赖缓存 1.06GB，首组编译
+            # 从 ~382s 降到 ~290s。cache-workspace-crates 实测无效（恢复后 34 个
+            # workspace crate 仍全部重编，归档 +650MB），保持 false；sccache 的
+            # GHA 后端实测 0 命中（可缓存面仅 lib/check），不启用。
+            # cache-all-crates 保持 false（本 job 没有 CI 内额外编译的 crate）。
             #
             # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
             # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
@@ -135,7 +141,8 @@ jobs:
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
-                  key: ${{ matrix.target }}
+                  key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-linux-cache-v1' || '' }}
+                  cmd-format: ${{ runner.os == 'Linux' && 'bash scripts/ci-rust-cache-cargo.sh {0}' || '{0}' }}
                   save-if: ${{ github.ref == 'refs/heads/main' }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
