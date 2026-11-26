@@ -61,8 +61,6 @@ pub use schema::SWARM_STATE_SCHEMA_VERSION;
 
 use super::StoreError;
 use crate::config::PostgresLocator;
-
-/// One connection may wait for the pool or run one statement for this long.
 use budget::REQUEST_BUDGET;
 
 /// Fixed per-connection setup: keep catalog checks and unqualified relation
@@ -232,3 +230,11 @@ pub(super) async fn rollback(
 #[cfg(test)]
 #[path = "integration_test.rs"]
 mod integration_tests;
+
+#[cfg(test)]
+#[path = "contract_test.rs"]
+mod contract_tests;
+
+#[cfg(test)]
+#[path = "test_fixture.rs"]
+mod test_fixture;

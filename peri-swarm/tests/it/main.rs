@@ -1,4 +1,4 @@
-//! 集成测试合并入口：九个文件合用一个测试二进制，减少 CI 需要链接的 target 数。
+//! 集成测试合并入口：十一个文件合用一个测试二进制，减少 CI 需要链接的 target 数。
 //!
 //! Cargo 把含 `main.rs` 的 `tests/<dir>/` 当作一个 target，`tests/*.rs` 才各自成为
 //! target；用例名因此带 `<module>::` 前缀，nextest 的进程隔离组按新名字匹配。
@@ -10,5 +10,7 @@ mod mcp_injection_test;
 mod openai_hosted_test;
 mod rivet_actor_test;
 mod session_resources_test;
+mod state_store_failure_test;
+mod state_store_support;
 mod state_store_test;
 mod streaming_test;
