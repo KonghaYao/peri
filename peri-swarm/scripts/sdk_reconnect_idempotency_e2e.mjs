@@ -998,6 +998,25 @@ async function main() {
     };
     summary.idempotency.finalState = idemFinalView.body?.state;
 
+    // 使用空闲会话的 cancel 探针，且不改变上面的 UUID 收据和模型调用断言。
+    const opaqueKey = `cancel-retry/${crypto.randomUUID()}`;
+    const postOpaque = () => api('POST', `/agents/sessions/${idemSession.id}/events`, {
+      body: { events: [{ type: 'agent.session.input.cancel' }] },
+      headers: { 'idempotency-key': opaqueKey },
+    });
+    const opaqueFirst = await postOpaque();
+    const opaqueRetry = await postOpaque();
+    const opaqueId = opaqueFirst.body?.inputId;
+    check('I: opaque key inserts once and replays as existing', opaqueFirst.status === 202
+      && opaqueFirst.body?.disposition === 'inserted' && opaqueRetry.status === 202
+      && opaqueRetry.body?.disposition === 'existing', { first: opaqueFirst.status, retry: opaqueRetry.status });
+    check('I: opaque key yields a stable UUIDv5 instead of echoing the raw key', typeof opaqueId === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(opaqueId)
+      && opaqueRetry.body?.inputId === opaqueId, opaqueId);
+    const afterOpaque = await allItems(idemSession.id);
+    check('I: opaque-key cancel and retry add no items', afterOpaque.length === afterReplayItems.length,
+      { before: afterReplayItems.length, after: afterOpaque.length });
+
     // -------------------------------------------------------- teardown ----
   } catch (error) {
     failure = error instanceof Error ? error.stack ?? error.message : String(error);

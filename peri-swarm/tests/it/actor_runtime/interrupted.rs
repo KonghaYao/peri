@@ -143,9 +143,19 @@ async fn exercise_interrupted_entry(durable_work: bool) {
             Disposition::Existing
         );
     }
-    next.accept_input(&logical, control_input(&uuid(95), "cancel"))
+    let cancel_id = uuid(95);
+    let cancel = next
+        .accept_input(&logical, control_input(&cancel_id, "cancel"))
         .await
-        .unwrap();
+        .expect_err("未恢复的持久 turn 没有可取消的 host");
+    assert_eq!(cancel.kind(), ErrorKind::BadGateway);
+    assert_eq!(cancel.code(), ErrorCode::UpstreamUnavailable);
+    assert_eq!(cancel.details()["operation"], "session_resume_required");
+    assert!(store
+        .swarm_get_input(logical.as_str(), &cancel_id)
+        .await
+        .unwrap()
+        .is_none());
     let retry = next
         .create_session(create_command(
             &logical,

@@ -1,8 +1,28 @@
 use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
-use super::{resolve_submission, resolve_tools, CreateSessionBody, SubmitEventBody};
-use crate::domain::{ErrorCode, ErrorKind, InputKind, InputMode};
+use super::{resolve_tools, CreateSessionBody, SubmitEventBody};
+use crate::domain::{
+    ErrorCode, ErrorKind, InputKind, InputMode, InputSubmission, LogicalId, SwarmError,
+};
+
+fn session_id() -> LogicalId {
+    LogicalId::parse("agent-01").expect("test session id")
+}
+
+fn resolve_submission(
+    body: SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<InputSubmission, SwarmError> {
+    super::resolve_submission(&session_id(), body, headers)
+}
+
+fn resolve_event(
+    body: SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<super::SubmitEvent, SwarmError> {
+    super::resolve_event(&session_id(), body, headers)
+}
 
 fn body(value: serde_json::Value) -> CreateSessionBody {
     serde_json::from_value(value).expect("create body")
@@ -350,12 +370,12 @@ fn official_events_envelope_maps_to_one_user_turn() {
 
 #[test]
 fn official_events_envelope_reuses_the_idempotency_key() {
-    let input_id = uuid::Uuid::now_v7().to_string();
+    let input_id = "0192F0C5-0000-7000-8000-0000000000C1";
     let submission = resolve_submission(
         event_body(official_envelope(json!([
             { "type": "input_text", "text": "via header" }
         ]))),
-        &idempotency_headers(&input_id),
+        &idempotency_headers(input_id),
     )
     .expect("official envelope with key");
 
@@ -364,17 +384,57 @@ fn official_events_envelope_reuses_the_idempotency_key() {
 }
 
 #[test]
-fn official_events_envelope_rejects_a_non_uuid_idempotency_key() {
-    let error = resolve_submission(
-        event_body(official_envelope(json!([
-            { "type": "input_text", "text": "hello" }
-        ]))),
-        &idempotency_headers("not-a-uuid"),
-    )
-    .expect_err("non-UUID key");
+fn official_events_envelope_derives_a_stable_id_for_an_opaque_key() {
+    let headers = idempotency_headers("submit-hello");
+    let envelope = official_envelope(json!([{ "type": "input_text", "text": "hello" }]));
+    let first = resolve_submission(event_body(envelope.clone()), &headers).unwrap();
+    let retry = resolve_submission(event_body(envelope), &headers).unwrap();
+    assert_eq!(first.input_id, "4f126633-b225-54ae-83d3-25fcc0285b6e");
+    assert_eq!(retry.input_id, first.input_id);
+}
 
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(error.message(), "inputId must be a UUID");
+#[test]
+fn native_input_id_must_be_a_uuid_and_match_the_resolved_header_id() {
+    let headers = idempotency_headers("submit-hello");
+    let with_header_only =
+        resolve_submission(event_body(json!({"text":"hello"})), &headers).unwrap();
+    let id = &with_header_only.input_id;
+    let body = event_body(json!({"inputId": id, "text":"hello"}));
+    assert_eq!(
+        resolve_submission(body, &headers).unwrap(),
+        with_header_only
+    );
+    for (body_id, expected) in [
+        (
+            "0192f0c5-0000-7000-8000-0000000000c1",
+            "inputId and Idempotency-Key disagree",
+        ),
+        ("submit-hello", "inputId must be a UUID"),
+    ] {
+        let error = resolve_submission(
+            event_body(json!({"inputId":body_id,"text":"hello"})),
+            &headers,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BadRequest);
+        assert_eq!(error.message(), expected);
+        assert!(error.details().is_null());
+    }
+}
+
+#[test]
+fn empty_and_non_ascii_idempotency_headers_keep_the_existing_boundary() {
+    let body = || event_body(json!({"text":"hello"}));
+    let missing = resolve_submission(body(), &idempotency_headers("")).unwrap_err();
+    assert!(missing.message().contains("inputId is required"));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "idempotency-key",
+        HeaderValue::from_bytes(&[0xc3, 0xa9]).unwrap(),
+    );
+    let error = resolve_submission(body(), &headers).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::BadRequest);
+    assert_eq!(error.message(), "Idempotency-Key must be ASCII");
 }
 
 #[test]
@@ -475,9 +535,19 @@ fn official_events_envelope_rejects_unknown_event_types_by_name() {
 
 #[test]
 fn official_cancel_resolves_to_control_without_a_user_input() {
-    for key in [None, Some("0192f0c5-0000-7000-8000-0000000000c1")] {
+    for (key, resolved) in [
+        (None, None),
+        (
+            Some("0192f0c5-0000-7000-8000-0000000000c1"),
+            Some("0192f0c5-0000-7000-8000-0000000000c1"),
+        ),
+        (
+            Some("submit-hello"),
+            Some("4f126633-b225-54ae-83d3-25fcc0285b6e"),
+        ),
+    ] {
         let headers = key.map(idempotency_headers).unwrap_or_default();
-        let event = super::resolve_event(
+        let event = resolve_event(
             event_body(json!({"events": [{"type":"agent.session.input.cancel"}]})),
             &headers,
         )
@@ -493,8 +563,8 @@ fn official_cancel_resolves_to_control_without_a_user_input() {
                 && input.plugin_selections.is_empty()
                 && input.original_draft.is_none()
         );
-        if let Some(key) = key {
-            assert_eq!(input.input_id, key);
+        if let Some(expected) = resolved {
+            assert_eq!(input.input_id, expected);
         } else {
             assert_eq!(
                 uuid::Uuid::parse_str(&input.input_id)
@@ -531,8 +601,8 @@ fn official_cancel_rejects_input_fields_mixed_shapes_and_batches() {
             "kind",
         ),
     ] {
-        let error = super::resolve_event(event_body(body), &HeaderMap::new())
-            .expect_err("malformed cancel");
+        let error =
+            resolve_event(event_body(body), &HeaderMap::new()).expect_err("malformed cancel");
         assert_eq!(error.kind(), ErrorKind::BadRequest);
         assert_eq!(error.code(), ErrorCode::InvalidInput);
         assert_eq!(field(&error), expected);
@@ -599,7 +669,7 @@ fn official_events_envelope_keeps_the_existing_empty_input_check() {
 
 #[test]
 fn an_approval_result_event_resolves_to_a_decision() {
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -623,7 +693,7 @@ fn an_approval_result_event_resolves_to_a_decision() {
 
 #[test]
 fn the_native_top_level_decision_alias_still_resolves() {
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -642,8 +712,28 @@ fn the_native_top_level_decision_alias_still_resolves() {
 }
 
 #[test]
+fn an_approval_result_uses_the_same_derived_id_for_an_opaque_key() {
+    let event = resolve_event(
+        event_body(json!({"events": [{
+            "type":"agent.session.input.mcp_approval_request_result",
+            "request_id":"appr_1",
+            "response":{"type":"mcp_tool_call", "decision":"approve"},
+        }]})),
+        &idempotency_headers("submit-hello"),
+    )
+    .unwrap();
+    let super::SubmitEvent::Approval(answer) = event else {
+        panic!("expected an approval answer");
+    };
+    assert_eq!(
+        answer.input_id.as_deref(),
+        Some("4f126633-b225-54ae-83d3-25fcc0285b6e")
+    );
+}
+
+#[test]
 fn an_approval_response_type_must_be_mcp_tool_call() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -662,7 +752,7 @@ fn an_approval_response_type_must_be_mcp_tool_call() {
 #[test]
 fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions() {
     let key = "0192f0c5-0000-7000-8000-0000000000bb";
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -679,7 +769,7 @@ fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions(
     assert_eq!(answer.input_id.as_deref(), Some(key));
     assert_eq!(answer.decision, crate::domain::ApprovalDecision::Cancel);
 
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -697,7 +787,7 @@ fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions(
 
 #[test]
 fn an_approval_result_requires_the_pending_id() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -712,7 +802,7 @@ fn an_approval_result_requires_the_pending_id() {
 
 #[test]
 fn an_approval_result_requires_the_official_response_object() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -724,7 +814,7 @@ fn an_approval_result_requires_the_official_response_object() {
     .expect_err("missing response");
     assert_eq!(field(&error), "events[0].response");
 
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",

@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod identity;
 pub mod input;
+pub(crate) mod input_id;
 pub mod item;
 pub mod mcp;
 pub mod official;

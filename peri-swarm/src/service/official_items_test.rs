@@ -246,6 +246,39 @@ async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
 }
 
 #[tokio::test]
+async fn an_opener_between_legacy_frames_still_counts_when_omitted_from_the_page() {
+    let store = MemorySwarmStore::new();
+    user(&store, 1, "itim_old").await;
+    append(
+        &store,
+        2,
+        "itim_answer",
+        ItemKind::Message,
+        json!({"role":"assistant","delta":true,"text":"early"}),
+        false,
+    )
+    .await;
+    user(&store, 3, "itim_resumed").await;
+    turn(&store, "itim_resumed", TurnStatus::InProgress).await;
+    append(
+        &store,
+        4,
+        "itim_answer",
+        ItemKind::Message,
+        json!({"role":"assistant","complete":true,"text":"final"}),
+        false,
+    )
+    .await;
+    let page = page(&store, ItemOrder::Desc, None, 1).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["items"][0]["seq"], 4);
+    assert_eq!(page["items"][1]["seq"], 2);
+    assert_eq!(page["nextCursor"], 4);
+    assert_eq!(page["data"][0]["turn_id"], turn_id_for_item("itim_resumed"));
+    assert_eq!(page["data"][0]["content"][0]["text"], "final");
+}
+
+#[tokio::test]
 async fn multi_page_lookback_matches_replay_classification() {
     use crate::service::{classify_row, ReplayTurn, RowFrame};
 

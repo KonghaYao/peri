@@ -1570,6 +1570,7 @@ async function main() {
   const cancelInputId = crypto.randomUUID();
   const cancelControlId = crypto.randomUUID();
   const expectedCancelTurnId = `turn_input_${cancelInputId}`;
+  const cancelText = `S9a1 cancellation probe ${cancelInputId}: stream slowly, then cancel.`;
   const cancelStream = await client.beta.agents.sessions.events.stream(
     createdSessionId,
     { after: afterFollowUp.lastItemSeq },
@@ -1604,7 +1605,7 @@ async function main() {
       inputId: cancelInputId,
       kind: 'user',
       mode: 'turn',
-      text: 'S9a1 cancellation probe: stream slowly, then cancel.',
+      text: cancelText,
     },
     headers: CONTRACT_HEADERS,
   });
@@ -1617,6 +1618,18 @@ async function main() {
     expectedTurnId: expectedCancelTurnId,
     input: cancelAccepted,
   });
+  // turn.created 先于宿主开始 provider 请求；确认 stub 已收到该轮，才测试在途取消。
+  let providerStarted = false;
+  const providerDeadline = Date.now() + 5000;
+  while (Date.now() < providerDeadline) {
+    const stats = await stubStats();
+    if (stats.turns.some((turn) => turn.lastUserText === cancelText)) {
+      providerStarted = true;
+      break;
+    }
+    await sleep(50);
+  }
+  check('cancel probe reached the model before cancellation', providerStarted);
   cancelTiming.controlSentAtMs = Date.now() - cancelStreamStarted;
   const cancelResponse = await sessionEvents.create(createdSessionId, {
     'Idempotency-Key': cancelControlId,

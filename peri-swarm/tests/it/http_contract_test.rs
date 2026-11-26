@@ -21,6 +21,8 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "test-deployment-key";
 
+#[path = "http_contract/idempotency_keys.rs"]
+mod idempotency_keys;
 #[path = "http_contract/official_cancel.rs"]
 mod official_cancel;
 

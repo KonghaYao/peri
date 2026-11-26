@@ -51,20 +51,21 @@ async fn project_items(
     let Some(min_seq) = items.iter().map(|row| row.seq).min() else {
         return Ok(BTreeMap::new());
     };
-    let mut persisted = BTreeMap::new();
-    let previous = if min_seq > 1 {
-        turn_at_cursor(store, logical_id, min_seq - 1, &mut persisted).await?
-    } else {
-        None
-    };
-    let mut has_output = previous
-        .as_ref()
-        .is_some_and(|turn| turn.completed_at.is_some());
-    let mut current = previous.map(|turn| turn.turn_id);
-    let mut statuses = persisted
+    let mut has_output = false;
+    let mut current = None;
+    let mut statuses = BTreeMap::new();
+    // 多帧条目跨过未入页的条目时，原始行的 seq 可能不连续。缺口中也可能有开轮或完成帧。
+    let mut seqs: Vec<_> = items.iter().map(|row| row.seq).collect();
+    seqs.sort_unstable();
+    let seed_bounds: Vec<_> = (min_seq > 1)
+        .then_some(min_seq)
         .into_iter()
-        .map(|(id, row)| (id, Some(row.status)))
+        .chain(
+            seqs.windows(2)
+                .filter_map(|pair| (pair[1] - pair[0] > 1).then_some(pair[1])),
+        )
         .collect();
+    let mut seed_at = seed_bounds.into_iter().peekable();
 
     let mut rows_by_item: BTreeMap<&str, Vec<&ItemView>> = BTreeMap::new();
     for row in items {
@@ -78,6 +79,23 @@ async fn project_items(
 
     let mut mapped = BTreeMap::new();
     for group in groups {
+        let mut seed = None;
+        while let Some(seq) = seed_at.next_if(|&seq| seq <= group.selected.seq) {
+            seed = Some(seq - 1);
+        }
+        if let Some(up_to) = seed {
+            let mut persisted = BTreeMap::new();
+            let previous = turn_at_cursor(store, logical_id, up_to, &mut persisted).await?;
+            has_output = previous
+                .as_ref()
+                .is_some_and(|turn| turn.completed_at.is_some());
+            current = previous.map(|turn| turn.turn_id);
+            statuses.extend(
+                persisted
+                    .into_iter()
+                    .map(|(id, row)| (id, Some(row.status))),
+            );
+        }
         let id = &group.selected.item_id;
         if group.class == GroupClass::User {
             let candidate = turn_id_for_item(id);
