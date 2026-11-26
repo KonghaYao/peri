@@ -443,6 +443,8 @@ const body = /** @type {any} */ (page).body;
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 
+- 恢复期（没有 gateway turn）冲刷的 assistant `complete` 行额外带 `recovered: true`，且
+  不含 `phase`/`outputIndex`；回放只发 `item` 帧，不归属前后 turn，也不推导官方 item 帧。
 - `items.list` 返回 item 级游标页：`data` 每个 item 一行（该 item 的最后一行），`items`
   是该页全部 item 的原始行；新数据每 item 一行，`items` 与 `data` 一一对应，历史数据
   （逐 chunk 行）仍可能让 `items` 更长。`object` 为 `"list"`，`has_more` 与 `hasMore` 同值。

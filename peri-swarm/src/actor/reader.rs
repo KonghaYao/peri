@@ -641,8 +641,9 @@ impl ItemLog {
         let persisted = self.flush_streams(streams, None).await.is_ok();
         let host_failed = self.state.lock().failure.take().is_some();
         // A flush that persisted nothing is a visible failure, not `idle` with
-        // no text: `report_append_failure` already marked the session failed and
-        // the committed groups (if any) were broadcast.
+        // no text: the committed groups (if any) were broadcast, the failure was
+        // logged, and the session state is decided here because the flush no
+        // longer writes it.
         let failed = host_failed || !persisted;
         self.update_state_quiet(if failed {
             SessionState::Failed
@@ -1182,17 +1183,24 @@ impl ItemLog {
             self.active_watch.send_replace(None);
             return;
         };
-        // A completion flush that persisted no row cannot end as a normal
+        // A completion flush that persisted no row cannot end a normal
         // `turn.completed`: the client would see a successful turn with no
         // text. Committed groups were already broadcast; the turn now reports
         // the failure. A turn that was already failing keeps its own
-        // code/message (the flush error was logged by `report_append_failure`).
-        let outcome = match (outcome, flush_failed) {
-            (TurnOutcome::Completed(_), true) => TurnOutcome::Failed {
-                code: -32603,
-                message: "the turn's assistant output was not persisted".to_owned(),
-            },
-            (outcome, _) => outcome,
+        // code/message (the flush error was logged by `log_append_failure`).
+        //
+        // A cancelled turn is the exception: the user's cancel is the outcome,
+        // and losing the text does not turn it into a failure. It keeps
+        // `turn.completed(status="cancelled")`/`TurnStatus::Cancelled` and the
+        // session still returns to idle; only the log records the lost row.
+        let outcome = match outcome {
+            TurnOutcome::Completed(stop_reason) if flush_failed && stop_reason != "cancelled" => {
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "the turn's assistant output was not persisted".to_owned(),
+                }
+            }
+            outcome => outcome,
         };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
@@ -2627,8 +2635,10 @@ impl ItemLog {
     ///
     /// A partly failed batch keeps its committed groups: they are broadcast
     /// before the failure is reported. The error is returned so the caller can
-    /// fail the turn instead of ending "successful but without text"; nothing is
-    /// retried here.
+    /// fail a non-cancelled turn instead of ending "successful but without
+    /// text"; nothing is retried here. The failure is only logged: the session
+    /// state follows the caller's terminal, so a cancelled turn still returns
+    /// to idle instead of being marked failed by a lost group.
     ///
     /// Only root `Message` streams compete for `outputIndex` and the
     /// final-answer phase: thought streams (same `messageId` as the answer) and
@@ -2721,8 +2731,7 @@ impl ItemLog {
             }
         }
         if let Err(error) = result {
-            self.report_append_failure("completion_items", error.clone())
-                .await;
+            self.log_append_failure("completion_items", &error);
             return Err(error);
         }
         Ok(())
@@ -2864,13 +2873,22 @@ impl ItemLog {
     }
 
     async fn report_append_failure(&self, operation: &'static str, error: SwarmError) {
+        self.log_append_failure(operation, &error);
+        self.update_state_quiet(SessionState::Failed).await;
+    }
+
+    /// Report a store rejection without touching the session state.
+    ///
+    /// The completion flush uses this and leaves the state to its caller: the
+    /// terminal outcome decides `idle`/`failed`, so a cancelled turn whose
+    /// completion row was lost still ends cancelled with an idle session.
+    fn log_append_failure(&self, operation: &'static str, error: &SwarmError) {
         tracing::warn!(
             logical_id = %self.logical_id,
             operation,
             error = %error,
             "swarm item was not persisted; it is not broadcast either"
         );
-        self.update_state_quiet(SessionState::Failed).await;
     }
 
     async fn set_session_state(

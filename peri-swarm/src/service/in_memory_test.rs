@@ -1754,6 +1754,143 @@ async fn replay_after_output_starts_a_new_turn_for_the_next_user_item() {
     assert_eq!(ids[4].1, "evt_turn_input_y_completed");
 }
 
+/// A recovered row belongs to no turn, so it is not the first turn row of the
+/// replay window: the user item behind it still opens the next turn instead of
+/// making replay resend the previous turn's terminal (`first_turn_row_role`).
+#[tokio::test]
+async fn a_recovered_row_is_not_the_first_turn_row_of_the_window() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "first"}),
+    )
+    .await;
+    let cursor = append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "done", "complete": true}),
+    )
+    .await;
+    // Recovery flushed root output after the turn closed: custom item only.
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_recovered",
+        json!({
+            "role": "assistant",
+            "messageId": "msg_recovered",
+            "text": "recovered text",
+            "complete": true,
+            "recovered": true,
+        }),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_y",
+        json!({"role": "user", "text": "second"}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // The window is [recovered row, user y]. Its first turn row is the user
+    // item and the previous turn already produced output, so the window opens
+    // turn y and does not attach itself to turn x.
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(cursor),
+        )
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.in_progress",
+            "agent.session.turn.created",
+            "agent.session.turn.in_progress",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    assert_eq!(ids[1].1, "evt_turn_input_y_created");
+    assert!(
+        ids.iter()
+            .all(|(_, event_id)| event_id != "evt_turn_input_x_completed"),
+        "the recovered row must not replay as turn x's completion: {ids:?}"
+    );
+}
+
+/// The lookback must not take a recovered row for the completion of the turn
+/// before it (`turn_at_cursor`). Without the skip, a cursor after the recovered
+/// row closes turn x with it and the next input mints a second turn.
+#[tokio::test]
+async fn a_recovered_row_after_the_cursor_does_not_close_the_open_turn() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "first"}),
+    )
+    .await;
+    // Turn x produced no final assistant row; recovery then wrote root output
+    // that belongs to no turn, and the client reconnects after that row.
+    let cursor = append_message(
+        &service,
+        "agent-01",
+        "itim_msg_recovered",
+        json!({
+            "role": "assistant",
+            "messageId": "msg_recovered",
+            "text": "recovered text",
+            "complete": true,
+            "recovered": true,
+        }),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_y",
+        json!({"role": "user", "text": "second"}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(cursor),
+        )
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    assert_eq!(ids[1].1, "evt_turn_input_x_completed");
+}
+
 #[tokio::test]
 async fn live_and_replay_agree_on_the_official_type_and_event_id_sequence() {
     let service = InMemorySwarmService::in_memory(ServiceConfig::default());

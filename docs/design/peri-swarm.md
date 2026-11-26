@@ -228,7 +228,10 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   情况已由 lookback 修复。
 - turn 内未 flush 的 assistant/thought 流在 turn 终止时一次写入状态库；进程在
   turn 执行中崩溃会丢失该 turn 尚未 flush 的文本（已落库的 user/tool/approval 行不受
-  影响），恢复只按行重放，不逐 chunk 重播增量。合并 payload 超过
+  影响），恢复只按行重放，不逐 chunk 重播增量。完成组按存储批次提交：失败批次不广播，
+  已提交批次先广播；任何未持久化的完成组都会让非取消 turn 以 `turn.failed` 收尾
+  （不静默成功）。取消 turn 的完成行落库失败只记录日志，终态仍是
+  `turn.completed(status="cancelled")`，会话回到 `idle`。合并 payload 超过
   `MAX_PAYLOAD_BYTES`（1 MiB）时按 `{_truncated:true, originalBytes}` 存储并置
   `truncated:true`，`seq`/`itemId` 不变；实时 delta 不受该截断影响。
 - 恢复期写入的 root 文本没有 gateway turn：合并行带 `payload.recovered=true`，且不含

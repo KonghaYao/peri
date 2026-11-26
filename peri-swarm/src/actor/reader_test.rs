@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use super::{ItemLog, PermissionStart, StagedItems, TurnOutcome};
 use crate::domain::{
     turn_id_for_item, ApprovalDecision, ItemKind, McpToolSpec, OfficialEvent, PromptCacheOptions,
-    PromptCacheTtl, SessionState, StreamEvent, TurnEvent,
+    PromptCacheTtl, SessionState, StreamEvent, TurnEvent, TurnStatus,
 };
 use crate::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 
@@ -3516,6 +3516,18 @@ async fn a_partially_failed_completion_flush_broadcasts_the_committed_row() {
     assert_eq!(written[0].payload["messageId"], json!("msg-small"));
     assert_eq!(written[0].payload["text"], json!("tail"));
     assert_eq!(written[0].payload["complete"], json!(true));
+    let committed_position = seen
+        .iter()
+        .position(|event| matches!(event, StreamEvent::Item(_)))
+        .expect("the committed row is broadcast");
+    let terminal_position = seen
+        .iter()
+        .position(|event| matches!(event, StreamEvent::Turn(TurnEvent::Failed { .. })))
+        .expect("the failed terminal follows");
+    assert!(
+        committed_position < terminal_position,
+        "the committed group must be broadcast before the turn failure: {seen:?}"
+    );
     assert!(
         matches!(
             seen.iter()
@@ -3606,6 +3618,93 @@ async fn a_completion_flush_that_persists_nothing_fails_the_turn() {
         .expect("read")
         .expect("row");
     assert_eq!(row.state, SessionState::Failed);
+}
+
+/// A cancelled turn keeps its cancelled terminal even when its completion row
+/// cannot be persisted: the user's cancel is the outcome, the lost text is
+/// logged, and the session still returns to idle. Before the fix the flush
+/// failure rewrote `Completed("cancelled")` into `Failed`, so the cancel
+/// vanished from the live frames, `turns.retrieve` and the session state.
+#[tokio::test]
+async fn a_cancelled_turn_stays_cancelled_when_its_completion_flush_fails() {
+    let memory = Arc::new(MemorySwarmStore::new());
+    memory
+        .swarm_upsert_session(session_row())
+        .await
+        .expect("session row");
+    let store: Arc<dyn SwarmStore> = memory.clone();
+    let (channel, mut events) = broadcast::channel(64);
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest("session/update", &chunk("hello")).await;
+    drain(&mut events);
+
+    memory.fail_next_appends(1);
+    log.finish_turn("req-1", TurnOutcome::Completed("cancelled".into()))
+        .await;
+
+    let seen = drain(&mut events);
+    assert!(
+        items(&seen).is_empty(),
+        "the lost completion row is not broadcast: {seen:?}"
+    );
+    let terminals: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals,
+        [TurnEvent::completed("req-1", "turn_1", "cancelled")],
+        "the cancel terminal survives a lost completion row: {seen:?}"
+    );
+    let types = official_types(&seen);
+    assert!(
+        types.contains(&"agent.session.turn.completed"),
+        "the official terminal is still a completion: {types:?}"
+    );
+    assert!(
+        !types.contains(&"agent.session.turn.failed"),
+        "a cancel must not be rewritten as a failure: {types:?}"
+    );
+    assert!(
+        !types.contains(&"agent.session.failed"),
+        "the session is not failed by a lost completion row: {types:?}"
+    );
+    let official = seen
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnCompleted { turn, .. }) => Some(turn),
+            _ => None,
+        })
+        .expect("turn.completed");
+    assert_eq!(official.status, "cancelled");
+
+    let turn = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("turn row")
+        .expect("row");
+    assert_eq!(
+        turn.status,
+        TurnStatus::Cancelled,
+        "turns.retrieve keeps reporting the cancel"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
 }
 
 /// F3: a delta staged before its stream's terminal is not broadcast after the
