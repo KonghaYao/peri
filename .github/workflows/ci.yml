@@ -116,6 +116,10 @@ jobs:
               if: runner.os == 'Linux'
               run: python3 scripts/test-ci-test-inventory.py
 
+            - name: Test Loom state import tool
+              if: runner.os == 'Linux'
+              run: python3 peri-swarm/scripts/test-import-loom-state.py
+
             - name: Verify test inventory
               if: runner.os == 'Linux'
               run: bash scripts/ci-test-inventory.sh --check
@@ -223,7 +227,7 @@ jobs:
                   | package(=peri-agent) & binary(=compact_session_manual_adversarial_test)
                   | package(=peri-agent) & binary(=compact_authority_projection_test))'
 
-            - name: Run PostgreSQL session storage contracts
+            - name: Run PostgreSQL session and Swarm state contracts
               if: runner.os == 'Linux'
               shell: bash
               run: |
@@ -236,6 +240,10 @@ jobs:
                   address=$(docker port "$db" 5432/tcp)
                   export PERI_TEST_POSTGRES_URL="postgresql://postgres@${address}/postgres"
                   cargo test --locked -p peri-resources --lib -- --ignored sessions::remote:: --test-threads=2
+                  # Swarm state store: schema init, idempotent receipts, cursor resume,
+                  # fail-closed recovery and concurrent delete. Every case owns a private
+                  # schema, so the two suites can share one instance.
+                  cargo test --locked -p peri-swarm --lib -- --ignored store::postgres --test-threads=2
 
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash
