@@ -184,6 +184,19 @@ impl ToolOutcome {
     }
 }
 
+/// 工具结果携带的图片块（MCP `ImageContent` 的结构化投影）。
+///
+/// 展示面（ACP `ToolCallUpdateFields.content` / TUI 工具卡）据此渲染图片；
+/// 模型可见文本（`ToolOutput.text` 里的 `[image: mime]`）保持不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolImage {
+    /// MIME 类型（`image/png` 等）。
+    pub mime_type: String,
+    /// 标准 base64 载荷（无 data URI 前缀）。
+    pub data: String,
+}
+
 /// Tool text plus optional execution evidence and typed result outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {

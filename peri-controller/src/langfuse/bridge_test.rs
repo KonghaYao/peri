@@ -148,6 +148,7 @@ impl Harness {
 
     fn main_tool_end(&self, tool_call_id: &str) {
         self.b1.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id: self.turn,
             agent_id: self.main,
             tool_call_id: tool_call_id.to_string(),
@@ -240,6 +241,7 @@ impl Harness {
 
     fn child_tool_end(&self, child: AgentId, tool_call_id: &str) {
         self.b2.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id: self.turn,
             agent_id: child,
             tool_call_id: tool_call_id.to_string(),

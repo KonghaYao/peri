@@ -511,6 +511,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "tc_read".to_string(),
@@ -826,6 +827,7 @@ async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {
         origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "queued-tool".into(),

@@ -947,4 +947,39 @@ async fn successful_result_carries_raw_without_inferring_failure_from_text() {
     converge_raw_result_fixture(transport, service).await;
 }
 
+/// 图片结果的双重投影：文本面保持 `[image: mime]`（模型可见文本不变），
+/// raw 面保留结构化 image 块（展示面/ACP content 的唯一数据源）。
+///
+/// 这条契约让 TUI 能在不改模型文本的前提下渲染工具图片。
+#[tokio::test]
+async fn image_content_keeps_text_marker_and_structured_block() {
+    let (bridge, fixture, transport, service, _pool) = raw_result_fixture(
+        "raw-image-session",
+        serde_json::json!({
+            "content": [
+                {"type": "text", "text": "Image read"},
+                {"type": "image", "data": "aW1n", "mimeType": "image/png"}
+            ]
+        }),
+    )
+    .await;
+
+    let output = bridge
+        .invoke_output(serde_json::json!({}), fixture.context(0, "."))
+        .await
+        .expect("图片结果必须返回 Ok");
+
+    assert_eq!(
+        output.text, "Image read\n[image: image/png]",
+        "模型可见文本保持既有的 [image: mime] 投影"
+    );
+    let raw = output.raw().expect("MCP adapter 必须携带 raw 结果");
+    assert_eq!(raw.content().len(), 2, "结构化内容块必须逐块保留");
+    assert_eq!(raw.content()[1]["type"], "image");
+    assert_eq!(raw.content()[1]["mimeType"], "image/png");
+    assert_eq!(raw.content()[1]["data"], "aW1n");
+
+    converge_raw_result_fixture(transport, service).await;
+}
+
 include!("tool_bridge_test/description_budgets.rs");

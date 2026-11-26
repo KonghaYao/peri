@@ -564,6 +564,7 @@ async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_
     for output in ["  ", r#"{"error":"failed"}"#] {
         let live = crate::event::map_event(
             &ExecutorEvent::ToolEnd {
+                images: Vec::new(),
                 message_id: MessageId::new(),
                 tool_call_id: "tc-completion".into(),
                 name: "delegate".into(),

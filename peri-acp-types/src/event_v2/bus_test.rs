@@ -336,6 +336,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
         origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id: turn1,
         agent_id,
         tool_call_id: "tc_iter1".to_string(),

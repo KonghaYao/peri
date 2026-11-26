@@ -1,7 +1,7 @@
 // Live 事件与持久历史共享工具的标准 ACP 投影；adapter 保留来源和兼容字段差异。
 use agent_client_protocol_schema::v1::{
-    Content, ContentBlock, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind,
+    Content, ContentBlock, ImageContent, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use peri_acp_types::builtin_mcp;
 use peri_acp_types::error::SafeSubagentFailure;
@@ -19,7 +19,17 @@ pub(crate) fn project_tool_completion(
     output: &str,
     is_error: bool,
     failure: Option<&SafeSubagentFailure>,
+    images: &[peri_acp_types::tools::ToolImage],
 ) -> ToolCallUpdate {
+    let mut content = tool_result_content(output, is_error);
+    // 图片走 ACP 标准 content 块（`ToolCallContent::Content`）：`rawOutput` 仍是
+    // 纯文本，不改变机器消费方对字符串的既有解析。
+    content.extend(images.iter().map(|image| {
+        ToolCallContent::Content(Content::new(ContentBlock::Image(ImageContent::new(
+            image.data.clone(),
+            image.mime_type.clone(),
+        ))))
+    }));
     let update = ToolCallUpdate::new(
         id.to_owned(),
         ToolCallUpdateFields::new()
@@ -28,7 +38,7 @@ pub(crate) fn project_tool_completion(
             } else {
                 ToolCallStatus::Completed
             })
-            .content(tool_result_content(output, is_error)),
+            .content(content),
     );
     if let Some(failure) = failure {
         update.meta(serde_json::Map::from_iter([(

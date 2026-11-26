@@ -72,6 +72,7 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             name,
             output,
             is_error,
+            images,
             subagent_failure,
             ..
         } => Some(ExecutorEvent::ToolEnd {
@@ -80,6 +81,7 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             name,
             output,
             is_error,
+            images: images.clone(),
             source_agent_id: None,
             subagent_failure,
         }),

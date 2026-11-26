@@ -559,6 +559,7 @@ impl AgentModelBridge {
                             .any(|call| &call.id == tool_call_id)
                         {
                             context.event_bus.emit_render(RenderEvent::ToolEnded {
+                                images: Vec::new(),
                                 turn_id: context.turn_id,
                                 agent_id: context.agent_id,
                                 tool_call_id: tool_call_id.clone(),
@@ -618,6 +619,7 @@ impl AgentModelBridge {
                     if let (Some(context), Some((tool_call_id, name))) = (&streaming, &active_tool)
                     {
                         context.event_bus.emit_render(RenderEvent::ToolEnded {
+                            images: Vec::new(),
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
                             tool_call_id: tool_call_id.clone(),

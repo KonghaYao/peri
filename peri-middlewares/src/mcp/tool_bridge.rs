@@ -727,6 +727,9 @@ impl BaseTool for McpToolBridge {
 
         // 6. 文本投影（截断超大输出）。投影与改动前逐字节一致：`isError` 结果仍带
         //    失败上下文，模型/ACP 看到的文本不回退，事实由 outcome 承载。
+        //    图片是**双重投影**：文本里保留 `[image: mime]`（模型面不变），同时
+        //    `raw`（第 4 步）逐块保留结构化 image content——展示面（ACP
+        //    `ToolCallUpdateFields.content` / TUI 工具卡）只消费结构化块，不解析文本。
         let formatted = format_contents(&result.content);
         let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
         let session_id = self

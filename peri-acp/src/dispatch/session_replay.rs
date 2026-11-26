@@ -590,6 +590,8 @@ pub fn project_message_updates(
                 &result_text,
                 *is_error,
                 subagent_failure.as_ref(),
+                // 历史 replay 只持久化文本：没有可回放的图片块。
+                &[],
             );
             // 历史 rawOutput 保持字符串；live adapter 保留 JSON 解析兼容行为。
             update.fields.raw_output = Some(serde_json::Value::String(result_text));

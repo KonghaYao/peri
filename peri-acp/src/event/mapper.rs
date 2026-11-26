@@ -136,6 +136,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             name,
             output,
             is_error,
+            images,
             source_agent_id,
             subagent_failure,
             ..
@@ -149,6 +150,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 output,
                 *is_error,
                 subagent_failure.as_ref(),
+                images,
             );
             update.fields.title = Some(name.clone());
             update.fields.raw_output = raw_output;
