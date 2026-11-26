@@ -21,7 +21,7 @@ python3 scripts/test-cargo-patches.py
 
 同一补丁还限制 generic service loop 的成功 response 日志：`CustomResult` 可能承载凭据，且 response 事件没有 method 关联，故收发 TRACE 仅记录请求 ID 与方向，handler DEBUG 仅记录请求 ID。请求、通知、JSON-RPC 错误与传输错误仍保留完整诊断；业务 `Err` 被成功 `CustomResult` 包装时，由 credentials handler 自己记录类型化错误。此调整不修改 MCP wire、不隐藏错误内容、不绕过 credentials MCP。回归位于 `mcp-packages/credentials` 的模型认证测试，覆盖 DEBUG/TRACE 下合成成功 token 不落日志和错误诊断保留。
 
-补丁保留 request-wise SSE 通道完成后的 replay cache：rmcp 3.9.0 在发出最终 response 后立即从 `tx_router` 移除通道，导致晚到的 `Last-Event-ID` resume 命中 `ChannelClosed` 并返回空流；补丁改为标记 `completed_at` 并关闭 sender，缓存按 `completed_cache_ttl`（默认 60s）回收，活动 SSE 流仍随 response 结束。回归位于 `mcp-packages/peri-browser-gateway` 的 `shutdown::sse_resume_after_delivery_replays_the_completed_reply_from_cache`（回复投递完成后再 resume）；`shutdown::sse_resume_replays_a_reply_without_executing_the_write_twice` 覆盖投递前 attach 的并发顺序。
+补丁保留 request-wise SSE 通道完成后的 replay cache：rmcp 3.9.0 在发出最终 response 后立即从 `tx_router` 移除通道，导致晚到的 `Last-Event-ID` resume 命中 `ChannelClosed` 并返回空流；补丁改为标记 `completed_at` 并关闭 sender，缓存按 `completed_cache_ttl`（默认 60s）回收，活动 SSE 流仍随 response 结束。原仓库内回归用例位于随 `peri-browser-gateway` 移除的 crate（`shutdown::sse_resume_after_delivery_replays_the_completed_reply_from_cache`、`shutdown::sse_resume_replays_a_reply_without_executing_the_write_twice`，2026-11-26）；该包移除后这条补丁没有仓库内 SSE resume 回归覆盖。
 
 补丁曾为 `matches_response_id`、`set_client_request_metadata`、`is_authorization_required` 加 `cfg_attr(not(feature = "client"), allow(dead_code))`：三者只在 `client` feature 下被调用，而 path 覆盖的依赖不享受 Cargo 对 registry 依赖的 lint cap，未启用该 feature 时会暴露 dead_code 告警。上游 3.6.0 已改用 `#[cfg(feature = "client")]` 门控这三个函数，补丁不再包含该变通。
 
