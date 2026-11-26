@@ -416,11 +416,19 @@ enum RowFrame {
         phase: String,
         output_index: u32,
     },
-    /// Delta or non-message row: the custom `item` frame only.
+    /// Non-message row (or a historical per-delta row): the custom `item`
+    /// frame only.
     Nothing,
 }
 
 /// Classify one persisted row and advance the open-turn state.
+///
+/// Replay reads rows exactly as stored (`design §9.4`). New data holds one row
+/// per item — an assistant/thought stream is a single `complete:true` row — so
+/// classifying it yields each official frame once. Historical rows written
+/// before item granularity add per-delta rows for the same `item_id`; they
+/// classify as [`RowFrame::Nothing`] and only their final `complete:true` row
+/// produces the official item. Both shapes therefore replay the same frames.
 fn classify_row(
     item: &crate::domain::ItemView,
     turns: &mut Vec<ReplayTurn>,
@@ -1011,6 +1019,11 @@ pub(crate) async fn settle_orphan_approvals(
 
 /// Decide whether the window continues a turn from before the cursor.
 ///
+/// The lookback only reads user items and root `complete:true` rows, the two
+/// rows that open and close an official turn; live deltas were never part of it
+/// and historical per-delta rows are skipped, so one-row-per-item data keeps
+/// the same decision.
+///
 /// A window whose first turn-relevant row is a user item starts a new turn only
 /// when the previous turn already produced output under the same boundary rule
 /// [`classify_row`] applies (`!previous.open()`); otherwise that user item is a
@@ -1056,7 +1069,8 @@ fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str
 /// final frame separates it from the next older user item. Scanning stops as
 /// soon as the opener is confirmed, so a normal session reads only the tail of
 /// the previous turn; a session whose turns never produced output reads back to
-/// its first user item.
+/// its first user item. Only those two row shapes matter here, so neither the
+/// number of historical delta rows nor the merged one-row item changes it.
 async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,

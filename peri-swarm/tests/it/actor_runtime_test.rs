@@ -297,6 +297,9 @@ async fn collect_until_terminal(
         };
         match event {
             StreamEvent::Item(item) => events.items.push(item),
+            // Live-only chunk: it has no `seq` and no row, so the item list
+            // stays the persisted view of the turn.
+            StreamEvent::Delta(_) => {}
             StreamEvent::Turn(turn) => {
                 let terminal =
                     matches!(turn, TurnEvent::Completed { .. } | TurnEvent::Failed { .. });
@@ -454,14 +457,19 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
         .collect();
     assert_eq!(user_items.len(), 1, "one frame per accepted input");
     assert_eq!(user_items[0].payload["text"], json!("hello"));
-    // All deltas and the completion item of one assistant message share one
-    // identity.
+    // The assistant stream is one merged row; its live deltas carry the same
+    // identity but are not rows (see `StreamEvent::Delta`).
     let message_items: Vec<_> = first
         .items
         .iter()
         .filter(|item| item.kind == ItemKind::Message && item.payload["messageId"].is_string())
         .collect();
-    assert!(message_items.len() >= 2, "deltas plus the completion item");
+    assert_eq!(
+        message_items.len(),
+        1,
+        "one persisted row per assistant stream"
+    );
+    assert_eq!(message_items[0].payload["complete"], json!(true));
     let ids: HashSet<_> = message_items
         .iter()
         .map(|item| item.item_id.clone())
@@ -1220,12 +1228,245 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
     };
     assert_eq!(completed_turn, turn_id, "completed closes the created turn");
 
+    // ILOG-6: replay rebuilds the same official frames — same types, same
+    // `event_id`s, same order — so a reconnect cannot rename a turn or an item.
+    let replay = service
+        .replay_after(&logical, EventCursor::START)
+        .await
+        .expect("replay the finished first turn");
+    let replayed: Vec<OfficialEvent> = replay
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    let identities = |events: &[OfficialEvent]| {
+        events
+            .iter()
+            .map(|event| (event.event_type(), event.event_id().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        identities(&replayed),
+        identities(&official),
+        "replay names the same turns and items as the live stream"
+    );
+
     let reports = service.shutdown_all().await;
     assert_eq!(reports.len(), 1);
     assert!(
         reports[0].complete,
         "host shutdown report: {:?}",
         reports[0]
+    );
+}
+
+/// ILOG-2: a finished turn replays exactly the item frames a live subscriber saw.
+///
+/// The live stream additionally carries custom `turn` frames and seq-less
+/// `delta` frames; neither is persisted, so the comparison is over
+/// `StreamEvent::Item` and over official `(event_type, event_id)` pairs only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_matches_live_frames() {
+    clear_telemetry_env();
+    let (base_url, _stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-replay-live").expect("logical id");
+    let (_, mut live) = service.open_stream(&logical).await.into_parts();
+
+    let mut command = create_command(&logical, &cwd, Some("hello replay"));
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    let pending = created.pending_initial.expect("the first turn is deferred");
+    service
+        .run_pending_turn(pending)
+        .await
+        .expect("run the deferred first turn");
+
+    let mut live_items = Vec::new();
+    let mut live_official = Vec::new();
+    let mut live_deltas = 0usize;
+    while !live_official
+        .last()
+        .is_some_and(|event| matches!(event, OfficialEvent::SessionIdle { .. }))
+    {
+        let event = timeout(Duration::from_secs(30), live.recv())
+            .await
+            .expect("the first turn terminates")
+            .expect("the subscription stays live");
+        match event {
+            StreamEvent::Item(item) => live_items.push(item),
+            StreamEvent::Delta(delta) => {
+                assert_eq!(
+                    delta.payload["delta"],
+                    json!(true),
+                    "a live chunk carries the streaming shape: {delta:?}"
+                );
+                live_deltas += 1;
+            }
+            StreamEvent::Official(event) => live_official.push(event),
+            // Custom turn frames have no persisted counterpart.
+            StreamEvent::Turn(_) | StreamEvent::Gap { .. } => {}
+        }
+    }
+    assert!(
+        live_deltas >= 2,
+        "the live stream carried the model chunks: {live_deltas}"
+    );
+    assert_eq!(
+        completed_text(&TurnEvents {
+            items: live_items.clone(),
+            ..Default::default()
+        })
+        .first()
+        .map(|(_, text)| text.as_str()),
+        Some(format!("{TURN_PREFIX}0").as_str()),
+        "the live item list ends with the merged answer"
+    );
+
+    let replay = service
+        .replay_after(&logical, EventCursor::START)
+        .await
+        .expect("replay the finished turn");
+    let replay_items: Vec<_> = replay
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect();
+    let replay_official: Vec<_> = replay
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        live_items, replay_items,
+        "every persisted item frame replays verbatim and in order"
+    );
+    let identities = |events: &[OfficialEvent]| {
+        events
+            .iter()
+            .map(|event| (event.event_type(), event.event_id().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        identities(&live_official),
+        identities(&replay_official),
+        "the official frames replay with the same ids, in the same order"
+    );
+}
+
+/// ILOG-3: mid-turn replay exposes no half-written assistant row; after the
+/// terminal the same cursor returns the merged row and the terminal exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_mid_turn_gets_final_row_once() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    // Keep the model request in flight long enough to replay mid-turn.
+    stub.set_delay(2_000);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = Arc::new(AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    ));
+    let logical = LogicalId::parse("agent-reconnect-mid-turn").expect("logical id");
+
+    let mut command = create_command(&logical, &cwd, Some("hello mid turn"));
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    let pending = created.pending_initial.expect("the first turn is deferred");
+    let admitted = items_of(&service, &logical).await;
+    assert_eq!(
+        admitted.len(),
+        1,
+        "only the user item is durable: {admitted:?}"
+    );
+    let user_seq = admitted[0].0;
+
+    let runner = Arc::clone(&service);
+    let turn = tokio::spawn(async move { runner.run_pending_turn(pending).await });
+    assert!(
+        wait_for_main_calls(&stub, 1, Duration::from_secs(10)).await,
+        "the turn reaches the model"
+    );
+
+    // Mid-turn: a cursor after the user item replays no item row at all, so a
+    // reconnecting client cannot project a partial assistant message.
+    let mid = service
+        .replay_after(&logical, EventCursor::after(user_seq))
+        .await
+        .expect("mid-turn replay");
+    assert!(
+        mid.iter()
+            .all(|event| !matches!(event, StreamEvent::Item(_))),
+        "no item row exists before the turn terminal: {mid:?}"
+    );
+
+    turn.await
+        .expect("the turn task finishes")
+        .expect("the deferred turn completes");
+    wait_idle(&service, &logical).await;
+
+    let done = service
+        .replay_after(&logical, EventCursor::after(user_seq))
+        .await
+        .expect("post-terminal replay from the same cursor");
+    let items: Vec<_> = done
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items.len(),
+        1,
+        "the answer is one merged row and appears once: {done:?}"
+    );
+    assert_eq!(items[0].seq, user_seq + 1, "the row follows the user item");
+    assert_eq!(items[0].payload["complete"], json!(true));
+    assert_eq!(
+        items[0].payload["text"].as_str(),
+        Some(format!("{TURN_PREFIX}0").as_str())
+    );
+    let types: Vec<&str> = done
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event.event_type()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        types
+            .iter()
+            .filter(|event_type| **event_type == "agent.session.turn.completed")
+            .count(),
+        1,
+        "one terminal per turn: {types:?}"
+    );
+    assert_eq!(
+        types
+            .iter()
+            .filter(|event_type| **event_type == "agent.session.idle")
+            .count(),
+        1,
+        "one idle frame per turn: {types:?}"
+    );
+    let seqs: Vec<u64> = done.iter().filter_map(StreamEvent::item_seq).collect();
+    assert_eq!(
+        seqs,
+        vec![items[0].seq],
+        "the replay carries no repeated seq: {done:?}"
     );
 }
 

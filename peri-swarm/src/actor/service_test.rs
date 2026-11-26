@@ -78,6 +78,17 @@ fn permission(server: &str, tool_name: &str) -> serde_json::Value {
     })
 }
 
+fn chunk(message_id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "sessionId": LOGICAL_ID,
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": message_id,
+            "content": { "type": "text", "text": text },
+        },
+    })
+}
+
 fn logical_id() -> LogicalId {
     LogicalId::parse(LOGICAL_ID).expect("logical id")
 }
@@ -242,6 +253,115 @@ async fn an_expired_pending_approval_is_settled_before_the_replay_window() {
         rows.iter()
             .any(|row| { row.payload["state"] == "settled" && row.payload["reason"] == "expired" }),
         "expiry must be persisted before replay: {rows:?}"
+    );
+}
+
+/// ILOG-4: approval rows interleaved with merged item rows replay with no
+/// pending action, and a settled approval cannot resurrect.
+#[tokio::test]
+async fn interleaved_approval_and_merged_rows_replay_without_a_pending_action() {
+    let fixture = fixture(false).await;
+    let request_id = pending_approval(&fixture).await;
+
+    // The stream starts before the approval, the approval settles, then the
+    // rest of the answer arrives; only the turn terminal writes the merged row.
+    fixture
+        .log
+        .ingest("session/update", &chunk("msg-1", "hel"))
+        .await;
+    let receipt = fixture
+        .service
+        .respond_required_action(&logical_id(), &request_id, ApprovalDecision::Approve, None)
+        .await
+        .expect("the approval settles");
+    assert_eq!(receipt.request_id, request_id);
+    fixture
+        .log
+        .ingest("session/update", &chunk("msg-1", "lo"))
+        .await;
+    fixture
+        .log
+        .finish_turn("prompt-1", TurnOutcome::Completed("end_turn".to_owned()))
+        .await;
+
+    let rows = fixture
+        .store
+        .swarm_items_after(LOGICAL_ID, 0, 500)
+        .await
+        .expect("items");
+    assert!(
+        rows.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+        "the mixed shapes share one seq space: {rows:?}"
+    );
+    let approvals: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == ItemKind::Approval)
+        .collect();
+    assert_eq!(
+        approvals.len(),
+        2,
+        "the pending row and its settlement are both durable: {rows:?}"
+    );
+    assert_eq!(approvals[0].payload["state"], "pending");
+    assert_eq!(approvals[1].payload["state"], "settled");
+    let merged: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == ItemKind::Message && row.payload["complete"] == json!(true))
+        .collect();
+    assert_eq!(merged.len(), 1, "the answer is one merged row: {rows:?}");
+    assert_eq!(merged[0].payload["text"], "hello");
+
+    let backlog = fixture
+        .service
+        .subscribe_backlog(&logical_id(), EventCursor::START)
+        .await
+        .expect("subscription backlog");
+    let replayed: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed.len(),
+        rows.len(),
+        "every persisted row replays once: {backlog:?}"
+    );
+    let (_, required_actions) =
+        requires_action_snapshot(&backlog).expect("a requires_action frame");
+    assert!(
+        required_actions.is_empty(),
+        "the settled action is not the current snapshot: {required_actions:?}"
+    );
+
+    // A second answer is refused as already settled and appends nothing.
+    let error = fixture
+        .service
+        .respond_required_action(&logical_id(), &request_id, ApprovalDecision::Approve, None)
+        .await
+        .expect_err("a settled approval cannot be answered twice");
+    assert_eq!(error.code(), ErrorCode::RequiredActionSettled);
+    assert_eq!(
+        fixture
+            .store
+            .swarm_items_after(LOGICAL_ID, 0, 500)
+            .await
+            .expect("items")
+            .len(),
+        rows.len(),
+        "a settled approval does not resurrect or append a row"
+    );
+    let backlog = fixture
+        .service
+        .subscribe_backlog(&logical_id(), EventCursor::START)
+        .await
+        .expect("subscription backlog");
+    let (_, required_actions) =
+        requires_action_snapshot(&backlog).expect("a requires_action frame");
+    assert!(
+        required_actions.is_empty(),
+        "the second answer cannot resurrect the action: {required_actions:?}"
     );
 }
 
