@@ -105,16 +105,16 @@ impl PostgresLocator {
     /// Parse a deployment DSN. `variable` names the source for error text; the
     /// value is never echoed.
     pub fn parse(value: &str, variable: &'static str) -> Result<Self, ConfigError> {
-        let url = Url::parse(value)
-            .map_err(|_| ConfigError::invalid(variable, "invalid PostgreSQL URL"))?;
+        // One message for both "not a URL" and "wrong scheme": a local path or a
+        // Loom locator both need the same next step.
+        let invalid =
+            || ConfigError::invalid(variable, "expected a postgres:// or postgresql:// DSN");
+        let url = Url::parse(value).map_err(|_| invalid())?;
         if !matches!(url.scheme(), "postgres" | "postgresql")
             || !url.has_host()
             || url.fragment().is_some()
         {
-            return Err(ConfigError::invalid(
-                variable,
-                "expected a postgres:// or postgresql:// DSN",
-            ));
+            return Err(invalid());
         }
         Ok(Self(url))
     }
