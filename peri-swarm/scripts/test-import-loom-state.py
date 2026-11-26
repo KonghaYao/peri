@@ -23,7 +23,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parent
 PERI_SWARM = SCRIPTS.parent
@@ -335,6 +337,58 @@ class FixtureTests(FixtureCase):
         ).hexdigest())
         self.assertEqual(expected["checks"]["items"], "8")
         self.assertTrue(expected["manifest"]["includes_ddl"])
+
+    def test_wal_commits_are_imported_and_identified(self) -> None:
+        manifests = []
+        with closing(sqlite3.connect(self.snapshot)) as writer:
+            self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            for number in (1, 2):
+                receipt = f"00000000-0000-4000-8000-{number:012d}"
+                writer.execute(
+                    "INSERT INTO swarm_inputs SELECT logical_id, ?, fingerprint, state, created_at "
+                    "FROM swarm_inputs WHERE input_id = ?",
+                    (receipt, OLD_INPUT_ID),
+                )
+                writer.commit()
+                frozen = self.copy_snapshot(f"frozen-{number}.db")
+                wal = Path(str(frozen) + "-wal")
+                wal.write_bytes(Path(str(self.snapshot) + "-wal").read_bytes())
+                with self.assertRaisesRegex(tool.ImportError, "--immutable.*non-empty WAL"):
+                    tool.load_snapshot(frozen, immutable=True, strict=True)
+                snapshot = tool.load_snapshot(frozen, immutable=False, strict=True)
+                self.assertIn(receipt, [r["input_id"] for r in snapshot.table("swarm_inputs")])
+                self.assertEqual(len(snapshot.table("swarm_inputs")), number + 1)
+                manifest = tool.manifest(snapshot, FIXTURE_CREATED_AT, True)
+                self.assertEqual(
+                    manifest["source_wal_sha256"], hashlib.sha256(wal.read_bytes()).hexdigest()
+                )
+                manifests.append(manifest)
+        self.assertEqual(manifests[0]["source_sha256"], manifests[1]["source_sha256"])
+        self.assertNotEqual(manifests[0]["source_wal_sha256"], manifests[1]["source_wal_sha256"])
+
+    def test_immutable_accepts_missing_or_empty_wal(self) -> None:
+        for empty_file in (False, True):
+            if empty_file:
+                Path(str(self.snapshot) + "-wal").touch()
+            snapshot = tool.load_snapshot(self.snapshot, immutable=True, strict=True)
+            self.assertIsNone(snapshot.wal_sha256)
+            self.assertEqual(len(snapshot.table("swarm_inputs")), 1)
+
+    def test_refuses_source_changed_during_read(self) -> None:
+        hash_file = tool.sha256_file
+        with closing(sqlite3.connect(self.snapshot)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+
+            def hash_and_append(path: Path) -> str:
+                if path == self.snapshot.resolve():
+                    writer.execute("UPDATE swarm_sessions SET instructions='new data'")
+                    writer.commit()
+                return hash_file(path)
+
+            with patch.object(tool, "sha256_file", side_effect=hash_and_append):
+                with self.assertRaisesRegex(tool.ImportError, "changed during the read"):
+                    tool.load_snapshot(self.snapshot, immutable=False, strict=True)
 
     def test_no_ddl_skips_the_schema_file(self) -> None:
         out = self.directory / "out"
