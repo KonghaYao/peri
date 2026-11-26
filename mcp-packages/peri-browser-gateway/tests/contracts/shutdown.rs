@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::serve_client_with_lifecycle;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -86,6 +87,53 @@ async fn sse_resume_replays_a_reply_without_executing_the_write_twice() -> anyho
     );
     gateway.shutdown().await?;
     assert_eq!(u16::from(reopened.close_frame().await?.code), 4001);
+    engine.shutdown().await
+}
+
+#[tokio::test]
+async fn sse_resume_after_delivery_replays_the_completed_reply_from_cache() -> anyhow::Result<()> {
+    let mut engine = Engine::ephemeral().await?;
+    let mut gateway = Gateway::start(&engine.url(), &[]).await?;
+    let id = gateway.init().await?;
+    gateway.connect(&id, &engine.url()).await?;
+    gateway.new_page(&id).await?;
+
+    let gate = engine.gate_reply("Input.dispatchKeyEvent");
+    let (request_id, message) = gateway.tool_request("press_key", json!({"key": "Enter"}));
+    let response = gateway
+        .post(Some(&id), message)
+        .send()
+        .await?
+        .error_for_status()?;
+    tokio::time::timeout(WAIT, gate.arrived.cancelled()).await?;
+    gate.release.cancel();
+
+    // 读到 EOF 才 resume：此时最终 reply 已写入 POST SSE 并完成投递，请求通道进入
+    // completed cache。与上一个测试的“先 attach 再投递”互补，覆盖契约承诺的晚到 resume。
+    let delivered = tokio::time::timeout(WAIT, response.text())
+        .await
+        .map_err(|_| anyhow::anyhow!("POST SSE 未在 {WAIT:?} 内投递最终 reply 并结束"))??;
+    let (cursor, reply) = last_reply(&delivered, request_id)?;
+
+    let resumed = gateway
+        .events(&id)
+        .header("last-event-id", &cursor)
+        .send()
+        .await?;
+    assert_eq!(resumed.status(), 200);
+    let replayed = tokio::time::timeout(WAIT, resumed.text())
+        .await
+        .map_err(|_| anyhow::anyhow!("completed 通道未在 {WAIT:?} 内结束：resume 挂起了 SSE"))??;
+    let events = sse_events(&replayed)?;
+    assert_eq!(
+        events.len(),
+        1,
+        "completed 通道应只重放最终 reply，实际 {replayed:?}"
+    );
+    assert_eq!(events[0].0.as_deref(), Some(cursor.as_str()));
+    assert_eq!(events[0].1, reply);
+    assert_eq!(engine.events().iter().filter(|event| matches!(event, Event::Command(Role::Writer, _, method, _) if method == "Input.dispatchKeyEvent")).count(), 2, "resume 重放只读缓存，不得再次执行 down/up");
+    gateway.shutdown().await?;
     engine.shutdown().await
 }
 
@@ -323,4 +371,38 @@ fn all_page_connections_ended(events: &[Event], target: &str) -> bool {
             .count();
         opened > 0 && opened == ended
     })
+}
+
+fn last_reply(body: &str, request_id: u64) -> anyhow::Result<(String, Value)> {
+    let (cursor, reply) = sse_events(body)?
+        .into_iter()
+        .rfind(|(_, payload)| payload["id"] == request_id)
+        .with_context(|| format!("POST SSE 未投递 reply id={request_id}：{body:?}"))?;
+    anyhow::ensure!(reply["result"].is_object(), "reply 缺少 result：{reply}");
+    Ok((
+        cursor.with_context(|| format!("reply id={request_id} 缺少 Event-ID：{body:?}"))?,
+        reply,
+    ))
+}
+
+fn sse_events(body: &str) -> anyhow::Result<Vec<(Option<String>, Value)>> {
+    let mut events = Vec::new();
+    for block in body.split("\n\n") {
+        let mut id = None;
+        let mut data = Vec::new();
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("id:") {
+                id = Some(value.trim().to_owned());
+            } else if let Some(value) = line.strip_prefix("data:") {
+                data.push(value.strip_prefix(' ').unwrap_or(value).to_owned());
+            }
+        }
+        if data.is_empty() || data.iter().all(|line| line.trim().is_empty()) {
+            continue;
+        }
+        let payload = serde_json::from_str(&data.join("\n"))
+            .with_context(|| format!("解析 SSE data：{data:?}"))?;
+        events.push((id, payload));
+    }
+    Ok(events)
 }
