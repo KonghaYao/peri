@@ -15,6 +15,7 @@ use crate::kit::message_area::grid::ZoneTransition;
 use crate::kit::message_area::render;
 
 use super::tool_activity_tests::EDIT_DIFF;
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::TextLineSource;
 
 // ── [D3 §9] 语义复制：semantic_line_text 变体分派矩阵 ────────────────────
@@ -414,13 +415,12 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         ..super::tool_card("Read", "src/main.rs", false, false)
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &tool,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(
@@ -464,13 +464,12 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         .into(),
     );
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &bubble,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     let header_idx = lines
         .iter()
@@ -550,13 +549,12 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         content_hash: 7,
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &note,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert!(
         render::is_step_row(&lines[0]),
@@ -582,13 +580,12 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
     let todo =
         TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks \u{b7} Running tests".into()));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &todo,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert_eq!(
         sem_at_lines(&todo, &lines, 1, &grid).as_deref(),

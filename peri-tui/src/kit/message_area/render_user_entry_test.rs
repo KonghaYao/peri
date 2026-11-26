@@ -3,6 +3,7 @@ use super::TuiRenderUnit;
 use super::TuiSystemReminder;
 use super::TuiUserBubble;
 
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::render;
 use crate::kit::message_area::render::helpers;
@@ -581,13 +582,12 @@ fn test_user_bubble_standalone_image_kept_as_text_without_inline_surface() {
 
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("![a]({source})")));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, _, image_lines, _, _, _) = render::vm_to_lines_cached_with_layout_scheduled(
+    let (lines, _, _, image_lines, _, _, _) = render::vm_to_lines_with_options(
         &vm,
         &grid,
         &mut cache,
         None,
-        false,
-        crate::kit::message_area::grid::ZoneTransition::None,
+        EntryRenderOptions::isolated(crate::kit::message_area::grid::ZoneTransition::None, false),
     );
     let text = super::all_text(&lines);
     assert!(

@@ -379,8 +379,8 @@ pub(super) fn resolved_bounds(
 /// - **中间行**（既不是首行也不是末行）：整行高亮 byte = [0, plain.len())
 /// - **首+末同行**：byte 范围 = [sr_off 行内 sc, er_off 行内 ec]
 ///
-/// [Why style 而非固定背景色] NO_COLOR 模式会在最终视口 pass 剥离所有颜色；
-/// 选区必须能改用 `REVERSED` 等非颜色 modifier（F3）。
+/// [Why style 而非固定背景色] NO_COLOR 模式由 AppShell 根 hook 在整帧绘制后
+/// 剥离所有颜色；选区必须能改用 `REVERSED` 等非颜色 modifier（F3）。
 ///
 /// [Why] 旧实现是整逻辑行高亮（粗粒度），与字符级复制提取不一致——用户看到的高亮
 /// 范围比实际复制内容大。改为字符级后高亮范围 = 复制范围，与终端鼠标拖拽选择一致。

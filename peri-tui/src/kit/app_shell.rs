@@ -36,6 +36,12 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 仅用于保证 ratatui-kit 在 wait() 时将本组件 waker 注入 heartbeat 的订阅表。
     let _heartbeat_val = *_heartbeat.read();
 
+    // [§12 / Q5] NO_COLOR 根级单点：整帧绘制完成后一次性剥离颜色，覆盖所有
+    // surface（消息区、SubAgent 面板、弹窗）。能力位在这里订阅，hook 内部
+    // 每帧读取 atom，避免跨帧持有 update 期的过期值。
+    let _caps = hooks.use_atom(&atoms::TERMINAL_CAPS);
+    let _no_color = hooks.use_hook(crate::kit::no_color::NoColorFrameHook::new);
+
     // 禁用 ratatui-kit 的 Ctrl+C 自动退出——peri 自行管理三级优先级链
     // （Cancel→FirstQuit→Quit）。SystemContext 控制 fullscreen event loop 的
     // Ctrl+C 行为，设为 false 后 Ctrl+C 键盘事件会经 dispatch 流入 Global handler，

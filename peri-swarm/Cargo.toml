@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Peri Swarm gateway — HTTP session contract, SSE events, and typed storage ports"
 
+# 进程入口没有单元测试，显式声明 bin 只为关掉空的测试 harness 链接。
+[[bin]]
+name = "peri-swarm"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 peri-time = { path = "../peri-time" }
 # S4 runtime boundary: only `src/actor/runtime.rs`, `src/store/remote.rs` and

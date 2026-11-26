@@ -6,6 +6,7 @@ use super::TuiAssistantBubble;
 use super::TuiReasoningBlock;
 use super::TuiRenderUnit;
 
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::grid::TextLineSource;
 use crate::kit::message_area::grid::ZoneTransition;
@@ -806,13 +807,12 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
         .into(),
     );
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &vm,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
 
     // 入口台阶（§6）：转场后的 entry 行首独立成行，先于 reasoning header

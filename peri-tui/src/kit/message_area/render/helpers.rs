@@ -76,7 +76,7 @@ pub(super) fn sym() -> SymbolSet {
 
 /// 状态符号 + 状态色：running/success/error 三元组。
 /// running 符号为动态 braille 动画帧（§8.2），返回 String。
-pub(super) fn status_symbol_and_color(
+pub(crate) fn status_symbol_and_color(
     is_running: bool,
     is_error: bool,
     sem: &peri_theme::semantic::SemanticTokens,
@@ -188,7 +188,7 @@ pub(super) const STEP_EXIT: &str = " \u{256d}\u{2500}\u{256f}";
 
 /// 台阶行（宽 4，不含内容）——纯结构 chrome，整行单 span；线色 = 所接文本
 /// 左侧线条色（[`text_line_color`]，转场处颜色不断链）；由
-/// `vm_to_lines_cached_with_layout` 在转场后的首个 entry 行首插入（§6）。
+/// `vm_to_lines_with_options` 在转场后的首个 entry 行首插入（§6）。
 pub(super) fn step_line(text: &'static str, color: Color) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(color)))
 }

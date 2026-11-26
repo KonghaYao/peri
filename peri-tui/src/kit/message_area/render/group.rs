@@ -165,7 +165,7 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
 /// 子 agent 失败原因行（§6.7：failed 自动显示错误原因；正文保持可读，不整块染红）。
 /// 前缀与工具行同列（过程区续行前缀，缩进由过程区承担、不叠加子工具缩进）——与
 /// 工具行同属一层级；正文预算减去符号位宽度（保持整行不越过程区预算，§8）。
-fn subagent_error_reason_lines(grid: &GridSpec, reason: &str) -> Vec<Line<'static>> {
+pub(crate) fn subagent_error_reason_lines(grid: &GridSpec, reason: &str) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     super::error::preview_lines(reason, grid.process_content_width().saturating_sub(2), 3)
         .into_iter()
@@ -186,7 +186,7 @@ fn subagent_error_reason_lines(grid: &GridSpec, reason: &str) -> Vec<Line<'stati
         .collect()
 }
 
-pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
+pub(crate) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     let fallback = || {
         data.view_models.iter().rev().find_map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(card)
@@ -288,7 +288,7 @@ pub(super) fn render_collapsed_group_lines(
             let (member_lines, ..) = super::vm_to_lines_cached(vm, grid, &mut md_cache, false);
             // 成员标题=首行；无折叠键（如普通通知）或空渲染的成员不参与点击。
             if !member_lines.is_empty()
-                && let Some((key, _)) = super::super::entry_nav::fold_key_of(vm)
+                && let Some(key) = FoldKey::of(vm)
             {
                 fold_hits.push((start, key));
             }

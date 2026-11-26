@@ -55,6 +55,7 @@ use self::vm_cache::VmCacheSlot;
 use self::vm_cache::total_visual_rows;
 
 use super::mermaid_scroll::MermaidBarDrag;
+use super::viewport_policy;
 
 use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
@@ -77,7 +78,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 确保所有 Markdown 色值随主题更新。
     let _palette = hooks.use_atom(&PALETTE_ATOM);
     let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
-    // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
+    // 订阅 TERMINAL_CAPS：NO_COLOR 时选区/焦点改用非颜色 modifier；颜色本身
+    // 由 AppShell 根 hook 在整帧绘制后统一剥离（§12 单点，见 kit::no_color）。
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
     let strip_color = !caps.read().color;
@@ -164,10 +166,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         hits: genui_rects,
         pressed: pressed_genui,
         area: area_rect,
-        strip_color,
     });
     pressed_overlay.area = area_rect;
-    pressed_overlay.strip_color = strip_color;
     // hover 高亮即时更新；预览需在同一目标稳定停留后才写入独立 atom。
     // gate 用 Arc<Mutex<_>> 跨异步计时任务保活，组件卸载后旧任务也只会自行失效。
     let image_preview_hover_gate = hooks.use_state(|| {
@@ -564,9 +564,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(false);
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
-    let max_scroll = total_visual_rows.saturating_sub(vis_height as usize);
+    let max_scroll = viewport_policy::max_scroll(total_visual_rows, vis_height as usize);
     let scroll_y_raw = scroll_state.read().offset();
-    let scroll_y = scroll_y_raw.min(max_scroll);
+    let scroll_y = viewport_policy::clamp_top(scroll_y_raw, total_visual_rows, vis_height as usize);
 
     // [Fix] 每帧钳制 scroll_state.offset 到 [0, max_scroll]。
     // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直
@@ -766,9 +766,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
-    // [F3] NO_COLOR 最终 pass 会剥离背景色；选区必须保留非颜色标记。
-    // 有颜色时用主题 selection 背景；无色时用 REVERSED（strip_line_colors
-    // 保留 modifier，仍可在最终 Buffer 上辨识）。
+    // [F3] NO_COLOR 的根级整帧 pass 会剥离背景色；选区必须保留非颜色标记。
+    // 有颜色时用主题 selection 背景；无色时用 REVERSED（modifier 保留，
+    // 仍可在最终 Buffer 上辨识）。
     let selection_style = if strip_color {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
@@ -892,12 +892,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 .fg(sem.status.running)
                 .add_modifier(Modifier::BOLD),
         ));
-        let line = Line::from(spans);
-        Some(if strip_color {
-            peri_tui_components::style::strip_line_colors(&line)
-        } else {
-            line
-        })
+        Some(Line::from(spans))
     } else {
         None
     };
@@ -907,13 +902,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     if viewport_has_footer {
         viewport_lines.extend(footer_lines.iter().cloned());
-    }
-    // [NO_COLOR 剥离 pass]（§12）：只作用于视口内可见行，不写缓存/业务状态（G3）。
-    // 剥离颜色但保留 modifier（bold/italic/dim）与符号、文本——状态不依赖颜色。
-    if strip_color {
-        for line in viewport_lines.iter_mut() {
-            *line = peri_tui_components::style::strip_line_colors(line);
-        }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时
     self::vm_cache::trace_phase(

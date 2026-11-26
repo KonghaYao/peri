@@ -22,7 +22,11 @@ fn public_loader_uses_isolated_home() {
         )
         .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "public_loader_uses_isolated_home", "--nocapture"])
+            .args([
+                "--exact",
+                "test_loader::public_loader_uses_isolated_home",
+                "--nocapture",
+            ])
             .env(CHILD_MARKER, "1")
             .env("HOME", home.path())
             .output()

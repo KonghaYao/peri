@@ -10,6 +10,7 @@ use serial_test::serial;
 
 use crate::i18n;
 use crate::kit::atoms::{REDUCED_MOTION, TERMINAL_CAPS};
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::render;
 use crate::kit::terminal_caps::TerminalCaps;
@@ -41,14 +42,12 @@ fn group(is_working: bool, failed_count: u32) -> TuiCollapsedGroup {
 
 fn rendered(group: &TuiCollapsedGroup, width: u16, frame: Option<u64>) -> Vec<Line<'static>> {
     let grid = GridSpec::grid_for(width);
-    let (lines, ..) = render::vm_to_lines_cached_with_layout_gated(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &TuiRenderUnit::TuiCollapsedGroup(group.clone()),
         &grid,
         &mut Default::default(),
         None,
-        false,
-        ZoneTransition::None,
-        frame,
+        EntryRenderOptions::message(ZoneTransition::None, frame).with_md_copy(false),
     );
     lines
 }

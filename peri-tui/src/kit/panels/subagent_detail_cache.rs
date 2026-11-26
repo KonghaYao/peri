@@ -27,5 +27,12 @@ use std::sync::Arc;
 mod detail_render_cache;
 use self::detail_render_cache as detail_cache;
 pub(super) use detail_cache::DetailRenderCache;
+
+#[path = "subagent_detail_cache/detail_artifacts.rs"]
+mod detail_artifacts;
+pub(super) use detail_artifacts::{
+    DetailArtifacts, apply_click as apply_artifact_click, collect as collect_artifacts,
+    resolve_click as resolve_artifact_click,
+};
 #[cfg(test)]
 use detail_cache::projected;

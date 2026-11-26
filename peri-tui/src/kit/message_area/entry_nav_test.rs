@@ -59,9 +59,11 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    let (k, f) = entry_nav::fold_key_of(&vm).expect("应可折叠");
-    assert_eq!(k, FoldKey::Reasoning("msg_9".into()));
-    assert_eq!(f, FoldState::Preview);
+    assert_eq!(FoldKey::of(&vm), Some(FoldKey::Reasoning("msg_9".into())));
+    assert_eq!(
+        crate::kit::tui_render_unit::fold_state_of(&vm),
+        Some(FoldState::Preview)
+    );
 
     // 无 message_id 的 reasoning bubble → 无折叠键：不能写覆盖，正文在渲染侧
     // 保持可见（流式 Preview / 完成 Expanded），不做假身份键控。
@@ -84,7 +86,12 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    assert!(entry_nav::fold_key_of(&vm_noid).is_none());
+    assert_eq!(FoldKey::of(&vm_noid), None);
+    assert_eq!(
+        crate::kit::tui_render_unit::fold_state_of(&vm_noid),
+        None,
+        "不可键控的 entry 没有可读 fold 语义"
+    );
 
     // tool / subagent 按 tool_id / agent_id 键控
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -103,23 +110,24 @@ fn test_fold_key_of_maps_vm_identities() {
         tool_calls_count: 0,
         content_hash: 0,
     });
+    assert_eq!(FoldKey::of(&tool), Some(FoldKey::Tool("tool-1".into())));
     assert_eq!(
-        entry_nav::fold_key_of(&tool),
-        Some((FoldKey::Tool("tool-1".into()), FoldState::Collapsed))
+        crate::kit::tui_render_unit::fold_state_of(&tool),
+        Some(FoldState::Collapsed)
     );
 
     let reminder = TuiSystemReminder::legacy("maintenance notice".into());
     let reminder_id = reminder.reminder_id;
     assert_eq!(
-        entry_nav::fold_key_of(&TuiRenderUnit::TuiSystemReminder(reminder)),
-        Some((FoldKey::SystemReminder(reminder_id), FoldState::Collapsed))
+        FoldKey::of(&TuiRenderUnit::TuiSystemReminder(reminder)),
+        Some(FoldKey::SystemReminder(reminder_id))
     );
 
     // user bubble 无折叠能力
     let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
-    assert!(entry_nav::fold_key_of(&user).is_none());
+    assert_eq!(FoldKey::of(&user), None);
 
-    // §6.7 subagent：fold_key_of 返回 SubAgent key——Enter 分派据此刻断打开
+    // §6.7 subagent：FoldKey::of 返回 SubAgent key——Enter 分派据此刻断打开
     // 详情 pane（折叠切换仍走同一 key 的覆盖表；分派改判在 mod.rs Enter 分支）。
     let sub = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
         instance_id: "instance-agent-7".into(),
@@ -136,12 +144,13 @@ fn test_fold_key_of_maps_vm_identities() {
         content_hash: 0,
     });
     assert_eq!(
-        entry_nav::fold_key_of(&sub),
-        Some((
-            FoldKey::SubAgent("instance-agent-7".into()),
-            FoldState::Collapsed
-        )),
+        FoldKey::of(&sub),
+        Some(FoldKey::SubAgent("instance-agent-7".into())),
         "subagent 折叠恒 Collapsed（§7 表），Enter 分派以此为锚"
+    );
+    assert_eq!(
+        crate::kit::tui_render_unit::fold_state_of(&sub),
+        Some(FoldState::Collapsed)
     );
 }
 

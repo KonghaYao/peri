@@ -1,6 +1,7 @@
 //! `NO_COLOR` style stripping: colors out, modifiers/symbols/alignment stay.
 
-use ratatui::layout::Alignment;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -96,4 +97,55 @@ fn sub_modifier_survives() {
     let stripped = super::strip_style_color(style);
     assert_eq!(stripped.fg, None);
     assert!(stripped.sub_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn buffer_strip_clears_colors_across_surfaces_keeps_modifiers() {
+    // 同一 Buffer 含两块模拟 surface：主区（REVERSED 选区）与 SubAgent 面板
+    // （带 bg/underline）。根级 pass 必须一次覆盖两者。
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 2));
+    buffer.set_string(
+        0,
+        0,
+        "main",
+        Style::default()
+            .fg(Color::Rgb(200, 0, 0))
+            .bg(Color::Rgb(0, 0, 80))
+            .add_modifier(Modifier::REVERSED),
+    );
+    buffer.set_string(
+        0,
+        1,
+        "subagent panel",
+        Style::default()
+            .fg(Color::Rgb(0, 200, 0))
+            .bg(Color::Rgb(20, 20, 20))
+            .underline_color(Color::Rgb(1, 2, 3))
+            .add_modifier(Modifier::BOLD),
+    );
+
+    super::strip_buffer_colors(&mut buffer);
+
+    assert_eq!(buffer[(0, 0)].symbol(), "m", "text stays");
+    assert_eq!(buffer[(0, 1)].symbol(), "s", "panel text stays");
+    for y in 0..2 {
+        for x in 0..24 {
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.fg, Color::Reset, "fg cleared at ({x},{y})");
+            assert_eq!(cell.bg, Color::Reset, "bg cleared at ({x},{y})");
+            assert_eq!(
+                cell.underline_color,
+                Color::Reset,
+                "underline color cleared at ({x},{y})"
+            );
+        }
+    }
+    assert!(
+        buffer[(0, 0)].modifier.contains(Modifier::REVERSED),
+        "selection REVERSED survives"
+    );
+    assert!(
+        buffer[(0, 1)].modifier.contains(Modifier::BOLD),
+        "panel BOLD survives"
+    );
 }

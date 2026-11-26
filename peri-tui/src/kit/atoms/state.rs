@@ -324,7 +324,8 @@ pub struct FocusedEntry {
 
 pub static FOCUSED_ENTRY: AtomStatic<Option<FocusedEntry>> = AtomStatic::new(|| None);
 /// 终端能力（启动时由 entry.rs 探测一次写入；默认全能力——未探测场景不做剥离/降级）。
-/// 渲染层按此决定 NO_COLOR 剥离 pass 与符号/italic/truecolor 降级。
+/// 渲染层按此决定符号/italic/truecolor 降级；NO_COLOR 的整帧剥离由 AppShell 根
+/// hook 在每帧绘制后统一执行（`kit::no_color`）。
 pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =
     AtomStatic::new(crate::kit::terminal_caps::TerminalCaps::default);
 /// reduced motion（启动时读一次 `PERI_REDUCED_MOTION`；默认 false 保持现有动画）。

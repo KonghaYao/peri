@@ -5,6 +5,7 @@ use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::render;
 use unicode_width::UnicodeWidthStr;
 
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::ZoneTransition;
 
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
@@ -443,13 +444,12 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &vm,
         &grid,
         &mut md_cache,
         Some(&mut layout),
-        false,
-        ZoneTransition::None,
+        EntryRenderOptions::isolated(ZoneTransition::None, false),
     );
 
     let index_of = |needle: &str| {
@@ -505,13 +505,12 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
 
     for term in [80u16, 30, 55, 20] {
         let grid = GridSpec::grid_for(term);
-        let (lines, ..) = render::vm_to_lines_cached_with_layout(
+        let (lines, ..) = render::vm_to_lines_with_options(
             &vm,
             &grid,
             &mut md_cache,
             Some(&mut layout),
-            false,
-            ZoneTransition::None,
+            EntryRenderOptions::isolated(ZoneTransition::None, false),
         );
 
         let (_, stable) = layout
@@ -550,13 +549,12 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &vm,
         &grid,
         &mut md_cache,
         Some(&mut layout),
-        false,
-        ZoneTransition::None,
+        EntryRenderOptions::isolated(ZoneTransition::None, false),
     );
 
     let stable_text: String = layout

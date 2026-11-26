@@ -5,6 +5,8 @@
 // 组内成员强制 `Expanded`；本表的工具 / reasoning 默认值只服务非分组语境。
 // ---------------------------------------------------------------------------
 
+use super::TuiRenderUnit;
+
 /// 折叠三态——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
 /// 默认策略只产出 `Collapsed` / `Expanded`；`Preview` 是用户 Space 手动覆盖的中态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,10 +51,91 @@ pub enum FoldKey {
     /// 流式追加只在组尾增员，键不变，用户展开选择跨重建保持。
     Group(String),
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
-    /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
+    /// `FoldKey::of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),
     /// System reminder 使用 TUI session 内分配的稳定身份键控。
     SystemReminder(u64),
+}
+
+impl FoldKey {
+    /// entry 的折叠身份——手动覆盖表、折叠 pass 与所有 surface（主区/详情面板）
+    /// 的唯一键控口径。
+    ///
+    /// 无折叠能力（user / system note / divider / todo 摘要）或缺稳定身份的
+    /// entry（无 `message_id` 的 reasoning、无 `request_id` 的 interaction）
+    /// 返回 `None`：没有身份就无法安全折叠，也不能写覆盖表。
+    #[must_use]
+    pub fn of(vm: &TuiRenderUnit) -> Option<Self> {
+        match vm {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                bubble.reasoning.as_ref()?;
+                bubble
+                    .message_id
+                    .as_deref()
+                    .map(|id| Self::Reasoning(id.to_owned()))
+            }
+            TuiRenderUnit::TuiToolCard(card) => Some(Self::Tool(card.tool_id.clone())),
+            TuiRenderUnit::TuiSubAgentGroup(group) => {
+                Some(Self::SubAgent(group.instance_id.clone()))
+            }
+            TuiRenderUnit::TuiCollapsedGroup(group) => Some(Self::Group(group.key.clone())),
+            TuiRenderUnit::TuiAskUserBlock(block) => block
+                .request_id
+                .as_deref()
+                .map(|id| Self::Interaction(id.to_owned())),
+            TuiRenderUnit::TuiSystemReminder(reminder) => {
+                Some(Self::SystemReminder(reminder.reminder_id))
+            }
+            TuiRenderUnit::TuiUserBubble(_)
+            | TuiRenderUnit::TuiSystemNote(_)
+            | TuiRenderUnit::TuiDivider(_)
+            | TuiRenderUnit::TuiTodoSummary(_) => None,
+        }
+    }
+}
+
+/// entry 的当前折叠状态；与 [`FoldKey::of`] 同一门槛——不可键控的 entry
+/// 返回 `None`（不能折叠就不存在可读的 fold 语义）。
+#[must_use]
+pub fn fold_state_of(vm: &TuiRenderUnit) -> Option<FoldState> {
+    FoldKey::of(vm)?;
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => {
+            bubble.reasoning.as_ref().map(|reasoning| reasoning.fold)
+        }
+        TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
+        TuiRenderUnit::TuiSubAgentGroup(group) => Some(group.fold),
+        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
+        TuiRenderUnit::TuiAskUserBlock(block) => Some(block.fold),
+        TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
+        TuiRenderUnit::TuiUserBubble(_)
+        | TuiRenderUnit::TuiSystemNote(_)
+        | TuiRenderUnit::TuiDivider(_)
+        | TuiRenderUnit::TuiTodoSummary(_) => None,
+    }
+}
+
+/// 折叠切换语义——键盘/鼠标动作到目标状态的唯一分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldToggle {
+    /// Enter / 单击组头：`Collapsed ↔ Expanded`（其余状态收起）。
+    Expand,
+    /// Space：`Preview ↔ Collapsed`（其余状态进入 Preview）。
+    Preview,
+}
+
+/// 折叠状态机——主区与详情面板共用的唯一切换实现。
+///
+/// 默认策略（[`fold_for_status`]）只产出 `Collapsed` / `Expanded`；
+/// `Preview` 是用户 Space 手动覆盖的中态。
+#[must_use]
+pub fn toggle_fold(current: FoldState, toggle: FoldToggle) -> FoldState {
+    match (toggle, current) {
+        (FoldToggle::Expand, FoldState::Collapsed) => FoldState::Expanded,
+        (FoldToggle::Expand, FoldState::Preview | FoldState::Expanded) => FoldState::Collapsed,
+        (FoldToggle::Preview, FoldState::Preview) => FoldState::Collapsed,
+        (FoldToggle::Preview, FoldState::Collapsed | FoldState::Expanded) => FoldState::Preview,
+    }
 }
 
 /// \[G2\] 折叠策略表——每个 entry 类型 × 状态的默认折叠目标。

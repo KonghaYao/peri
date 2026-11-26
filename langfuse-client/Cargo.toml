@@ -31,7 +31,7 @@ futures = { workspace = true }
 [dev-dependencies]
 temp-env = "0.3"
 mockito = "1"
-# 集成测试断言默认 gzip 正文（tests/otel_contract.rs 的 HTTP canary）需解压；复用同一版本边。
+# 集成测试断言默认 gzip 正文（tests/it/otel_contract.rs 的 HTTP canary）需解压；复用同一版本边。
 flate2 = "1.1.9"
 # native 暂存测试只用 open_at 临时目录，不触碰用户私有目录。
 tempfile.workspace = true

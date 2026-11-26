@@ -34,6 +34,7 @@ use ratatui_kit::ratatui::layout::Rect;
 use crate::app::panel_types::PanelKind;
 
 use crate::kit::message_area::scroll::SCROLL_LINES;
+use crate::kit::message_area::viewport_policy;
 
 // ── 注册表 ──────────────────────────────────────────────────────────────
 
@@ -297,7 +298,7 @@ fn apply_scroll_to_virtual(
     *offset = peri_tui_components::scrollbar::bounded_offset(
         *offset,
         delta,
-        content_height.saturating_sub(viewport_height),
+        viewport_policy::max_scroll(content_height, viewport_height),
     );
 }
 

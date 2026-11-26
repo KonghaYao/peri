@@ -245,7 +245,7 @@ fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         panic!(
             "{name} must be set: export the Loom locator/credential before running \
-             `cargo test -p peri-swarm --test loom_store_test -- --ignored --nocapture`"
+             `cargo test -p peri-swarm --test it loom_store_test -- --ignored --nocapture`"
         )
     })
 }

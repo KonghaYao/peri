@@ -1,7 +1,8 @@
 use super::scroll::GesturePending;
 
 use crate::kit::tui_render_unit::{
-    FoldKey, FoldState, InteractionKind, TuiAskUserBlock, TuiRenderUnit,
+    FoldKey, FoldState, FoldToggle, InteractionKind, TuiAskUserBlock, TuiRenderUnit, fold_state_of,
+    toggle_fold,
 };
 use ratatui_kit::prelude::*;
 
@@ -40,28 +41,10 @@ pub(in crate::kit::message_area) enum EntryClickHit {
 }
 
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
-/// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
-/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) / Group(key) /
-/// Interaction(request_id) / SystemReminder(reminder_id)。
-pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
-    match vm {
-        TuiRenderUnit::TuiAssistantBubble(b) => {
-            let r = b.reasoning.as_ref()?;
-            Some((FoldKey::Reasoning(b.message_id.clone()?), r.fold))
-        }
-        TuiRenderUnit::TuiToolCard(t) => Some((FoldKey::Tool(t.tool_id.clone()), t.fold)),
-        TuiRenderUnit::TuiSubAgentGroup(g) => {
-            Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
-        }
-        TuiRenderUnit::TuiCollapsedGroup(g) => Some((FoldKey::Group(g.key.clone()), g.fold)),
-        TuiRenderUnit::TuiAskUserBlock(a) => {
-            Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
-        }
-        TuiRenderUnit::TuiSystemReminder(r) => {
-            Some((FoldKey::SystemReminder(r.reminder_id), r.fold))
-        }
-        _ => None,
-    }
+/// 键控口径的唯一实现在 [`FoldKey::of`]（与折叠 pass、详情面板共用）；
+/// 本函数只把「身份 + 当前状态」配对，供本模块的键盘/鼠标结算使用。
+fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
+    Some((FoldKey::of(vm)?, fold_state_of(vm)?))
 }
 
 /// [S2 焦点单一事实源] 设 entry 焦点：一次写入 FOCUSED_ENTRY 完整表达导航
@@ -282,25 +265,22 @@ pub(super) fn apply_fold_toggle(
         return EventResult::Consumed;
     };
     // [Slice 2] §6.7：subagent Enter → 打开详情 pane（不切折叠——subagent
-    // 折叠恒 Collapsed 是 §7 表裁决，fold_key_of 不动）；Tool/Reasoning/SystemReminder 的
+    // 折叠恒 Collapsed 是 §7 表裁决）；Tool/Reasoning/SystemReminder 的
     // Enter 语义不变。写 SELECTED_SUBAGENT_ID 供详情面板按 id 从 VIEW_MODELS
     // 扫描嵌套消息。
-    if !next_is_preview && let FoldKey::SubAgent(agent_id) = &fold_key {
+    let toggle = if next_is_preview {
+        FoldToggle::Preview
+    } else {
+        FoldToggle::Expand
+    };
+    if toggle == FoldToggle::Expand
+        && let FoldKey::SubAgent(agent_id) = &fold_key
+    {
         *SELECTED_SUBAGENT_ID.state().write() = Some(agent_id.clone());
         crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::SubAgentDetail);
         return EventResult::Consumed;
     }
-    let next = if next_is_preview {
-        if current_fold == FoldState::Preview {
-            FoldState::Collapsed
-        } else {
-            FoldState::Preview
-        }
-    } else if current_fold == FoldState::Collapsed {
-        FoldState::Expanded
-    } else {
-        FoldState::Collapsed
-    };
+    let next = toggle_fold(current_fold, toggle);
     // 持久覆盖表：快照重建（push_view_models）后由折叠 pass 恢复，
     // 手动选择跨流式/跨 turn 保持（spec §7）。
     crate::kit::fold_overrides::insert(fold_key, next);
@@ -343,11 +323,7 @@ pub(super) fn apply_group_member_toggle(
     let Some((_, current_fold)) = fold_key_of(&group.view_models[member_index]) else {
         return EventResult::Consumed;
     };
-    let next = if current_fold == FoldState::Collapsed {
-        FoldState::Expanded
-    } else {
-        FoldState::Collapsed
-    };
+    let next = toggle_fold(current_fold, FoldToggle::Expand);
     crate::kit::fold_overrides::insert(key.clone(), next);
     let mut updated_group = group;
     let mut member = updated_group.view_models[member_index].clone();

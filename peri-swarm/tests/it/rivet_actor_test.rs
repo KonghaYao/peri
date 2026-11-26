@@ -824,7 +824,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
 ///   replicas read the same Loom databases"; it is **not** "two hosts", and it
 ///   says nothing about a multi-node engine or TLS.
 /// - because the deployment is process-wide, run this test alone in its own
-///   process: `--test rivet_actor_test --ignored --exact <this name>`.
+///   process: `--test it --ignored --exact rivet_actor_test::<this name>`.
 #[ignore = "requires a local Rivet engine; run alone with --ignored --exact"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry() {
@@ -837,8 +837,8 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
     assert!(
         peri_swarm::actor::deployment::current_deployment().is_none(),
         "a swarm deployment is already installed: this process-wide state belongs to another \
-         test. Run this test alone: --test rivet_actor_test --ignored --exact \
-         an_attaching_registry_recovers_actors_started_by_the_spawning_registry"
+         test. Run this test alone: --test it --ignored --exact \
+         rivet_actor_test::an_attaching_registry_recovers_actors_started_by_the_spawning_registry"
     );
 
     let (base_url, stub) = start_stub().await;

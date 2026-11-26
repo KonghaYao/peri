@@ -32,8 +32,8 @@ pub use bubble::{
 pub(crate) use bubble::{is_local_message_id, next_local_message_id};
 pub use diff::{TuiDiffBlock, TuiHunk, TuiHunkLine, TuiHunkLineKind, diff_change_counts};
 pub use fold::{
-    EntryStatus, FoldKey, FoldState, FoldTarget, entry_status_code, fold_for_status,
-    fold_for_unkeyed_reasoning, fold_state_code,
+    EntryStatus, FoldKey, FoldState, FoldTarget, FoldToggle, entry_status_code, fold_for_status,
+    fold_for_unkeyed_reasoning, fold_state_code, fold_state_of, toggle_fold,
 };
 pub use group::{
     TuiCollapsedGroup, TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary,

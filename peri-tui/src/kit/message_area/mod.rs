@@ -6,6 +6,7 @@
 //! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
 //! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
 
+pub(crate) mod artifact_hits;
 mod entry_nav;
 mod footer;
 mod genui_action;
@@ -21,10 +22,13 @@ pub(crate) mod scroll;
 pub(crate) mod selection;
 mod slot_index;
 mod transcript;
-use self::slot_index as transcript_index;
 mod viewport_anchor;
+pub(crate) mod viewport_policy;
 mod vm_cache_slot;
+
+use self::slot_index as transcript_index;
 use self::vm_cache_slot as vm_cache;
+pub(crate) use transcript::zone_transition;
 
 #[cfg(test)]
 #[path = "center_band_test.rs"]
@@ -55,6 +59,14 @@ mod inline_image_draw_tests;
 mod mermaid_viewport_tests;
 
 #[cfg(test)]
+#[path = "artifact_hits_test.rs"]
+mod artifact_hits_tests;
+
+#[cfg(test)]
+#[path = "viewport_policy_test.rs"]
+mod viewport_policy_tests;
+
+#[cfg(test)]
 #[path = "mermaid_hscroll_test.rs"]
 mod mermaid_hscroll_tests;
 
@@ -64,7 +76,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use self::entry_nav::{
     apply_fold_override, apply_fold_toggle, apply_group_member_toggle, cycle_interaction_option,
-    entry_click_decision, fold_key_of, pending_interaction_of, set_entry_focus,
+    entry_click_decision, pending_interaction_of, set_entry_focus,
 };
 #[cfg(test)]
 use self::handlers::{ImagePreviewHoverGate, schedule_image_preview_hover};
@@ -102,6 +114,7 @@ use scroll::GesturePending;
 mod message_area;
 pub use message_area::*;
 
+pub(crate) use self::genui_action::dispatch_action as dispatch_genui_action;
 pub(crate) use self::hits::ImageHoverState;
 pub(crate) use footer::hash_todo_items;
 pub use footer::{TodoItem, TodoStatus};
