@@ -5,10 +5,10 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use super::{ItemLog, TurnOutcome};
+use super::{ItemLog, PermissionStart, TurnOutcome};
 use crate::domain::{
-    turn_id_for_item, ItemKind, OfficialEvent, PromptCacheOptions, PromptCacheTtl, SessionState,
-    StreamEvent, TurnEvent,
+    turn_id_for_item, ApprovalDecision, ItemKind, McpToolSpec, OfficialEvent, PromptCacheOptions,
+    PromptCacheTtl, SessionState, StreamEvent, TurnEvent,
 };
 use crate::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 
@@ -91,6 +91,51 @@ fn child_chunk_for(message_id: &str, text: &str) -> serde_json::Value {
     })
 }
 
+fn tool_call(call_id: &str, input: &str) -> serde_json::Value {
+    json!({
+        "sessionId": "agent-1",
+        "update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": call_id,
+            "title": "read",
+            "status": "pending",
+            "rawInput": { "q": input },
+        },
+    })
+}
+
+fn tool_result(call_id: &str, output: &str) -> serde_json::Value {
+    json!({
+        "sessionId": "agent-1",
+        "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": call_id,
+            "status": "completed",
+            "rawOutput": output,
+        },
+    })
+}
+
+fn deltas(events: &[StreamEvent]) -> Vec<crate::domain::ItemDelta> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Delta(delta) => Some(delta.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn items(events: &[StreamEvent]) -> Vec<crate::domain::ItemView> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn official_types(events: &[StreamEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -109,8 +154,10 @@ fn drain(receiver: &mut broadcast::Receiver<StreamEvent>) -> Vec<StreamEvent> {
     events
 }
 
+/// ILOG-1: every chunk still reaches a live client, but only the turn terminal
+/// writes a row, so one stream is one durable item carrying the full text.
 #[tokio::test]
-async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
+async fn chunks_broadcast_live_and_persist_once() {
     let Fixture {
         log,
         store,
@@ -120,26 +167,62 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
     log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest("session/update", &chunk("hel")).await;
     log.ingest("session/update", &chunk("lo")).await;
+
+    let live = drain(&mut events);
+    let live_deltas = deltas(&live);
+    assert_eq!(
+        live_deltas.len(),
+        2,
+        "every chunk is delivered live: {live:?}"
+    );
+    assert!(live_deltas
+        .iter()
+        .all(|delta| delta.item_id == live_deltas[0].item_id));
+    assert_eq!(live_deltas[0].payload["role"], "assistant");
+    assert_eq!(live_deltas[0].payload["text"], "hel");
+    assert_eq!(live_deltas[1].payload["text"], "lo");
+    assert!(live_deltas
+        .iter()
+        .all(|delta| delta.payload["delta"] == json!(true)));
+    assert!(
+        live.iter().all(|event| event.item_seq().is_none()),
+        "a live chunk is not persisted, so it cannot advance the cursor: {live:?}"
+    );
+    assert_eq!(
+        store.swarm_last_seq("agent-1").await.expect("seq"),
+        0,
+        "no chunk row is written"
+    );
+    assert!(store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows")
+        .is_empty());
+
     log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
         .await;
 
     let seen = drain(&mut events);
-    let items: Vec<_> = seen
-        .iter()
-        .filter_map(|event| match event {
-            StreamEvent::Item(item) => Some(item.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(items.len(), 3, "two deltas plus one completion item");
-    assert!(items.iter().all(|item| item.item_id == items[0].item_id));
-    assert_eq!(items[0].payload["role"], "assistant");
-    assert_eq!(items[0].payload["text"], "hel");
-    assert_eq!(items[0].payload["delta"], true);
-    assert_eq!(items[2].payload["role"], "assistant");
-    assert_eq!(items[2].payload["text"], "hello");
-    assert_eq!(items[2].payload["complete"], true);
-    assert!(items[0].seq < items[1].seq && items[1].seq < items[2].seq);
+    let written = items(&seen);
+    assert_eq!(written.len(), 1, "one merged row per stream per turn");
+    assert_eq!(written[0].payload["role"], "assistant");
+    assert_eq!(written[0].payload["text"], "hello");
+    assert_eq!(written[0].payload["complete"], true);
+    assert_eq!(written[0].seq, 1);
+    assert_eq!(
+        written[0].item_id, live_deltas[0].item_id,
+        "live deltas and the merged row share one item identity"
+    );
+
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1, "exactly one stored row: {rows:?}");
+    assert_eq!(rows[0].payload["text"], json!("hello"));
+    assert_eq!(rows[0].payload["complete"], json!(true));
+    assert!(rows[0].payload.get("delta").is_none());
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 1);
 
     // Ordering contract: the completion item is persisted before the turn
     // terminal is announced. The official terminal frames follow it.
@@ -163,7 +246,7 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
         .expect("read")
         .expect("row");
     assert_eq!(row.state, SessionState::Idle);
-    assert_eq!(row.last_item_seq, 3);
+    assert_eq!(row.last_item_seq, 1);
 }
 
 #[tokio::test]
@@ -175,25 +258,42 @@ async fn a_batched_burst_keeps_host_order_and_consecutive_seqs() {
     } = fixture().await;
 
     log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
     log.ingest_batch(vec![
+        ("session/update".to_owned(), tool_call("call-1", "read a")),
         ("session/update".to_owned(), chunk("he")),
         ("session/update".to_owned(), chunk("llo")),
+        ("session/update".to_owned(), tool_result("call-1", "done")),
     ])
     .await;
 
-    let items: Vec<_> = drain(&mut events)
-        .into_iter()
-        .filter_map(|event| match event {
-            StreamEvent::Item(item) => Some(item),
-            _ => None,
+    let seen = drain(&mut events);
+    let written = items(&seen);
+    assert_eq!(
+        written.len(),
+        2,
+        "tool frames are one row each and chunks produce no row: {seen:?}"
+    );
+    assert_eq!(written[0].seq + 1, written[1].seq, "the run is contiguous");
+    assert_eq!(written[0].kind, ItemKind::ToolCall);
+    assert_eq!(written[1].kind, ItemKind::ToolResult);
+    assert_eq!(
+        store.swarm_last_seq("agent-1").await.expect("seq"),
+        2,
+        "only durable items consume seqs"
+    );
+    // The chunks between the tool rows are still delivered, in host order.
+    let live_deltas = deltas(&seen);
+    assert_eq!(live_deltas.len(), 2);
+    let kinds: Vec<&str> = seen
+        .iter()
+        .map(|event| match event {
+            StreamEvent::Item(_) => "item",
+            StreamEvent::Delta(_) => "delta",
+            _ => "other",
         })
         .collect();
-    assert_eq!(items.len(), 2, "one delta item per chunk");
-    assert_eq!(items[0].seq + 1, items[1].seq, "the run is contiguous");
-    assert_eq!(items[0].item_id, items[1].item_id, "one message identity");
-    assert_eq!(items[0].payload["text"], "he");
-    assert_eq!(items[1].payload["text"], "llo");
-    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 2);
+    assert_eq!(kinds, ["item", "delta", "delta", "item"], "{seen:?}");
 
     let row = store
         .swarm_get_session("agent-1")
@@ -204,17 +304,14 @@ async fn a_batched_burst_keeps_host_order_and_consecutive_seqs() {
     assert_eq!(row.last_item_seq, 2, "the cursor moves with the batch");
 
     // The turn's completion still flushes the whole streamed text under the
-    // stable identity, after the batched deltas.
+    // stable identity, as the next item.
     log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
         .await;
-    let completion = drain(&mut events)
+    let completion = items(&drain(&mut events))
         .into_iter()
-        .find_map(|event| match event {
-            StreamEvent::Item(item) if item.payload["complete"] == true => Some(item),
-            _ => None,
-        })
+        .find(|item| item.payload["complete"] == true)
         .expect("completion item");
-    assert_eq!(completion.item_id, items[0].item_id);
+    assert_eq!(completion.item_id, live_deltas[0].item_id);
     assert_eq!(completion.payload["text"], "hello");
     assert_eq!(completion.seq, 3);
 }
@@ -518,18 +615,13 @@ async fn thought_streams_flush_as_thoughts() {
         .await;
 
     let seen = drain(&mut events);
-    let items: Vec<_> = seen
-        .iter()
-        .filter_map(|event| match event {
-            StreamEvent::Item(item) => Some(item),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(items.len(), 2);
-    assert!(items
-        .iter()
-        .all(|item| item.kind == crate::domain::ItemKind::Thought));
-    assert_eq!(items[1].payload["text"], "why");
+    let written = items(&seen);
+    assert_eq!(written.len(), 1, "one row for the thought stream");
+    assert_eq!(written[0].kind, ItemKind::Thought);
+    assert_eq!(written[0].payload["text"], "why");
+    assert_eq!(written[0].payload["complete"], true);
+    assert_eq!(deltas(&seen).len(), 1, "the chunk still streams live");
+    assert_eq!(deltas(&seen)[0].kind, ItemKind::Thought);
 }
 
 #[tokio::test]
@@ -739,14 +831,14 @@ async fn assistant_completion_reports_item_parts_and_final_phase() {
 }
 
 #[tokio::test]
-async fn interleaved_assistant_messages_share_the_turn_by_first_chunk_seq() {
+async fn interleaved_assistant_messages_are_ordered_by_arrival() {
     let Fixture {
         log, mut events, ..
     } = fixture().await;
     log.begin_turn("req-1", "turn_1").await.expect("turn");
     drain(&mut events);
     // `msg-b` opens first and `msg-a` interleaves. Message ids must not decide
-    // the output order; the first persisted chunk does.
+    // the output order; the order the streams opened does.
     log.ingest("session/update", &chunk_for("msg-b", "first"))
         .await;
     log.ingest("session/update", &chunk_for("msg-a", "second"))
@@ -918,7 +1010,7 @@ async fn message_and_thought_sharing_a_message_id_stay_separate() {
 }
 
 #[tokio::test]
-async fn thought_first_chunk_later_does_not_steal_final_answer() {
+async fn a_late_thought_stream_does_not_steal_the_final_answer() {
     let Fixture {
         log, mut events, ..
     } = fixture().await;
@@ -1043,6 +1135,383 @@ async fn child_messages_never_become_official_items_or_output_indices() {
         )),
         "child item must not appear in official item.added"
     );
+}
+
+/// ILOG-1: a turn with interleaved messages, reasoning, tool traffic and both
+/// approval facts writes exactly one row per item, in the order the streams
+/// opened. Only root assistant messages carry `phase`/`outputIndex`.
+#[tokio::test]
+async fn one_row_per_stream_per_turn() {
+    let mut spec = McpToolSpec::new("server-a", "https://mcp.example.test/mcp");
+    spec.require_approval = Some(json!("always"));
+    let tools = vec![spec];
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    store
+        .swarm_upsert_session(SwarmSessionRow {
+            mcp_tools: tools.clone(),
+            ..session_row()
+        })
+        .await
+        .expect("session row");
+    let (channel, mut events) = broadcast::channel(64);
+    let log = Arc::new(
+        ItemLog::new(
+            "agent-1",
+            Arc::clone(&store),
+            channel,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .with_approval_declarations(&tools),
+    );
+
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    log.ingest("session/update", &chunk_for("msg-b", "first"))
+        .await;
+    log.ingest("session/update", &chunk_for("msg-a", "second"))
+        .await;
+    log.ingest("session/update", &thought_for("msg-t", "why"))
+        .await;
+    log.ingest("session/update", &tool_call("call-1", "read a"))
+        .await;
+    log.ingest("session/update", &tool_result("call-1", "done"))
+        .await;
+    let start = log
+        .begin_permission(
+            &json!(7),
+            &json!({
+                "_meta": { "peri.mcp": { "server": "server-a", "tool": "search" } },
+                "toolCall": {
+                    "toolCallId": "call-1",
+                    "title": "search",
+                    "rawInput": { "q": "x" },
+                },
+            }),
+        )
+        .await
+        .expect("permission recorded");
+    assert_eq!(start, PermissionStart::Pending);
+    let request_id = log.required_actions()[0]["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+    log.respond_approval(
+        &request_id,
+        ApprovalDecision::Approve,
+        Some("input-1".into()),
+    )
+    .await;
+
+    // No chunk is persisted; these four rows are the tool and approval items.
+    let before_terminal = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(
+        before_terminal.len(),
+        4,
+        "tool_call, tool_result and both approval facts: {before_terminal:?}"
+    );
+    assert!(
+        before_terminal
+            .iter()
+            .all(|row| row.payload.get("delta").is_none()),
+        "no chunk is persisted"
+    );
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(
+        rows.len(),
+        7,
+        "four item rows plus two merged assistant rows and one thought: {rows:?}"
+    );
+    let messages: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == ItemKind::Message && row.payload["role"] == json!("assistant"))
+        .collect();
+    assert_eq!(messages.len(), 2, "one merged row per message stream");
+    assert_eq!(messages[0].payload["text"], json!("first"));
+    assert_eq!(messages[0].payload["phase"], json!("commentary"));
+    assert_eq!(messages[0].payload["outputIndex"], json!(0));
+    assert_eq!(messages[1].payload["text"], json!("second"));
+    assert_eq!(messages[1].payload["phase"], json!("final_answer"));
+    assert_eq!(messages[1].payload["outputIndex"], json!(1));
+    let thought = rows
+        .iter()
+        .find(|row| row.kind == ItemKind::Thought)
+        .expect("thought row");
+    assert_eq!(thought.payload["text"], json!("why"));
+    assert!(
+        thought.payload.get("phase").is_none(),
+        "a thought is not an official output"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == ItemKind::Approval)
+            .count(),
+        2,
+        "the pending fact and the settlement are each one row"
+    );
+    // Seq stays the ordering cursor: rows are contiguous and strictly increasing.
+    let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
+    assert!(
+        seqs.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "{seqs:?}"
+    );
+}
+
+/// A chunk that arrives after the turn terminal must not extend the merged row
+/// or open a stream for the next turn's flush.
+#[tokio::test]
+async fn a_late_chunk_after_the_terminal_is_dropped() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest("session/update", &chunk("hi")).await;
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let merged = items(&drain(&mut events));
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].payload["text"], json!("hi"));
+
+    log.ingest("session/update", &chunk("late")).await;
+
+    assert!(
+        drain(&mut events).is_empty(),
+        "a chunk after the terminal is neither stored nor broadcast"
+    );
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the durable text stays the terminal's: {rows:?}"
+    );
+    assert_eq!(rows[0].payload["text"], json!("hi"));
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 1);
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        row.state,
+        SessionState::Idle,
+        "a late chunk must not reopen the session"
+    );
+}
+
+/// Recovered root output has no gateway turn: its buffered text is still
+/// written as one merged row, without official frames or phase metadata.
+#[tokio::test]
+async fn recovered_root_flushes_one_merged_row_without_official_frames() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.ingest("session/update", &chunk("hel")).await;
+    log.ingest("session/update", &chunk("lo")).await;
+    assert_eq!(deltas(&drain(&mut events)).len(), 2, "chunks stream live");
+
+    log.finish_recovered_root().await;
+
+    let seen = drain(&mut events);
+    let written = items(&seen);
+    assert_eq!(written.len(), 1, "one merged row for the recovered stream");
+    assert_eq!(written[0].payload["text"], json!("hello"));
+    assert_eq!(written[0].payload["complete"], json!(true));
+    assert!(
+        written[0].payload.get("phase").is_none(),
+        "recovered text belongs to no turn: {:?}",
+        written[0].payload
+    );
+    assert!(written[0].payload.get("outputIndex").is_none());
+    assert!(
+        official_types(&seen).is_empty(),
+        "no turn is open, so no official frame may name one: {seen:?}"
+    );
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].payload["text"], json!("hello"));
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+/// A merged payload over the store budget keeps its identity and cursor but is
+/// stored as the truncation marker; live clients still saw every chunk.
+#[tokio::test]
+async fn an_oversized_stream_is_one_truncated_row() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    let huge = "x".repeat(crate::domain::item::MAX_PAYLOAD_BYTES + 1);
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest("session/update", &chunk(&huge)).await;
+    let live = deltas(&drain(&mut events));
+    assert_eq!(live.len(), 1);
+    assert_eq!(
+        live[0].payload["text"].as_str().map(str::len),
+        Some(huge.len()),
+        "the live chunk is not truncated"
+    );
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1, "the stream is one row even when truncated");
+    assert!(
+        rows[0].truncated,
+        "the merged row exceeds the payload budget"
+    );
+    assert_eq!(rows[0].payload["_truncated"], json!(true));
+    assert!(
+        rows[0].payload["originalBytes"]
+            .as_u64()
+            .expect("originalBytes")
+            > u64::try_from(crate::domain::item::MAX_PAYLOAD_BYTES).expect("budget"),
+        "the marker reports the oversized payload: {:?}",
+        rows[0].payload
+    );
+    assert_eq!(rows[0].seq, 1);
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 1);
+}
+
+/// ILOG-7: a slow consumer loses events (including live deltas), is told once
+/// with `gap`, and recovers by resuming from the last persisted item seq.
+#[tokio::test]
+async fn a_lagged_subscriber_can_resume_from_the_last_item() {
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    store
+        .swarm_upsert_session(session_row())
+        .await
+        .expect("session row");
+    // Capacity 2 plus a receiver that does not read: the third broadcast below
+    // is dropped from the channel.
+    let (channel, mut events) = broadcast::channel(2);
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    // Consume the turn-start frames (a lagged `try_recv` still advances the
+    // cursor) so the next three broadcasts are the ones the subscriber misses.
+    while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = events.try_recv() {}
+
+    log.ingest("session/update", &chunk("hel")).await; // delta, position 0
+    log.ingest("session/update", &tool_call("call-1", "read"))
+        .await; // item seq 1, position 1
+    log.ingest("session/update", &chunk("lo")).await; // delta, position 2
+
+    let skipped = loop {
+        match events.recv().await {
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Lagged(count)) => break count,
+            Err(broadcast::error::RecvError::Closed) => panic!("channel closed before lag"),
+        }
+    };
+    assert_eq!(
+        skipped, 1,
+        "only the first delta was lost; the persisted item stayed readable"
+    );
+    // The SSE writer ends here: one gap frame names the dropped upper bound.
+    let gap = crate::event_stream::FrameWriter::new(0).gap(skipped);
+    assert!(gap.starts_with("event: gap"), "{gap}");
+    assert_eq!(
+        gap, "event: gap\ndata: {\"fromSeq\":1,\"toSeq\":1}\n\n",
+        "the gap starts after the last delivered item seq"
+    );
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    // Reconnect from the last item the slow consumer saw: only the deltas were
+    // lost; the merged row is still readable.
+    let resumed = store
+        .swarm_items_after("agent-1", 1, 10)
+        .await
+        .expect("rows");
+    assert_eq!(resumed.len(), 1, "the complete row is after the last item");
+    assert_eq!(resumed[0].payload["text"], json!("hello"));
+    assert_eq!(resumed[0].payload["complete"], json!(true));
+}
+
+/// ILOG-6: a single turn emits the fixed official family in order; no chunk
+/// adds or removes an official frame.
+#[tokio::test]
+async fn a_single_turn_keeps_the_official_sequence() {
+    let Fixture {
+        log, mut events, ..
+    } = fixture().await;
+    let (_, user_item_id) = log
+        .record_user_input(Some("input-1"), "hello?")
+        .await
+        .expect("user item");
+    // The real turn id is derived from the accepted user item; the deferred
+    // `turn.created`/`item.added` frames wait for that turn to start.
+    log.begin_turn("req-1", &turn_id_for_item(&user_item_id))
+        .await
+        .expect("turn");
+    log.ingest("session/update", &chunk("hel")).await;
+    log.ingest("session/update", &chunk("lo")).await;
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let seen = drain(&mut events);
+    assert_eq!(
+        official_types(&seen),
+        [
+            "agent.session.in_progress",
+            "agent.session.turn.created",
+            "agent.session.turn.in_progress",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.done",
+            "agent.session.turn.content_part.done",
+            "agent.session.turn.item.done",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{seen:?}"
+    );
+    let user_ids: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                if item.role == "user" =>
+            {
+                Some(item.id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_ids, [user_item_id]);
 }
 
 #[tokio::test]
@@ -2634,16 +3103,17 @@ async fn a_failed_group_does_not_discard_the_rest_of_the_run() {
     log.begin_turn("req-1", "turn_1").await.expect("turn");
     drain(&mut events);
 
-    // The oversized delta sits alone in its durable group; the store rejects
-    // that group, and the small delta behind it must still be persisted.
+    // The oversized tool row sits alone in its durable group; the store rejects
+    // that group, and the small item behind it must still be persisted and
+    // broadcast.
     memory.fail_next_appends(1);
     let oversized = "x".repeat(9_000);
     log.ingest_batch(vec![
         (
             "session/update".to_owned(),
-            chunk_for("msg-big", &oversized),
+            tool_call("call-big", &oversized),
         ),
-        ("session/update".to_owned(), chunk_for("msg-small", "tail")),
+        ("session/update".to_owned(), tool_call("call-small", "tail")),
     ])
     .await;
 
@@ -2656,15 +3126,21 @@ async fn a_failed_group_does_not_discard_the_rest_of_the_run() {
         .swarm_items_after("agent-1", 0, 10)
         .await
         .expect("rows");
-    let texts: Vec<_> = stored
-        .iter()
-        .filter_map(|row| row.payload.get("text").and_then(|text| text.as_str()))
-        .collect();
     assert_eq!(
-        texts,
-        ["tail"],
-        "a rejected group must not drop later items: {stored:?}"
+        stored.len(),
+        1,
+        "only the surviving row is stored: {stored:?}"
     );
+    assert_eq!(stored[0].payload["toolCallId"], json!("call-small"));
+    assert_eq!(stored[0].payload["input"], json!({ "q": "tail" }));
+
+    let broadcast = items(&drain(&mut events));
+    assert_eq!(
+        broadcast.len(),
+        1,
+        "the failed group is not broadcast; the surviving row is"
+    );
+    assert_eq!(broadcast[0].payload["toolCallId"], json!("call-small"));
 }
 
 /// Round 9 finding 1: the newer continuation's terminal replaces the retained
