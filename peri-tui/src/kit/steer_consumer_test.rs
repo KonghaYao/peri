@@ -307,6 +307,90 @@ async fn test_enqueue_receipt_dispatches_same_input_immediately_once() {
     client.close();
 }
 
+/// 执行中的入队不得再补发送选择：后续输入保持 Queued，由工具边界或
+/// 下一次 idle 逐条抽取，避免多条输入合并进同一个模型请求。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_enqueue_while_active_does_not_auto_dispatch() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: None,
+            items: vec![],
+            terminal_items: vec![],
+        },
+        7,
+        true,
+    );
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let draft = "排队中";
+    let command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "enqueue-while-active".into(),
+        generation: None,
+        auto_dispatch: false,
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: input_id.clone(),
+            original_draft: draft.into(),
+            content: MessageContent::text(draft),
+            plugin_selections: Vec::new(),
+        }),
+    };
+    projection.begin(command.clone());
+    STEERS.set(projection);
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, notifications, _) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s", false);
+    client.spawn_pump(notifications);
+    let (tx, shutdown, consumer) = start_consumer(&client);
+
+    tx.send(command)
+        .expect("enqueue fixture channel must deliver");
+    let (enqueue_id, _) = expect_rpc(&server_transport, "session/input/enqueue").await;
+    server_transport
+        .send_response(
+            enqueue_id,
+            Ok(serde_json::json!({
+                "snapshot":{"sessionId":"s","generation":"g","revision":2,"activeRequestId":"run-1","items":[{
+                    "inputId":input_id,"originalDraft":draft,
+                    "content":MessageContent::text(draft),"state":"queued"
+                }]},
+                "results":[{"inputId":input_id,"state":"queued"}]
+            })),
+        )
+        .await
+        .expect("enqueue response fixture must be delivered");
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), server_transport.recv())
+            .await
+            .is_err(),
+        "执行中的输入不得自动发送"
+    );
+    let rows = STEERS.state().read().rows("s");
+    assert!(
+        rows.iter().any(|row| row.id == input_id
+            && row.state == crate::kit::steer_queue::SteerItemState::Queued),
+        "输入必须保持待发状态"
+    );
+
+    shutdown.cancel();
+    consumer.await.expect("consumer must stop");
+    client.close();
+}
+
 /// 自动发送选择失败不能回退成第二次入队，也不得误报输入未被接收。
 #[tokio::test]
 #[serial_test::serial]

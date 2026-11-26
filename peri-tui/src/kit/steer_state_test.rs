@@ -119,6 +119,72 @@ fn test_auto_dispatch_follows_settled_enqueue_once() {
     );
 }
 
+/// 只有「这一轮的第一条」才自动发送：执行中的后续输入保持 Queued，
+/// 由工具边界或下一次 idle 逐条抽取，不能被提前标记为已发送。
+#[test]
+fn test_auto_dispatch_waits_until_the_input_owns_a_turn() {
+    let mut state = make_idle_state();
+    let enqueue = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(enqueue.clone());
+    let mut busy = make_snapshot(3);
+    busy.active_request_id = Some("run".into());
+    state.settle(
+        &enqueue,
+        UserInputQueueReceipt {
+            snapshot: busy,
+            results: Vec::new(),
+            taken_back: None,
+        },
+    );
+    assert!(
+        state.begin_auto_dispatch(&enqueue).is_none(),
+        "流式/工具批次期间不得自动发送后续输入"
+    );
+
+    // 排队里已有旧输入时，新输入不能越过 FIFO 队首抢占这一轮。
+    let next = make_command(SteerCommandKind::Enqueue(make_input("b")));
+    state.begin(next.clone());
+    let mut backlog = make_snapshot(4);
+    backlog.items.push(UserInputQueueItem {
+        input_id: "b".to_owned(),
+        content: MessageContent::text("b"),
+        original_draft: "b".to_owned(),
+        plugin_selections: Vec::new(),
+        state: UserInputState::Queued,
+    });
+    state.settle(
+        &next,
+        UserInputQueueReceipt {
+            snapshot: backlog,
+            results: Vec::new(),
+            taken_back: None,
+        },
+    );
+    assert!(
+        state.begin_auto_dispatch(&next).is_none(),
+        "已有排队项时不得自动发送后来输入"
+    );
+
+    // 跳过不会消耗一次性标记：真正独占队列且空闲时仍然补发。
+    let mut idle = make_snapshot(5);
+    idle.items.clear();
+    idle.items.push(UserInputQueueItem {
+        input_id: "b".to_owned(),
+        content: MessageContent::text("b"),
+        original_draft: "b".to_owned(),
+        plugin_selections: Vec::new(),
+        state: UserInputState::Queued,
+    });
+    state.accept_snapshot(idle, 1, true);
+    let dispatch = state
+        .begin_auto_dispatch(&next)
+        .expect("独占队列且空闲时必须自动发送");
+    assert!(matches!(
+        &dispatch.kind,
+        SteerCommandKind::Dispatch(ids) if ids == &["b".to_owned()]
+    ));
+}
+
 #[test]
 fn test_steer_pending_dispatch_disables_repeat_takeback() {
     let mut state = make_state();

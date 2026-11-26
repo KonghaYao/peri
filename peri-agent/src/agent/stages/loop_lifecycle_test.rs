@@ -508,19 +508,42 @@ async fn assert_tool_boundary_steer(
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2, "工具后必须再走一轮 Reason");
     let pending = mailbox.snapshot_sync().items;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].original_draft, "idle-only");
-    assert_eq!(pending[0].state, UserInputState::Queued);
+    let expected_pending: &[&str] = if mode == SteerMode::Boundary {
+        // 边界每次只抽取队首一条；steer-2 解除本次 attempt 的边界绑定，
+        // 保持 Queued 等下一次 idle，不得挤进同一次模型请求。
+        &["idle-only", "steer-2"]
+    } else {
+        &["idle-only"]
+    };
+    let pending_drafts: Vec<&str> = pending
+        .iter()
+        .map(|item| item.original_draft.as_str())
+        .collect();
+    assert_eq!(pending_drafts, expected_pending);
+    assert!(pending
+        .iter()
+        .all(|item| item.state == UserInputState::Queued));
 
     let requests = requests.lock();
     let second = requests.get(1).expect("第二轮 Reason 请求必须存在");
-    for text in ["steer-1", "steer-2"] {
+    let expected_steers: &[&str] = if mode == SteerMode::Boundary {
+        &["steer-1"]
+    } else {
+        &["steer-1", "steer-2"]
+    };
+    for text in expected_steers {
         assert_eq!(
             second
                 .iter()
-                .filter(|message| message.content() == text)
+                .filter(|message| message.content() == *text)
                 .count(),
             1
+        );
+    }
+    if mode == SteerMode::Boundary {
+        assert!(
+            !second.iter().any(|message| message.content() == "steer-2"),
+            "边界一次只放行一条，后续输入必须留到下一轮"
         );
     }
     assert!(!second
@@ -535,7 +558,7 @@ async fn assert_tool_boundary_steer(
             )
         })
         .expect("第二轮请求必须包含工具结果");
-    let steer_positions: Vec<_> = ["steer-1", "steer-2"]
+    let steer_positions: Vec<_> = expected_steers
         .iter()
         .map(|text| {
             second
@@ -547,8 +570,11 @@ async fn assert_tool_boundary_steer(
         })
         .collect();
     assert!(
-        tool_position < steer_positions[0] && steer_positions[0] < steer_positions[1],
-        "同一批 steer 必须按 MQ 顺序排在工具结果之后: {steer_positions:?}, tool={tool_position}"
+        steer_positions
+            .iter()
+            .all(|position| tool_position < *position)
+            && steer_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "steer 必须按 MQ 顺序排在工具结果之后: {steer_positions:?}, tool={tool_position}"
     );
 }
 

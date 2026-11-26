@@ -316,6 +316,11 @@ impl SteerState {
     /// 为刚受理的 Enqueue 生成紧随其后的 Dispatch：Enter 与 ↑ 共用同一发送
     /// 选择，服务端再按 loop 阶段决定打断模型还是只放行 MQ。
     ///
+    /// 只有「这一轮的第一条」才补发送选择：接收快照没有活跃执行，且队列里
+    /// 只有它自己。执行中的后续输入必须留在 `Queued`，否则多个 Enqueue 各自
+    /// 自动 Dispatch 会一起进入下一次 Receive，合并成同一个模型请求；它们由
+    /// 工具边界或下一次 idle 按 FIFO 逐条抽取。
+    ///
     /// 同一 `input_id` 只生成一次，且必须沿用入队时绑定的 generation；失败
     /// 只影响这次发送选择，入队成功的待发送项仍在队列中。
     pub(crate) fn begin_auto_dispatch(&mut self, source: &SteerCommand) -> Option<SteerCommand> {
@@ -335,12 +340,17 @@ impl SteerState {
             }
             // 服务端可能已按 idle 调度选中或摄取这条输入；只有仍在待发的
             // 输入才需要补一次明确的发送选择。
-            let queued = session.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.items.iter().any(|item| {
-                    item.input_id == input.input_id && item.state == UserInputState::Queued
-                })
+            let starts_turn = session.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.active_request_id.is_none()
+                    && snapshot
+                        .items
+                        .iter()
+                        .all(|item| item.input_id == input.input_id)
+                    && snapshot.items.iter().any(|item| {
+                        item.input_id == input.input_id && item.state == UserInputState::Queued
+                    })
             });
-            if !queued {
+            if !starts_turn {
                 return None;
             }
             if !session.auto_dispatched.insert(input.input_id.clone()) {
