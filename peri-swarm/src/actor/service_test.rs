@@ -24,8 +24,8 @@ use crate::actor::reader::{ItemLog, TurnOutcome};
 use crate::actor::runtime::AcpChild;
 use crate::domain::{
     ApprovalDecision, Disposition, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
-    InputState, InputSubmission, ItemKind, LogicalId, McpToolSpec, OfficialEvent, SessionState,
-    StreamEvent, SwarmError,
+    InputState, InputSubmission, ItemKind, ItemSource, LogicalId, McpToolSpec, OfficialEvent,
+    SessionState, StreamEvent, SwarmError,
 };
 use crate::service::{AcceptedInput, SwarmService};
 use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore};
@@ -289,6 +289,11 @@ async fn interleaved_approval_and_merged_rows_replay_without_a_pending_action() 
         .swarm_items_after(LOGICAL_ID, 0, 500)
         .await
         .expect("items");
+    assert_eq!(
+        rows.len(),
+        3,
+        "pending approval + settlement + one merged answer row: {rows:?}"
+    );
     assert!(
         rows.windows(2).all(|pair| pair[0].seq < pair[1].seq),
         "the mixed shapes share one seq space: {rows:?}"
@@ -1202,4 +1207,235 @@ async fn a_steer_whose_turn_ends_while_a_replacement_starts_is_rejected_without_
     assert_eq!(runtime.log.steer_generation(), 0);
     assert!(!runtime.log.steer_pending());
     assert_eq!(runtime.log.active_turn().as_deref(), Some("req-2"));
+}
+
+/// F2: recovered root output is a custom item only. Replay neither attaches it
+/// to the turn that preceded it nor derives an official item frame from it.
+#[tokio::test]
+async fn a_recovered_root_row_replays_without_a_turn() {
+    let fixture = fixture(false).await;
+    fixture
+        .log
+        .record_user_input(Some("in-1"), "hello")
+        .await
+        .expect("user item");
+    fixture
+        .log
+        .begin_turn("prompt-1", "turn_1")
+        .await
+        .expect("turn");
+    fixture
+        .log
+        .ingest("session/update", &chunk("msg-1", "answer"))
+        .await;
+    fixture
+        .log
+        .finish_turn("prompt-1", TurnOutcome::Completed("end_turn".to_owned()))
+        .await;
+    let cursor = fixture
+        .store
+        .swarm_last_seq(LOGICAL_ID)
+        .await
+        .expect("cursor");
+
+    // Recovery buffered root output after the turn ended: no gateway turn.
+    fixture
+        .log
+        .ingest("session/update", &chunk("msg-recovered", "recovered text"))
+        .await;
+    fixture.log.finish_recovered_root().await;
+
+    let rows = fixture
+        .store
+        .swarm_items_after(LOGICAL_ID, 0, 500)
+        .await
+        .expect("items");
+    let recovered = rows
+        .iter()
+        .find(|row| row.payload["messageId"] == json!("msg-recovered"))
+        .expect("the recovered row is durable");
+    assert_eq!(recovered.payload["complete"], json!(true));
+    assert_eq!(recovered.payload["recovered"], json!(true));
+    assert!(recovered.payload.get("phase").is_none());
+    assert!(recovered.payload.get("outputIndex").is_none());
+
+    // A window that starts after the closed turn contains the recovered row as
+    // a custom item and nothing but the seeded terminal frames: no
+    // `turn.item.*`/`content_part.*` may name it.
+    let window = fixture
+        .service
+        .replay_after(&logical_id(), EventCursor::after(cursor))
+        .await
+        .expect("replay after the turn");
+    let replayed: Vec<_> = window
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replayed.len(), 1, "one custom item: {window:?}");
+    assert_eq!(replayed[0].seq, recovered.seq);
+    let window_types: Vec<_> = window
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event.event_type()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        window_types
+            .iter()
+            .all(|event_type| *event_type == "agent.session.turn.completed"
+                || *event_type == "agent.session.idle"),
+        "the recovered row produces no item frames: {window:?}"
+    );
+
+    // A full replay still ends the previous turn exactly once and never counts
+    // the recovered row as an assistant output of it.
+    let all = fixture
+        .service
+        .replay_after(&logical_id(), EventCursor::START)
+        .await
+        .expect("full replay");
+    let official: Vec<_> = all
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        official
+            .iter()
+            .filter(|event| event.event_type() == "agent.session.turn.item.done")
+            .count(),
+        1,
+        "only the merged answer item is done: {all:?}"
+    );
+    assert_eq!(
+        official
+            .iter()
+            .filter(|event| event.event_type() == "agent.session.turn.item.added")
+            .count(),
+        2,
+        "one user item and one merged answer item: {all:?}"
+    );
+    let recovered_event_prefix = format!("evt_item_{}_", recovered.seq);
+    assert!(
+        official
+            .iter()
+            .all(|event| !event.event_id().contains(&recovered_event_prefix)),
+        "no official frame is derived from the recovered row: {all:?}"
+    );
+    assert!(
+        all.iter()
+            .filter_map(StreamEvent::item_seq)
+            .any(|seq| seq == recovered.seq),
+        "the recovered row still replays as an item frame"
+    );
+}
+
+/// F5: historical per-delta rows replay row by row (no folding); only the
+/// `complete` row of the same item yields official frames.
+#[tokio::test]
+async fn a_historical_multi_row_item_replays_row_by_row_with_one_official_item() {
+    let fixture = fixture(false).await;
+    let item_id = "itim_hist";
+    let rows = vec![
+        SwarmItemRow {
+            logical_id: LOGICAL_ID.to_owned(),
+            seq: 1,
+            item_id: "itim_input_hist".to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload: json!({ "role": "user", "text": "hi", "inputId": "hist" }),
+            created_at: "2026-11-21T00:00:01Z".to_owned(),
+            truncated: false,
+        },
+        SwarmItemRow {
+            logical_id: LOGICAL_ID.to_owned(),
+            seq: 2,
+            item_id: item_id.to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload: json!({ "role": "assistant", "messageId": "msg-hist", "text": "he", "delta": true }),
+            created_at: "2026-11-21T00:00:02Z".to_owned(),
+            truncated: false,
+        },
+        SwarmItemRow {
+            logical_id: LOGICAL_ID.to_owned(),
+            seq: 3,
+            item_id: item_id.to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload: json!({ "role": "assistant", "messageId": "msg-hist", "text": "llo", "delta": true }),
+            created_at: "2026-11-21T00:00:03Z".to_owned(),
+            truncated: false,
+        },
+        SwarmItemRow {
+            logical_id: LOGICAL_ID.to_owned(),
+            seq: 4,
+            item_id: item_id.to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload: json!({ "role": "assistant", "messageId": "msg-hist", "text": "hello", "complete": true }),
+            created_at: "2026-11-21T00:00:04Z".to_owned(),
+            truncated: false,
+        },
+    ];
+    fixture
+        .store
+        .swarm_append_items(&rows, None)
+        .await
+        .expect("historical rows");
+
+    let backlog = fixture
+        .service
+        .subscribe_backlog(&logical_id(), EventCursor::START)
+        .await
+        .expect("replay");
+    let replayed: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "every historical row replays in seq order without folding: {backlog:?}"
+    );
+    assert_eq!(replayed[3].payload["text"], json!("hello"));
+
+    let official: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        official
+            .iter()
+            .filter(|event| event.event_type() == "agent.session.turn.item.done")
+            .count(),
+        1,
+        "only the complete row produces the assistant item: {backlog:?}"
+    );
+    assert_eq!(
+        official
+            .iter()
+            .filter(|event| event.event_type() == "agent.session.turn.item.added")
+            .count(),
+        2,
+        "the user row and the one complete row, not the historical deltas: {backlog:?}"
+    );
+    assert!(
+        official.iter().all(|event| {
+            !event.event_id().contains("evt_item_2_") && !event.event_id().contains("evt_item_3_")
+        }),
+        "historical delta rows add no official frame: {backlog:?}"
+    );
 }

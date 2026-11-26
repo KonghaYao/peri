@@ -429,12 +429,24 @@ enum RowFrame {
 /// before item granularity add per-delta rows for the same `item_id`; they
 /// classify as [`RowFrame::Nothing`] and only their final `complete:true` row
 /// produces the official item. Both shapes therefore replay the same frames.
+/// Recovered root output: a merged row written after recovery without a gateway
+/// turn (`payload.recovered = true`, `design §4.2`).
+///
+/// It is a custom item only. Replay must not open a turn for it, attach it to
+/// the turn that happened to precede it, or count it as that turn's output.
+fn is_recovered_row(item: &crate::domain::ItemView) -> bool {
+    item.payload.get("recovered") == Some(&json!(true))
+}
+
 fn classify_row(
     item: &crate::domain::ItemView,
     turns: &mut Vec<ReplayTurn>,
     current: &mut Option<usize>,
     persisted: &BTreeMap<String, crate::store::SwarmTurnRow>,
 ) -> RowFrame {
+    if is_recovered_row(item) {
+        return RowFrame::Nothing;
+    }
     if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
         // Thought chunks share the answer's `messageId`; child agents own their
         // own source. Both stay on the custom `item` surface and must not open
@@ -1048,7 +1060,10 @@ fn seed_for(
 /// Role of the first root row that participates in turn classification.
 fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str> {
     for item in items {
-        if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
+        if item.kind != crate::domain::ItemKind::Message
+            || !item.source.is_root()
+            || is_recovered_row(item)
+        {
             continue;
         }
         match item.payload.get("role").and_then(|role| role.as_str()) {
@@ -1093,8 +1108,12 @@ async fn turn_at_cursor(
         for row in page {
             let view = row.to_view();
             // Child and thought rows are not root turn boundaries; only root
-            // messages may open, close, or steer a turn.
-            if view.kind != crate::domain::ItemKind::Message || !view.source.is_root() {
+            // messages may open, close, or steer a turn. Recovered root output
+            // has no turn at all and must not close or extend the one before it.
+            if view.kind != crate::domain::ItemKind::Message
+                || !view.source.is_root()
+                || is_recovered_row(&view)
+            {
                 continue;
             }
             match view.payload.get("role").and_then(|role| role.as_str()) {

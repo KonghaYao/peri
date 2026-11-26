@@ -406,15 +406,16 @@ const body = /** @type {any} */ (page).body;
 | 场景 | 帧 | 终止 |
 | --- | --- | --- |
 | 实时（先开流，再 POST） | 自定义 `item`（用户输入先于 `turn.started`）+ 实时 `delta`（无 `seq`，不落库）+ 自定义 `turn`（`started` → `completed` \| `failed`）+ 官方 `agent.session.turn.created` → `turn.item.added` → `turn.completed` \| `turn.failed` → `agent.session.idle` \| `failed`；可能有 `gap` | 原生客户端看 `turn.state`；官方 SDK 看 `agent.session.idle` / `agent.session.failed` |
-| 回放（显式 `after`/`afterSeq`/`Last-Event-ID`） | 自定义 `item` + 同一套官方帧，没有自定义 `turn` 帧，也不重播 `delta`（只给合并后的最终 item）；可能有 `gap` | 官方 SDK 在 turn 终态后的 `agent.session.idle` 结束；原生客户端看 `payload.complete === true` |
+| 回放（显式 `after`/`afterSeq`/`Last-Event-ID`） | 自定义 `item` + 同一套官方帧，没有自定义 `turn` 帧，也不重播实时 `delta`；新写入的数据只给合并后的最终 item，历史多行 item 会按 `seq` 逐行发出 `item` 帧（客户端按 `itemId` 自行折叠）；可能有 `gap` | 官方 SDK 在 turn 终态后的 `agent.session.idle` 结束；原生客户端看 `payload.complete === true` |
 | 无游标订阅 | 不读历史，只收订阅之后的实时帧 | 同上；要补历史必须显式给游标（`afterSeq=0` 回放全部） |
 | `after` 等于/超过末尾 | 只有心跳 | 不会自行关闭；用客户端超时、`AbortController` 或 `items.list` |
-| 心跳 | `{ "lastItemSeq": N }` | 无 `seq`、无 `state`；不是本流已投递的位置 |
+| 心跳 | `{ "lastItemSeq": N }` | 只由持久化 item 推进（长 turn 期间可能整轮不变）；无 `seq`、无 `state`；不是本流已投递的位置 |
 
 - 实时帧序不是「先 `turn.started`」：用户输入的自定义 `item` 先到，官方 `turn.created`
   随后；不要收到 `turn.started`/`turn.created` 就清空已到达的帧。
 - assistant/thought 的实时 `delta` 帧没有 `id:`、不落库，也不能用于续读；同一
-  `messageId` 的合并行在 turn 终止时只落一次（`complete:true`）。
+  `(agentId, messageId, kind)` 的合并行在 turn 终止时只落一次（`complete:true`），
+  answer 与 reasoning 共享 `messageId` 时是两条 item。
 - `POST /events` 是接收语义：202 只表示 receipt、用户 item 与 turn 预留已持久化，turn 在
   后台执行；失败在流上以 `turn.failed`/`session.failed` 出现。要观察本轮先开流再 POST；
   `ack.lastItemSeq` 已包含用户输入，不能用它开流补看本轮。
@@ -426,8 +427,9 @@ const body = /** @type {any} */ (page).body;
   item** 帧的 `id:` 是 seq。实时 `delta`、自定义 `turn`、官方 `agent.session.*` 与
   `gap` 帧不带 `id:`，不推进 `Last-Event-ID`。
 - 订阅落后超过通道容量时收到一帧 `gap` 后流即结束（可能丢掉 turn 终态）；按最后渲染的
-  item `seq` 重连补齐。`gap` 的 `fromSeq`/`toSeq` 是丢失区间的上界，不是行数差值
-  （不落库的 delta 不占 `seq`）。
+  item `seq` 重连补齐。`gap.toSeq` 是被丢弃持久化行的 `seq` 上界（按本流最后已投递
+  item 加上丢弃帧数推算），可能高于会话当前游标；不落库的 delta 不占 `seq`，不能按
+  差值推算丢弃行数。
 - 心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 决定（默认 15s，最短 1ms）；空流是否收到
   心跳取决于网关进程配置。
 
@@ -498,8 +500,9 @@ stateDiagram-v2
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 宿主在 turn 中退出后，历史查询返回已存状态。下一条新用户输入触发原会话恢复；同步中断的旧 turn 记录为失败，Peri 按持久 MQ 恢复待处理工作。
-- 回放不逐 chunk 重播增量：assistant/thought 只有 turn 终止时的合并行，`delta` 帧仅
-  实时可见；依赖增量文本重放的客户端需自行缓存实时帧。
+- 新写入的回放不逐 chunk 重播增量：assistant/thought 只有 turn 终止时的合并行，
+  `delta` 帧仅实时可见；历史逐 chunk 行仍按 `seq` 逐行发出 `item` 帧，客户端按
+  `itemId` 自行折叠。依赖增量文本重放的客户端需自行缓存实时帧。
 - turn 执行中崩溃会丢失该 turn 尚未写入的 assistant/thought 文本（已落库的
   user/tool/approval 行不受影响）；恢复从最后一行继续，不重建在途文本。
 - 合并 payload 超过 1 MiB（`MAX_PAYLOAD_BYTES`）时按 `{_truncated:true,

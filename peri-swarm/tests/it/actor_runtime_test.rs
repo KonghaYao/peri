@@ -15,12 +15,13 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use futures::StreamExt as _;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -46,6 +47,8 @@ struct StubModel {
     calls: AtomicUsize,
     main_calls: AtomicUsize,
     delay_ms: AtomicU64,
+    /// Pause between the first content frame and the rest of a turn's answer.
+    chunk_gap_ms: AtomicU64,
     bodies: Mutex<Vec<Value>>,
 }
 
@@ -55,6 +58,7 @@ impl StubModel {
             calls: AtomicUsize::new(0),
             main_calls: AtomicUsize::new(0),
             delay_ms: AtomicU64::new(0),
+            chunk_gap_ms: AtomicU64::new(0),
             bodies: Mutex::new(Vec::new()),
         }
     }
@@ -71,6 +75,15 @@ impl StubModel {
 
     fn set_delay(&self, millis: u64) {
         self.delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// Send the first content frame, then hold the stream open for `millis`.
+    ///
+    /// A test that resumes mid-turn needs a chunk that is *consumed* while the
+    /// turn is still running; a whole-response delay only proves the request
+    /// arrived.
+    fn set_chunk_gap(&self, millis: u64) {
+        self.chunk_gap_ms.store(millis, Ordering::SeqCst);
     }
 
     fn requests(&self) -> Vec<Value> {
@@ -150,6 +163,10 @@ async fn stub_chat(State(stub): State<Arc<StubModel>>, body: Bytes) -> Response 
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
     let text = format!("{TURN_PREFIX}{index}");
+    let gap = stub.chunk_gap_ms.load(Ordering::SeqCst);
+    if gap > 0 {
+        return streaming_sse_response(&text, index, &format!("main-{index}"), gap);
+    }
     sse_response(&[text], index, &format!("main-{index}"))
 }
 
@@ -170,28 +187,8 @@ fn is_background_helper(request: &Value) -> bool {
 fn sse_response(texts: &[String], index: usize, tag: &str) -> Response {
     let mut sse = String::new();
     for text in texts {
-        let (head, tail) = text.split_at(text.len().min(5));
-        let frames = [
-            json!({
-                "id": format!("chatcmpl-stub-{tag}-{index}"),
-                "object": "chat.completion.chunk",
-                "choices": [{ "index": 0, "delta": { "role": "assistant", "content": head } }],
-            }),
-            json!({
-                "id": format!("chatcmpl-stub-{tag}-{index}"),
-                "object": "chat.completion.chunk",
-                "choices": [{ "index": 0, "delta": { "content": tail } }],
-            }),
-            json!({
-                "id": format!("chatcmpl-stub-{tag}-{index}"),
-                "object": "chat.completion.chunk",
-                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
-            }),
-        ];
-        for frame in frames {
-            sse.push_str("data: ");
-            sse.push_str(&frame.to_string());
-            sse.push_str("\n\n");
+        for frame in sse_frames(text, index, tag) {
+            sse.push_str(&frame);
         }
     }
     sse.push_str("data: [DONE]\n\n");
@@ -201,6 +198,54 @@ fn sse_response(texts: &[String], index: usize, tag: &str) -> Response {
         sse,
     )
         .into_response()
+}
+
+/// One text chunk's SSE frames, in the wire shape Peri's OpenAI client expects.
+fn sse_frames(text: &str, index: usize, tag: &str) -> Vec<String> {
+    let (head, tail) = text.split_at(text.len().min(5));
+    let frames = [
+        json!({
+            "id": format!("chatcmpl-stub-{tag}-{index}"),
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": { "role": "assistant", "content": head } }],
+        }),
+        json!({
+            "id": format!("chatcmpl-stub-{tag}-{index}"),
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": { "content": tail } }],
+        }),
+        json!({
+            "id": format!("chatcmpl-stub-{tag}-{index}"),
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+        }),
+    ];
+    frames
+        .into_iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .collect()
+}
+
+/// First content frame now, the rest after `gap_ms`.
+///
+/// The pause sits between the two content frames, so the host ingests and
+/// projects a chunk while the turn is still in flight.
+fn streaming_sse_response(text: &str, index: usize, tag: &str, gap_ms: u64) -> Response {
+    let mut frames = sse_frames(text, index, tag);
+    frames.push("data: [DONE]\n\n".to_owned());
+    let body = Body::from_stream(futures::stream::iter(frames.into_iter().enumerate()).then(
+        move |(position, frame)| async move {
+            if position == 1 {
+                tokio::time::sleep(Duration::from_millis(gap_ms)).await;
+            }
+            Ok::<_, std::io::Error>(Bytes::from(frame))
+        },
+    ));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .expect("streaming SSE response")
 }
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -1371,8 +1416,9 @@ async fn replay_matches_live_frames() {
 async fn reconnect_mid_turn_gets_final_row_once() {
     clear_telemetry_env();
     let (base_url, stub) = start_stub().await;
-    // Keep the model request in flight long enough to replay mid-turn.
-    stub.set_delay(2_000);
+    // Send one chunk, then hold the rest of the answer: the mid-turn replay
+    // below runs after a chunk was consumed but before the terminal.
+    stub.set_chunk_gap(2_000);
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
     let service = Arc::new(AcpSwarmService::new(
@@ -1393,12 +1439,32 @@ async fn reconnect_mid_turn_gets_final_row_once() {
     );
     let user_seq = admitted[0].0;
 
+    let (_, mut live) = service
+        .subscribe(&logical, EventCursor::Tail)
+        .await
+        .expect("live subscription")
+        .into_parts();
     let runner = Arc::clone(&service);
     let turn = tokio::spawn(async move { runner.run_pending_turn(pending).await });
     assert!(
         wait_for_main_calls(&stub, 1, Duration::from_secs(10)).await,
         "the turn reaches the model"
     );
+    // Wait until a live chunk was projected and broadcast: this is the event
+    // that a per-chunk persistence would have written as a row.
+    let delta = timeout(Duration::from_secs(10), async {
+        loop {
+            match live.recv().await.expect("the live subscription stays open") {
+                StreamEvent::Delta(delta) => break delta,
+                // The reader may emit unrelated live frames first (turn
+                // markers, official frames); keep waiting for the chunk.
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("the first chunk is consumed before the replay");
+    assert_eq!(delta.payload["delta"], json!(true));
 
     // Mid-turn: a cursor after the user item replays no item row at all, so a
     // reconnecting client cannot project a partial assistant message.

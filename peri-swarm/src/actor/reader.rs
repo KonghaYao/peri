@@ -10,10 +10,13 @@
 //! stream is buffered in memory and written as one merged row when the turn
 //! terminates (`payload.complete = true`, full text); live chunks travel as
 //! [`StreamEvent::Delta`] frames that are never persisted and carry no `seq`, so
-//! they cannot advance a resume cursor. Replay therefore reads one row per item
-//! and never re-emits per-chunk deltas (`design §9`). A chunk that arrives after
-//! its stream was flushed by a terminal is dropped: it cannot rewrite the
-//! durable terminal and must not leak into the next turn's flush.
+//! they cannot advance a resume cursor. New data therefore replays one row per
+//! item and never re-emits live deltas (`design §9`); historical per-chunk rows
+//! still replay row by row as `item` frames, which clients fold by `itemId`. A
+//! chunk that arrives after its stream was flushed by a terminal is dropped: it
+//! cannot rewrite the durable terminal, must not leak into the next turn's
+//! flush, and is re-checked at broadcast time in case the terminal closed the
+//! stream while the chunk was staged.
 //!
 //! Rejected alternatives (so they are not reopened): merging in place with an
 //! `UPDATE` breaks append-only replay and loses the final text for a client
@@ -635,8 +638,12 @@ impl ItemLog {
             state.closed.extend(streams.keys().cloned());
             streams
         };
-        self.flush_streams(streams, None).await;
-        let failed = self.state.lock().failure.take().is_some();
+        let persisted = self.flush_streams(streams, None).await.is_ok();
+        let host_failed = self.state.lock().failure.take().is_some();
+        // A flush that persisted nothing is a visible failure, not `idle` with
+        // no text: `report_append_failure` already marked the session failed and
+        // the committed groups (if any) were broadcast.
+        let failed = host_failed || !persisted;
         self.update_state_quiet(if failed {
             SessionState::Failed
         } else {
@@ -1150,7 +1157,10 @@ impl ItemLog {
         }
         // The turn identity stays set while completion items are flushed: their
         // `turn.item.added` frames belong to this turn.
-        self.flush_streams(streams, turn_id.as_deref()).await;
+        let flush_failed = self
+            .flush_streams(streams, turn_id.as_deref())
+            .await
+            .is_err();
         let (turn_id, created_at, started_at) = {
             let mut state = self.state.lock();
             (
@@ -1171,6 +1181,18 @@ impl ItemLog {
             );
             self.active_watch.send_replace(None);
             return;
+        };
+        // A completion flush that persisted no row cannot end as a normal
+        // `turn.completed`: the client would see a successful turn with no
+        // text. Committed groups were already broadcast; the turn now reports
+        // the failure. A turn that was already failing keeps its own
+        // code/message (the flush error was logged by `report_append_failure`).
+        let outcome = match (outcome, flush_failed) {
+            (TurnOutcome::Completed(_), true) => TurnOutcome::Failed {
+                code: -32603,
+                message: "the turn's assistant output was not persisted".to_owned(),
+            },
+            (outcome, _) => outcome,
         };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
@@ -2307,7 +2329,22 @@ impl ItemLog {
         for (index, entry) in entries.into_iter().enumerate() {
             match entry {
                 StagedEntry::Chunk(delta) => {
-                    self.broadcast(StreamEvent::Delta(delta));
+                    // The stream may have been closed by a terminal after this
+                    // chunk was staged (another ingest or a direct caller can
+                    // flush in between). Broadcasting it now would deliver a
+                    // delta after the item's `complete` row and render text the
+                    // durable item does not have.
+                    let closed = delta_stream_key(&delta)
+                        .is_some_and(|key| self.state.lock().closed.contains(&key));
+                    if closed {
+                        tracing::debug!(
+                            logical_id = %self.logical_id,
+                            item_id = %delta.item_id,
+                            "dropping a staged delta whose stream closed before the broadcast"
+                        );
+                    } else {
+                        self.broadcast(StreamEvent::Delta(delta));
+                    }
                 }
                 StagedEntry::Item { .. } => {
                     if let Some(view) = committed.get(&index) {
@@ -2583,10 +2620,15 @@ impl ItemLog {
     ///
     /// `turn_id` names the turn whose official item frames the flush publishes;
     /// `None` for recovered root output, which has no gateway turn (no
-    /// `phase`/`outputIndex`, and no official frames). All rows go in one store
+    /// `phase`/`outputIndex`, no official frames, and `payload.recovered = true`
+    /// so replay never attaches the row to a turn). All rows go in one store
     /// batch, so a turn terminal costs one write per store group instead of one
-    /// per stream, and a failed write is reported once while the terminal frames
-    /// still go out.
+    /// per stream.
+    ///
+    /// A partly failed batch keeps its committed groups: they are broadcast
+    /// before the failure is reported. The error is returned so the caller can
+    /// fail the turn instead of ending "successful but without text"; nothing is
+    /// retried here.
     ///
     /// Only root `Message` streams compete for `outputIndex` and the
     /// final-answer phase: thought streams (same `messageId` as the answer) and
@@ -2596,14 +2638,14 @@ impl ItemLog {
         &self,
         streams: BTreeMap<StreamKey, MessageStream>,
         turn_id: Option<&str>,
-    ) {
+    ) -> Result<(), SwarmError> {
         let mut streams: Vec<_> = streams
             .into_iter()
             .filter(|(_, stream)| !stream.text.is_empty())
             .map(|(key, stream)| (stream.order, key, stream))
             .collect();
         if streams.is_empty() {
-            return;
+            return Ok(());
         }
         // Arrival order: a turn that interleaved two messages still reports
         // them in output order, exactly as the first persisted chunk seq did.
@@ -2629,6 +2671,13 @@ impl ItemLog {
                 "text": stream.text,
                 "complete": true,
             });
+            if turn_id.is_none() {
+                // Recovered root output belongs to no gateway turn. The marker
+                // is the replay-side contract: `service::classify_row` treats
+                // such a row as a custom item, so it neither opens nor extends
+                // the turn that happened to precede it (`design §4.2`).
+                payload["recovered"] = json!(true);
+            }
             if root_message {
                 payload["phase"] = json!(if root_message_index + 1 == root_messages {
                     "final_answer"
@@ -2656,17 +2705,11 @@ impl ItemLog {
             .map(|(index, (item, item_id))| (index, item, item_id))
             .collect();
         let mut committed = BTreeMap::new();
-        if let Err(error) = self
+        let result = self
             .append_items_tracked(keyed, ProgressWrite::WhileTurnOpen, &mut committed)
-            .await
-        {
-            tracing::warn!(
-                logical_id = %self.logical_id,
-                error = %error,
-                "swarm completion items were not persisted"
-            );
-            return;
-        }
+            .await;
+        // Broadcast every committed group first: one rejected store group must
+        // not hide the rows of the same flush that are already durable.
         for view in committed.into_values() {
             if turn_id.is_some() {
                 self.publish(&view);
@@ -2677,6 +2720,12 @@ impl ItemLog {
                 self.broadcast(StreamEvent::Item(view));
             }
         }
+        if let Err(error) = result {
+            self.report_append_failure("completion_items", error.clone())
+                .await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Last persisted seq, read from the store only when the cache is cold.
@@ -2897,6 +2946,20 @@ fn stream_parts(item: &ProjectedItem) -> Option<(StreamKey, String, String)> {
         item.kind.as_str(),
     );
     Some((key, message_id, text))
+}
+
+/// Rebuild the [`StreamKey`] of a staged live delta.
+///
+/// A staged chunk never carries the key itself (the delta frame is a public
+/// shape), but the key is derivable from the frame: the source agent, the
+/// `messageId` kept for client-side joining, and the item kind.
+fn delta_stream_key(delta: &ItemDelta) -> Option<StreamKey> {
+    let message_id = delta.payload.get("messageId")?.as_str()?.to_owned();
+    Some((
+        delta.source.agent_id.clone(),
+        message_id,
+        delta.kind.as_str(),
+    ))
 }
 
 #[cfg(test)]

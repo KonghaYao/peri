@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use super::{ItemLog, PermissionStart, TurnOutcome};
+use super::{ItemLog, PermissionStart, StagedItems, TurnOutcome};
 use crate::domain::{
     turn_id_for_item, ApprovalDecision, ItemKind, McpToolSpec, OfficialEvent, PromptCacheOptions,
     PromptCacheTtl, SessionState, StreamEvent, TurnEvent,
@@ -1332,6 +1332,12 @@ async fn recovered_root_flushes_one_merged_row_without_official_frames() {
     assert_eq!(written.len(), 1, "one merged row for the recovered stream");
     assert_eq!(written[0].payload["text"], json!("hello"));
     assert_eq!(written[0].payload["complete"], json!(true));
+    assert_eq!(
+        written[0].payload["recovered"],
+        json!(true),
+        "recovered text is marked as belonging to no turn: {:?}",
+        written[0].payload
+    );
     assert!(
         written[0].payload.get("phase").is_none(),
         "recovered text belongs to no turn: {:?}",
@@ -3466,4 +3472,177 @@ async fn a_prompt_terminal_in_settle_yields_to_a_run_adopted_meanwhile() {
         .expect("read")
         .expect("row");
     assert_eq!(row.state, SessionState::Idle);
+}
+
+/// F1: a completion flush whose first store group fails keeps the group that
+/// did commit. The committed row is broadcast before the failure is reported,
+/// and the turn ends failed instead of "completed without that text".
+#[tokio::test]
+async fn a_partially_failed_completion_flush_broadcasts_the_committed_row() {
+    let memory = Arc::new(MemorySwarmStore::new());
+    memory
+        .swarm_upsert_session(session_row())
+        .await
+        .expect("session row");
+    let store: Arc<dyn SwarmStore> = memory.clone();
+    let (channel, mut events) = broadcast::channel(64);
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    // The oversized stream owns the first store group (the batch splitter
+    // isolates a >8 KiB payload); the small stream follows in its own group.
+    let big = "x".repeat(9_000);
+    log.ingest("session/update", &chunk_for("msg-big", &big))
+        .await;
+    log.ingest("session/update", &chunk_for("msg-small", "tail"))
+        .await;
+    drain(&mut events);
+
+    memory.fail_next_appends(1);
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let seen = drain(&mut events);
+    let written = items(&seen);
+    assert_eq!(
+        written.len(),
+        1,
+        "the committed group is broadcast; the failed one is not: {seen:?}"
+    );
+    assert_eq!(written[0].payload["messageId"], json!("msg-small"));
+    assert_eq!(written[0].payload["text"], json!("tail"));
+    assert_eq!(written[0].payload["complete"], json!(true));
+    assert!(
+        matches!(
+            seen.iter()
+                .find(|event| matches!(event, StreamEvent::Turn(_))),
+            Some(StreamEvent::Turn(TurnEvent::Failed { .. }))
+        ),
+        "a flush error fails the turn instead of completing it: {seen:?}"
+    );
+    assert!(
+        !official_types(&seen).contains(&"agent.session.turn.completed"),
+        "no successful terminal may follow a failed flush: {seen:?}"
+    );
+
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the committed group is durable: {rows:?}"
+    );
+    assert_eq!(rows[0].payload["messageId"], json!("msg-small"));
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 1);
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Failed);
+}
+
+/// F1: a flush that persists nothing must not end as a normal
+/// `turn.completed` ("successful but no text"). The visible failure is the
+/// turn terminal and the session state.
+#[tokio::test]
+async fn a_completion_flush_that_persists_nothing_fails_the_turn() {
+    let memory = Arc::new(MemorySwarmStore::new());
+    memory
+        .swarm_upsert_session(session_row())
+        .await
+        .expect("session row");
+    let store: Arc<dyn SwarmStore> = memory.clone();
+    let (channel, mut events) = broadcast::channel(64);
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest("session/update", &chunk("hello")).await;
+    drain(&mut events);
+
+    memory.fail_next_appends(1);
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let seen = drain(&mut events);
+    assert!(
+        items(&seen).is_empty(),
+        "the rejected merged row is not broadcast: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Failed { .. }))),
+        "the turn terminal reports the failure: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))),
+        "a turn whose whole output was lost is not completed: {seen:?}"
+    );
+    let types = official_types(&seen);
+    assert!(
+        !types.contains(&"agent.session.turn.completed"),
+        "no official completion either: {types:?}"
+    );
+    assert!(
+        types.contains(&"agent.session.turn.failed"),
+        "the official terminal is a failure: {types:?}"
+    );
+    assert_eq!(store.swarm_last_seq("agent-1").await.expect("seq"), 0);
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Failed);
+}
+
+/// F3: a delta staged before its stream's terminal is not broadcast after the
+/// merged row; the merged row itself still goes out.
+#[tokio::test]
+async fn a_staged_delta_is_dropped_when_its_stream_closed_before_the_flush() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    // Stage the chunk without flushing it, then let the terminal close the
+    // stream: this is the interleaving the broadcast-time check must catch.
+    let mut staged = StagedItems::default();
+    for event in crate::actor::projection::project("session/update", &chunk("hi")) {
+        if let crate::actor::projection::Projected::Item(item) = event {
+            log.stage_item(item, &mut staged);
+        }
+    }
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let terminal = drain(&mut events);
+    assert_eq!(items(&terminal).len(), 1, "the merged row is written");
+    assert_eq!(items(&terminal)[0].payload["text"], json!("hi"));
+
+    log.flush_staged(&mut staged).await;
+    let after = drain(&mut events);
+    assert!(
+        deltas(&after).is_empty(),
+        "a delta must not follow its stream's complete row: {after:?}"
+    );
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1, "the dropped delta wrote nothing: {rows:?}");
 }
