@@ -266,7 +266,8 @@ PERI_TEST_POSTGRES_URL='postgresql://peri:peri@127.0.0.1:55433/postgres' \
 PERI_SWARM_SESSION_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_session' \
 PERI_SWARM_STATE_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_swarm_state' \
   scripts/cargo-rmcp-patched.sh test -p peri-swarm --test it -- --ignored state_store
-# test result: ok. 3 passed; 0 failed; finished in 40.02s
+# test result: ok. 4 passed; 0 failed; finished in 40.03s
+# （含 type=none 删除的 HTTP 回归）
 
 # 离线导入工具（fixture 驱动，无 PostgreSQL）
 python3 peri-swarm/scripts/test-import-loom-state.py
