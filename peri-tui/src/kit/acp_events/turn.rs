@@ -410,9 +410,11 @@ pub(super) fn handle_user_input_delivered(
     }
     state.last_submitted_text = None;
     state.variant = 1;
-    // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留序号与大小）。
+    // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留摘要与大小），
+    // 载荷同时登记进上传仓库供渲染查表。
     // `input_id` 与落库的 `messages.message_id` 是同一 UUID；历史窗口重开时用它
     // 判断这条消息是否仍由 live 尾部实际持有。
+    crate::kit::steer_state::retain_content_uploads(content);
     state.push_user_bubble(
         content.text_content(),
         crate::kit::steer_state::attachment_displays_from_content(content),

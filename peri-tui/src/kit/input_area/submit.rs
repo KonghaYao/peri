@@ -278,6 +278,8 @@ pub(crate) fn send_local_user_bubble(
     attachments: &[crate::kit::atoms::PendingAttachment],
 ) {
     use crate::kit::acp_types::AcpEventData;
+    // 气泡一旦出现，图片就应该能画：载荷在此刻登记进上传仓库（视图模型只留摘要）。
+    crate::kit::steer_state::retain_attachment_uploads(attachments);
     if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,

@@ -207,11 +207,17 @@ impl CurrentTurn {
     ///
     /// Returns `true` only when this call transitions the matching card from running
     /// to finished. Unknown and duplicate end events are no-ops.
-    pub fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
+    pub fn end_tool(
+        &mut self,
+        tool_id: &str,
+        output: String,
+        is_error: bool,
+        images: Vec<crate::kit::image_view::UploadId>,
+    ) -> bool {
         let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) else {
             return false;
         };
-        if !t.finish(output, is_error) {
+        if !t.finish(output, is_error, images) {
             return false;
         }
         self.invalidate_cache();

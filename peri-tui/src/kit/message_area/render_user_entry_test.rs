@@ -427,7 +427,7 @@ fn test_user_bubble_renders_attachment_record_with_text() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         "look at this".into(),
-        vec![UserAttachment { bytes: 45 }],
+        vec![UserAttachment::for_bytes(45)],
     ));
     let lines = render::vm_to_lines(&vm, &grid);
     let text = super::all_text(&lines);
@@ -445,7 +445,7 @@ fn test_user_bubble_image_only_renders_attachment_record() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         String::new(),
-        vec![UserAttachment { bytes: 2048 }],
+        vec![UserAttachment::for_bytes(2048)],
     ));
     let lines = render::vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 1, "Wide 仅附件记录行（无节拍空行）");
@@ -460,7 +460,10 @@ fn test_user_bubble_numbers_multiple_attachments() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         "two shots".into(),
-        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+        vec![
+            UserAttachment::for_bytes(45),
+            UserAttachment::for_bytes(2048),
+        ],
     ));
     let text = super::all_text(&render::vm_to_lines(&vm, &grid));
     assert!(
@@ -521,11 +524,10 @@ fn test_user_bubble_standalone_image_renders_placement_when_ready() {
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::USER_IMAGE_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );
@@ -538,9 +540,19 @@ fn test_user_bubble_standalone_image_renders_placement_when_ready() {
     let info = &image_lines[0];
     let placement = info.inline.as_ref().expect("应携带协议句柄");
     assert!(placement.rows >= 1);
+    // 等比铺满 + 在正文宽内水平居中。
+    let body_cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    let prefix = u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16");
     assert_eq!(
         placement.x_offset,
-        u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16")
+        prefix + (body_cols - placement.cols) / 2,
+        "用户气泡图片在正文列内居中"
+    );
+    assert!(
+        placement.cols == body_cols || placement.rows == crate::kit::inline_image::USER_IMAGE_ROWS,
+        "受限轴必须贴边（铺满）：cols={} rows={}",
+        placement.cols,
+        placement.rows
     );
     assert!(
         !lines
@@ -551,10 +563,147 @@ fn test_user_bubble_standalone_image_renders_placement_when_ready() {
     assert!(!text.contains("![a]"), "命中后不再显示原始图片语法");
     assert!(!text.contains("[Image:"), "不产生 @image meta 行");
     assert!(
-        lines.len() <= 6,
-        "图片行计入用户正文预算（6 行），实际 {} 行",
+        lines.len() <= usize::from(placement.rows) + 1,
+        "图片行使用独立预算（不占正文 6 行），最多再加 1 行尾随空行，实际 {} 行",
         lines.len()
     );
+}
+
+/// 上传附件（粘贴图片）在转录区按摘要查上传仓库：Ready → 预留 ready.rows 行，
+/// meta 记录行照旧；图片行使用独立预算，不占正文 6 行。
+#[test]
+#[serial_test::serial]
+fn test_user_bubble_uploaded_image_renders_placement_when_ready() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let dir = tempfile::tempdir().expect("uploaded image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    let payload = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .encode(std::fs::read(&file).expect("read png fixture"))
+    };
+    let attachment =
+        crate::kit::tui_render_unit::UserAttachment::from_base64_payload(&payload, "image/png");
+    let id = attachment.upload_id();
+    crate::kit::image_view::retain_upload(id, std::sync::Arc::from(payload.as_str()));
+
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    assert!(
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::Uploaded(id),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS,),
+            std::time::Duration::from_secs(5),
+        ),
+        "上传图片应能编码就绪"
+    );
+    let ready_rows = crate::kit::image_view::lookup(
+        &crate::kit::image_view::ImageSource::Uploaded(id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS),
+    )
+    .expect("Ready")
+    .rows;
+
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        "see attached".to_string(),
+        vec![attachment],
+    ));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut cache, false);
+    assert_eq!(image_lines.len(), 1, "上传附件应产出一处内联放置");
+    let info = &image_lines[0];
+    let placement = info.inline.as_ref().expect("inline placement");
+    assert_eq!(placement.rows, ready_rows, "占位行数 == 实际编码行数");
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("[Image] Image 1"),
+        "meta 记录行保留：{text:?}"
+    );
+    assert!(
+        (info.logical_idx..info.logical_idx + usize::from(placement.rows)).all(|idx| {
+            let text: String = lines[idx]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            !text.contains('█') && !text.chars().any(char::is_alphanumeric)
+        }),
+        "图片占位行只有网格前缀"
+    );
+    crate::kit::image_view::release_all_uploads();
+}
+
+/// 上传附件未就绪（仓库无载荷）时只保留 meta 行，不产生空白预留。
+#[test]
+#[serial_test::serial]
+fn test_user_bubble_uploaded_image_without_payload_shows_meta_only() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let attachment =
+        crate::kit::tui_render_unit::UserAttachment::from_base64_payload("AQID", "image/png");
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        String::new(),
+        vec![attachment],
+    ));
+    let grid = GridSpec::grid_for(120);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut cache, false);
+    assert!(image_lines.is_empty(), "未命中不得预留像素区");
+    let text = super::all_text(&lines);
+    assert!(text.contains("[Image] Image 1"), "只保留 meta 行：{text:?}");
+}
+
+/// 多图总预算 10 行：6 行大图之后剩余 4 行放不下第二张 6 行图，
+/// 后续附件只显示 meta 行（不产生越界占位）。
+#[test]
+#[serial_test::serial]
+fn test_user_bubble_image_total_budget_caps_multi_image() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let dir = tempfile::tempdir().expect("multi image budget: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    let payload = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .encode(std::fs::read(&file).expect("read png fixture"))
+    };
+    // 三张同一图片（同摘要）：第一张占 6 行（上限），剩余 4 行放不下第二张。
+    let attachment =
+        crate::kit::tui_render_unit::UserAttachment::from_base64_payload(&payload, "image/png");
+    let id = attachment.upload_id();
+    crate::kit::image_view::retain_upload(id, std::sync::Arc::from(payload.as_str()));
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::Uploaded(id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS),
+        std::time::Duration::from_secs(5),
+    ));
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        String::new(),
+        vec![attachment, attachment, attachment],
+    ));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut cache, false);
+    let rows: usize = image_lines
+        .iter()
+        .map(|info| usize::from(info.inline.as_ref().map_or(0, |p| p.rows)))
+        .sum();
+    assert!(
+        rows <= usize::from(crate::kit::inline_image::USER_IMAGE_TOTAL_ROWS),
+        "多图总行数不得超过 10 行，实际 {rows}"
+    );
+    assert_eq!(image_lines.len(), 1, "第二张起只显示 meta 行");
+    let text = super::all_text(&lines);
+    assert_eq!(
+        text.matches("[Image] Image").count(),
+        3,
+        "三张附件都保留 meta 记录：{text:?}"
+    );
+    crate::kit::image_view::release_all_uploads();
 }
 
 /// 无 draw hook 的 surface（scheduled/detail：inline_pixels=false）不得把已就绪
@@ -571,11 +720,10 @@ fn test_user_bubble_standalone_image_kept_as_text_without_inline_surface() {
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::USER_IMAGE_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );
@@ -610,11 +758,10 @@ fn test_user_bubble_inline_image_syntax_kept_as_text() {
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::USER_IMAGE_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );

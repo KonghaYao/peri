@@ -281,6 +281,7 @@ pub(super) fn decode_stream_update_with(
             };
             let is_error = status == "failed";
             if is_session_replay {
+                // 历史 replay 只持久化文本；上传图片不落盘，回放只剩 meta 行。
                 Some(AcpEventData::ReplayToolEnded {
                     tool_id,
                     output_summary,
@@ -291,6 +292,7 @@ pub(super) fn decode_stream_update_with(
                     tool_id,
                     output_summary,
                     is_error,
+                    images: tool_update_images(update),
                     agent_id,
                 };
                 Some(AcpEventData::ToolEnded(tool_ended))
@@ -364,4 +366,41 @@ pub(super) fn decode_stream_update_with(
         _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)
     };
     StreamUpdate { event, token_count }
+}
+
+/// 提取 `ToolCallUpdateFields.content` 中的标准 image 块（MCP/ACP 透传）。
+///
+/// 兼容两种序列化形态：flatten 后的顶层 `content`，以及旧格式的 `fields.content`。
+/// 非 image 块（text/diff/terminal）忽略——工具输出文本已由 `rawOutput` 承载。
+fn tool_update_images(update: &serde_json::Value) -> Vec<crate::kit::stream_data::TuiToolImage> {
+    let content = update.get("content").or_else(|| {
+        update
+            .get("fields")
+            .and_then(|fields| fields.get("content"))
+    });
+    let Some(items) = content.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            // ToolCallContent::Content { content: ContentBlock::Image { .. } }
+            let block = item.get("content").unwrap_or(item);
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                return None;
+            }
+            let mime_type = block
+                .get("mimeType")
+                .and_then(serde_json::Value::as_str)
+                .filter(|mime| !mime.is_empty())?;
+            let base64 = block
+                .get("data")
+                .and_then(serde_json::Value::as_str)
+                .filter(|data| !data.is_empty())?;
+            Some(crate::kit::stream_data::TuiToolImage {
+                mime_type: mime_type.to_string(),
+                base64: base64.to_string(),
+            })
+        })
+        .collect()
 }

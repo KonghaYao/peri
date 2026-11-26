@@ -3,9 +3,9 @@ use super::{CurrentTurn, ToolCardAccumulator, TuiRenderUnit};
 #[test]
 fn finish_is_shared_and_idempotent() {
     let mut card = ToolCardAccumulator::new("tool".into(), "Shell".into(), "pwd".into());
-    assert!(card.finish("original".into(), false));
+    assert!(card.finish("original".into(), false, Vec::new()));
     let duration = card.completed_duration_ms;
-    assert!(!card.finish("duplicate".into(), true));
+    assert!(!card.finish("duplicate".into(), true, Vec::new()));
     assert_eq!(card.output_summary.as_deref(), Some("original"));
     assert!(!card.is_error);
     assert_eq!(card.completed_duration_ms, duration);
@@ -19,9 +19,9 @@ fn current_turn_duplicate_end_preserves_result_and_duration() {
         "Shell".into(),
         "pwd".into(),
     ));
-    assert!(turn.end_tool("tool", "original".into(), false));
+    assert!(turn.end_tool("tool", "original".into(), false, Vec::new()));
     let duration = turn.tool_cards[0].completed_duration_ms;
-    assert!(!turn.end_tool("tool", "duplicate".into(), true));
+    assert!(!turn.end_tool("tool", "duplicate".into(), true, Vec::new()));
     assert_eq!(
         turn.tool_cards[0].output_summary.as_deref(),
         Some("original")

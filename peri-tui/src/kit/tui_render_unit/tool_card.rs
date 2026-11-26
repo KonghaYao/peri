@@ -115,6 +115,8 @@ pub struct TuiToolCard {
     pub content_hash: u64,
     /// Agent 工具专用的子工具调用计数（由 sync_cache 后处理 pair_agent_tool_cards 配对填充）。
     pub tool_calls_count: usize,
+    /// 工具结果携带的图片身份（摘要 + 媒体）；base64 只在 `image_view` 上传仓库。
+    pub images: Vec<crate::kit::image_view::UploadId>,
 }
 
 impl TuiToolCard {
@@ -153,6 +155,10 @@ impl TuiToolCard {
         // [G-Diff] diff 定型于 tool-ended，此后不变——稳定摘要纳入 hash 保证
         // diff 变更（含路径/计数/截断）触发按 hash 分片的渲染缓存重建。
         h = super::hash::tui_hash_combine(h, self.diff_code());
+        // 无图片时不参与 hash：保持既有工具卡 hash 与缓存分片稳定。
+        if !self.images.is_empty() {
+            h = super::hash::tui_hash_combine(h, self.image_code());
+        }
         self.content_hash = h;
     }
 
@@ -172,9 +178,18 @@ impl TuiToolCard {
         h = super::hash::tui_hash_combine(h, u64::from(d.is_new_file));
         h
     }
+
+    /// 工具图片身份摘要：图片到达/变化必须改变内容哈希（触发缓存重建）。
+    fn image_code(&self) -> u64 {
+        let mut h = self.images.len() as u64;
+        for id in &self.images {
+            h = super::hash::tui_hash_combine(h, id.digest);
+        }
+        h
+    }
 }
 
-tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified);
+tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified, images);
 
 #[cfg(test)]
 #[path = "tool_card_test.rs"]

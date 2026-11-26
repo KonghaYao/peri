@@ -550,26 +550,33 @@ fn vm_to_lines_impl(
                                         lines.push(body_line(line.clone()));
                                     }
                                 } else {
+                                    // 预算 = 正文宽 × 8 行；等比铺满后水平居中
+                                    // （x 偏移来自共享 sizing，前缀列在此叠加）。
                                     let cols = u16::try_from(body_width).unwrap_or(u16::MAX);
-                                    let x_offset = u16::try_from(if brief {
+                                    let prefix = u16::try_from(if brief {
                                         grid.process_prefix_width()
                                     } else {
                                         grid.cont_prefix_width()
                                     })
                                     .unwrap_or(u16::MAX);
+                                    let budget = crate::kit::image_view::Budget::new(
+                                        cols,
+                                        crate::kit::inline_image::MAX_ROWS,
+                                    );
                                     for source in &img.sources {
-                                        let ready = crate::kit::inline_image::lookup_ready(
-                                            &source.source,
-                                            cols,
-                                            crate::kit::inline_image::MAX_ROWS,
+                                        let ready = crate::kit::image_view::lookup(
+                                            &crate::kit::image_view::ImageSource::File(
+                                                &source.source,
+                                            ),
+                                            budget,
                                         );
                                         let fallback: &[Line<'static>] = img
                                             .lines
                                             .get(source.line_range.clone())
                                             .map_or(&[], |slice| slice);
-                                        if let Some(ready) = ready {
+                                        if let Some(placement) = ready {
                                             let logical_idx = lines.len();
-                                            for _ in 0..ready.rows {
+                                            for _ in 0..placement.rows {
                                                 lines.push(body_line(Line::default()));
                                             }
                                             image_lines.push(ImageLineInfo {
@@ -578,10 +585,11 @@ fn vm_to_lines_impl(
                                                 managed: false,
                                                 size_text: String::new(),
                                                 inline: Some(InlineImagePlacement {
-                                                    cols: ready.cols,
-                                                    rows: ready.rows,
-                                                    x_offset,
-                                                    image: ready.image,
+                                                    cols: placement.cols,
+                                                    rows: placement.rows,
+                                                    x_offset: prefix
+                                                        .saturating_add(placement.x_offset),
+                                                    image: placement.image,
                                                 }),
                                             });
                                         } else {
@@ -720,13 +728,17 @@ fn vm_to_lines_impl(
                 (lines, None, None, image_lines, Vec::new())
             }
         }
-        TuiRenderUnit::TuiToolCard(data) => (
-            self::tool_card::render_tool_card_lines(data, grid),
-            data.is_error.then(|| error::icon_button(grid, 0)),
-            None,
-            Vec::new(),
-            Vec::new(),
-        ),
+        TuiRenderUnit::TuiToolCard(data) => {
+            let (lines, image_lines) =
+                self::tool_card::render_tool_card_lines(data, grid, inline_pixels);
+            (
+                lines,
+                data.is_error.then(|| error::icon_button(grid, 0)),
+                None,
+                image_lines,
+                Vec::new(),
+            )
+        }
         TuiRenderUnit::TuiSystemNote(data) => (
             self::system::render_system_note_lines(data, grid),
             (data.level == crate::kit::tui_render_unit::TuiNoteLevel::Error)

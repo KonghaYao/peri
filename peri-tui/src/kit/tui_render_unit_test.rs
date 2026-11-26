@@ -30,10 +30,22 @@ fn test_tui_hash_str_different_input_different_output() {
 /// base64 载荷长度 → 解码字节数（只看长度与填充位，不解码内容）。
 #[test]
 fn test_user_attachment_bytes_from_base64_payload() {
-    assert_eq!(UserAttachment::from_base64_payload("AQID").bytes, 3);
-    assert_eq!(UserAttachment::from_base64_payload("AQI=").bytes, 2);
-    assert_eq!(UserAttachment::from_base64_payload("AA==").bytes, 1);
-    assert_eq!(UserAttachment::from_base64_payload("").bytes, 0);
+    assert_eq!(
+        UserAttachment::from_base64_payload("AQID", "image/png").bytes,
+        3
+    );
+    assert_eq!(
+        UserAttachment::from_base64_payload("AQI=", "image/png").bytes,
+        2
+    );
+    assert_eq!(
+        UserAttachment::from_base64_payload("AA==", "image/png").bytes,
+        1
+    );
+    assert_eq!(
+        UserAttachment::from_base64_payload("", "image/png").bytes,
+        0
+    );
 }
 
 /// 附件进 content_hash（渲染缓存 key）：同文本不同附件必须触发重渲染；
@@ -47,10 +59,13 @@ fn test_user_bubble_attachments_join_content_hash() {
         "无附件不改变哈希（既有缓存行为不变）"
     );
 
-    let one = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
+    let one = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment::for_bytes(45)]);
     let two = TuiUserBubble::with_attachments(
         "hi".into(),
-        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+        vec![
+            UserAttachment::for_bytes(45),
+            UserAttachment::for_bytes(2048),
+        ],
     );
     assert_ne!(plain.content_hash, one.content_hash, "带附件必须改变哈希");
     assert_ne!(
@@ -59,15 +74,31 @@ fn test_user_bubble_attachments_join_content_hash() {
     );
 }
 
+/// 同大小不同图片（摘要不同）必须得到不同哈希——修复「只按大小哈希」的碰撞。
+#[test]
+fn test_user_bubble_attachment_digest_joins_content_hash() {
+    let first = UserAttachment::from_base64_payload("AQID", "image/png");
+    let second = UserAttachment::from_base64_payload("BAUG", "image/png");
+    assert_eq!(first.bytes, second.bytes, "大小相同（碰撞前提）");
+    assert_ne!(first.digest, second.digest, "摘要必须不同");
+
+    let a = TuiUserBubble::with_attachments("hi".into(), vec![first]);
+    let b = TuiUserBubble::with_attachments("hi".into(), vec![second]);
+    assert_ne!(
+        a.content_hash, b.content_hash,
+        "同大小不同图片必须触发重渲染"
+    );
+}
+
 /// 附件是内容的一部分：进 partial_eq（附件不同 → 气泡不等）。
 #[test]
 fn test_user_bubble_partial_eq_respects_attachments() {
-    let a = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
-    let b = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 46 }]);
+    let a = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment::for_bytes(45)]);
+    let b = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment::for_bytes(46)]);
     assert_ne!(a, b, "附件不同 → 应不等");
     assert_eq!(
         a,
-        TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }])
+        TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment::for_bytes(45)])
     );
 }
 
@@ -99,6 +130,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
     );
     assert_eq!(assistant.content_hash(), 22);
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
         tool_id: "t1".into(),
         tool_name: "Bash".into(),
         input_summary: "ls".into(),
@@ -436,6 +468,7 @@ fn test_assistant_bubble_partial_eq_ignores_content_hash_but_keeps_message_id() 
 #[test]
 fn test_tool_card_partial_eq_ignores_content_hash() {
     let a = TuiToolCard {
+        images: Vec::new(),
         tool_id: "tc-1".into(),
         tool_name: "Edit".into(),
         input_summary: "path: foo".into(),
@@ -473,6 +506,7 @@ fn test_tool_card_hash_includes_diff() {
 
     let mk = |diff: Option<TuiDiffBlock>| {
         let mut card = TuiToolCard {
+            images: Vec::new(),
             tool_id: "tc-1".into(),
             tool_name: "Edit".into(),
             input_summary: "src/main.rs".into(),
@@ -895,6 +929,7 @@ fn keyed_bubble(message_id: Option<&str>) -> TuiAssistantBubble {
 
 fn keyed_tool() -> TuiToolCard {
     let mut tool = TuiToolCard {
+        images: Vec::new(),
         tool_id: "tool-1".into(),
         tool_name: "Bash".into(),
         input_summary: "echo hi".into(),

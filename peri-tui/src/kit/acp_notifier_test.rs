@@ -345,6 +345,46 @@ async fn test_session_update_tool_call_update_flattened_format() {
     shutdown.cancel();
 }
 
+/// `ToolCallUpdateFields.content` 的标准 image 块进入 `TuiToolEnded.images`；
+/// 文本块/未知块被忽略，旧事件（无 content）保持空列表。
+#[tokio::test]
+async fn test_session_update_tool_call_update_carries_standard_image_content() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: "s1".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-img",
+                    "rawOutput": "Image read\n[image: image/png]",
+                    "status": "completed",
+                    "content": [
+                        {"type": "content", "content": {"type": "text", "text": "Image read"}},
+                        {"type": "content", "content": {"type": "image", "data": "AQID", "mimeType": "image/png"}}
+                    ]
+                }
+            }),
+        })
+        .await
+        .expect("image content notification must be delivered");
+
+    let ev = bridge_rx.recv().await.expect("expected one event");
+    match ev.event {
+        AcpEventData::ToolEnded(te) => {
+            assert_eq!(te.tool_id, "tc-img");
+            assert_eq!(te.images.len(), 1, "只提取 image 块");
+            assert_eq!(te.images[0].mime_type, "image/png");
+            assert_eq!(te.images[0].base64, "AQID");
+        }
+        other => panic!("expected ToolEnded, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 /// 验证 tool_call_update 的 fields 嵌套格式（fallback 兼容路径）：
 /// rawOutput/status 在 fields 子对象内。
 #[tokio::test]

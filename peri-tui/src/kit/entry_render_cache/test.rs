@@ -59,7 +59,7 @@ fn inline_image_revision_change_invalidates_image_messages_only() {
         0,
         ZoneTransition::None,
     );
-    image_cache.inline_image_revision = Some(crate::kit::inline_image::revision().wrapping_add(1));
+    image_cache.inline_image_revision = Some(crate::kit::image_view::revision().wrapping_add(1));
     assert_eq!(
         image_cache.ensure(
             &image_vm,
@@ -81,7 +81,7 @@ fn inline_image_revision_change_invalidates_image_messages_only() {
         0,
         ZoneTransition::None,
     );
-    plain_cache.inline_image_revision = Some(crate::kit::inline_image::revision().wrapping_add(1));
+    plain_cache.inline_image_revision = Some(crate::kit::image_view::revision().wrapping_add(1));
     assert_eq!(
         plain_cache.ensure(&plain_vm, &grid, render_context, 0, ZoneTransition::None),
         EntryInvalidation::None,
@@ -111,11 +111,10 @@ fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
 
     let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::MAX_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在重建前就绪"
     );

@@ -345,11 +345,7 @@ fn test_steer_delivered_and_replay_keep_one_identity() {
 
 #[test]
 fn test_steer_attachment_content_survives_roundtrip() {
-    let attachments = vec![PendingAttachment {
-        label: "image".to_owned(),
-        media_type: "image/png".to_owned(),
-        base64_data: "AQID".to_owned(),
-    }];
+    let attachments = vec![PendingAttachment::image("image/png", "AQID")];
     let content = super::content_with_attachments("  image\n", &attachments);
     let recovered = super::attachments_from_content(&content);
     assert_eq!(

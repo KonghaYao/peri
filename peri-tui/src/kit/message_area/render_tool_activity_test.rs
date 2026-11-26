@@ -480,6 +480,7 @@ fn test_system_note_levels() {
 fn skill_card_hides_raw_skill_output() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
+        images: Vec::new(),
         tool_id: "skill-1".into(),
         tool_name: "Skill".into(),
         input_summary: "skill: using-superpowers".into(),
@@ -513,6 +514,7 @@ fn skill_card_hides_raw_skill_output() {
 fn todo_card_renders_progress_and_changes_without_raw_output() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
+        images: Vec::new(),
         tool_id: "todo-1".into(),
         tool_name: "TodoWrite".into(),
         input_summary: "todos: 2".into(),
@@ -557,6 +559,7 @@ fn todo_card_renders_progress_and_changes_without_raw_output() {
 fn todo_card_collapsed_hides_change_details() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
+        images: Vec::new(),
         tool_id: "todo-collapsed".into(),
         tool_name: "TodoWrite".into(),
         input_summary: "todos: 1".into(),
@@ -594,6 +597,7 @@ fn semantic_cards_respect_narrow_widths() {
     for width in 1..=8u16 {
         let grid = GridSpec::grid_for(width);
         let card = TuiToolCard {
+            images: Vec::new(),
             tool_id: format!("todo-{width}"),
             tool_name: "TodoWrite".into(),
             input_summary: String::new(),
@@ -951,4 +955,123 @@ fn workspace_read_and_edit_cards_keep_header_suffix() {
             "{tool_name} 完成态头行应包含 '· +3 · -1'，实际: {header:?}"
         );
     }
+}
+
+// ── 工具结果图片（agent 回复图片）─────────────────────────────────────
+
+fn upload_png(width: u32, height: u32) -> crate::kit::image_view::UploadId {
+    use base64::Engine as _;
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([30, 120, 200, 255]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("tool image fixture must encode");
+    let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let id = crate::kit::image_view::UploadId::from_payload(&payload, "image/png");
+    crate::kit::image_view::retain_upload(id, std::sync::Arc::from(payload.as_str()));
+    id
+}
+
+fn tool_card_with_images(
+    images: Vec<crate::kit::image_view::UploadId>,
+    fold: FoldState,
+) -> TuiToolCard {
+    TuiToolCard {
+        tool_id: "tc-img".into(),
+        tool_name: "Read".into(),
+        input_summary: "shot.png".into(),
+        output_summary: "Image read\n[image: image/png]".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: Some(12),
+        diff: None,
+        presentation: TuiToolPresentation::Generic,
+        fold,
+        user_modified: false,
+        images,
+        content_hash: 0,
+        tool_calls_count: 0,
+    }
+}
+
+/// 工具卡在折叠态也渲染结果图片（agent 回复的一部分，不依赖展开输出）。
+#[test]
+#[serial_test::serial]
+fn test_tool_card_renders_result_image_even_when_collapsed() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let id = upload_png(64, 64);
+    let grid = GridSpec::grid_for(80);
+    let cols = u16::try_from(grid.process_content_width()).expect("width fits u16");
+    assert!(
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::Uploaded(id),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+            std::time::Duration::from_secs(5),
+        ),
+        "工具图片应能编码就绪"
+    );
+    let ready_rows = crate::kit::image_view::lookup(
+        &crate::kit::image_view::ImageSource::Uploaded(id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+    )
+    .expect("Ready")
+    .rows;
+
+    let card = tool_card_with_images(vec![id], FoldState::Collapsed);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    assert_eq!(image_lines.len(), 1, "工具结果图片应产出一处内联放置");
+    let placement = image_lines[0].inline.as_ref().expect("inline placement");
+    assert_eq!(placement.rows, ready_rows, "占位行数 == 实际编码行数");
+    assert!(
+        placement.rows <= crate::kit::inline_image::TOOL_IMAGE_ROWS,
+        "单图不超过 8 行"
+    );
+    assert!(
+        lines.len() >= image_lines[0].logical_idx + usize::from(placement.rows),
+        "占位行必须完整落在卡片行内"
+    );
+    crate::kit::image_view::release_all_uploads();
+}
+
+/// 工具图片总预算 16 行、最多 4 张：超出部分降级为 meta 行，不越界占位。
+#[test]
+#[serial_test::serial]
+fn test_tool_card_images_beyond_budget_fall_back_to_meta_rows() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let id = upload_png(64, 64);
+    let grid = GridSpec::grid_for(80);
+    let cols = u16::try_from(grid.process_content_width()).expect("width fits u16");
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::Uploaded(id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+        std::time::Duration::from_secs(5),
+    ));
+
+    let card = tool_card_with_images(vec![id, id, id, id, id], FoldState::Collapsed);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    let rows: usize = image_lines
+        .iter()
+        .map(|info| usize::from(info.inline.as_ref().map_or(0, |p| p.rows)))
+        .sum();
+    assert!(
+        rows <= usize::from(crate::kit::inline_image::TOOL_IMAGE_TOTAL_ROWS),
+        "工具图片总行数不得超过 16 行，实际 {rows}"
+    );
+    assert!(image_lines.len() <= crate::kit::inline_image::TOOL_IMAGE_MAX);
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("[Image 3] image/png"),
+        "超出预算的图片降级为 meta 行：{text:?}"
+    );
+    crate::kit::image_view::release_all_uploads();
 }

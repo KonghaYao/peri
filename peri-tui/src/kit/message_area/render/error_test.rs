@@ -15,6 +15,7 @@ fn note(text: &str, level: TuiNoteLevel) -> TuiRenderUnit {
 
 fn tool(text: &str) -> TuiRenderUnit {
     TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
         tool_id: "error-call".into(),
         tool_name: "Bash".into(),
         input_summary: "command".into(),

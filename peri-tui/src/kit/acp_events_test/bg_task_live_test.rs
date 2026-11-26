@@ -527,6 +527,7 @@ fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
     crate::kit::bg_task_live::handle_bg_tool_ended(
         "child-upgrade",
         &TuiToolEnded {
+            images: Vec::new(),
             tool_id: started.tool_id.clone(),
             output_summary: "workspace".into(),
             is_error: false,
@@ -813,6 +814,7 @@ fn test_bg_tool_sync_preserves_event_order() {
     crate::kit::bg_task_live::handle_bg_tool_ended(
         "bg-order",
         &TuiToolEnded {
+            images: Vec::new(),
             tool_id: "tool-1".into(),
             output_summary: "done".into(),
             is_error: false,

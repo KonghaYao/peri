@@ -777,6 +777,7 @@ mod tests {
             fold: FoldState::Collapsed,
             user_modified: false,
             tool_calls_count: 0,
+            images: Vec::new(),
             content_hash: 0,
         })
     }

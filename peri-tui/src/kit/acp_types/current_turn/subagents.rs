@@ -367,6 +367,7 @@ impl CurrentTurn {
         tool_id: &str,
         output: String,
         is_error: bool,
+        images: Vec<crate::kit::image_view::UploadId>,
     ) -> bool {
         if let Some(s) = self
             .subagents
@@ -374,7 +375,7 @@ impl CurrentTurn {
             .rev()
             .find(|s| s.agent_id == agent_id && s.is_running)
         {
-            let ended = s.end_tool(tool_id, output, is_error);
+            let ended = s.end_tool(tool_id, output, is_error, images);
             if ended {
                 self.active = true;
                 self.invalidate_cache();

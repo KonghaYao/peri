@@ -103,6 +103,7 @@ fn reasoning_block(text: &str) -> TuiReasoningBlock {
 
 fn tool_card(tool_name: &str, summary: &str, is_error: bool, is_running: bool) -> TuiToolCard {
     TuiToolCard {
+        images: Vec::new(),
         tool_id: format!("tc-{tool_name}"),
         tool_name: tool_name.to_string(),
         input_summary: summary.to_string(),

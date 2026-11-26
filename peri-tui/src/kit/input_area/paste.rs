@@ -59,11 +59,13 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// 图片字节 → 待发送附件（上传式：base64 直接进 composer，不落盘）。
+///
+/// 同时登记进进程内上传仓库：composer 预览与提交后的转录区都按摘要查表，
+/// 载荷只在仓库里被编码线程消费。
 fn attach_image(bytes: Vec<u8>, media_type: &str) {
-    PENDING_ATTACHMENTS
-        .state()
-        .write()
-        .push(PendingAttachment::image(media_type, base64_encode(&bytes)));
+    let attachment = PendingAttachment::image(media_type, base64_encode(&bytes));
+    crate::kit::steer_state::retain_attachment_uploads(std::slice::from_ref(&attachment));
+    PENDING_ATTACHMENTS.state().write().push(attachment);
 }
 
 /// 本机剪贴板一次粘贴尝试的终态。

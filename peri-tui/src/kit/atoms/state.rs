@@ -217,16 +217,30 @@ pub struct PendingAttachment {
     pub label: String,
     pub media_type: String,
     pub base64_data: String,
+    /// 内容摘要——粘贴时算一次，提交后作为上传仓库与消息区的身份。
+    pub digest: u64,
 }
 
 impl PendingAttachment {
-    /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
+    /// 以图片 MIME 与标准 base64 载荷构造待发送附件（摘要在此固化）。
     pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
         let media_type = media_type.into();
+        let base64_data = base64_data.into();
+        let digest = crate::kit::image_view::digest_of(&base64_data);
         Self {
             label: media_type.clone(),
             media_type,
-            base64_data: base64_data.into(),
+            base64_data,
+            digest,
+        }
+    }
+
+    /// 上传仓库身份。
+    #[must_use]
+    pub fn upload_id(&self) -> crate::kit::image_view::UploadId {
+        crate::kit::image_view::UploadId {
+            digest: self.digest,
+            media: crate::kit::image_view::UploadMedia::from_mime(&self.media_type),
         }
     }
 }
@@ -237,6 +251,7 @@ impl std::fmt::Debug for PendingAttachment {
             .field("label", &self.label)
             .field("media_type", &self.media_type)
             .field("base64_bytes", &self.base64_data.len())
+            .field("digest", &self.digest)
             .finish()
     }
 }

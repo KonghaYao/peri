@@ -152,6 +152,7 @@ fn bridge_snapshot_counts_independently_cloned_tool_cards_twice() {
     let input = "input-summary-".repeat(64);
     let output = "output-summary-".repeat(64);
     let card = crate::kit::tui_render_unit::TuiToolCard {
+        images: Vec::new(),
         tool_id: "tool-clone".into(),
         tool_name: "Bash".into(),
         input_summary: input.clone(),

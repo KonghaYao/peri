@@ -64,6 +64,7 @@ fn bubble(text: &str) -> TuiRenderUnit {
 
 fn tool_card(tool_id: &str) -> TuiRenderUnit {
     TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
         tool_id: tool_id.to_string(),
         tool_name: "Read".into(),
         input_summary: "a.rs".into(),

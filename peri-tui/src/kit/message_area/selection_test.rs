@@ -591,6 +591,7 @@ fn test_extract_semantic_tool_card_header_and_command() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
     let mut card = TuiToolCard {
+        images: Vec::new(),
         tool_id: "tc-1".into(),
         tool_name: "Bash".into(),
         input_summary: "cargo test -p peri-tui".into(),
@@ -653,6 +654,7 @@ fn test_extract_semantic_diff_strips_gutter_keeps_markers() {
 }
 ";
     let mut card = TuiToolCard {
+        images: Vec::new(),
         tool_id: "tc-e".into(),
         tool_name: "Edit".into(),
         input_summary: "src/main.rs".into(),

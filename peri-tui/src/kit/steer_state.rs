@@ -860,11 +860,13 @@ pub(crate) fn content_with_attachments(
     MessageContent::blocks(blocks)
 }
 
-/// 待发送附件 → 展示记录（提交路径）：只取渲染所需的顺序与大小，不带 base64 载荷。
+/// 待发送附件 → 展示记录（提交路径）：只取渲染所需的顺序、大小与摘要，不带 base64 载荷。
 pub(crate) fn attachment_displays(attachments: &[PendingAttachment]) -> Vec<UserAttachment> {
     attachments
         .iter()
-        .map(|attachment| UserAttachment::from_base64_payload(&attachment.base64_data))
+        .map(|attachment| {
+            UserAttachment::from_base64_payload(&attachment.base64_data, &attachment.media_type)
+        })
         .collect()
 }
 
@@ -878,8 +880,8 @@ pub(crate) fn attachment_displays_from_content(content: &MessageContent) -> Vec<
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Image {
-                source: ImageSource::Base64 { data, .. },
-            } => Some(UserAttachment::from_base64_payload(data)),
+                source: ImageSource::Base64 { media_type, data },
+            } => Some(UserAttachment::from_base64_payload(data, media_type)),
             _ => None,
         })
         .collect()
@@ -895,14 +897,41 @@ pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingA
         .filter_map(|block| match block {
             ContentBlock::Image {
                 source: ImageSource::Base64 { media_type, data },
-            } => Some(PendingAttachment {
-                label: media_type.clone(),
-                media_type: media_type.clone(),
-                base64_data: data.clone(),
-            }),
+            } => Some(PendingAttachment::image(media_type.clone(), data.clone())),
             _ => None,
         })
         .collect()
+}
+
+/// 提交边界：把附件载荷登记进上传仓库（视图模型只保留摘要，不落盘）。
+pub(crate) fn retain_attachment_uploads(attachments: &[PendingAttachment]) {
+    for attachment in attachments {
+        crate::kit::image_view::retain_upload(
+            attachment.upload_id(),
+            std::sync::Arc::from(attachment.base64_data.as_str()),
+        );
+    }
+}
+
+/// 投递边界：把 `MessageContent` 里的图片块载荷登记进上传仓库。
+///
+/// 投递路径的图片块由 [`content_with_attachments`] 逐字节复制，摘要与提交路径
+/// 一致，重复登记按摘要去重。
+pub(crate) fn retain_content_uploads(content: &MessageContent) {
+    let MessageContent::Blocks(blocks) = content else {
+        return;
+    };
+    for block in blocks {
+        if let ContentBlock::Image {
+            source: ImageSource::Base64 { media_type, data },
+        } = block
+        {
+            crate::kit::image_view::retain_upload(
+                crate::kit::image_view::UploadId::from_payload(data, media_type),
+                std::sync::Arc::from(data.as_str()),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

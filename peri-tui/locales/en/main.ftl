@@ -851,6 +851,8 @@ user-image-open-failed = Failed to open image
 attachment-image-name = Image { $index }
 # $size is a human-readable size (user-image-size-*).
 user-attachment-image-meta = [Image] { $name } · { $size }
+# Tool result image beyond the display budget: $index is 1-based, $mime is the media type.
+tool-image-meta = [Image { $index }] { $mime }
 
 # ---- image preview overlay (image-p0-p1-spec §7 T7) ----
 # 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、

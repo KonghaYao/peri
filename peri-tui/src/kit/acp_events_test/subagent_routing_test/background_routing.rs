@@ -51,6 +51,7 @@ fn test_turn_done_with_only_background_child_keeps_current_turn_bounded() {
         super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                images: Vec::new(),
                 agent_id: None,
                 tool_id: format!("tool-{round}"),
                 output_summary: "ok".into(),

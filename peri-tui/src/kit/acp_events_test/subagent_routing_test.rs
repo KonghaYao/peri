@@ -313,6 +313,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
             agent_id: Some("sync-1".into()),
             tool_id: "tc-1".into(),
             output_summary: "10 lines".into(),
@@ -574,6 +575,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
         super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                images: Vec::new(),
                 agent_id: None,
                 tool_id: tool_id.into(),
                 output_summary: "started".into(),

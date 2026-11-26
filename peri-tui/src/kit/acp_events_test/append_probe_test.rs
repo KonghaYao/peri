@@ -14,6 +14,7 @@ use crate::kit::tui_render_unit::{FoldState, TuiRenderUnit, TuiToolCard, TuiTool
 
 fn make_unit(i: usize) -> TuiRenderUnit {
     TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
         tool_id: format!("t{i}"),
         tool_name: "Bash".into(),
         input_summary: "echo hi".into(),

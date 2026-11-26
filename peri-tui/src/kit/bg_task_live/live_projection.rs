@@ -796,7 +796,7 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
             preview::FIELD_BYTES,
             &mut detail.preview_omitted,
         );
-        if t.finish(output, te.is_error) {
+        if t.finish(output, te.is_error, Vec::new()) {
             sync_tool_units(detail);
         }
     });

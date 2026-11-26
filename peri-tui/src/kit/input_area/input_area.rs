@@ -756,9 +756,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             if let Some(input) = recovered {
                 editor.replace_all_no_undo(input.original_draft);
                 drop(editor);
-                PENDING_ATTACHMENTS.set(crate::kit::steer_state::attachments_from_content(
-                    &input.content,
-                ));
+                let recovered = crate::kit::steer_state::attachments_from_content(&input.content);
+                crate::kit::steer_state::retain_attachment_uploads(&recovered);
+                PENDING_ATTACHMENTS.set(recovered);
                 // 撤回回执带回同一组插件选择；重新提交时不再读取“当前全局选择”。
                 PENDING_PLUGIN_SELECTIONS.set(input.plugin_selections);
                 crate::kit::input_history::reset_history_cursor();

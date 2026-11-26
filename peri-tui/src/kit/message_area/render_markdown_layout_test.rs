@@ -690,11 +690,13 @@ fn test_assistant_local_image_renders_pixel_placement() {
     let source = source.as_str();
     let grid = GridSpec::grid_for(120);
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            u16::try_from(grid.content_width()).expect("content width fits u16"),
-            crate::kit::inline_image::MAX_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(
+                u16::try_from(grid.content_width()).expect("content width fits u16"),
+                crate::kit::inline_image::MAX_ROWS
+            ),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );
@@ -717,10 +719,19 @@ fn test_assistant_local_image_renders_pixel_placement() {
         "占位行数受 8 行上限约束，实际 {}",
         placement.rows
     );
+    // 等比铺满后在正文宽内水平居中：x = 正文列起点 + (正文宽 - 图片宽)/2。
+    let body_cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    let prefix = u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16");
     assert_eq!(
         placement.x_offset,
-        u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16"),
-        "图片从正文列起画"
+        prefix + (body_cols - placement.cols) / 2,
+        "图片在正文列内居中"
+    );
+    assert!(
+        placement.cols <= body_cols && placement.rows <= crate::kit::inline_image::MAX_ROWS,
+        "几何不得越过预算：cols={} rows={}",
+        placement.cols,
+        placement.rows
     );
     // 占位行只有网格前缀，不含半块/方块字符。
     assert!(
@@ -765,12 +776,10 @@ fn test_local_image_failure_keeps_degraded_line() {
     let grid = GridSpec::grid_for(120);
     // 短回复走 brief 形态：与渲染侧 wrap 宽度对齐，确保命中 Failed 缓存而非未请求。
     let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
-    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::MAX_ROWS);
     assert!(
-        !crate::kit::inline_image::wait_ready(
-            source,
-            cols,
-            crate::kit::inline_image::MAX_ROWS,
+        !crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS,),
             std::time::Duration::from_secs(5),
         ),
         "坏图不应进入 Ready"
@@ -791,6 +800,48 @@ fn test_local_image_failure_keeps_degraded_line() {
     );
 }
 
+/// 宽图铺满：等比缩到正文宽（受限轴贴边），高度按比例，不越预算。
+#[test]
+fn test_assistant_wide_image_fills_body_width() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("wide image: tempdir must exist");
+    let file = dir.path().join("wide.png");
+    let image = image::RgbaImage::from_pixel(1600, 200, image::Rgba([30, 120, 200, 255]));
+    image
+        .save_with_format(&file, image::ImageFormat::Png)
+        .expect("wide png fixture must encode");
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let grid = GridSpec::grid_for(120);
+    let body_cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    assert!(
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(&source),
+            crate::kit::image_view::Budget::new(body_cols, crate::kit::inline_image::MAX_ROWS,),
+            std::time::Duration::from_secs(5),
+        ),
+        "宽图应编码就绪"
+    );
+    let vm = super::assistant_bubble_with_text(
+        &format!(
+            "{}
+
+![a]({source})
+
+after",
+            "x".repeat(100)
+        ),
+        72,
+    );
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (_, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let placement = image_lines
+        .first()
+        .and_then(|info| info.inline.as_ref())
+        .expect("宽图应产出内联放置");
+    assert_eq!(placement.cols, body_cols, "宽度受限轴必须贴满正文宽");
+    assert!(placement.rows <= crate::kit::inline_image::MAX_ROWS);
+}
+
 /// 同段多图：一张命中本地缓存时，其余图片仍保留各自的降级行（不丢内容）。
 #[test]
 fn test_multi_image_segment_keeps_unmatched_fallbacks() {
@@ -807,17 +858,19 @@ fn test_multi_image_segment_keeps_unmatched_fallbacks() {
     // 短回复走 brief 形态：正文 wrap 宽度是过程区列宽，缓存键必须与之对齐。
     let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::MAX_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );
     assert!(
-        crate::kit::inline_image::lookup_ready(source, cols, crate::kit::inline_image::MAX_ROWS)
-            .is_some(),
+        crate::kit::image_view::lookup(
+            &crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+        )
+        .is_some(),
         "缓存查表应命中（诊断为渲染侧问题）"
     );
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
@@ -853,11 +906,10 @@ fn test_assistant_brief_local_image_uses_process_prefix() {
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            source,
-            cols,
-            crate::kit::inline_image::MAX_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在渲染前就绪"
     );
@@ -867,10 +919,12 @@ fn test_assistant_brief_local_image_uses_process_prefix() {
     let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
     let info = image_lines.first().expect("短回复图片应产出内联放置");
     let placement = info.inline.as_ref().expect("inline placement");
+    let body_cols = u16::try_from(grid.process_content_width()).expect("width fits u16");
+    let prefix = u16::try_from(grid.process_prefix_width()).expect("prefix fits u16");
     assert_eq!(
         placement.x_offset,
-        u16::try_from(grid.process_prefix_width()).expect("prefix fits u16"),
-        "短回复图片从过程区正文列起画"
+        prefix + (body_cols - placement.cols) / 2,
+        "短回复图片在过程区正文列内居中"
     );
     assert!(
         lines.len() >= info.logical_idx + usize::from(placement.rows),

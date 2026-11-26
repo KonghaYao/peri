@@ -50,6 +50,8 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
         crate::kit::history_v2::consumer::reset_consumer_state();
     }
     crate::kit::history_window::clear_window_viewport();
+    // 上传图片只在进程内驻留：会话边界清空仓库与编码缓存，避免跨会话泄漏。
+    crate::kit::image_view::release_all_uploads();
     atoms::FOCUSED_ENTRY.set(None);
     atoms::HISTORY_DETAIL.set(None);
     acp_events::push_view_models_for_reset();

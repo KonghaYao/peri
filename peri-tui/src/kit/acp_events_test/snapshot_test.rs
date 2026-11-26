@@ -103,6 +103,7 @@ fn p0_new_prompt_preserves_running_tool_result() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
+            images: Vec::new(),
             tool_id: "tool-1".into(),
             output_summary: "file contents".into(),
             is_error: false,
@@ -354,6 +355,7 @@ fn test_snapshot_tools_grouped_in_body_gap() {
         super::dispatch_and_notify(
             st,
             &AcpEventData::ToolEnded(TuiToolEnded {
+                images: Vec::new(),
                 tool_id: id.into(),
                 output_summary: "ok".into(),
                 is_error,
@@ -455,6 +457,7 @@ fn test_snapshot_semantic_tools_in_group() {
         super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(TuiToolEnded {
+                images: Vec::new(),
                 tool_id: format!("k{i}"),
                 output_summary: "ok".into(),
                 is_error: false,

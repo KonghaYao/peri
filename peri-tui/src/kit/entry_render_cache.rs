@@ -211,7 +211,7 @@ impl EntryRenderCache {
         if content_changed || self.has_inline_image.is_none() {
             self.has_inline_image = Some(crate::kit::inline_image::vm_may_have_image(vm));
         }
-        let inline_image_revision = crate::kit::inline_image::revision();
+        let inline_image_revision = crate::kit::image_view::revision();
         let inline_image_changed = self.has_inline_image == Some(true)
             && self
                 .inline_image_revision

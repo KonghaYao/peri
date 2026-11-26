@@ -62,6 +62,7 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
         fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::Tool, status),
         user_modified: false,
         tool_calls_count: 0,
+        images: t.images.clone(),
         content_hash: 0,
     };
     card.recompute_hash();
@@ -133,15 +134,23 @@ pub struct ToolCardAccumulator {
     /// 是否已有 SubAgent segment 声明与此 ToolCard 关联。
     /// 防止多 Agent 场景下 SubAgent 段错配到错误的 ToolCard。
     pub claimed_by_subagent: bool,
+    /// 工具结果携带的图片身份（载荷在上传仓库）。
+    pub images: Vec<crate::kit::image_view::UploadId>,
 }
 
 impl ToolCardAccumulator {
-    pub(crate) fn finish(&mut self, output: String, is_error: bool) -> bool {
+    pub(crate) fn finish(
+        &mut self,
+        output: String,
+        is_error: bool,
+        images: Vec<crate::kit::image_view::UploadId>,
+    ) -> bool {
         if self.output_summary.is_some() {
             return false;
         }
         self.output_summary = Some(output);
         self.is_error = is_error;
+        self.images = images;
         self.completed_duration_ms =
             Some(peri_time::elapsed_since(self.started_at).as_millis() as u64);
         true
@@ -185,6 +194,7 @@ impl ToolCardAccumulator {
             started_at: peri_time::monotonic_now(),
             completed_duration_ms: None,
             claimed_by_subagent: false,
+            images: Vec::new(),
         }
     }
 }
@@ -269,11 +279,17 @@ impl SubAgentAccumulator {
         self.bound_preview();
     }
 
-    pub(super) fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
+    pub(super) fn end_tool(
+        &mut self,
+        tool_id: &str,
+        output: String,
+        is_error: bool,
+        images: Vec<crate::kit::image_view::UploadId>,
+    ) -> bool {
         if !self.is_running {
             return false;
         }
-        let ended = self.child_turn.end_tool(tool_id, output, is_error);
+        let ended = self.child_turn.end_tool(tool_id, output, is_error, images);
         if ended {
             self.cached_view_model.replace(None);
             self.bound_preview();

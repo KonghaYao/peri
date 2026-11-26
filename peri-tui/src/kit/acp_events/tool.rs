@@ -119,6 +119,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
     {
         return;
     }
+    // 工具图片：载荷登记进上传仓库，视图模型只保留摘要。
+    let images = retain_tool_images(&te.images);
     let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
         // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
         if BG_AGENT_IDS.state().read().contains(agent_id) {
@@ -146,6 +148,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
                 &te.tool_id,
                 output.to_owned(),
                 te.is_error,
+                images.clone(),
             );
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
@@ -155,10 +158,12 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.complete_todo_if_current(&te.tool_id, te.is_error)
         }
     } else {
-        let ended =
-            state
-                .current_turn
-                .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
+        let ended = state.current_turn.end_tool(
+            &te.tool_id,
+            te.output_summary.clone(),
+            te.is_error,
+            images.clone(),
+        );
         // 取消/挂起会把仍在运行的工具卡整段归档；迟到终点必须同步已归档单元，
         // 不能留下永久 running 的卡片或过期字节账目。
         if !ended {
@@ -252,6 +257,7 @@ pub(super) fn replay_tool_started_unit(
         fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::Tool, EntryStatus::Error),
         user_modified: false,
         tool_calls_count: 0,
+        images: Vec::new(),
         content_hash: 0,
     };
     let mut card = card;
@@ -332,6 +338,7 @@ pub(super) fn completed_tool_card(
         ),
         user_modified: card.user_modified,
         tool_calls_count: card.tool_calls_count,
+        images: card.images.clone(),
         content_hash: 0,
     };
     let mut updated = updated;
@@ -404,6 +411,24 @@ fn complete_archived_tool_card(
 }
 
 use crate::kit::atoms::BG_AGENT_IDS;
+
+use crate::kit::image_view::UploadId;
+
+/// 工具图片入库上限：渲染预算远小于此，超过部分不再驻留内存。
+const TOOL_IMAGE_RETAIN_MAX: usize = 16;
+
+/// 登记工具图片载荷并返回身份列表（事件边界调用）。
+fn retain_tool_images(images: &[crate::kit::stream_data::TuiToolImage]) -> Vec<UploadId> {
+    images
+        .iter()
+        .take(TOOL_IMAGE_RETAIN_MAX)
+        .map(|image| {
+            let id = UploadId::from_payload(&image.base64, &image.mime_type);
+            crate::kit::image_view::retain_upload(id, std::sync::Arc::from(image.base64.as_str()));
+            id
+        })
+        .collect()
+}
 
 use crate::kit::stream_data::TuiToolEnded;
 

@@ -39,6 +39,7 @@ pub mod hitl_response;
 pub mod image_overlay;
 pub mod image_preview;
 pub mod image_safety;
+pub(crate) mod image_view;
 pub(crate) mod inline_image;
 pub mod inline_nav;
 pub mod input_area;

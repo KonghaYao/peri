@@ -6,8 +6,8 @@ use super::reminder::ReminderInfo;
 /// 用户消息携带的附件展示记录——只保留渲染所需字段。
 ///
 /// [Why 无载荷] `TuiRenderUnit` 逐帧克隆，图片 base64（单张上限 20 MiB）只能留在
-/// `PENDING_ATTACHMENTS` 与提交请求里；消息区需要的是「这条消息带了哪几张图」的
-/// 记录，而不是图片本身。
+/// `PENDING_ATTACHMENTS`、提交请求与 `image_view` 上传仓库里；消息区需要的是
+/// 「这条消息带了哪几张图」的记录与摘要身份，而不是图片本身。
 ///
 /// [Why 无文件名] 剪贴板图片没有文件名（`paste.rs` 只拿到字节），展示名
 /// `图片 {序号}` 由渲染层按提交顺序本地化，因此这里只需记录顺序（`Vec` 位置）与大小。
@@ -15,11 +15,16 @@ use super::reminder::ReminderInfo;
 pub struct UserAttachment {
     /// 载荷字节数（解码后）——消息区 meta 行的大小档显示用。
     pub bytes: usize,
+    /// 内容摘要——渲染时据此从上传仓库取编码结果（载荷不入视图模型）。
+    pub digest: u64,
+    /// 媒体类型——缓存键与降级文案。
+    pub media: crate::kit::image_view::UploadMedia,
 }
 
 impl UserAttachment {
-    /// 由标准 base64 载荷（无换行）长度推解码字节数：`len / 4 * 3 - 填充位数`。
-    pub fn from_base64_payload(payload: &str) -> Self {
+    /// 由标准 base64 载荷（无换行）长度推解码字节数：`len / 4 * 3 - 填充位数`，
+    /// 并固化内容摘要（提交后载荷只在仓库里）。
+    pub fn from_base64_payload(payload: &str, media_type: &str) -> Self {
         let padding = payload
             .as_bytes()
             .iter()
@@ -28,7 +33,32 @@ impl UserAttachment {
             .filter(|byte| **byte == b'=')
             .count();
         let bytes = (payload.len() / 4 * 3).saturating_sub(padding);
-        Self { bytes }
+        let id = crate::kit::image_view::UploadId::from_payload(payload, media_type);
+        Self {
+            bytes,
+            digest: id.digest,
+            media: id.media,
+        }
+    }
+
+    /// 测试/回放夹具：按已知字节数构造（无载荷可算摘要，摘要恒 0）。
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_bytes(bytes: usize) -> Self {
+        Self {
+            bytes,
+            digest: 0,
+            media: crate::kit::image_view::UploadMedia::Other,
+        }
+    }
+
+    /// 上传仓库身份。
+    #[must_use]
+    pub fn upload_id(&self) -> crate::kit::image_view::UploadId {
+        crate::kit::image_view::UploadId {
+            digest: self.digest,
+            media: self.media,
+        }
     }
 }
 
@@ -78,10 +108,12 @@ impl TuiUserBubble {
 
     /// 带附件的用户气泡。附件记录并入 `content_hash`（渲染缓存 key，见
     /// `entry_render_cache::ensure`）——否则「同文本、不同附件」不会触发重渲染。
+    /// 摘要也计入：同大小不同图片的哈希必须不同（图片身份由内容摘要决定）。
     /// 无附件时哈希与 [`Self::new`] 逐位一致（不改变既有缓存行为）。
     pub fn with_attachments(text: String, attachments: Vec<UserAttachment>) -> Self {
         let mut content_hash = super::hash::tui_hash_str(&text);
         for attachment in &attachments {
+            content_hash = super::hash::tui_hash_combine(content_hash, attachment.digest);
             content_hash = super::hash::tui_hash_combine(content_hash, attachment.bytes as u64);
         }
         if !attachments.is_empty() {
