@@ -168,9 +168,20 @@ fn image_attachment_reserves_preview_rows_and_draws_kitty() {
     push_attachment("image/png", png_base64(64, 64));
 
     let buf = render(25, 1);
-    assert_eq!(composer_top(&buf), PREVIEW_ROWS, "待编码时预留最大预览高度");
-
     let preview = Rect::new(0, 0, 80, PREVIEW_ROWS);
+    if has_protocol_marker(&buf, preview) {
+        // 同一帧快照内的自洽断言：body 在帧首按缓存定预留高度，绘制钩子在同帧
+        // 稍后才查缓存；编码恰在两者之间完成时会「已画标记、高度仍按 Pending
+        // 预留」。已绘制时只要求高度落在预留范围内，避免与编码线程竞速。
+        let top = composer_top(&buf);
+        assert!(
+            top > 0 && top <= PREVIEW_ROWS,
+            "已绘制预览时高度必须在预留范围内，实际 {top}"
+        );
+    } else {
+        assert_eq!(composer_top(&buf), PREVIEW_ROWS, "待编码时预留最大预览高度");
+    }
+
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut buf = buf;
     while !has_protocol_marker(&buf, preview) {
@@ -194,18 +205,34 @@ fn ready_preview_shrinks_reserved_height() {
     push_attachment("image/png", png_base64(1600, 200));
 
     let preview = Rect::new(0, 0, 80, PREVIEW_ROWS);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let appearance_deadline = Instant::now() + Duration::from_secs(10);
     let mut buf = render(25, 1);
     while !has_protocol_marker(&buf, preview) {
-        assert!(Instant::now() < deadline, "编码完成后预览应出现");
+        assert!(
+            Instant::now() < appearance_deadline,
+            "预览在 10s 内从未出现：解码/绘制未完成，无法验证高度收缩"
+        );
         std::thread::sleep(Duration::from_millis(10));
         buf = render(25, 1);
     }
-    let top = composer_top(&buf);
-    assert!(
-        top < PREVIEW_ROWS && top > 0,
-        "Ready 后高度应收缩到实际行数（不是固定 6 行），实际 {top}"
-    );
+
+    // 高度收缩不保证与协议标记同帧：`use_preview` 在帧首按缓存定预留高度，
+    // 绘制钩子在同帧稍后才查缓存；解码回调恰好落在两者之间时，同一帧会
+    // 「已画预览标记、高度仍按 Pending 预留」。按有界收敛断言：反复 render
+    // 直到 composer 顶边框落在 (0, PREVIEW_ROWS)，超时才判定未收缩。
+    let shrink_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let top = composer_top(&buf);
+        if top > 0 && top < PREVIEW_ROWS {
+            break;
+        }
+        assert!(
+            Instant::now() < shrink_deadline,
+            "预览已出现，但高度在 5s 内未收敛：composer 顶部仍在第 {top} 行（应落在 1..{PREVIEW_ROWS}）"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        buf = render(25, 1);
+    }
 }
 
 #[test]
@@ -270,7 +297,9 @@ fn unsupported_protocol_keeps_text_only() {
 ///
 /// 关键断言在**同一次** `render_frames(frames = 2)` 内：持久组件树的 effect 只在
 /// deps 变化时重跑，只有 deps 含 `image_view::revision()` 才会在第二帧重试——
-/// 否则 `lookup` 无条目（Request 从未登记），预览会一直停在文本降级。
+/// 否则缓存无条目（Request 从未登记），预览会一直停在文本降级。
+/// 登记与编码是两条并行时间线：第二帧登记后 64×64 图可能瞬间 Ready，因此这里
+/// 只断言「已登记」（Pending 或 Ready），不断言瞬态 Pending 与预留高度。
 #[test]
 #[serial]
 fn deferred_preview_retries_after_slot_release() {
@@ -286,15 +315,10 @@ fn deferred_preview_retries_after_slot_release() {
 
     // 第一帧请求被暂缓，并在同一帧内模拟槽位释放（bump revision）。
     crate::kit::image_view::defer_once_and_signal_release_for_test();
-    let buf = render(25, 2);
+    let _ = render(25, 2);
     assert!(
-        crate::kit::image_view::has_pending(source, budget),
-        "revision 变化必须让 effect 在下一帧重试请求：只有第二帧重新 request，才会登记 Pending 条目"
-    );
-    assert_eq!(
-        composer_top(&buf),
-        PREVIEW_ROWS,
-        "重试仍在编码中：保持 Pending 预留高度"
+        crate::kit::image_view::has_registered(source, budget),
+        "revision 变化必须让 effect 在下一帧重试请求：缓存无条目说明 deps 缺 revision() 或 effect 未在第二帧重跑"
     );
 
     // 最终 Ready，并画出预览。

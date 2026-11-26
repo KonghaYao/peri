@@ -59,8 +59,38 @@ fn once_command_hook(event: HookEvent, log: &std::path::Path) -> RegisteredHook 
     }
 }
 
+/// 读取侧重试预算：hook 子进程写完到释放句柄之间存在窗口，Windows 上
+/// PowerShell `Add-Content` 会在此期间持有句柄，立即读取命中共享冲突
+/// （os error 32 / `PermissionDenied`）。
+const LOG_READ_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+const LOG_READ_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// 是否为瞬时共享冲突（另一进程正持有句柄），而非真实的权限/IO 错误。
+fn is_sharing_violation(error: &std::io::Error) -> bool {
+    // 共享冲突只存在于 Windows：`ERROR_SHARING_VIOLATION`（32）通常映射为
+    // `PermissionDenied`，同时显式匹配 raw os error 以防平台映射差异。
+    // 非 Windows 不做重试，保持原有错误时机与类别不变。
+    cfg!(windows)
+        && (error.kind() == std::io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(32))
+}
+
+/// 有界重试读取：仅共享冲突重试，其余错误立即返回。
+fn read_hook_log(path: &std::path::Path) -> std::io::Result<String> {
+    let deadline = std::time::Instant::now() + LOG_READ_RETRY_BUDGET;
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(log) => return Ok(log),
+            Err(error) if is_sharing_violation(&error) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(LOG_READ_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn fired_lines(path: &std::path::Path) -> usize {
-    match std::fs::read_to_string(path) {
+    match read_hook_log(path) {
         Ok(log) => log.lines().count(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => panic!("failed to read hook log {}: {error}", path.display()),
