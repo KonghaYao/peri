@@ -1332,6 +1332,7 @@ panel-ask-user-url-title = External authorization required
 panel-ask-user-url-host = Target host
 panel-ask-user-url-opened = Link opened
 panel-ask-user-cancel = Cancel this authorization
+panel-ask-user-decline = Decline to answer
 panel-ask-user-no-options =   (no options provided)
 panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
 panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel

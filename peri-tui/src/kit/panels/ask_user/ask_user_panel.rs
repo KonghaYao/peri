@@ -187,19 +187,31 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             return EventResult::Consumed;
                         }
                     }
-                    // 外部 MCP elicitation：可点击的「取消」行（与 Esc 的 decline 区分）。
+                    // 外部 MCP elicitation：可点击的「取消」与「拒绝作答」行
+                    // （与 Esc → 确认弹窗的 decline 保持同一响应语义）。
                     if let Some(snapshot) = interaction_for_closure.as_ref()
                         && snapshot.payload.elicitation.is_some()
-                        && visual == cur + 1
                     {
-                        if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
-                            let _ = tx.send(AskUserResponseAction::Cancel {
-                                owner: snapshot.owner.clone(),
-                                request_id_str: snapshot.request_id_json.clone(),
-                            });
+                        if visual == cur + 1 {
+                            if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
+                                let _ = tx.send(AskUserResponseAction::Cancel {
+                                    owner: snapshot.owner.clone(),
+                                    request_id_str: snapshot.request_id_json.clone(),
+                                });
+                            }
+                            panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
+                            return EventResult::Consumed;
                         }
-                        panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
-                        return EventResult::Consumed;
+                        if visual == cur + 2 {
+                            if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
+                                let _ = tx.send(AskUserResponseAction::Reject {
+                                    owner: snapshot.owner.clone(),
+                                    request_id_str: snapshot.request_id_json.clone(),
+                                });
+                            }
+                            panel_registry::close_ask_user_panel_for_owner(&snapshot.owner);
+                            return EventResult::Consumed;
+                        }
                     }
                 }
                 // 区域内点击（未命中行）也消费，防止穿透
@@ -536,11 +548,16 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
 
-            // 外部 MCP elicitation：保留明确的取消操作（Esc 仍走 decline 确认）。
+            // 外部 MCP elicitation：保留明确的取消与拒绝操作（Esc 仍走 decline 确认）。
             if au.elicitation.is_some() {
                 lines.push(Line::from(""));
                 lines.push(
                     Line::from(format!("  [{}]", i18n::tr("panel-ask-user-cancel")))
+                        .fg(semantic.status.warning)
+                        .add_modifier(Modifier::BOLD),
+                );
+                lines.push(
+                    Line::from(format!("  [{}]", i18n::tr("panel-ask-user-decline")))
                         .fg(semantic.status.warning)
                         .add_modifier(Modifier::BOLD),
                 );
