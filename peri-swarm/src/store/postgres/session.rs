@@ -48,7 +48,7 @@ impl SwarmStateStore {
         // The binding update and the session insert form one write transaction:
         // an identity conflict rolls back the binding, and a missing or replaced
         // shared environment leaves both statements without effect.
-        within_batch("create_hosted_session", 2, async {
+        let transaction = within_batch("create_hosted_session", 2, async {
             let mut transaction = self.begin("create_hosted_session").await?;
             if require_existing {
                 let attached = sqlx::query(ATTACH_BINDING_SQL)
@@ -86,9 +86,10 @@ impl SwarmStateStore {
                 rollback("create_hosted_session", transaction).await;
                 return Err(StoreError::NotFound(logical_env_id));
             }
-            commit("create_hosted_session", transaction).await
+            Ok(transaction)
         })
-        .await
+        .await?;
+        commit("create_hosted_session", transaction).await
     }
 
     pub(super) async fn get_session(
@@ -175,7 +176,7 @@ impl SwarmStateStore {
         // One transaction: a partial delete can never be reported as success.
         // Statements are ordered child-first for readability; the transaction is
         // what makes the set atomic.
-        within_batch("delete_session", 6, async {
+        let transaction = within_batch("delete_session", 6, async {
             let mut transaction = self.begin("delete_session").await?;
             for (operation, sql) in [
                 ("delete_items", DELETE_ITEMS_SQL),
@@ -191,8 +192,9 @@ impl SwarmStateStore {
                     .await
                     .map_err(|error| classify(operation, error))?;
             }
-            commit("delete_session", transaction).await
+            Ok(transaction)
         })
-        .await
+        .await?;
+        commit("delete_session", transaction).await
     }
 }

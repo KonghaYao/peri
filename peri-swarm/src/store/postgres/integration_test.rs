@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use crate::domain::{ItemOrder, SessionState, SessionsWindow};
 use crate::store::{InputPut, StoreError, SwarmSessionPatch, SwarmStore};
 
-use super::test_fixture::{input, session, TestSchema};
+use super::test_fixture::{current_schema, input, quote, session, TestSchema};
 use super::{SwarmStateError, SwarmStateStore, SWARM_STATE_SCHEMA_VERSION};
 
 // ── schema ──────────────────────────────────────────────────────────────────
@@ -464,6 +464,66 @@ async fn inputs_are_insert_if_absent() {
         Some(receipt)
     );
 
+    store.close().await.expect("close");
+    fixture.close().await;
+}
+
+// ── commit boundary ─────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn a_write_that_never_reaches_commit_is_rolled_back() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = fixture.store().await;
+    let pool = fixture.pool().await;
+    let schema = current_schema(&pool).await;
+    let insert = format!(
+        "INSERT INTO {}.swarm_inputs (logical_id, input_id, fingerprint, state, created_at)
+         VALUES ('logical-1', 'input-1', 'fp', 'accepted', '2026-01-01T00:00:00Z')",
+        quote(&schema)
+    );
+
+    // The pre-commit phase times out after the insert ran inside the
+    // transaction: the transaction is dropped (rolled back), so the row must
+    // never become visible — that is what makes a retry safe.
+    let outcome = super::budget::within_batch_for(
+        std::time::Duration::from_millis(50),
+        "append_items",
+        async {
+            let mut transaction = pool.begin().await.expect("begin");
+            sqlx::query(sqlx::AssertSqlSafe(insert.clone()))
+                .execute(&mut *transaction)
+                .await
+                .expect("insert");
+            peri_time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok::<_, crate::store::StoreError>(transaction)
+        },
+    )
+    .await;
+    let error = outcome.expect_err("the budget must expire");
+    assert!(error.to_string().contains("nothing was applied"), "{error}");
+    assert_eq!(
+        fixture.count("swarm_inputs").await,
+        0,
+        "an uncommitted write is invisible to every other connection"
+    );
+
+    // A commit inside its budget still works. A *stuck* COMMIT cannot be produced
+    // here: tokio polls the inner future first, so a local commit finishes on its
+    // first poll and never trips a short budget; `commit_outcome_unknown` pins
+    // that branch's text in the unit tests instead.
+    let transaction = pool.begin().await.expect("begin");
+    super::commit_with_budget(
+        std::time::Duration::from_secs(10),
+        "append_items",
+        transaction,
+    )
+    .await
+    .expect("commit");
+
+    pool.close().await;
     store.close().await.expect("close");
     fixture.close().await;
 }

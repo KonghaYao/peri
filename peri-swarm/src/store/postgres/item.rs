@@ -43,7 +43,7 @@ impl SwarmStateStore {
         }
         // One transaction: a viewer never sees an item the session cursor has
         // not reached, and a failed run leaves no hole for the retry to skip.
-        within_batch("append_items", statements, async move {
+        let transaction = within_batch("append_items", statements, async move {
             let mut transaction = self.begin("append_items").await?;
             for row in rows {
                 let affected = bind_item(sqlx::query(INSERT_ITEM_SQL), row)?
@@ -72,9 +72,10 @@ impl SwarmStateStore {
                     )));
                 }
             }
-            commit("append_items", transaction).await
+            Ok(transaction)
         })
-        .await
+        .await?;
+        commit("append_items", transaction).await
     }
 
     pub(super) async fn items_after(

@@ -27,6 +27,11 @@
 //! violation is reported as [`StoreError::Conflict`] and left for the caller to
 //! resolve by reading again.
 //!
+//! Timeouts name their phase: the bounded pre-commit phase is rolled back on
+//! expiry (`nothing was applied`, safe to retry), while a `COMMIT` that gets no
+//! reply is an **unknown outcome** — the server may have committed, so the
+//! caller re-reads its rows by key instead of replaying the write.
+//!
 //! ## Field encoding
 //!
 //! The layout keeps the port contract fixed (`.peri/plans/S6a-report.md` §1.2):
@@ -205,15 +210,50 @@ impl SwarmStateStore {
     }
 }
 
-/// Commit one explicit transaction, classifying a commit failure.
+/// Commit one explicit transaction.
+///
+/// A failed `COMMIT` means PostgreSQL rolled the transaction back, so nothing
+/// was applied. A `COMMIT` that gets **no reply** within the budget is different
+/// and is reported as an unknown outcome: the server may have committed before
+/// the connection stalled, so the caller must re-read its rows by key (or by
+/// `(logical_id, seq)`) instead of retrying blindly.
 pub(super) async fn commit(
     operation: &'static str,
     transaction: sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), StoreError> {
-    transaction
-        .commit()
-        .await
-        .map_err(|error| budget::classify(operation, error))
+    commit_with_budget(REQUEST_BUDGET, operation, transaction).await
+}
+
+/// [`commit`] with an explicit budget (tests drive short ones).
+pub(super) async fn commit_with_budget(
+    budget: std::time::Duration,
+    operation: &'static str,
+    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), StoreError> {
+    match peri_time::timeout(budget, transaction.commit()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            tracing::error!(operation, error = %error, "swarm state store commit failed");
+            Err(budget::classify(operation, error))
+        }
+        Err(_) => Err(commit_outcome_unknown(operation, budget)),
+    }
+}
+
+/// The failure of a `COMMIT` that got no reply.
+///
+/// Kept separate so the branch is testable without engineering a real stuck
+/// socket: tokio polls the inner future first, so a local `COMMIT` completes on
+/// its first poll and never trips a short budget.
+pub(super) fn commit_outcome_unknown(
+    operation: &'static str,
+    budget: std::time::Duration,
+) -> StoreError {
+    StoreError::Unavailable(format!(
+        "{operation}: COMMIT was sent but no reply arrived within {budget:?}; the outcome is \
+         unknown — the transaction may have committed. Re-read the rows by key before retrying; \
+         do not replay the write blindly"
+    ))
 }
 
 /// Roll back one explicit transaction. A failed rollback is already reported by

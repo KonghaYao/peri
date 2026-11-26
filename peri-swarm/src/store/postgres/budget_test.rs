@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use sqlx::error::ErrorKind;
 
+use super::super::commit_outcome_unknown;
 use super::{
-    batch_budget, classify, unexpected_row_count, unexplained, unreadable, REQUEST_BUDGET,
+    batch_budget, classify, unexpected_row_count, unexplained, unreadable, within_batch_for,
+    REQUEST_BUDGET,
 };
 use crate::store::StoreError;
 
@@ -173,4 +175,61 @@ fn helper_messages_name_the_operation_and_the_requirement() {
     );
     let rows = unexpected_row_count("get_session", 2);
     assert!(rows.to_string().contains("2 rows"), "{rows}");
+}
+
+#[tokio::test]
+async fn a_batch_that_never_reaches_commit_promises_nothing_was_applied() {
+    // The bounded block must stay uncommitted and return its transaction; a
+    // timeout there is safely retryable, unlike a COMMIT timeout.
+    let outcome: Result<i32, StoreError> =
+        within_batch_for(Duration::from_millis(20), "append_items", async {
+            peri_time::sleep(Duration::from_millis(200)).await;
+            Ok(7)
+        })
+        .await;
+    let error = outcome.expect_err("the budget must expire");
+    let message = error.to_string();
+    for hint in [
+        "append_items",
+        "did not reach COMMIT",
+        "nothing was applied",
+        "cannot duplicate rows",
+    ] {
+        assert!(message.contains(hint), "missing {hint}: {message}");
+    }
+    assert!(
+        !message.contains("unknown"),
+        "a pre-commit timeout is a known outcome: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_inside_its_budget_returns_its_value() {
+    let value = within_batch_for(Duration::from_secs(5), "append_items", async {
+        Ok::<_, StoreError>("transaction")
+    })
+    .await
+    .expect("within budget");
+    assert_eq!(value, "transaction");
+}
+
+#[test]
+fn a_commit_without_a_reply_reports_an_unknown_outcome() {
+    // tokio polls the inner future first, so a real stuck COMMIT cannot be
+    // produced deterministically in a test; the branch's contract is pinned here.
+    let error = commit_outcome_unknown("append_items", Duration::from_secs(20));
+    let message = error.to_string();
+    for hint in [
+        "append_items",
+        "COMMIT was sent",
+        "outcome is unknown",
+        "may have committed",
+        "Re-read the rows by key",
+    ] {
+        assert!(message.contains(hint), "missing {hint}: {message}");
+    }
+    assert!(
+        !message.contains("nothing was applied"),
+        "a sent COMMIT must not promise an empty result: {message}"
+    );
 }

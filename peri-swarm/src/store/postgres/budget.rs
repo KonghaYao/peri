@@ -39,22 +39,31 @@ pub(super) async fn within_budget<T>(
     }
 }
 
-/// Run one explicit transaction (or any multi-step write) under the batch
-/// budget.
+/// Run the pre-commit part of one explicit transaction under the batch budget.
 ///
-/// A timeout drops the transaction, so nothing is committed; the message says
-/// so instead of claiming an unknown outcome.
+/// The future must return the transaction **uncommitted**: the caller commits it
+/// through [`super::commit`]. A timeout drops it, and a dropped transaction is
+/// rolled back, so "nothing was committed" is a fact — unlike a timeout around
+/// `COMMIT` itself, which cannot be promised either way.
 pub(super) async fn within_batch<T>(
     operation: &'static str,
     statements: usize,
     future: impl Future<Output = Result<T, StoreError>>,
 ) -> Result<T, StoreError> {
-    let budget = batch_budget(statements);
+    within_batch_for(batch_budget(statements), operation, future).await
+}
+
+/// [`within_batch`] with an explicit budget (tests drive short ones).
+pub(super) async fn within_batch_for<T>(
+    budget: Duration,
+    operation: &'static str,
+    future: impl Future<Output = Result<T, StoreError>>,
+) -> Result<T, StoreError> {
     match peri_time::timeout(budget, future).await {
         Ok(result) => result,
         Err(_) => Err(StoreError::Unavailable(format!(
-            "{operation}: swarm state store write exceeded {budget:?}; the transaction was rolled \
-             back and nothing was applied"
+            "{operation}: the write did not reach COMMIT within {budget:?}; the transaction was \
+             rolled back, nothing was applied, and a retry cannot duplicate rows"
         ))),
     }
 }

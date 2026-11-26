@@ -64,14 +64,10 @@ impl TestSchema {
         };
         // The DSN rewrite must actually select the private schema.
         let probe = fixture.pool().await;
-        let current: Option<String> = sqlx::query_scalar("SELECT current_schema()::text")
-            .fetch_one(&probe)
-            .await
-            .expect("read current_schema");
+        let current = current_schema(&probe).await;
         probe.close().await;
         assert_eq!(
-            current.as_deref(),
-            Some(fixture.schema.as_str()),
+            current, fixture.schema,
             "the test DSN must select {}",
             fixture.schema
         );
@@ -181,6 +177,14 @@ impl TestSchema {
         .expect("drop the private test schema");
         admin.close().await;
     }
+}
+
+/// `current_schema()` of this DSN: the schema the store writes to.
+pub(super) async fn current_schema(pool: &PgPool) -> String {
+    sqlx::query_scalar::<_, String>("SELECT current_schema()::text")
+        .fetch_one(pool)
+        .await
+        .expect("current_schema")
 }
 
 pub(super) fn quote(identifier: &str) -> String {

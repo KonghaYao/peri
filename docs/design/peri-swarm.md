@@ -722,6 +722,8 @@ Bun：
 14. **官方会话资源面**：既有库升级与双副本并发迁移、PostgreSQL 状态库的 metadata 过滤
     （已有真实 PG 契约测试）、删除事务中断、SDK 完整资源面仍需独立验收；已覆盖范围见
     [官方 SDK 探针](../verification/peri-swarm-session-resources-2026-11-21.md#5-真实官方-sdk-探针)。
-15. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
+15. **超时分相**：写入前的有界阶段超时即回滚（可安全重试）；`COMMIT` 已发出但无回包时
+    结果未知（可能已提交），调用方按 key/seq 重读对账，不盲目重放。
+16. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
     202 推断已执行。无 owner/lease/fencing 时不得让多个宿主同时服务同一 logicalId；
     即使部署支持节点放置，也未证明旧宿主已停止。
