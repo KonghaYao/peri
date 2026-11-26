@@ -8,6 +8,7 @@
 本次从 Cargo workspace、MCP handlers、middleware 模块、ACP 请求、TUI 面板、SDK/Peri Swarm 入口交叉盘点；源码位置见验收表。内部辅助函数、参数组合、重复入口不各算能力。159 项旧草表未附送，不能虚构逐项迁移对应；旧表对账仍是明确缺口。此表范围为 Peri 产品能力和直接支持的 SDK/插件；side-projects 实验不视为已发布能力。
 
 > 2026-11-22：试验性 TS 适配层 `npm-packages/peri-rivet` 与 `npm-packages/agent-builder` 已移除；F-SDK-008 与 F-RIVET-001..008 退役，ID 不复用。Rivet actor 与部署主线见 F-SWARM-001..012。
+> 2026-11-26：`mcp-packages/peri-browser-gateway` 已移除，浏览器能力改由外部 agent-browser 承担；F-EXT-016 退役，ID 不复用。
 
 | ID | 等级 | 功能与边界 | 权威来源 |
 | --- | --- | --- | --- |
@@ -202,7 +203,6 @@
 | F-EXT-013 | L3 | Goal 提醒；目标提示不另建执行控制面 | [契约](../design/system-reminder.md) |
 | F-EXT-014 | L3 | Todo 管理；任务清单不成为执行调度器 | [契约](../design/tool-system.md) |
 | F-EXT-015 | L3 | 图像输入；媒体转换遵循模型协议边界 | [契约](../design/model-adapters.md) |
-| F-EXT-016 | L3 | 浏览器网关；会话各管其页面并可交人操作；CLI：serve/start/stop/update [kitesurf]/install kitesurf | [契约](../../mcp-packages/peri-browser-gateway/README.md) |
 | F-CLI-001 | L3 | 非交互输出；print 模式复用 Agent 执行链 | [契约](../design/architecture.md) |
 | F-CLI-002 | L3 | 身份登录；认证结果供模型连接使用 | [契约](../design/configuration-authority.md) |
 | F-CLI-003 | L4 | 版本更新；升级检查与运行会话分离 | [契约](../design/architecture.md) |

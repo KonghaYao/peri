@@ -60,30 +60,6 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 
 `${…}` 由 MCP 配置加载器展开。旧 `mcpServers.artifact.env` 仅在 legacy 装配生效，默认 v5 不迁移它；未配置有效 URL 时会使用公共默认服务。Web 能力启用时，v5 兼容读取旧 `mcpServers.web.env`，同名键优先使用 `peri.env`。外部 Artifact MCP 子进程使用它自己的 `env`。边界见 [v5 装配](../design/mcp-v5-single-exit.md) 和 [Artifact 操作参考](../reference/artifact-remote-storage.md)。
 
-## Browser Gateway
-
-下列变量由独立的 [`peri-browser-gateway`](../../mcp-packages/peri-browser-gateway/README.md) 进程读取，不通过 Peri 的 MCP 客户端为远端进程注入。对应 CLI 参数优先于环境变量；所有毫秒值为 `1..=86400000` 的整数，非法值拒绝启动。
-
-| 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
-| --- | --- | --- |
-| `PERI_BROWSER_MONITOR_BIND` | MCP 与 monitor 唯一的 TCP 地址；`--bind` 优先，只接受 `127.0.0.1` 或 `[::1]`，默认 `127.0.0.1:7391`；端口 `0` 由 OS 选择。 | `peri-browser-gateway/src/config.rs` |
-| `KITESURF_CDP_URL` | 新会话的 `browser_status` 建议地址；`--cdp-url` 优先，缺省建议 `http://127.0.0.1:18971`。仅环回 HTTP/WS、显式非零端口、无 userinfo；不启动引擎也不预绑定。 | 同上；`src/onboarding.rs` |
-| `PERI_BROWSER_GATEWAY_SECRET` | monitor token 派生输入；`--secret` 优先，推荐用环境变量，不留 secret 文件。缺省为每进程随机值，空白值非法。 | 同上；`src/token.rs` |
-| `PERI_BROWSER_OWNER` | 建/关页的 Browser 端点 owner，非空，默认为 `peri-browser`；不是 MCP 会话权限。 | 同上；`src/provision.rs` |
-| `PERI_BROWSER_SESSION_NAME` | monitor 显示标签前缀，缺省/空白用 `PERI_BROWSER_OWNER`；域 UUID 后缀由网关生成。 | 同上；`src/core.rs` |
-| `KITESURF_INSTALL_DIR` | 安装状态检测目录；缺省/空白用 `$HOME/.kitesurf`，不决定已连接的端点。 | 同上；`src/onboarding.rs` |
-| `PERI_BROWSER_PROVISION_LOCK` | 建/关页机器锁路径；缺省/空白用系统临时目录下的 `kitesurf-provision.lock`。 | 同上；`src/provision.rs` |
-| `PERI_BROWSER_PROVISION_LOCK_WAIT_MS` | 建/关页锁等待上限，默认 10000。 | 同上 |
-| `PERI_BROWSER_LOCK_STALE_MS` | 建/关页锁陈旧年龄判定，默认 30000。 | 同上 |
-| `PERI_BROWSER_CONNECT_TIMEOUT_MS` | CDP 探测、短 Browser 连接和 page writer 握手的连接预算，默认 5000。 | `peri-browser-gateway/src/config.rs`、`src/provision.rs`、`src/page/control.rs` |
-| `PERI_BROWSER_PAGE_WAIT_MS` | 页面就绪等待预算，默认 30000；导航等待还有 15 秒上限。 | 同上；`src/page/tools.rs`、`src/cdp/navigation.rs` |
-| `PERI_BROWSER_IDLE_YIELD_MS` | Agent 静置让出，`--idle-yield-ms` 优先，默认 15000。 | 同上；`src/core.rs` |
-| `PERI_BROWSER_RECLAIM_WAIT_MS` | 人持有 writer 时 Agent 等待释放上限，默认 2000。 | 同上；`src/page/control.rs` |
-| `PERI_BROWSER_YIELD_TIMEOUT_MS` | `yield_page` 的绝对预算，`--yield-timeout-ms` 优先，默认 60000。 | 同上；`src/core/monitor.rs` |
-| `PERI_BROWSER_REQUEST_HUMAN_TIMEOUT_MS` | `request_human` 绝对预算的服务上限，`--request-human-timeout-ms` 优先，默认 300000。 | 同上；`src/core/monitor.rs` |
-
-旧 `PERI_BROWSER_GATEWAY_SOCK`、`PERI_BROWSER_HTTP_ADDR` 和网关自动启动、独立 monitor token TTL 不再是运行开关。`RUST_LOG` 对独立网关只调整网关自身的诊断级别，不能开启可能包含原始请求的依赖日志。
-
 ## Langfuse 与日志
 
 Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环境值覆盖同名 settings 值。旧键（`LANGFUSE_PUBLIC_KEY`…`LANGFUSE_USER_ID`）数值解析失败时保留 settings 或默认值，不报错；新键（`LANGFUSE_SPOOL_ENABLED` 起的 spool/预算键）逐键选择胜出来源（env > `langfuse.*` settings > default），胜出值非法即返回结构化配置错误、且不发布新配置快照（不回退默认），不接受旧 `PERI_` 别名：布尔键只接受 `true/false/1/0/on/off`，压缩键只接受 `gzip/none`，整数键只接受非零十进制（零、负数、浮点、溢出、空白均拒绝）。跨键约束（input/payload 阈值与读写块不超 `LANGFUSE_MEMORY_BUDGET_BYTES`，并发槽与时限非零）在 langfuse-client 构造期校验；队列等容量的最终运行约束还由 Controller/Client 执行。

@@ -463,7 +463,7 @@ CI 的 Rust 测试是「一次主调用（`--workspace --profile ci`，排除 Co
 
 已确认超过 120s 的用例在 `[[profile.ci.overrides]]` 放宽到 2×120s，按测试名精确匹配（`#[path]` 引入的模块名不等于文件名，例如 `kit::steer_consumer::tests`）。新增 override 前先确认过滤器实际命中的测试，不要按包整体放宽。
 
-隔离：`serial-process-state`（middlewares lib + 6 个 MCP 能力包）与 `process-isolation`（`peri-process`、`peri-browser-gateway`、`peri-swarm` 中绑定真实监听器的集成目标）都是 `max-threads = 1` 的互斥组。nextest 一个测试一个进程，`#[serial]` 只保护本地 `cargo test` 的进程内并发，在 CI 下是 no-op；跨进程共享资源（文件锁、固定端口）仍需代码自身保证。
+隔离：`serial-process-state`（middlewares lib + 6 个 MCP 能力包）与 `process-isolation`（`peri-process` 与 `peri-swarm` 中绑定真实监听器的集成目标）都是 `max-threads = 1` 的互斥组。nextest 一个测试一个进程，`#[serial]` 只保护本地 `cargo test` 的进程内并发，在 CI 下是 no-op；跨进程共享资源（文件锁、固定端口）仍需代码自身保证。
 
 ---
 
