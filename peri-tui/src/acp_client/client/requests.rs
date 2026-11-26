@@ -137,7 +137,12 @@ impl AcpTuiClient {
         meta.insert("peri.mcpControlV1".into(), Value::Bool(true));
         let params = json!({
             "protocolVersion": 1,
-            "clientCapabilities": { "_meta": meta },
+            "clientCapabilities": {
+                // ACP elicitation modes this client can render. Declared independently
+                // of the MCP server capability (Peri only renders what the host shows).
+                "elicitation": { "form": {}, "url": {} },
+                "_meta": meta,
+            },
         });
         let result = self.transport.send_request("initialize", params).await?;
         self.mcp_control.store(

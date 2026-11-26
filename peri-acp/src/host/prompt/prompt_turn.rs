@@ -565,9 +565,9 @@ pub(super) async fn run_prompt_attempt(
     // 因此不存在「静默重冻」这条路径。
     let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = None;
 
-    let session_mcp_catalog = mcp_pool
-        .as_ref()
-        .and_then(|pool| Arc::clone(pool).catalog_source(&session_id));
+    let session_mcp_catalog = mcp_pool.as_ref().and_then(|pool| {
+        Arc::clone(pool).catalog_source_with_broker(&session_id, Arc::clone(&broker))
+    });
 
     let ctx = executor::SessionContext {
         cwd,

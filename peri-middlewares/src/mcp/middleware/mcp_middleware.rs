@@ -39,6 +39,9 @@ pub struct McpMiddleware {
     /// print 模式语义逐位不变）。判定只走 `builtin::is_closed`，
     /// 本文件不硬编码实例名或 `mcp__web__` 前缀。
     pub(super) builtin_closures: BTreeSet<String>,
+    /// 本会话交互 broker（MCP elicitation 的唯一入口；None = fail-closed）。
+    pub(super) interaction_broker:
+        Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
     ///  链槽关闭位（F11）：DiscoverMCP 的 agent 投影与
     /// SubAgent 工具面同源——关闭后不得再列本地 agent 来源。
     pub(super) sub_agent_face_closed: bool,
@@ -64,12 +67,26 @@ impl McpMiddleware {
     /// 权威）。session invocation 复用
     /// [`McpAdmissionPreparation::new`] 同一条构造路径。
     pub(super) fn admission(&self) -> McpAdmissionPreparation {
-        McpAdmissionPreparation::new(
+        let mut admission = McpAdmissionPreparation::new(
             Arc::clone(&self.pool),
             self.session_id.clone(),
             self.cancel.clone(),
             self.builtin_closures.clone(),
-        )
+        );
+        if let Some(broker) = self.interaction_broker.as_ref() {
+            admission = admission.with_interaction_broker(Arc::clone(broker));
+        }
+        admission
+    }
+
+    /// 注入本会话交互 broker（MCP elicitation 的唯一入口）。
+    #[must_use]
+    pub fn with_interaction_broker(
+        mut self,
+        broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+    ) -> Self {
+        self.interaction_broker = Some(broker);
+        self
     }
 
     #[must_use]
@@ -84,6 +101,7 @@ impl McpMiddleware {
             hint_sent: AtomicBool::new(false),
             builtin_closures: BTreeSet::new(),
             sub_agent_face_closed: false,
+            interaction_broker: None,
         }
     }
 

@@ -37,6 +37,8 @@ pub enum AskUserResponseAction {
         /// 首问 id——inline block 只展示首问，本地 display result 取该问题的
         /// 答案；取整个 map 的首个非空值会把后续问题的答案错挂到首问下。
         first_question_id: Option<String>,
+        /// 外部 MCP URL elicitation：用户已同意导航，发送 accept 后打开。
+        open_url: Option<String>,
     },
     /// 用户取消（Esc）
     Cancel {
@@ -78,8 +80,8 @@ pub fn spawn_ask_user_consumer(
                         Some(AskUserResponseAction::Cancel { owner, request_id_str }) => {
                             handle_cancel(&acp_client, &owner, &request_id_str).await;
                         }
-                        Some(AskUserResponseAction::Submit { owner, request_id_str, answers, first_question_id }) => {
-                            handle_submit(&acp_client, &owner, &request_id_str, &answers, first_question_id.as_deref()).await;
+                        Some(AskUserResponseAction::Submit { owner, request_id_str, answers, first_question_id, open_url }) => {
+                            handle_submit(&acp_client, &owner, &request_id_str, &answers, first_question_id.as_deref(), open_url.as_deref()).await;
                         }
                         Some(AskUserResponseAction::Reject { owner, request_id_str }) => {
                             handle_reject(&acp_client, &owner, &request_id_str).await;
@@ -104,25 +106,48 @@ async fn handle_submit(
     request_id_str: &str,
     answers: &Value,
     first_question_id: Option<&str>,
+    open_url: Option<&str>,
 ) {
-    let response = json!({
-        "action": "accept",
-        "content": answers
-    });
+    // URL accept 只表示「同意导航」，content 必须缺省；form accept 携带结构化答案。
+    let response = match open_url {
+        Some(_) => json!({ "action": "accept" }),
+        None => json!({ "action": "accept", "content": answers }),
+    };
 
     info!(request_id = %request_id_str, "kit ask_user_consumer: sending Accept response");
 
-    let result = first_question_id
-        .and_then(|id| answers.get(id))
-        .map(display_answer)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| i18n::tr("render-interaction-result-answered"));
-    if let Err(e) = acp_client
+    let result = display_answer_for(answers, first_question_id, open_url);
+    match acp_client
         .respond_interaction(owner, response, result)
         .await
     {
-        error!(error = %e, "kit ask_user_consumer: send_response failed");
+        Err(e) => error!(error = %e, "kit ask_user_consumer: send_response failed"),
+        // claim 失败 = 旧答案，绝不能触发导航。
+        Ok(false) => {}
+        Ok(true) => {
+            if let Some(url) = open_url
+                && let Err(error) = crate::kit::open_url::open(url)
+            {
+                // 面板已展示可复制链接；这里只记录失败，不把用户同意伪装成成功打开。
+                tracing::warn!(%url, %error, "kit ask_user_consumer: platform opener failed");
+            }
+        }
     }
+}
+
+fn display_answer_for(
+    answers: &Value,
+    first_question_id: Option<&str>,
+    open_url: Option<&str>,
+) -> String {
+    if open_url.is_some() {
+        return i18n::tr("panel-ask-user-url-opened");
+    }
+    first_question_id
+        .and_then(|id| answers.get(id))
+        .map(display_answer)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| i18n::tr("render-interaction-result-answered"))
 }
 
 /// 单个答案值 → 本地展示文本：单选 string 原样；多选 array 以 `, ` 拼接

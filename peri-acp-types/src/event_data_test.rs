@@ -145,9 +145,13 @@ fn test_ask_user_roundtrip() {
             options: vec![QuestionOption {
                 label: "Option A".into(),
                 description: "The first approach".into(),
+                value: None,
             }],
             multi_select: false,
+            field_type: None,
+            required: false,
         }],
+        elicitation: None,
     };
     let json = serde_json::to_string(&au).unwrap();
     let back: AskUser = serde_json::from_str(&json).unwrap();
@@ -196,6 +200,8 @@ fn test_question_fields_are_snake_case() {
         question: "q".into(),
         options: vec![],
         multi_select: true,
+        field_type: None,
+        required: false,
     };
     let val = serde_json::to_value(&q).unwrap();
     assert!(val.get("multi_select").is_some());

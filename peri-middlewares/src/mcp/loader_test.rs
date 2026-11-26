@@ -41,7 +41,7 @@ impl Fixture {
     }
 
     fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot> {
-        crate::mcp::control::catalog_source(self.pool.clone(), "session-1").snapshot()
+        crate::mcp::control::catalog_source(self.pool.clone(), "session-1", None).snapshot()
     }
 
     fn loaders(&self) -> Vec<Arc<dyn BaseTool>> {
@@ -66,6 +66,7 @@ impl Fixture {
             Some(crate::mcp::control::catalog_source(
                 self.pool.clone(),
                 "session-1",
+                None,
             )),
         ))
     }
@@ -603,6 +604,7 @@ async fn load_reports_zero_session_tools_when_the_session_filters_them_all() {
         Some(crate::mcp::control::catalog_source(
             fixture.pool.clone(),
             "session-1",
+            None,
         )),
         Arc::new(|tool: &dyn BaseTool| tool.mcp_tool_name().is_none()),
     ));

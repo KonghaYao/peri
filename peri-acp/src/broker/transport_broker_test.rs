@@ -1130,3 +1130,171 @@ fn test_ask_user_timeout_reads_env() {
         Some(Duration::from_secs(300))
     );
 }
+
+// ─── 外部 MCP elicitation 投影（#589） ───
+
+fn mcp_form_context() -> InteractionContext {
+    InteractionContext::Elicitation {
+        request: peri_acp_types::interaction::ElicitationRequest::Form {
+            server: "expense".into(),
+            tool: "submit_expense".into(),
+            message: "Approve this expense?".into(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "approve": { "type": "boolean", "title": "Approve" },
+                    "note": { "type": "string", "title": "Note" }
+                },
+                "required": ["approve"]
+            }),
+        },
+    }
+}
+
+#[tokio::test]
+async fn mcp_form_projects_schema_and_origin_marker() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let broker = AcpTransportBroker::new(
+        Arc::new(MockTransport {
+            calls: Arc::clone(&calls),
+            behavior: Behavior::Respond(json!({
+                "action": "accept",
+                "content": { "approve": false, "note": "not now" }
+            })),
+        }),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+
+    let response = broker.request(owner(), mcp_form_context()).await;
+    let InteractionResponse::Elicitation(
+        peri_acp_types::interaction::ElicitationDecision::Accept { content },
+    ) = response
+    else {
+        panic!("expected accept, got {response:?}");
+    };
+    assert_eq!(content, json!({ "approve": false, "note": "not now" }));
+
+    let calls = calls.lock().unwrap();
+    let (method, params) = &calls[0];
+    assert_eq!(method, "elicitation/create");
+    assert_eq!(params["mode"], "form");
+    assert_eq!(params["message"], "Approve this expense?");
+    assert_eq!(params["sessionId"], "s1");
+    assert_eq!(
+        params["requestedSchema"]["properties"]["approve"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        params["_meta"]["io.peri/mcpElicitation"],
+        json!({ "server": "expense", "tool": "submit_expense" })
+    );
+}
+
+#[tokio::test]
+async fn mcp_url_elicitation_projects_consent_card_and_generates_a_local_id() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let broker = AcpTransportBroker::new(
+        Arc::new(MockTransport {
+            calls: Arc::clone(&calls),
+            behavior: Behavior::Respond(json!({ "action": "accept" })),
+        }),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    for _ in 0..2 {
+        let response = broker
+            .request(
+                owner(),
+                InteractionContext::Elicitation {
+                    request: peri_acp_types::interaction::ElicitationRequest::Url {
+                        server: "oauth".into(),
+                        tool: "connect".into(),
+                        message: "Authorize in browser".into(),
+                        url: "https://example.com/connect".into(),
+                    },
+                },
+            )
+            .await;
+        assert!(matches!(
+            response,
+            InteractionResponse::Elicitation(
+                peri_acp_types::interaction::ElicitationDecision::Accept { .. }
+            )
+        ));
+    }
+    let calls = calls.lock().unwrap();
+    let first = &calls[0].1;
+    let second = &calls[1].1;
+    assert_eq!(first["mode"], "url");
+    assert_eq!(first["url"], "https://example.com/connect");
+    assert_eq!(
+        first["_meta"]["io.peri/mcpElicitation"],
+        json!({ "server": "oauth", "tool": "connect" })
+    );
+    let first_id = first["elicitationId"]
+        .as_str()
+        .expect("ACP url elicitation carries a local id");
+    let second_id = second["elicitationId"]
+        .as_str()
+        .expect("ACP url elicitation carries a local id");
+    assert!(!first_id.is_empty());
+    assert_ne!(
+        first_id, second_id,
+        "each displayed elicitation id must be unique within the ACP connection"
+    );
+}
+
+#[test]
+fn mcp_elicitation_cancel_keeps_cancel_and_decline_stays_decline() {
+    use crate::broker::transport_broker::parse_mcp_elicitation_response;
+    use peri_acp_types::interaction::ElicitationDecision;
+
+    let cancel = parse_mcp_elicitation_response(json!({ "action": "cancel" }));
+    assert!(matches!(
+        cancel,
+        InteractionResponse::Elicitation(ElicitationDecision::Cancel)
+    ));
+
+    let decline = parse_mcp_elicitation_response(json!({ "action": "decline" }));
+    assert!(matches!(
+        decline,
+        InteractionResponse::Elicitation(ElicitationDecision::Decline)
+    ));
+}
+
+#[tokio::test]
+async fn mcp_form_schema_that_acp_cannot_express_fails_closed() {
+    let broker = AcpTransportBroker::new(
+        Arc::new(MockTransport {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            behavior: Behavior::Respond(json!({ "action": "decline" })),
+        }),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    let response = broker
+        .request(
+            owner(),
+            InteractionContext::Elicitation {
+                request: peri_acp_types::interaction::ElicitationRequest::Form {
+                    server: "srv".into(),
+                    tool: "tool".into(),
+                    message: "nested".into(),
+                    requested_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "nested": { "type": "object", "properties": {} }
+                        }
+                    }),
+                },
+            },
+        )
+        .await;
+    assert!(matches!(
+        response,
+        InteractionResponse::Failed {
+            failure: InteractionFailure::Transport { .. }
+        }
+    ));
+}

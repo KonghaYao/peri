@@ -602,7 +602,10 @@ fn ask_user() -> AcpEventData {
     AcpEventData::AskUser(PendingInteraction {
         owner: Default::default(),
         request_id_json: "\"a\"".into(),
-        payload: AskUser { questions: vec![] },
+        payload: AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     })
 }
 

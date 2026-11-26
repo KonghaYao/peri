@@ -27,6 +27,14 @@ async fn submit_once(
     answers: serde_json::Value,
     first_question_id: Option<&str>,
 ) -> (serde_json::Value, crate::acp_client::InteractionUiOutcome) {
+    submit_once_with_open_url(answers, first_question_id, None).await
+}
+
+async fn submit_once_with_open_url(
+    answers: serde_json::Value,
+    first_question_id: Option<&str>,
+    open_url: Option<&str>,
+) -> (serde_json::Value, crate::acp_client::InteractionUiOutcome) {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s1", true);
@@ -61,6 +69,7 @@ async fn submit_once(
         request_id_str: request_id_json,
         answers,
         first_question_id: first_question_id.map(str::to_string),
+        open_url: open_url.map(str::to_string),
     })
     .expect("submit fixture: response channel must accept the action");
     let response = request
@@ -158,6 +167,21 @@ async fn test_ask_user_submit_display_result_missing_first_id_falls_back() {
     assert_eq!(resolved_result(outcome), "Answered");
 }
 
+/// 外部 MCP URL：accept 只表示同意导航，wire 不带 content；打开失败只记录。
+#[tokio::test]
+async fn test_mcp_url_accept_omits_content() {
+    crate::i18n::init(Some("en"));
+    let (response, outcome) = submit_once_with_open_url(
+        json!({}),
+        Some("__mcp_url__"),
+        // file scheme 在 opener 校验处被拒绝，不会启动任何进程。
+        Some("file:///tmp/not-opened"),
+    )
+    .await;
+    assert_eq!(response, json!({ "action": "accept" }));
+    assert_eq!(resolved_result(outcome), "Link opened");
+}
+
 #[test]
 fn test_display_answer_shapes() {
     assert_eq!(super::display_answer(&json!("Fast")), "Fast");
@@ -176,6 +200,7 @@ fn test_ask_user_response_action_variants_carry_owner() {
         request_id_str: "\"abc\"".into(),
         answers: json!({"q1":"yes"}),
         first_question_id: Some("q1".into()),
+        open_url: None,
     };
     let AskUserResponseAction::Submit {
         owner: actual,

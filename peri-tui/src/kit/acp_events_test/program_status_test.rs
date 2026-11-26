@@ -41,9 +41,13 @@ fn ask_user_event() -> AcpEventData {
                 options: vec![QuestionOption {
                     label: "A".into(),
                     description: String::new(),
+                    value: None,
                 }],
                 multi_select: false,
+                field_type: None,
+                required: false,
             }],
+            elicitation: None,
         },
     })
 }

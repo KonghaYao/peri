@@ -45,7 +45,10 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
-        payload: AskUser { questions: vec![] },
+        payload: AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     });
     *OPEN_PANELS.state().write() = vec![PanelKind::Tasks];
     *ACTIVE_PANEL.state().write() = Some(PanelKind::Tasks);
@@ -87,7 +90,10 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
         request_id_json: "\"sentinel\"".into(),
-        payload: AskUser { questions: vec![] },
+        payload: AskUser {
+            questions: vec![],
+            elicitation: None,
+        },
     });
     *OPEN_PANELS.state().write() = vec![PanelKind::Tasks];
     *ACTIVE_PANEL.state().write() = Some(PanelKind::Tasks);

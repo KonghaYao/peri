@@ -273,6 +273,18 @@ pub trait McpPoolPort: Any + Send + Sync {
     ) -> Option<Arc<dyn SessionMcpCatalogPort>> {
         None
     }
+
+    /// Catalog whose bridges carry this session's interaction broker.
+    ///
+    /// 默认实现保持旧语义（不注入 broker）：替换实现没有交互入口时，MCP
+    /// elicitation 必须 fail-closed。生产池覆盖它以覆盖 ToolSearch 动态加载的工具。
+    fn catalog_source_with_broker(
+        self: Arc<Self>,
+        session_id: &str,
+        _broker: Arc<dyn crate::interaction::UserInteractionBroker>,
+    ) -> Option<Arc<dyn SessionMcpCatalogPort>> {
+        self.catalog_source(session_id)
+    }
     /// 当前会话可见的 dynamic Loader 绑定（Host 生成插件指引的受控来源）。
     ///
     /// 与 `catalog_source` 的 Loader 面同源：关闭 / 禁用 / 不可见来源不产出。

@@ -70,5 +70,5 @@ export type ElicitationRequest = {
 };
 
 export type ElicitationDecision =
-    | { action: "accept"; content: Record<string, unknown> }
+    | { action: "accept"; content?: Record<string, unknown> }
     | { action: "decline" | "cancel" };

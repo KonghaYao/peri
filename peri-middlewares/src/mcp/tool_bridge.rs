@@ -52,6 +52,10 @@ pub struct McpToolBridge {
     admission: Option<super::connection_gate::McpCallGate>,
     output_pool: Option<std::sync::Weak<McpClientPool>>,
     output_session_id: Option<String>,
+    /// 会话级交互 broker（装配面注入）；缺失时 MCP elicitation 恒 fail-closed。
+    interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
+    /// 连接装配时的能力 profile：0728 单次请求按需声明 Form/URL。
+    capability_profile: super::apps::McpCapabilityProfile,
 }
 
 impl Debug for McpToolBridge {
@@ -176,7 +180,18 @@ impl McpToolBridge {
             binding_leases: None,
             output_pool: None,
             output_session_id: None,
+            interaction_broker: None,
+            capability_profile: super::apps::McpCapabilityProfile::disabled(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_capability_profile(
+        mut self,
+        profile: super::apps::McpCapabilityProfile,
+    ) -> Self {
+        self.capability_profile = profile;
+        self
     }
 
     #[must_use]
@@ -187,6 +202,16 @@ impl McpToolBridge {
     ) -> Self {
         self.output_pool = Some(Arc::downgrade(pool));
         self.output_session_id = session_id.map(str::to_string);
+        self
+    }
+
+    /// 注入该会话的交互 broker：0728 MRTR 输入经它征询用户。
+    #[must_use]
+    pub fn with_interaction_broker(
+        mut self,
+        broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+    ) -> Self {
+        self.interaction_broker = Some(broker);
         self
     }
 
@@ -386,7 +411,31 @@ impl BaseTool for McpToolBridge {
             _ => false,
         };
         let timeout = (!workspace_tool).then_some(TOOL_CALL_TIMEOUT);
-        let response = match super::tool_request::call_tool(peer, request, timeout).await {
+        // 0728 的输入要求随原 tools/call 返回：归属由本次调用显式携带，
+        // 不再按连接猜测唯一活动调用。
+        let interaction = self.interaction_broker.as_ref().and_then(|broker| {
+            crate::interaction_owner::owner_from_tool_context(&ctx).map(|owner| {
+                super::client::InteractionRoute {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    owner,
+                    broker: Arc::clone(broker),
+                    cancellation: ctx.cancellation.clone(),
+                }
+            })
+        });
+        let request_capabilities = interaction
+            .as_ref()
+            .map(|_| super::client::client_capabilities_for_call(&self.capability_profile));
+        let response = match super::tool_request::call_tool(
+            peer,
+            request,
+            timeout,
+            interaction.as_ref(),
+            request_capabilities.as_ref(),
+        )
+        .await
+        {
             Ok(response) => response,
             Err(error) => {
                 // 只有真正的传输/协议失败走这条路。远端 JSON-RPC error 的
@@ -747,31 +796,34 @@ pub(crate) fn format_contents(contents: &[ContentBlock]) -> String {
 /// 「声明 direct 集合 == `system_mcp_tools` 集合」的断言锁死，不得冲突）。其余一律
 /// 保持 deferred。判定只走 `builtin::is_declared_direct`（未实现 / 未知名恒 false），
 /// 不在本文件硬编码任何 `mcp__*` 字面量或实例名。
-pub(crate) fn build_typed_tool_bridges_visible_to(
+/// 与本会话交互 broker 同批构造的 typed bridge 集合（会话装配唯一入口）。
+pub(crate) fn build_typed_tool_bridges_visible_to_with_broker(
     pool: &Arc<McpClientPool>,
     session_id: Option<&str>,
+    interaction_broker: Option<&Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 ) -> Vec<McpToolBridge> {
-    build_bridges(pool, true, session_id)
+    build_bridges(pool, true, session_id, interaction_broker)
 }
 
 /// 部署面视图的 typed 版本（无会话归属过滤）。
 pub(crate) fn build_typed_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
-    build_bridges(pool, true, None)
+    build_bridges(pool, true, None, None)
 }
 
 /// 强制 deferred 的 typed 版本：public [`build_tool_bridges`] 专用。
 ///
-/// 与 [`build_typed_tool_bridges_visible_to`] 的唯一差异是不应用声明 direct，因此
+/// 与 [`build_typed_tool_bridges_visible_to_with_broker`] 的唯一差异是不应用声明 direct，因此
 /// public builder 在 builtin 与外部 server 两种输入下的行为都与提取出 typed
 /// builder 之前**逐位一致**。
 pub(crate) fn build_deferred_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
-    build_bridges(pool, false, None)
+    build_bridges(pool, false, None, None)
 }
 
 fn build_bridges(
     pool: &Arc<McpClientPool>,
     apply_declared_direct: bool,
     session_id: Option<&str>,
+    interaction_broker: Option<&Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 ) -> Vec<McpToolBridge> {
     let mut bridges: Vec<McpToolBridge> = Vec::new();
     let mut clients = pool.clients_visible_to(session_id);
@@ -782,7 +834,11 @@ fn build_bridges(
             let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
                 .with_server_generation(generation)
                 .with_binding_leases(Arc::clone(&pool.app_binding_leases))
+                .with_capability_profile(pool.capability_profile.clone())
                 .with_output_store(pool, session_id);
+            if let Some(broker) = interaction_broker {
+                bridge = bridge.with_interaction_broker(Arc::clone(broker));
+            }
             if apply_declared_direct
                 && matches!(
                     &client.source,
@@ -823,7 +879,7 @@ pub fn build_tool_bridges_visible_to(
     pool: &Arc<McpClientPool>,
     session_id: Option<&str>,
 ) -> Vec<Box<dyn BaseTool>> {
-    build_bridges(pool, false, session_id)
+    build_bridges(pool, false, session_id, None)
         .into_iter()
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
         .collect()

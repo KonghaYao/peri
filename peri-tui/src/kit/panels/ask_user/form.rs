@@ -102,7 +102,7 @@ impl FormState {
         }
         if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
             if let Some(q) = pending.and_then(|p| p.questions.get(self.focused)) {
-                if self.focused_option == q.options.len() {
+                if self.focused_option == q.options.len() && q.allows_custom_text() {
                     self.begin_custom_input(self.focused);
                 } else if self.focused_option < q.options.len() {
                     self.toggle_option(self.focused, self.focused_option, q.multi_select);
@@ -133,14 +133,18 @@ impl FormState {
                 if !self.is_typing {
                     let limit = pending
                         .and_then(|p| p.questions.get(self.focused))
-                        .map(|q| q.options.len() + 1)
+                        .map(|q| q.options.len() + usize::from(q.allows_custom_text()))
                         .unwrap_or(0);
                     if limit > 0 {
                         self.focused_option = peri_tui_components::list_nav::next_selection(
                             self.focused_option,
                             limit,
                         );
-                        if self.focused_option == limit.saturating_sub(1) {
+                        if self.focused_option == limit.saturating_sub(1)
+                            && pending
+                                .and_then(|p| p.questions.get(self.focused))
+                                .is_some_and(Question::allows_custom_text)
+                        {
                             self.begin_custom_input(self.focused);
                         }
                     }
@@ -168,15 +172,29 @@ impl FormState {
     }
 
     fn confirm(&mut self, pending: Option<&AskUser>, count: usize) -> FormOutcome {
-        let all_answered = self.answers.iter().enumerate().all(|(i, answer)| {
-            !answer.is_empty()
-                || self.custom_answers.get(i).is_some_and(Option::is_some)
-                || pending
-                    .and_then(|p| p.questions.get(i))
-                    .map(|q| q.options.is_empty())
-                    .unwrap_or(true)
+        let all_answered = (0..count).all(|i| {
+            let answer = self.answers.get(i).cloned().unwrap_or_default();
+            let custom = self.custom_answers.get(i).cloned().flatten();
+            let Some(q) = pending.and_then(|p| p.questions.get(i)) else {
+                return true;
+            };
+            if q.field_type.is_some() {
+                // MCP 字段只按 schema 的 required 判定；布尔/枚举不要求自定义文本。
+                !q.required
+                    || !answer.is_empty()
+                    || custom.is_some_and(|text| !text.trim().is_empty())
+            } else {
+                !answer.is_empty() || custom.is_some() || q.options.is_empty()
+            }
         });
         if all_answered {
+            return FormOutcome::Submit(build_answers_map(
+                pending,
+                &self.answers,
+                &self.custom_answers,
+            ));
+        }
+        if count == 0 {
             return FormOutcome::Submit(build_answers_map(
                 pending,
                 &self.answers,
@@ -186,12 +204,22 @@ impl FormState {
         let mut next = (self.focused + 1) % count;
         loop {
             let is_answered = self.answers.get(next).is_some_and(|v| !v.is_empty())
-                || self.custom_answers.get(next).is_some_and(Option::is_some);
-            let has_no_options = pending
+                || self
+                    .custom_answers
+                    .get(next)
+                    .and_then(Clone::clone)
+                    .is_some_and(|text| !text.trim().is_empty());
+            let needs_answer = pending
                 .and_then(|p| p.questions.get(next))
-                .map(|q| q.options.is_empty())
-                .unwrap_or(true);
-            if !is_answered && !has_no_options {
+                .map(|q| {
+                    if q.field_type.is_some() {
+                        q.required
+                    } else {
+                        !q.options.is_empty()
+                    }
+                })
+                .unwrap_or(false);
+            if !is_answered && needs_answer {
                 break;
             }
             next = (next + 1) % count;
@@ -227,43 +255,81 @@ pub(super) fn build_answers_map(
     custom_answers: &[Option<String>],
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    if let Some(au) = pending {
-        {
-            let iteration_items = au.questions.iter().enumerate();
-            for (i, q) in iteration_items {
-                let custom = custom_answers.get(i).cloned().flatten();
-                let selected: Vec<usize> = answers.get(i).cloned().unwrap_or_default();
-                let val = if q.multi_select {
-                    // 多选：合并预设选项 labels + 自定义文本
-                    let mut labels: Vec<serde_json::Value> = selected
-                        .iter()
-                        .filter_map(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
-                        .collect();
-                    if let Some(custom_text) = custom
-                        && !custom_text.is_empty()
-                    {
-                        labels.push(json!(custom_text));
-                    }
-                    if labels.is_empty() {
-                        json!([])
-                    } else {
-                        json!(labels)
-                    }
-                } else if let Some(custom_text) = custom {
-                    // 单选：自定义文本优先
-                    json!(custom_text)
-                } else {
-                    // 单选：仅预设选项
-                    selected
-                        .first()
-                        .and_then(|idx| q.options.get(*idx).map(|opt| json!(opt.label)))
-                        .unwrap_or(json!(""))
-                };
-                map.insert(q.id.clone(), val);
-            }
+    let Some(au) = pending else {
+        return serde_json::Value::Object(map);
+    };
+    for (i, q) in au.questions.iter().enumerate() {
+        let custom = custom_answers.get(i).cloned().flatten();
+        let selected: Vec<usize> = answers.get(i).cloned().unwrap_or_default();
+        if let Some(value) = typed_question_value(q, &selected, custom.as_deref()) {
+            map.insert(q.id.clone(), value);
         }
     }
     serde_json::Value::Object(map)
 }
 
-use peri_acp_types::event_data::AskUser;
+/// MCP 字段按 schema 类型回填；内置 AskUser 保持「label 即答案」的旧行为。
+fn typed_question_value(
+    q: &Question,
+    selected: &[usize],
+    custom: Option<&str>,
+) -> Option<serde_json::Value> {
+    let Some(field_type) = q.field_type.as_deref() else {
+        // 内置 AskUser 保持旧语义：空字符串也是一次明确的自定义作答。
+        return Some(legacy_question_value(q, selected, custom));
+    };
+    let custom = custom.filter(|text| !text.trim().is_empty());
+    let selected_values: Vec<serde_json::Value> = selected
+        .iter()
+        .filter_map(|index| q.options.get(*index))
+        .map(|option| {
+            option
+                .value
+                .clone()
+                .unwrap_or_else(|| serde_json::Value::String(option.label.clone()))
+        })
+        .collect();
+    match field_type {
+        "url" => None,
+        "boolean" => selected_values.first().cloned(),
+        "array" => Some(serde_json::Value::Array(selected_values)),
+        "integer" => custom
+            .and_then(|text| text.trim().parse::<i64>().ok())
+            .map(|value| serde_json::Value::Number(value.into()))
+            .or_else(|| selected_values.first().cloned()),
+        "number" => custom
+            .and_then(|text| text.trim().parse::<f64>().ok())
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .or_else(|| selected_values.first().cloned()),
+        _ => custom
+            .map(|text| serde_json::Value::String(text.to_string()))
+            .or_else(|| selected_values.first().cloned()),
+    }
+}
+
+fn legacy_question_value(
+    q: &Question,
+    selected: &[usize],
+    custom: Option<&str>,
+) -> serde_json::Value {
+    if q.multi_select {
+        let mut labels: Vec<serde_json::Value> = selected
+            .iter()
+            .filter_map(|index| q.options.get(*index).map(|option| json!(option.label)))
+            .collect();
+        if let Some(custom_text) = custom {
+            labels.push(json!(custom_text));
+        }
+        json!(labels)
+    } else if let Some(custom_text) = custom {
+        json!(custom_text)
+    } else {
+        selected
+            .first()
+            .and_then(|index| q.options.get(*index).map(|option| json!(option.label)))
+            .unwrap_or(json!(""))
+    }
+}
+
+use peri_acp_types::event_data::{AskUser, Question};

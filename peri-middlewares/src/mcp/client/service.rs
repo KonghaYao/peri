@@ -10,6 +10,8 @@ use rmcp::model::CancelledNotificationParam;
 use rmcp::model::ClientCapabilities;
 #[allow(deprecated)]
 use rmcp::model::CustomNotification;
+use rmcp::model::ElicitationCapability;
+use rmcp::model::FormElicitationCapability;
 #[allow(deprecated)]
 use rmcp::model::Implementation;
 #[allow(deprecated)]
@@ -20,6 +22,7 @@ use rmcp::model::LoggingMessageNotificationParam;
 use rmcp::model::ProgressNotificationParam;
 #[allow(deprecated)]
 use rmcp::model::TaskStatusNotificationParams;
+use rmcp::model::UrlElicitationCapability;
 #[allow(deprecated)]
 use rmcp::model::TASKS_EXTENSION_ID;
 #[allow(deprecated)]
@@ -165,6 +168,8 @@ impl ClientHandler for PeriClientHandler {
         std::future::ready(())
     }
 
+    /// 非订阅通知统一交给 tap；2026-07-28 的 elicitation 不再有独立的
+    /// server → client 完成通知通道。
     fn on_custom_notification(
         &self,
         notification: CustomNotification,
@@ -313,9 +318,11 @@ impl McpServiceWrapper {
 
 pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
 
-pub(crate) fn mcpp_client_info_for_profile(
+/// 连接初始化能力：EL 只在 2026-07-28 的**单次请求**边界按需声明，
+/// 旧 initialize 包不得携带 elicitation（也不得对不支持的版本虚报）。
+fn base_client_capabilities(
     profile: &crate::mcp::apps::McpCapabilityProfile,
-) -> InitializeRequestParams {
+) -> ClientCapabilities {
     let mut extensions = std::collections::BTreeMap::from([(
         SERVER_CACHE_VERSION_EXTENSION.to_string(),
         serde_json::Map::new(),
@@ -326,7 +333,32 @@ pub(crate) fn mcpp_client_info_for_profile(
     extensions.insert(TASKS_EXTENSION_ID.to_string(), serde_json::Map::new());
     let mut capabilities = ClientCapabilities::default();
     capabilities.extensions = Some(extensions);
-    InitializeRequestParams::new(capabilities, Implementation::from_build_env())
+    capabilities
+}
+
+pub(crate) fn mcpp_client_info_for_profile(
+    profile: &crate::mcp::apps::McpCapabilityProfile,
+) -> InitializeRequestParams {
+    InitializeRequestParams::new(
+        base_client_capabilities(profile),
+        Implementation::from_build_env(),
+    )
+}
+
+/// 2026-07-28 `tools/call` 的单次请求能力声明。
+///
+/// 只有本次调用存在可用交互入口时才声明 Form + URL；不支持
+/// `schemaValidation`，不得虚报。未注入时调用方不覆盖共享 `_meta`。
+pub(crate) fn client_capabilities_for_call(
+    profile: &crate::mcp::apps::McpCapabilityProfile,
+) -> ClientCapabilities {
+    let mut capabilities = base_client_capabilities(profile);
+    capabilities.elicitation = Some(
+        ElicitationCapability::new()
+            .with_form(FormElicitationCapability::new())
+            .with_url(UrlElicitationCapability::new()),
+    );
+    capabilities
 }
 
 pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {

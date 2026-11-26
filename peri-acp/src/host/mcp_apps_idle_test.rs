@@ -340,6 +340,7 @@ impl Fixture {
             queue: Arc::new(peri_acp_types::session::MessageQueue::new),
             rules: Arc::new(InvocationRuleChain::from_derived_blueprint(rules)),
             closed_instances: Default::default(),
+            interaction_broker: None,
             session_cancel: session_cancel.clone(),
         }));
         let apps_relay = PoolMcpAppsRelay::new(

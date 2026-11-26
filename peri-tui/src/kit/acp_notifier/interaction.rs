@@ -20,8 +20,15 @@ pub(super) async fn handle_elicitation(
         .unwrap_or("")
         .to_string();
 
-    let questions = parse_elicitation_questions(params);
-    let ask_user = AskUser { questions };
+    let (questions, elicitation) = if let Some(marker) = mcp_elicitation_marker(params) {
+        parse_mcp_elicitation(params, marker)
+    } else {
+        (parse_elicitation_questions(params), None)
+    };
+    let ask_user = AskUser {
+        questions,
+        elicitation,
+    };
     let event = AcpEventData::AskUser(PendingInteraction {
         owner,
         request_id_json,
@@ -102,6 +109,220 @@ pub(super) async fn handle_request_permission(
     )
 }
 
+/// 外部 MCP elicitation 的 `_meta` 标记（peri-acp broker 写入）。
+const MCP_ELICITATION_META_KEY: &str = "io.peri/mcpElicitation";
+
+fn mcp_elicitation_marker(params: &Value) -> Option<(&str, &str)> {
+    let marker = params.get("_meta")?.get(MCP_ELICITATION_META_KEY)?;
+    Some((
+        marker.get("server")?.as_str()?,
+        marker.get("tool")?.as_str()?,
+    ))
+}
+
+/// MCP form → TUI 字段；URL → 单个「打开」确认项。
+///
+/// 与内置 AskUserQuestion 的差别只在 `elicitation` 标记与 `field_type`：
+/// 内置路径继续走原解析，不改断言。
+fn parse_mcp_elicitation(
+    params: &Value,
+    (server, tool): (&str, &str),
+) -> (Vec<Question>, Option<ElicitationPresentation>) {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match params.get("mode").and_then(Value::as_str).unwrap_or("form") {
+        "url" => {
+            let url = params
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let elicitation_id = params
+                .get("elicitationId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (
+                vec![Question {
+                    id: "__mcp_url__".to_string(),
+                    header: "URL".to_string(),
+                    question: message.clone(),
+                    options: Vec::new(),
+                    multi_select: false,
+                    field_type: Some("url".to_string()),
+                    required: false,
+                }],
+                Some(ElicitationPresentation::Url {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    message,
+                    url,
+                    elicitation_id,
+                }),
+            )
+        }
+        _ => {
+            let required: std::collections::BTreeSet<String> = params
+                .get("requestedSchema")
+                .and_then(|schema| schema.get("required"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut questions = Vec::new();
+            if let Some(props) = params
+                .get("requestedSchema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+            {
+                for (id, prop) in props {
+                    questions.push(mcp_form_question(id, prop, &required, &message));
+                }
+            }
+            (
+                questions,
+                Some(ElicitationPresentation::Form {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                }),
+            )
+        }
+    }
+}
+
+fn mcp_form_question(
+    id: &str,
+    prop: &Value,
+    required: &std::collections::BTreeSet<String>,
+    message: &str,
+) -> Question {
+    let header = prop
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(id)
+        .to_string();
+    let question = prop
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.is_empty())
+        .unwrap_or(message)
+        .to_string();
+    let field_type = prop
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("string")
+        .to_string();
+    let is_required = required.contains(id);
+    let mut options = Vec::new();
+    let mut multi_select = false;
+    match field_type.as_str() {
+        "boolean" => {
+            options.push(QuestionOption {
+                label: "Yes".to_string(),
+                description: String::new(),
+                value: Some(Value::Bool(true)),
+            });
+            options.push(QuestionOption {
+                label: "No".to_string(),
+                description: String::new(),
+                value: Some(Value::Bool(false)),
+            });
+        }
+        "string" => {
+            options = extract_enum_options(prop, prop.get("oneOf").or_else(|| prop.get("enum")));
+        }
+        "array" => {
+            multi_select = true;
+            options = prop
+                .get("items")
+                .and_then(|items| items.get("anyOf").or_else(|| items.get("enum")))
+                .map(|source| enum_options_to_questions(source, true))
+                .unwrap_or_default();
+        }
+        _ => {}
+    }
+    Question {
+        id: id.to_string(),
+        header,
+        question,
+        options,
+        multi_select,
+        field_type: Some(field_type),
+        required: is_required,
+    }
+}
+
+fn extract_enum_options(prop: &Value, source: Option<&Value>) -> Vec<QuestionOption> {
+    source
+        .map(|source| enum_options_to_questions(source, false))
+        .unwrap_or_else(|| {
+            prop.get("oneOf")
+                .map(|source| enum_options_to_questions(source, false))
+                .unwrap_or_default()
+        })
+}
+
+fn enum_options_to_questions(source: &Value, values_are_strings: bool) -> Vec<QuestionOption> {
+    let Some(options) = source.as_array() else {
+        return Vec::new();
+    };
+    options
+        .iter()
+        .map(|option| {
+            if values_are_strings {
+                let value = option
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| {
+                        option
+                            .get("const")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_default();
+                QuestionOption {
+                    label: value.clone(),
+                    description: String::new(),
+                    value: Some(Value::String(value)),
+                }
+            } else {
+                let value = option
+                    .get("const")
+                    .cloned()
+                    .or_else(|| {
+                        option
+                            .as_str()
+                            .map(|value| Value::String(value.to_string()))
+                    })
+                    .unwrap_or(Value::Null);
+                let label = option
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.as_str().map(str::to_string).unwrap_or_default());
+                QuestionOption {
+                    label,
+                    description: option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    value: Some(value),
+                }
+            }
+        })
+        .collect()
+}
+
 /// 从 CreateElicitationRequest JSON 中解析问题列表。
 ///
 /// JSON 结构（CreateElicitationRequest 序列化后，#[serde(flatten)] 展开）:
@@ -155,6 +376,8 @@ pub(super) fn parse_elicitation_questions(params: &Value) -> Vec<Question> {
                         header,
                         options,
                         multi_select: true,
+                        field_type: None,
+                        required: false,
                     }
                 }
                 "string" => {
@@ -166,6 +389,8 @@ pub(super) fn parse_elicitation_questions(params: &Value) -> Vec<Question> {
                         header,
                         options,
                         multi_select: false,
+                        field_type: None,
+                        required: false,
                     }
                 }
                 _ => Question {
@@ -174,6 +399,8 @@ pub(super) fn parse_elicitation_questions(params: &Value) -> Vec<Question> {
                     header,
                     options: vec![],
                     multi_select: false,
+                    field_type: None,
+                    required: false,
                 },
             }
         })
@@ -208,14 +435,11 @@ fn extract_options_from_oneof(prop: &Value, key: &str, nested: bool) -> Vec<Ques
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            value: None,
         })
         .collect()
 }
 
-use peri_acp_types::event_data::AskUser;
+use peri_acp_types::event_data::{AskUser, ElicitationPresentation, Question, QuestionOption};
 
 use peri_acp_types::event_data::HitlPending;
-
-use peri_acp_types::event_data::Question;
-
-use peri_acp_types::event_data::QuestionOption;

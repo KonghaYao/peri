@@ -74,6 +74,53 @@ pub enum InteractionContext {
     Approval { items: Vec<ApprovalItem> },
     /// 向用户提问（原 AskUserBatchRequest）
     Questions { requests: Vec<QuestionItem> },
+    /// 外部 MCP Server 在执行工具期间发起的 elicitation。
+    ///
+    /// 与 [`Self::Questions`] 分开：MCP 表单是 JSON Schema 驱动的任意字段，
+    /// 而不是 AskUserQuestion 的固定「选项 + 文本」形状；客户端据此选择表单
+    /// 渲染与 URL 确认流程。
+    Elicitation { request: ElicitationRequest },
+}
+
+// ─── ElicitationRequest ───────────────────────────────────────────────────────
+
+/// 外部 MCP Server 的 elicitation 请求（Form / URL 两种协议模式）。
+///
+/// `requested_schema` 保持原样 JSON（MCP 的 schema 子集），由各客户端自行投影；
+/// 本 crate 不依赖 rmcp，协议转换只在 MCP 适配层发生一次。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ElicitationRequest {
+    /// 表单模式：按 `requested_schema` 收集结构化数据。
+    Form {
+        /// MCP server 名（展示「谁在提问」）。
+        server: String,
+        /// 该 server 上的 wire 工具名。
+        tool: String,
+        /// Server 提供的说明文本。
+        message: String,
+        /// MCP `requestedSchema` 原样 JSON。
+        requested_schema: serde_json::Value,
+    },
+    /// URL 模式：用户同意后由客户端打开外部页面。
+    Url {
+        server: String,
+        tool: String,
+        message: String,
+        url: String,
+    },
+}
+
+/// 用户对 MCP elicitation 的决定（对应 MCP `ElicitResult.action` 三态）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum ElicitationDecision {
+    /// 用户提交：`content` 必须符合请求的 schema；URL 模式忽略 content。
+    Accept { content: serde_json::Value },
+    /// 用户明确拒绝。
+    Decline,
+    /// 用户取消 / 切会话 / 断连 / 超时：整个操作应中止。
+    Cancel,
 }
 
 // ─── InteractionResponse ───────────────────────────────────────────────────────
@@ -110,6 +157,8 @@ pub struct QuestionAnswer {
 pub enum InteractionResponse {
     Decisions(Vec<ApprovalDecision>),
     Answers(Vec<QuestionAnswer>),
+    /// 外部 MCP elicitation 的答复（Form / URL 共用一个三态）。
+    Elicitation(ElicitationDecision),
     /// 用户明确拒绝了交互（如在 AskUserQuestion 确认弹窗中选择 decline，或
     /// TUI Esc / 生命周期取消产生的裸 `cancel`——用户撤销了本次提问）。
     Rejected,

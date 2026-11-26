@@ -93,8 +93,16 @@ export type InteractionView = {
     title?: string;
     message?: string;
     formUnsupported?: string;
-    /** AskUserQuestion 兼容形态；普通 permission/elicitation 不设置。 */
-    variant?: "ask_user";
+    /** AskUserQuestion 兼容形态或外部 MCP URL 确认；普通 elicitation 不设置。 */
+    variant?: "ask_user" | "mcp_url";
+    /** 外部 MCP elicitation 来源（form 也带 server/tool）。 */
+    mcpElicitation?: {
+        server: string;
+        tool: string;
+        mode: "form" | "url";
+        url?: string;
+        targetHost?: string;
+    };
     options?: Array<{ optionId: string; name: string }>;
     fields?: InteractionFieldView[];
     /** 仅 `variant === "ask_user"`；旧文档只有 `fields` 时按文本表单渲染。 */
@@ -359,6 +367,20 @@ function interactionView(value: unknown): InteractionView | null {
     }
     if (record.get("formSupport") === "unsupported") result.formUnsupported = str(record.get("formReason")) ?? "unsupported_form";
     if (record.get("variant") === "ask_user") result.variant = "ask_user";
+    if (record.get("variant") === "mcp_url") result.variant = "mcp_url";
+    const mcp = obj(record.get("mcpElicitation"));
+    const mcpServer = str(mcp?.server);
+    const mcpTool = str(mcp?.tool);
+    if (mcpServer && mcpTool) {
+        const mode = mcp?.mode === "url" ? "url" : "form";
+        result.mcpElicitation = {
+            server: mcpServer,
+            tool: mcpTool,
+            mode,
+            ...(str(mcp?.url) ? { url: str(mcp?.url)! } : {}),
+            ...(str(mcp?.targetHost) ? { targetHost: str(mcp?.targetHost)! } : {}),
+        };
+    }
     if (kind === "permission") result.options = list(record.get("options"), (value) => {
         const row = obj(value); const optionId = str(row?.optionId);
         return optionId ? { optionId, name: str(row?.name) ?? optionId } : null;

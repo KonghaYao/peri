@@ -108,6 +108,26 @@ pub struct ToolApproval {
 #[serde(rename_all = "snake_case")]
 pub struct AskUser {
     pub questions: Vec<Question>,
+    /// 外部 MCP elicitation 的来源/模式；`None` = 内置 AskUserQuestion。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<ElicitationPresentation>,
+}
+
+/// 外部 MCP elicitation 在 TUI 中的展示事实（server/tool 与 URL）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ElicitationPresentation {
+    Form {
+        server: String,
+        tool: String,
+    },
+    Url {
+        server: String,
+        tool: String,
+        message: String,
+        url: String,
+        elicitation_id: String,
+    },
 }
 
 /// A single question in an `AskUser` form.
@@ -119,6 +139,25 @@ pub struct Question {
     pub question: String,
     pub options: Vec<QuestionOption>,
     pub multi_select: bool,
+    /// MCP form 字段原始类型（`string` / `integer` / `number` / `boolean` /
+    /// `array`）；`None` = 内置 AskUserQuestion（自由文本 + 选项）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
+    /// MCP schema 的 `required`；仅对 `field_type` 有值的字段生效。
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl Question {
+    /// 是否允许自定义文本：数值/字符串字段可以；布尔与枚举只能选预设值。
+    #[must_use]
+    pub fn allows_custom_text(&self) -> bool {
+        match self.field_type.as_deref() {
+            None => true,
+            Some("string" | "integer" | "number") => true,
+            Some(_) => false,
+        }
+    }
 }
 
 /// A selectable option within a `Question`.
@@ -127,6 +166,9 @@ pub struct Question {
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
+    /// MCP enum/boolean 的 wire 值；`None` = 内置 AskUserQuestion（label 即答案）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 /// `"rewind-preview"` — preview of changes that will be undone by a rewind.

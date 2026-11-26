@@ -85,7 +85,9 @@ function parseQuestion(key: string, raw: unknown): AskUserQuestion | string {
     }
     if (property.type === "array") {
         const items = record(property.items);
-        if (!items || items.type !== "string") return `${key}: invalid array items`;
+        // ACP 的多选 schema 只写 items.anyOf（不再重复 type:"string"）；两者都接受。
+        if (!items || (items.type !== undefined && items.type !== "string"))
+            return `${key}: invalid array items`;
         const options = parseOptions(items.anyOf);
         if (!options) return `${key}: invalid items.anyOf`;
         return { id: key, header, question, multiSelect: true, options };

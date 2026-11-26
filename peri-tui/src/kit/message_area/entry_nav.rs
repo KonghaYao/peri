@@ -224,6 +224,7 @@ pub(crate) fn submit_interaction_option_with(
                 request_id_str: id_str.clone(),
                 answers,
                 first_question_id: block.question_ids.first().cloned(),
+                open_url: None,
             });
             crate::kit::panel_registry::close_ask_user_panel_for_owner(&owner);
         }

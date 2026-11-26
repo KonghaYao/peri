@@ -548,6 +548,8 @@ impl SessionEnvironment {
                         closed_instances: peri_middlewares::assembly::builtin_closed_instances(
                             &disabled_middlewares,
                         ),
+                        interaction_broker: Some(Arc::clone(&interaction_router)
+                            as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>),
                         session_cancel: cancel,
                     },
                 ),

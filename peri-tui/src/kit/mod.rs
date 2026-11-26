@@ -50,6 +50,7 @@ pub(crate) mod mermaid;
 pub mod message_area;
 pub mod mouse_router;
 pub(crate) mod no_color;
+pub mod open_url;
 pub mod panel_overlay;
 pub mod panel_registry;
 pub mod panel_scroll;

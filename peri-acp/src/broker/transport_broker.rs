@@ -8,13 +8,15 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol_schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-    ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
-    EnumOption, MultiSelectPropertySchema, StringPropertySchema,
+    ElicitationContentValue, ElicitationFormMode, ElicitationId, ElicitationPropertySchema,
+    ElicitationSchema, ElicitationSessionScope, ElicitationUrlMode, EnumOption,
+    MultiSelectPropertySchema, StringPropertySchema,
 };
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
-    ApprovalDecision, ApprovalItem, InteractionContext, InteractionFailure, InteractionResponse,
-    QuestionAnswer, QuestionItem, TrustedInteractionOwner, UnansweredCause, UserInteractionBroker,
+    ApprovalDecision, ApprovalItem, ElicitationDecision, ElicitationRequest, InteractionContext,
+    InteractionFailure, InteractionResponse, QuestionAnswer, QuestionItem, TrustedInteractionOwner,
+    UnansweredCause, UserInteractionBroker,
 };
 
 use crate::transport::types::AcpError;
@@ -141,6 +143,7 @@ impl UserInteractionBroker for AcpTransportBroker {
         match context {
             InteractionContext::Approval { items } => self.handle_approval(items).await,
             InteractionContext::Questions { requests } => self.handle_questions(requests).await,
+            InteractionContext::Elicitation { request } => self.handle_elicitation(request).await,
         }
     }
 }
@@ -221,6 +224,108 @@ impl AcpTransportBroker {
         }
 
         InteractionResponse::Decisions(decisions)
+    }
+
+    /// 把外部 MCP elicitation 投影为 ACP `elicitation/create`（form / url）。
+    ///
+    /// `_meta["io.peri/mcpElicitation"]` 标明来源 server/tool：客户端据此区分
+    /// AskUserQuestion 与外部 MCP 请求。schema 只在本边界转换一次；无法转换时
+    /// 显式 `Failed`，不伪造可作答表单。
+    async fn handle_elicitation(&self, request: ElicitationRequest) -> InteractionResponse {
+        let (mode, message, (server, tool)) = match request {
+            ElicitationRequest::Form {
+                server,
+                tool,
+                message,
+                requested_schema,
+            } => {
+                let schema = match serde_json::from_value::<ElicitationSchema>(requested_schema) {
+                    Ok(schema)
+                        if schema.properties.values().all(|property| {
+                            !matches!(property, ElicitationPropertySchema::Other(_))
+                        }) =>
+                    {
+                        schema
+                    }
+                    Ok(_) => {
+                        tracing::warn!(%server, %tool, "MCP requestedSchema contains unsupported nested/unknown properties");
+                        return InteractionResponse::Failed {
+                            failure: InteractionFailure::Transport {
+                                detail: "MCP requestedSchema contains properties ACP cannot render"
+                                    .into(),
+                            },
+                        };
+                    }
+                    Err(error) => {
+                        tracing::warn!(%server, %tool, %error, "MCP requestedSchema is not representable in ACP");
+                        return InteractionResponse::Failed {
+                            failure: InteractionFailure::Transport {
+                                detail: format!("invalid MCP requestedSchema: {error}"),
+                            },
+                        };
+                    }
+                };
+                (
+                    agent_client_protocol_schema::v1::ElicitationMode::Form(
+                        ElicitationFormMode::new(
+                            ElicitationSessionScope::new(self.session_id.clone()),
+                            schema,
+                        ),
+                    ),
+                    message,
+                    (server, tool),
+                )
+            }
+            ElicitationRequest::Url {
+                server,
+                tool,
+                message,
+                url,
+            } => {
+                // 0728 的 MCP elicitationId 不进入 Peri 内部；ACP 展示 ID 只在本适配器
+                // 本地生成，确保同一 ACP 连接内唯一。
+                let elicitation_id = uuid::Uuid::now_v7().to_string();
+                (
+                    agent_client_protocol_schema::v1::ElicitationMode::Url(
+                        ElicitationUrlMode::new(
+                            ElicitationSessionScope::new(self.session_id.clone()),
+                            ElicitationId::new(elicitation_id),
+                            url,
+                        ),
+                    ),
+                    message,
+                    (server, tool),
+                )
+            }
+        };
+        let typed = CreateElicitationRequest::new(mode, message);
+        let mut params = serde_json::to_value(&typed).unwrap_or_default();
+        params["_meta"] = serde_json::json!({
+            "io.peri/mcpElicitation": { "server": server, "tool": tool }
+        });
+        self.request_elicitation(params).await
+    }
+
+    async fn request_elicitation(&self, params: serde_json::Value) -> InteractionResponse {
+        let request = self.transport.send_request("elicitation/create", params);
+        let result = match self.timeout {
+            Some(timeout) => peri_time::timeout(timeout, request).await,
+            None => Ok(request.await),
+        };
+        match result {
+            Ok(Ok(response)) => parse_mcp_elicitation_response(response),
+            Ok(Err(error)) => {
+                let failure = classify_elicitation_transport_error(&error);
+                tracing::warn!(error = %error, ?failure, "MCP elicitation request failed");
+                InteractionResponse::Failed { failure }
+            }
+            Err(_elapsed) => {
+                tracing::warn!("MCP elicitation request timed out without a response");
+                InteractionResponse::Failed {
+                    failure: InteractionFailure::Timeout,
+                }
+            }
+        }
     }
 
     async fn handle_questions(&self, requests: Vec<QuestionItem>) -> InteractionResponse {
@@ -310,6 +415,61 @@ pub(crate) fn build_elicitation_params(
     let mut params = serde_json::to_value(&request).unwrap_or_default();
     inject_option_descriptions(&mut params, requests);
     params
+}
+
+/// 外部 MCP elicitation 的响应三态（与 AskUser 的 Rejected/Unanswered 语义不同：
+/// 裸 `cancel` 必须保持 Cancel，不能降级成用户拒绝）。
+pub(crate) fn parse_mcp_elicitation_response(response: serde_json::Value) -> InteractionResponse {
+    match serde_json::from_value::<CreateElicitationResponse>(response) {
+        Ok(resp) => match resp.action {
+            ElicitationAction::Accept(accept) => {
+                let content = accept
+                    .content
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, value)| (key, elicitation_content_to_json(value)))
+                    .collect::<serde_json::Map<String, serde_json::Value>>();
+                InteractionResponse::Elicitation(ElicitationDecision::Accept {
+                    content: serde_json::Value::Object(content),
+                })
+            }
+            ElicitationAction::Decline => {
+                InteractionResponse::Elicitation(ElicitationDecision::Decline)
+            }
+            ElicitationAction::Cancel => {
+                if let Some(cause) = UnansweredCause::from_meta(resp.meta.as_ref()) {
+                    InteractionResponse::Unanswered { cause }
+                } else {
+                    InteractionResponse::Elicitation(ElicitationDecision::Cancel)
+                }
+            }
+            _ => InteractionResponse::Failed {
+                failure: InteractionFailure::Transport {
+                    detail: format!("unsupported elicitation action: {:?}", resp.action),
+                },
+            },
+        },
+        Err(error) => InteractionResponse::Failed {
+            failure: InteractionFailure::Transport {
+                detail: format!("invalid elicitation response: {error}"),
+            },
+        },
+    }
+}
+
+fn elicitation_content_to_json(value: ElicitationContentValue) -> serde_json::Value {
+    match value {
+        ElicitationContentValue::String(value) => serde_json::Value::String(value),
+        ElicitationContentValue::Integer(value) => serde_json::Value::Number(value.into()),
+        ElicitationContentValue::Number(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        ElicitationContentValue::Boolean(value) => serde_json::Value::Bool(value),
+        ElicitationContentValue::StringArray(values) => {
+            serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect())
+        }
+        _ => serde_json::Value::Null,
+    }
 }
 
 pub(crate) fn parse_elicitation_response(
