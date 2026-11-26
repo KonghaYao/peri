@@ -1,5 +1,7 @@
 use ratatui_kit::prelude::*;
 
+use crate::kit::message_area::viewport_policy;
+
 use super::{AutoFollowCtx, SCROLL_PADDING};
 
 // ── 粘性吸底跟随状态 ───────────────────────────────────────────────────
@@ -108,9 +110,8 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_total = *ctx.prev_total_visual_rows.read();
     *ctx.prev_total_visual_rows.write_no_update() = ctx.total_visual_rows;
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
-        let max_scroll = ctx
-            .total_visual_rows
-            .saturating_sub(ctx.vis_height as usize);
+        let max_scroll =
+            viewport_policy::max_scroll(ctx.total_visual_rows, ctx.vis_height as usize);
         let current_y = ctx.scroll_state.read().offset();
         if current_y > max_scroll {
             ctx.scroll_state.write().set_offset(max_scroll);
@@ -221,9 +222,8 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         && *ctx.follow_bottom.read()
         && let Some((_anchor_start, anchor_end)) = ctx.anchor_visual_range
     {
-        let max_scroll = ctx
-            .total_visual_rows
-            .saturating_sub(ctx.vis_height as usize);
+        let max_scroll =
+            viewport_policy::max_scroll(ctx.total_visual_rows, ctx.vis_height as usize);
         let scroll_y = ctx.scroll_state.read().offset();
         if let Some(target) =
             anchor_scroll_target(scroll_y, ctx.vis_height as usize, anchor_end, max_scroll)

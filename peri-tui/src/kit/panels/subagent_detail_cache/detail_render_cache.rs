@@ -18,7 +18,9 @@ use crate::kit::entry_render_cache::{
 };
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::selection::WrappedLineInfo;
-use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgentGroup};
+use crate::kit::tui_render_unit::{
+    FoldKey, FoldState, FoldToggle, TuiRenderUnit, TuiSubAgentGroup, fold_state_of, toggle_fold,
+};
 
 pub(super) const DETAIL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -38,6 +40,9 @@ pub(in super::super) struct DetailRenderCache {
     pub(super) focused: Option<FoldKey>,
     pub(super) dirty: bool,
     pub(super) source_changed: bool,
+    /// 上次 prepare 时的 GenUI 会话状态版本；按钮 Set/Reset 可能改变行高，
+    /// 必须重算 prefix/wrap，不能只靠 draw 期的逐槽失效。
+    genui_revision: u64,
 }
 
 #[derive(Default)]
@@ -49,6 +54,18 @@ pub(super) struct DetailSlot {
     pub(super) height: usize,
     pub(super) resident: bool,
     pub(super) retained_bytes: usize,
+}
+
+/// 面板本地 fold 的可见目标。
+///
+/// SubAgent 组在详情渲染下始终是「≤3 个工具行 / 单行摘要」（`render/group.rs`
+/// §6.7），展开没有可见差异；嵌套导航另案（Q12）。面板不把 SubAgent 暴露为
+/// fold 目标，避免 Enter/点击产生无效果的状态变化。
+fn panel_fold_key(unit: &TuiRenderUnit) -> Option<FoldKey> {
+    match FoldKey::of(unit) {
+        Some(FoldKey::SubAgent(_)) => None,
+        key => key,
+    }
 }
 
 impl DetailSlot {
@@ -70,11 +87,10 @@ impl DetailSlot {
         grid: &GridSpec,
         context: EntryRenderContext,
         frame: u64,
+        transition: ZoneTransition,
     ) {
-        // 面板沿用基准列（`indent = 0`），无过程区转场台阶形态。
-        let invalidation = self
-            .entry
-            .ensure(vm, grid, context, frame, ZoneTransition::None);
+        // 面板与主时间线共用转场/缩进口径（C2）；surface 差异见 EntrySurface。
+        let invalidation = self.entry.ensure(vm, grid, context, frame, transition);
         if !self.resident
             || matches!(
                 invalidation,
@@ -104,6 +120,11 @@ impl DetailRenderCache {
     ) -> bool {
         let switched = self.instance_id != group.instance_id || self.plain.is_some();
         self.plain = None;
+        // GenUI 按钮状态（Set/Reset）可能改变正文行高：会话级版本变化时按
+        // Layout 重渲染所有槽位并重建 prefix，避免高度表停在旧值。
+        let genui_revision = crate::kit::genui::view_state::revision();
+        let genui_changed = self.genui_revision != genui_revision;
+        self.genui_revision = genui_revision;
         let context_changed = switched
             || self.grid != *grid
             || self.context.as_ref().is_none_or(|context| {
@@ -112,7 +133,7 @@ impl DetailRenderCache {
         self.header = header;
         let source_changed = !self.source.ptr_eq(&group.view_models);
         self.source_changed = source_changed && !switched && !self.dirty;
-        if !context_changed && !self.dirty && !source_changed {
+        if !context_changed && !self.dirty && !source_changed && !genui_changed {
             return false;
         }
         if switched {
@@ -133,7 +154,7 @@ impl DetailRenderCache {
         self.grid = *grid;
         self.source = group.view_models.clone();
         if source_changed {
-            let keys: HashSet<_> = self.source.iter().filter_map(fold_key).collect();
+            let keys: HashSet<_> = self.source.iter().filter_map(FoldKey::of).collect();
             self.folds.retain(|key, _| keys.contains(key));
             if self.focused.as_ref().is_some_and(|key| !keys.contains(key)) {
                 self.focused = None;
@@ -155,10 +176,12 @@ impl DetailRenderCache {
         for index in 0..self.source.len() {
             let vm = projected(
                 &self.source[index],
-                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
+            let transition = crate::kit::message_area::zone_transition(&self.source, index);
             let slot = &mut self.slots[index];
             if context_changed
+                || genui_changed
                 || slot.hash != Some(vm.content_hash())
                 || slot.variant != Some(std::mem::discriminant(&vm))
             {
@@ -170,6 +193,7 @@ impl DetailRenderCache {
                         .expect("detail cache preparation installs context before materialization")
                         .clone(),
                     frame,
+                    transition,
                 );
             }
             self.prefix.push(
@@ -236,7 +260,7 @@ impl DetailRenderCache {
     pub(in super::super) fn focused(&self) -> Option<usize> {
         self.source
             .iter()
-            .position(|vm| fold_key(vm).as_ref() == self.focused.as_ref())
+            .position(|vm| FoldKey::of(vm).as_ref() == self.focused.as_ref())
             .filter(|_| self.focused.is_some())
     }
 
@@ -259,7 +283,7 @@ impl DetailRenderCache {
             } else {
                 (start + step) % len
             };
-            if let Some(key) = fold_key(&self.source[index]) {
+            if let Some(key) = panel_fold_key(&self.source[index]) {
                 self.focused = Some(key);
                 return self
                     .prefix
@@ -274,29 +298,23 @@ impl DetailRenderCache {
         let Some(index) = self.focused() else {
             return false;
         };
-        let Some(key) = fold_key(&self.source[index]) else {
+        let Some(key) = panel_fold_key(&self.source[index]) else {
             return false;
         };
         let Some(current) = self
             .folds
             .get(&key)
             .copied()
-            .or_else(|| fold_of(&self.source[index]))
+            .or_else(|| fold_state_of(&self.source[index]))
         else {
             return false;
         };
-        let next = if preview {
-            if current == crate::kit::tui_render_unit::FoldState::Preview {
-                crate::kit::tui_render_unit::FoldState::Collapsed
-            } else {
-                crate::kit::tui_render_unit::FoldState::Preview
-            }
-        } else if current == crate::kit::tui_render_unit::FoldState::Collapsed {
-            crate::kit::tui_render_unit::FoldState::Expanded
+        let toggle = if preview {
+            FoldToggle::Preview
         } else {
-            crate::kit::tui_render_unit::FoldState::Collapsed
+            FoldToggle::Expand
         };
-        self.folds.insert(key, next);
+        self.folds.insert(key, toggle_fold(current, toggle));
         self.dirty = true;
         true
     }
@@ -312,7 +330,7 @@ impl DetailRenderCache {
         if index >= self.source.len() || self.prefix[index] != content_row {
             return false;
         }
-        let Some(key) = fold_key(&self.source[index]) else {
+        let Some(key) = panel_fold_key(&self.source[index]) else {
             return false;
         };
         self.focused = Some(key);
@@ -331,25 +349,48 @@ impl DetailRenderCache {
         start.min(self.slots.len())..end.max(start.min(self.slots.len()))
     }
 
+    /// 高度变化后从 `from` 起重建前缀表。`ensure_visible` 的异步重排（例如
+    /// Mermaid 布局到达）只更新槽位自身高度；总高与后续槽位起点必须同步，
+    /// 否则下一条消息仍按旧位置绘制，滚动总高也偏小。
+    fn rebuild_prefix_from(&mut self, from: usize) {
+        let from = from.min(self.slots.len());
+        for index in from..self.slots.len() {
+            let next = self.prefix[index].saturating_add(self.slots[index].height);
+            let Some(entry) = self.prefix.get_mut(index + 1) else {
+                break;
+            };
+            *entry = next;
+        }
+    }
+
     pub(super) fn ensure_visible(&mut self, rows: Range<usize>) -> Range<usize> {
         let visible = self.slots_for(rows);
         let Some(context) = self.context.as_ref() else {
             return visible;
         };
         let frame = current_frame();
+        let mut resized_from: Option<usize> = None;
         for index in visible.clone() {
             let slot = &mut self.slots[index];
             let previous_bytes = slot.bytes();
+            let previous_height = slot.height;
             let vm = projected(
                 &self.source[index],
-                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+                panel_fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
             );
-            slot.ensure(&vm, &self.grid, context.clone(), frame);
+            let transition = crate::kit::message_area::zone_transition(&self.source, index);
+            slot.ensure(&vm, &self.grid, context.clone(), frame, transition);
+            if slot.height != previous_height {
+                resized_from.get_or_insert(index);
+            }
             self.resident_bytes = self
                 .resident_bytes
                 .saturating_sub(previous_bytes)
                 .saturating_add(slot.bytes());
             self.resident_slots.insert(index);
+        }
+        if let Some(from) = resized_from {
+            self.rebuild_prefix_from(from);
         }
         if self.resident_bytes > DETAIL_CACHE_BYTES {
             let cold: Vec<_> = self
@@ -478,30 +519,12 @@ impl DetailRenderCache {
     }
 }
 
-pub(super) fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
-    match vm {
-        TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
-        TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
-        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
-        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
-        _ => None,
-    }
-}
-
-pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
-    match vm {
-        TuiRenderUnit::TuiSystemReminder(reminder) => {
-            Some(FoldKey::SystemReminder(reminder.reminder_id))
-        }
-        TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
-        TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
-            bubble.message_id.clone().map(FoldKey::Reasoning)
-        }
-        TuiRenderUnit::TuiCollapsedGroup(group) => Some(FoldKey::Group(group.key.clone())),
-        _ => None,
-    }
-}
-
+/// 把面板本地 fold 投影到一条 entry 上（canonical 内容只读，面板状态不落
+/// `FOLD_OVERRIDES`）。键控/状态判定由 [`FoldKey::of`] / [`fold_state_of`] 统一；
+/// 这里只负责把选中的 fold 写回副本并重算 hash。
+///
+/// SubAgent 组不在投影范围内：详情渲染下它恒为紧凑形态，[`panel_fold_key`]
+/// 也不会返回它的键，因此不会传入 fold（嵌套导航见 Q12）。
 pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUnit> {
     let Some(fold) = fold else {
         return Cow::Borrowed(vm);
@@ -526,6 +549,10 @@ pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, 
         TuiRenderUnit::TuiCollapsedGroup(group) => {
             group.fold = fold;
             group.recompute_hash();
+        }
+        TuiRenderUnit::TuiAskUserBlock(block) => {
+            block.fold = fold;
+            block.recompute_hash();
         }
         _ => {}
     }

@@ -370,19 +370,23 @@ fn ask_user_block(pending: bool, rid: Option<&str>) -> TuiRenderUnit {
     TuiRenderUnit::TuiAskUserBlock(b)
 }
 
-/// [Slice 4] fold_key_of：Interaction block 按 request_id 键控；request_id 为
+/// [Slice 4] FoldKey::of：Interaction block 按 request_id 键控；request_id 为
 /// None（测试构造）时返回 None（与 reasoning message_id 先例一致）。
 #[test]
 fn test_fold_key_of_interaction_block() {
     let vm = ask_user_block(true, Some("rid-1"));
-    let (k, f) = super::fold_key_of(&vm).expect("有 request_id 时应可折叠");
-    assert_eq!(k, FoldKey::Interaction("rid-1".into()));
-    assert_eq!(f, FoldState::Expanded);
+    assert_eq!(FoldKey::of(&vm), Some(FoldKey::Interaction("rid-1".into())));
+    assert_eq!(
+        crate::kit::tui_render_unit::fold_state_of(&vm),
+        Some(FoldState::Expanded)
+    );
 
     let vm_noid = ask_user_block(true, None);
-    assert!(
-        super::fold_key_of(&vm_noid).is_none(),
-        "无 request_id → 不可折叠键控"
+    assert_eq!(FoldKey::of(&vm_noid), None, "无 request_id → 不可折叠键控");
+    assert_eq!(
+        crate::kit::tui_render_unit::fold_state_of(&vm_noid),
+        None,
+        "不可键控的 entry 没有可读 fold 语义"
     );
 }
 

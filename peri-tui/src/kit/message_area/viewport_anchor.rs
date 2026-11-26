@@ -73,7 +73,7 @@ use std::hash::{Hash, Hasher};
 /// 单元身份：优先既有折叠键，其次既有内容身份。
 ///
 /// 不新造身份体系——两类来源都是仓库里已经在用的身份事实（折叠键见
-/// `message_area::entry_nav::fold_key_of`，内容身份见 `hits.rs` 的点击陈旧校验）。
+/// `FoldKey::of`，内容身份见 `hits.rs` 的点击陈旧校验）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UnitIdentity {
     /// 折叠键（`FoldKey`）：工具 `tool_id` / 子 agent 实例 / 交互 `request_id` /
@@ -87,12 +87,7 @@ impl UnitIdentity {
     /// 该身份是否就是这个单元。`kind` 先比、内容 hash 后算——种类不符时不做文本 hash。
     fn is(&self, vm: &TuiRenderUnit) -> bool {
         match self {
-            Self::Fold(key) => {
-                super::entry_nav::fold_key_of(vm)
-                    .map(|(key, _)| key)
-                    .as_ref()
-                    == Some(key)
-            }
+            Self::Fold(key) => FoldKey::of(vm).as_ref() == Some(key),
             Self::Content { kind, hash } => {
                 content_kind(vm) == *kind && content_identity_hash(vm) == *hash
             }
@@ -378,8 +373,8 @@ impl PrependRelocation {
 }
 
 fn identity_of(vm: &TuiRenderUnit) -> UnitIdentity {
-    match super::entry_nav::fold_key_of(vm) {
-        Some((key, _)) => UnitIdentity::Fold(key),
+    match FoldKey::of(vm) {
+        Some(key) => UnitIdentity::Fold(key),
         None => UnitIdentity::Content {
             kind: content_kind(vm),
             hash: content_identity_hash(vm),

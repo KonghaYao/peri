@@ -871,9 +871,278 @@ fn test_fold_key_interaction_roundtrip() {
     assert_ne!(k, FoldKey::Tool("rid-9".into()), "不同变体不相等");
 }
 
+// ── 折叠键 / 状态机单点（主时间线与详情面板同构）────────────────────────────
+
+fn keyed_bubble(message_id: Option<&str>) -> TuiAssistantBubble {
+    let mut bubble = TuiAssistantBubble {
+        text: "answer".into(),
+        reasoning: Some(TuiReasoningBlock {
+            text: "thought".into(),
+            fold: FoldState::Preview,
+            status: EntryStatus::Completed,
+            is_running: false,
+            started_at: None,
+            duration_ms: None,
+        }),
+        message_id: message_id.map(str::to_owned),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    bubble
+}
+
+fn keyed_tool() -> TuiToolCard {
+    let mut tool = TuiToolCard {
+        tool_id: "tool-1".into(),
+        tool_name: "Bash".into(),
+        input_summary: "echo hi".into(),
+        output_summary: "hi".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Generic,
+        fold: FoldState::Expanded,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    tool.recompute_hash();
+    tool
+}
+
+fn keyed_group() -> super::TuiCollapsedGroup {
+    let mut group = super::TuiCollapsedGroup {
+        key: "tool:t1".into(),
+        title: "Read 1".into(),
+        count: 1,
+        failed_count: 0,
+        view_models: vec![],
+        fold: FoldState::Collapsed,
+        is_working: false,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    group
+}
+
+fn keyed_subagent() -> TuiSubAgentGroup {
+    let mut group = TuiSubAgentGroup {
+        instance_id: "instance-7".into(),
+        agent_id: "agent-7".into(),
+        agent_name: "explorer".into(),
+        view_models: im::Vector::new(),
+        preview_omitted: false,
+        collapsed: false,
+        is_running: false,
+        is_error: false,
+        error_reason: None,
+        fold: FoldState::Collapsed,
+        user_modified: false,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    group
+}
+
+/// 10 个 `TuiRenderUnit` 变体的折叠键一致性：可折叠变体按 ACP 身份键控，
+/// 其余（user / system note / divider / todo）无折叠能力；键与当前状态同门槛。
+#[test]
+fn fold_key_parity_all_variants() {
+    use super::{TuiSystemReminder, TuiTodoSummary, fold_state_of};
+
+    let mut reminder = TuiSystemReminder::legacy("maintenance notice".into());
+    reminder.fold = FoldState::Expanded;
+    let reminder_key = FoldKey::SystemReminder(reminder.reminder_id);
+    let ask = ask_user_block_base();
+    let ask_key = FoldKey::Interaction("rid-1".into());
+
+    let cases: Vec<(TuiRenderUnit, Option<(FoldKey, FoldState)>)> = vec![
+        (
+            TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into())),
+            None,
+        ),
+        (
+            TuiRenderUnit::TuiAssistantBubble(keyed_bubble(Some("msg-1")).into()),
+            Some((FoldKey::Reasoning("msg-1".into()), FoldState::Preview)),
+        ),
+        (
+            TuiRenderUnit::TuiToolCard(keyed_tool()),
+            Some((FoldKey::Tool("tool-1".into()), FoldState::Expanded)),
+        ),
+        (
+            TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                text: "note".into(),
+                level: TuiNoteLevel::Info,
+                content_hash: 0,
+            }),
+            None,
+        ),
+        (
+            TuiRenderUnit::TuiSystemReminder(reminder),
+            Some((reminder_key, FoldState::Expanded)),
+        ),
+        (
+            TuiRenderUnit::TuiSubAgentGroup(keyed_subagent()),
+            Some((FoldKey::SubAgent("instance-7".into()), FoldState::Collapsed)),
+        ),
+        (
+            TuiRenderUnit::TuiCollapsedGroup(keyed_group()),
+            Some((FoldKey::Group("tool:t1".into()), FoldState::Collapsed)),
+        ),
+        (
+            TuiRenderUnit::TuiDivider(TuiDivider {
+                label: None,
+                content_hash: 0,
+            }),
+            None,
+        ),
+        (
+            TuiRenderUnit::TuiAskUserBlock(ask),
+            Some((ask_key, FoldState::Expanded)),
+        ),
+        (
+            TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("1/2 tasks".into())),
+            None,
+        ),
+    ];
+    assert_eq!(cases.len(), 10, "覆盖全部 TuiRenderUnit 变体");
+
+    for (vm, expected) in &cases {
+        assert_eq!(
+            FoldKey::of(vm),
+            expected.as_ref().map(|(key, _)| key.clone()),
+            "折叠键必须与唯一键控口径一致: {vm:?}"
+        );
+        assert_eq!(
+            fold_state_of(vm),
+            expected.as_ref().map(|(_, state)| *state),
+            "当前状态与键同门槛: {vm:?}"
+        );
+    }
+    let mut keys: Vec<FoldKey> = cases
+        .iter()
+        .filter_map(|(_, expected)| expected.as_ref().map(|(key, _)| key.clone()))
+        .collect();
+    keys.sort_by_cached_key(|key| format!("{key:?}"));
+    keys.dedup();
+    assert_eq!(keys.len(), 6, "六个可折叠变体各自产生独立键");
+}
+
+/// 缺稳定身份（无 message_id 的 reasoning / 无 request_id 的 interaction）
+/// 与不可折叠变体一样不可键控——不能写覆盖表，也不能折叠隐藏正文。
+#[test]
+fn fold_key_requires_stable_identity() {
+    use super::fold_state_of;
+
+    let unkeyed_reasoning = TuiRenderUnit::TuiAssistantBubble(keyed_bubble(None).into());
+    assert_eq!(FoldKey::of(&unkeyed_reasoning), None);
+    assert_eq!(fold_state_of(&unkeyed_reasoning), None);
+
+    let mut no_reasoning = keyed_bubble(Some("msg-2"));
+    no_reasoning.reasoning = None;
+    no_reasoning.recompute_hash();
+    assert_eq!(
+        FoldKey::of(&TuiRenderUnit::TuiAssistantBubble(no_reasoning.into())),
+        None,
+        "正文 bubble 无 reasoning 块 → 无折叠键"
+    );
+
+    let mut ask = ask_user_block_base();
+    ask.request_id = None;
+    let ask = TuiRenderUnit::TuiAskUserBlock(ask);
+    assert_eq!(FoldKey::of(&ask), None);
+    assert_eq!(fold_state_of(&ask), None);
+}
+
+/// 折叠状态机 3 态 × 2 动作的完整矩阵（Enter/单击 vs Space）。
+#[test]
+fn toggle_fold_state_machine_matrix() {
+    use super::{FoldToggle, toggle_fold};
+    let cases = [
+        (
+            FoldToggle::Expand,
+            FoldState::Collapsed,
+            FoldState::Expanded,
+        ),
+        (
+            FoldToggle::Expand,
+            FoldState::Expanded,
+            FoldState::Collapsed,
+        ),
+        (FoldToggle::Expand, FoldState::Preview, FoldState::Collapsed),
+        (
+            FoldToggle::Preview,
+            FoldState::Collapsed,
+            FoldState::Preview,
+        ),
+        (FoldToggle::Preview, FoldState::Expanded, FoldState::Preview),
+        (
+            FoldToggle::Preview,
+            FoldState::Preview,
+            FoldState::Collapsed,
+        ),
+    ];
+    for (toggle, current, expected) in cases {
+        assert_eq!(
+            toggle_fold(current, toggle),
+            expected,
+            "{toggle:?} on {current:?}"
+        );
+    }
+}
+
 #[path = "tui_render_unit_reminder_test.rs"]
 mod reminder_tests;
 
 use super::ReminderInfo;
 use super::ReminderType;
 use super::i18n;
+
+/// 组构造唯一入口：状态 → running/error/fold 与内容哈希一次算清；
+/// 消息区累计器与详情面板共用，避免两处各写一遍映射。
+#[test]
+fn subagent_group_constructor_maps_status_and_hash_once() {
+    let child = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "child note".into(),
+        level: TuiNoteLevel::Info,
+        content_hash: 7,
+    });
+    let group = TuiSubAgentGroup::new(
+        "inst-1".into(),
+        "agent-1".into(),
+        "coder".into(),
+        im::vector![child],
+        true,
+        EntryStatus::Error,
+        Some("boom".into()),
+    );
+    assert!(!group.is_running);
+    assert!(group.is_error);
+    assert_eq!(group.error_reason.as_deref(), Some("boom"));
+    assert_eq!(group.fold, FoldState::Expanded, "error 组按 §7 展开");
+    assert!(!group.user_modified);
+    assert_ne!(group.content_hash, 0, "构造器已算好 hash");
+
+    let mut again = group.clone();
+    again.recompute_hash();
+    assert_eq!(
+        again.content_hash, group.content_hash,
+        "hash 只在构造点计算"
+    );
+
+    let running = TuiSubAgentGroup::new(
+        "inst-2".into(),
+        "agent-2".into(),
+        "coder".into(),
+        im::Vector::new(),
+        false,
+        EntryStatus::Running,
+        None,
+    );
+    assert!(running.is_running && !running.is_error);
+    assert_eq!(running.fold, FoldState::Collapsed);
+}

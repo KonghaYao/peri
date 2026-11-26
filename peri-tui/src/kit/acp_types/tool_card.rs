@@ -302,23 +302,17 @@ impl SubAgentAccumulator {
         } else {
             EntryStatus::Completed
         };
-        // [G1] hash 由 TuiSubAgentGroup::recompute_hash 单点计算（含 fold +
-        // user_modified + child hash 组合）——构造与折叠 pass 共用同一公式。
-        let mut group = crate::kit::tui_render_unit::TuiSubAgentGroup {
-            instance_id: self.instance_id.clone(),
-            agent_id: self.agent_id.clone(),
-            agent_name: self.agent_name.clone(),
-            view_models: child_vms.clone(),
-            preview_omitted: self.preview_omitted,
-            collapsed: false,
-            is_running: self.is_running,
-            is_error: self.is_error,
-            error_reason: self.error_reason.clone(),
-            fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::SubAgent, status),
-            user_modified: false,
-            content_hash: 0,
-        };
-        group.recompute_hash();
+        // [G1] hash 与 fold 映射由 `TuiSubAgentGroup::new` 单点计算——构造与
+        // 折叠 pass 共用同一公式。
+        let group = crate::kit::tui_render_unit::TuiSubAgentGroup::new(
+            self.instance_id.clone(),
+            self.agent_id.clone(),
+            self.agent_name.clone(),
+            child_vms.clone(),
+            self.preview_omitted,
+            status,
+            self.error_reason.clone(),
+        );
         let vm = TuiRenderUnit::TuiSubAgentGroup(group);
         self.cached_view_model.replace(Some(vm.clone()));
         vm

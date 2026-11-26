@@ -5,6 +5,7 @@ use crate::kit::focus_router;
 use crate::kit::message_area::props::ScrollbarFields;
 use crate::kit::message_area::selection::AnchorResolution;
 use crate::kit::message_area::selection::SlotIndex;
+use crate::kit::message_area::viewport_policy;
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
 use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
@@ -272,7 +273,8 @@ pub(in crate::kit::message_area) fn handle_event(
             let drag_active = scrollbar_drag.read().active;
             if scrollbar_owns_pointer(drag_active, on_scrollbar_col, selection_captured) {
                 let fields = *scrollbar_fields.read();
-                let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
+                let max_scroll =
+                    viewport_policy::max_scroll(fields.content_length, fields.viewport_length);
                 if let Some(bar) = VerticalBar::new(
                     sb_area.height,
                     fields.viewport_length,
@@ -687,7 +689,7 @@ pub(in crate::kit::message_area) fn handle_event(
         // 跟随态下 offset 可能是 usize::MAX 哨兵——先归一化到当帧底部，否则
         // Up/Down 要先消耗巨大偏移（"滚空气"）才生效。
         let fields = *scrollbar_fields.read();
-        let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
+        let max_scroll = viewport_policy::max_scroll(fields.content_length, fields.viewport_length);
         let mut st = scroll_state.write();
         if st.offset() > max_scroll {
             st.set_offset(max_scroll);

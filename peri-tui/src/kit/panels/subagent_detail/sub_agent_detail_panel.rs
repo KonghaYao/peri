@@ -3,23 +3,29 @@
 //! §6.7 subagent 详情 pane：Enter 打开 nested transcript 或详情 pane，不把
 //! 完整嵌套消息铺入主时间轴。本面板从 VIEW_MODELS 扫描 `TuiSubAgentGroup`
 //! （按 `SELECTED_SUBAGENT_ID` 匹配，由消息区焦点分派在 Enter 时写入），
-//! 用真实面板宽度构建 `GridSpec`，共享 EntryRenderCache 嵌套渲染子消息。
-//! 缓存保留完整内容高度，只为可见范围访问行，不渲染 md 复制按钮。
+//! 用 draw 期记录的面板内容区宽度构建 `GridSpec`，共享 EntryRenderCache 嵌套
+//! 渲染子消息。缓存保留完整内容高度，只为可见范围访问行，不渲染 md 复制按钮。
 //!
 //! canonical 内容只读；面板内可选择、展开和滚动（滚轮复用面板仲裁）；Esc 单层关闭
 //! （栈顶弹栈，不触及其他面板/焦点仲裁）。
 
 use super::{child_history, render_cache};
 
+use std::sync::Arc;
+
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render::{
+    status_symbol_and_color, subagent_error_reason, subagent_error_reason_lines,
+};
+use crate::kit::message_area::viewport_policy;
 use crate::kit::tui_render_unit::EntryStatus;
-use crate::kit::tui_render_unit::FoldTarget;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiSubAgentGroup;
 use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
@@ -34,6 +40,48 @@ use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
+use unicode_width::UnicodeWidthStr;
+
+/// 身份头（面板自有 chrome）：状态符号 + agent 名称 + agent id；failed 时追加
+/// 失败原因行。
+///
+/// 状态符号复用主时间线组头映射 [`status_symbol_and_color`]，失败原因复用
+/// [`subagent_error_reason`] / [`subagent_error_reason_lines`]——面板不维护第二套
+/// 映射。`width` 是 Q9 记录的内容区让出滚动条列后的视口宽，`grid` 由同一份内容
+/// 区派生（`indent = 0`）；原因行沿用主区组头的缩进/换行预算。
+#[must_use]
+pub(super) fn detail_header_lines(
+    group: &TuiSubAgentGroup,
+    grid: &GridSpec,
+    width: usize,
+    theme: &ThemeDefinition,
+) -> Vec<Line<'static>> {
+    let (symbol, color) =
+        status_symbol_and_color(group.is_running, group.is_error, &theme.semantic);
+    let symbol_text = format!("{symbol} ");
+    let name = crate::truncate::truncate_to_width(
+        &group.agent_name,
+        width.saturating_sub(symbol_text.width()).max(1),
+    );
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(symbol_text, Style::default().fg(color)),
+            Span::styled(name, Style::new().fg(theme.component.panel.title).bold()),
+        ]),
+        Line::from(vec![Span::styled(
+            crate::truncate::truncate_to_width(&format!("  [{}]", group.agent_id), width),
+            Style::new().fg(theme.semantic.text.dim),
+        )]),
+    ];
+    // 只有真实 failed 且有原因（canonical error_reason 或子工具错误兜底）才
+    // 追加；completed/running 不把 result 文本当失败原因，也不留空行。
+    if group.is_error
+        && let Some(reason) = subagent_error_reason(group)
+    {
+        lines.extend(subagent_error_reason_lines(grid, reason));
+    }
+    lines
+}
 
 #[component]
 pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -43,18 +91,32 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sv = hooks.use_state(|| 0usize);
     let scrollbar_grab = hooks.use_state(|| None::<u16>);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
+    // 副产物命中（GenUI 按钮 / Mermaid 查看图）——draw 期按内容区几何重建，
+    // 事件处理器读取最近一帧（与消息区 hits 同模式）。
+    let artifacts = hooks.use_state(|| Arc::new(render_cache::DetailArtifacts::default()));
     let history = hooks.use_state(child_history::ChildHistoryView::default);
     let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
     let _ = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    // GenUI 动作只 bump heartbeat（不直接改 VIEW_MODELS）；面板订阅它才能把
+    // Set/Reset 后的按钮外观与高度刷新出来。
+    let _ = hooks.use_atom(&RENDER_HEARTBEAT);
     let _ = hooks.use_atom(&SELECTED_SUBAGENT_ID);
-    hooks.use_hook(move || DetailViewportHook {
+    // 面板内容区几何——draw 期记录（`DetailGeometry`），prepare、鼠标命中与滚轮
+    // 仲裁读取同一份。首帧 update 尚未测量（`content == None`），此时不 prepare；
+    // 首次 draw 回填后由 `DetailGeometry::poll_change` 请求一帧校正渲染，届时才按
+    // 实测宽度准备（不再用 0/2 列兜底宽度先准备一遍）。
+    let draw_hook = hooks.use_hook(move || DetailViewportHook {
         cache: render_cache,
         scroll: sv,
-        outer: None,
+        geometry: DetailGeometry::default(),
         last_height: 0,
         last_viewport_height: 0,
+        artifacts,
     });
-    let area = hooks.use_previous_size();
+    let content = draw_hook.geometry.content();
+    let prepare_layout = draw_hook.geometry.prepare_layout();
+    let viewport = content.map(detail_viewport);
+    let viewport_height = content.map_or(0, |content| content.height as usize);
 
     // 选中 subagent：SELECTED_SUBAGENT_ID（消息区焦点分派写入）→ 候选源解析
     let selected_id = SELECTED_SUBAGENT_ID.state().read().clone();
@@ -81,6 +143,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             move || {
                 history.write().reset(scope);
                 render_cache.write().clear(Vec::new());
+                *artifacts.write() = Arc::default();
                 *sv.write() = 0;
             }
         },
@@ -94,8 +157,12 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if crate::kit::atoms::POPUP_KIND.state().read().is_some() {
                     return EventResult::Ignored;
                 }
-                let viewport = detail_viewport(area);
-                let scrollbar_col = area.x.saturating_add(area.width).saturating_sub(1);
+                // 命中几何与 draw/prepare 同源（draw 期记录的内容区）；首帧未测量时
+                // 不产生命中——不能按兜底矩形反推行号。
+                let Some(viewport) = viewport else {
+                    return EventResult::Ignored;
+                };
+                let scrollbar_col = viewport.x.saturating_add(viewport.width);
                 let in_rows = mouse.row >= viewport.y
                     && mouse.row < viewport.y.saturating_add(viewport.height);
                 match mouse.kind {
@@ -162,6 +229,17 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             && mouse.column >= viewport.x
                             && mouse.column < scrollbar_col =>
                     {
+                        // 缓存读锁内只做命中解析；动作（GenUI 分发 / 打开图面板）
+                        // 在锁外执行，避免动作触发重渲染时与缓存写入互相等待。
+                        let click = render_cache::resolve_artifact_click(
+                            &render_cache.read(),
+                            &artifacts.read(),
+                            mouse.row,
+                            mouse.column,
+                        );
+                        if render_cache::apply_artifact_click(click) {
+                            return EventResult::Consumed;
+                        }
                         let row = (*sv.read())
                             .saturating_add(mouse.row.saturating_sub(viewport.y) as usize);
                         render_cache.write().click_fold_header(row);
@@ -235,22 +313,22 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             KeyCode::Tab => {
                 if let Some(row) = render_cache.write().focus_next(false) {
-                    focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
+                    focus_detail_row(sv, row, viewport_height);
                 }
             }
             KeyCode::BackTab => {
                 if let Some(row) = render_cache.write().focus_next(true) {
-                    focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
+                    focus_detail_row(sv, row, viewport_height);
                 }
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
                 if let Some(row) = render_cache.write().focus_next(false) {
-                    focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
+                    focus_detail_row(sv, row, viewport_height);
                 }
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                 if let Some(row) = render_cache.write().focus_next(true) {
-                    focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
+                    focus_detail_row(sv, row, viewport_height);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
@@ -258,7 +336,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if cache.focused().is_none()
                     && let Some(row) = cache.focus_next(false)
                 {
-                    focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
+                    focus_detail_row(sv, row, viewport_height);
                 }
                 cache.toggle_focused(key.code == KeyCode::Char(' '));
             }
@@ -271,11 +349,11 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 *sv.write() = next;
             }
             KeyCode::PageUp => {
-                let next = sv.read().saturating_sub(area.height as usize);
+                let next = sv.read().saturating_sub(viewport_height);
                 *sv.write() = next;
             }
             KeyCode::PageDown => {
-                let next = sv.read().saturating_add(area.height as usize);
+                let next = sv.read().saturating_add(viewport_height);
                 *sv.write() = next;
             }
             KeyCode::Home => *sv.write() = 0,
@@ -285,75 +363,64 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         EventResult::Consumed
     });
 
-    // 面板绘制区域（上一帧）——嵌套渲染 wrap 宽度 + 滚轮仲裁
-    let mut grid = GridSpec::grid_for(area.width.max(2));
-    // 嵌套面板沿用基准列：过程区缩进只作用于消息区主时间轴，本 issue 不改变面板形态。
-    grid.indent = 0;
-
     // 嵌套渲染：组内 view_models → vm_to_lines_cached（复用统一水平网格与
     // markdown 增量缓存；md 复制按钮关闭——嵌套内容不提供复制按钮）。
+    // wrap 宽度、初始偏移与滚轮仲裁都取 draw 期记录的内容区；几何未知（首帧
+    // update）时整段延后——不能用兜底宽度先准备一遍极窄的行。
     let mut lines: Vec<Line<'static>> = Vec::new();
     let reading_history = {
         let history = history.read();
         history.enabled && history.matches(&history_scope)
     };
-    if reading_history {
-        let width = area.width.saturating_sub(1) as usize;
-        let (header, text) = history.read().presentation(width);
-        // The sparse layout keeps total height without allocating every rendered row.
-        render_cache
-            .write_no_update()
-            .prepare_text(header, text, width);
-    } else {
-        match &group {
-            Some(g) => {
-                lines.push(Line::from(vec![Span::styled(
-                    crate::truncate::truncate_to_width(
-                        &g.agent_name,
-                        area.width.saturating_sub(1) as usize,
-                    ),
-                    Style::new()
-                        .fg(theme_def.read().component.panel.title)
-                        .bold(),
-                )]));
-                lines.push(Line::from(vec![Span::styled(
-                    crate::truncate::truncate_to_width(
-                        &format!("  [{}]", g.agent_id),
-                        area.width.saturating_sub(1) as usize,
-                    ),
-                    Style::new().fg(theme_def.read().semantic.text.dim),
-                )]));
-                lines.push(Line::from(""));
-                if g.preview_omitted {
-                    lines.push(Line::from(i18n::tr("subagent-preview-omitted")));
+    if let (Some(content), Some(layout)) = (content, prepare_layout) {
+        if reading_history {
+            let width = content.width.saturating_sub(1) as usize;
+            let (header, text) = history.read().presentation(width);
+            // The sparse layout keeps total height without allocating every rendered row.
+            render_cache
+                .write_no_update()
+                .prepare_text(header, text, width);
+        } else {
+            match &group {
+                Some(g) => {
+                    let theme = theme_def.read().clone();
+                    lines.extend(detail_header_lines(
+                        g,
+                        &layout.grid,
+                        content.width.saturating_sub(1) as usize,
+                        &theme,
+                    ));
+                    lines.push(Line::from(""));
+                    if g.preview_omitted {
+                        lines.push(Line::from(i18n::tr("subagent-preview-omitted")));
+                    }
+                    lines.push(Line::from(i18n::tr("subagent-history-open-hint")));
+                    let mut cache = render_cache.write_no_update();
+                    if cache.prepare(g, &layout.grid, theme, LANG_VERSION.get(), lines) {
+                        *sv.write_no_update() = initial_detail_offset(
+                            g.is_running,
+                            cache.height(),
+                            layout.viewport_height,
+                        );
+                    }
                 }
-                lines.push(Line::from(i18n::tr("subagent-history-open-hint")));
-                let theme = theme_def.read().clone();
-                let mut cache = render_cache.write_no_update();
-                if cache.prepare(g, &grid, theme, LANG_VERSION.get(), lines) {
-                    *sv.write_no_update() = initial_detail_offset(
-                        g.is_running,
-                        cache.height(),
-                        area.height.saturating_sub(2) as usize,
-                    );
+                None => {
+                    lines.push(Line::from(vec![Span::styled(
+                        i18n::tr("subagent-detail-not-found"),
+                        Style::new().fg(theme_def.read().semantic.text.muted),
+                    )]));
+                    render_cache.write_no_update().clear(lines);
                 }
-            }
-            None => {
-                lines.push(Line::from(vec![Span::styled(
-                    i18n::tr("subagent-detail-not-found"),
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                )]));
-                render_cache.write_no_update().clear(lines);
             }
         }
     }
 
     crate::kit::panel_scroll::register_virtual_panel_scroll(
         PanelKind::SubAgentDetail,
-        area,
+        content.unwrap_or_default(),
         sv,
         render_cache.read().height(),
-        area.height.saturating_sub(2) as usize,
+        viewport_height,
     );
 
     panel_shell!(PanelKind::SubAgentDetail, {
@@ -367,23 +434,30 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 pub(super) struct DetailViewportHook {
     pub(super) cache: State<render_cache::DetailRenderCache>,
     pub(super) scroll: State<usize>,
-    pub(super) outer: Option<Rect>,
+    pub(super) geometry: DetailGeometry,
     pub(super) last_height: usize,
     pub(super) last_viewport_height: usize,
+    pub(super) artifacts: State<Arc<render_cache::DetailArtifacts>>,
 }
 
 impl Hook for DetailViewportHook {
+    fn poll_change(&mut self, cx: &mut std::task::Context) -> std::task::Poll<()> {
+        // 首次记录到内容区（或几何变化）时请求一帧校正渲染：update 期 prepare
+        // 才拿得到实测内容区宽度。
+        self.geometry.poll_change(cx)
+    }
+
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        // Border changes drawer.area while drawing its child. Capture the panel
-        // bounds before that happens so the viewport uses one border inset.
-        self.outer = Some(drawer.area);
+        // Border 在绘制子节点时收窄 `drawer.area`；这里拿到的是面板外框，
+        // 内容区由同一份公式换算（prepare/命中读取的正是这次记录）。
+        self.geometry.observe(drawer.area);
     }
 
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        let Some(outer) = self.outer else {
+        let Some(content) = self.geometry.content() else {
             return;
         };
-        let viewport = detail_viewport(outer);
+        let viewport = detail_viewport(content);
         if viewport.is_empty() {
             return;
         }
@@ -402,10 +476,14 @@ impl Hook for DetailViewportHook {
         self.last_height = height;
         self.last_viewport_height = viewport.height as usize;
         cache.draw(drawer, viewport, top);
+        // 副产物命中与 draw 同源几何、同一次 ensure_visible 结果；滚动或内容
+        // 变化后热区随帧更新。
+        let hits = render_cache::collect_artifacts(&cache, viewport, top);
+        *self.artifacts.write_no_update() = Arc::new(hits);
         crate::kit::scrollbar_chrome::draw_scrollbar(
             drawer,
             Rect {
-                width: outer.width,
+                width: content.width,
                 ..viewport
             },
             height,
@@ -415,9 +493,72 @@ impl Hook for DetailViewportHook {
     }
 }
 
-#[must_use]
-pub(super) fn clamp_detail_offset(top: usize, height: usize, viewport_height: usize) -> usize {
-    top.min(height.saturating_sub(viewport_height))
+/// 面板内容区几何——draw 期记录、prepare 与命中读取的唯一来源。
+///
+/// 仿 `MsgAreaTracker` / `AreaTracker`（值类型 + hook 跨帧持有）：
+/// `pre_component_draw` 每帧把面板外框换算成内容区；首次测量与每次几何变化置
+/// 校正标记，由 `poll_change` 请求一帧重渲染。首帧 update 拿不到实测几何——
+/// 此时 `content()` 与 `prepare_layout()` 都是 `None`，prepare 延后到校正帧，
+/// 不再用 2 列兜底宽度先准备一遍（那会把内容折成极窄行并一直停留到下次刷新）。
+#[derive(Debug, Default)]
+pub(super) struct DetailGeometry {
+    content: Option<Rect>,
+    changed: bool,
+}
+
+impl DetailGeometry {
+    /// 已记录的内容区；首帧/从未绘制时为 `None`。
+    #[must_use]
+    pub(super) fn content(&self) -> Option<Rect> {
+        self.content
+    }
+
+    /// prepare 布局：几何未知时 `None`（本帧不 prepare）；已记录时由内容区宽度
+    /// 派生网格、由内容区高度派生视口高度。
+    #[must_use]
+    pub(super) fn prepare_layout(&self) -> Option<DetailPrepareLayout> {
+        let content = self.content?;
+        // 1 列退化几何仍按 2 列取网格（既有下限钳制）；这不是未知几何的兜底——
+        // 未知时根本不会走到这里。
+        // 面板与主时间线共用断点/缩进（C2）：content 宽度 >= 60 时 indent = 2，
+        // 过程区台阶由 render_options 的 transition 驱动，不再清零。
+        let grid = GridSpec::grid_for(content.width.max(2));
+        Some(DetailPrepareLayout {
+            grid,
+            viewport_height: content.height as usize,
+        })
+    }
+
+    /// 记录面板外框对应的内容区；几何变化（含首次测量）置校正标记。
+    pub(super) fn observe(&mut self, panel: Rect) {
+        let content = detail_content_area(panel);
+        if self.content == Some(content) {
+            return;
+        }
+        self.content = Some(content);
+        self.changed = true;
+    }
+}
+
+impl Hook for DetailGeometry {
+    fn poll_change(&mut self, _cx: &mut std::task::Context) -> std::task::Poll<()> {
+        if std::mem::take(&mut self.changed) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        self.observe(drawer.area);
+    }
+}
+
+/// `prepare` 所需的几何——网格与视口高度同取内容区，避免第二套尺寸来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DetailPrepareLayout {
+    pub(super) grid: GridSpec,
+    pub(super) viewport_height: usize,
 }
 
 pub(super) fn focus_detail_row(scroll: State<usize>, row: usize, viewport: usize) {
@@ -434,15 +575,13 @@ pub(super) fn focus_detail_row(scroll: State<usize>, row: usize, viewport: usize
     }
 }
 
+/// 视口上缘口径与主时间线共用一份实现（[`viewport_policy`]）：初始位置。
 #[must_use]
 pub(super) fn initial_detail_offset(running: bool, height: usize, viewport: usize) -> usize {
-    if running {
-        height.saturating_sub(viewport)
-    } else {
-        0
-    }
+    viewport_policy::initial_top(running, height, viewport)
 }
 
+/// 视口上缘口径与主时间线共用一份实现（[`viewport_policy`]）：吸底跟随。
 pub(super) fn follow_detail_offset(
     top: usize,
     previous_height: usize,
@@ -451,24 +590,35 @@ pub(super) fn follow_detail_offset(
     viewport: usize,
     source_changed: bool,
 ) -> usize {
-    if source_changed
-        && previous_height > 0
-        && height > previous_height
-        && top >= previous_height.saturating_sub(previous_viewport)
-    {
-        height.saturating_sub(viewport)
-    } else {
-        clamp_detail_offset(top, height, viewport)
+    viewport_policy::follow_top(
+        top,
+        previous_height,
+        previous_viewport,
+        height,
+        viewport,
+        source_changed,
+    )
+}
+
+/// 面板内容区——`panel_shell!` 的上下边框/标题之后的那块区域。
+///
+/// 与 `Block::inner` 对 `Borders::TOP | Borders::BOTTOM` 的换算一致：上边框（带
+/// 标题）与下边框各占 1 行，左右无边框（最右列由 [`detail_viewport`] 让给滚动条）。
+#[must_use]
+pub(super) fn detail_content_area(panel: Rect) -> Rect {
+    Rect {
+        y: panel.y.saturating_add(1),
+        height: panel.height.saturating_sub(2),
+        ..panel
     }
 }
 
+/// 内容区右侧让出滚动条列后的绘制/命中视口。
 #[must_use]
-pub(super) fn detail_viewport(outer: Rect) -> Rect {
+pub(super) fn detail_viewport(content: Rect) -> Rect {
     Rect {
-        y: outer.y.saturating_add(1),
-        height: outer.height.saturating_sub(2),
-        width: outer.width.saturating_sub(1),
-        ..outer
+        width: content.width.saturating_sub(1),
+        ..content
     }
 }
 
@@ -546,26 +696,21 @@ pub(super) fn find_live_detail_subagent(
     } else {
         EntryStatus::Completed
     };
-    let group = TuiSubAgentGroup {
-        instance_id: task_id.to_string(),
-        agent_id: detail
+    let group = TuiSubAgentGroup::new(
+        task_id.to_string(),
+        detail
             .agent_id
             .clone()
             .unwrap_or_else(|| selected_id.to_string()),
-        agent_name: detail
+        detail
             .agent_name
             .clone()
             .unwrap_or_else(|| detail.summary.clone()),
-        view_models: detail.nested_units.clone(),
-        collapsed: false,
-        is_running: detail.status == crate::kit::atoms::BgLiveStatus::Running,
-        is_error: detail.subagent_is_error,
-        error_reason: detail.subagent_result.clone(),
-        preview_omitted: detail.preview_omitted,
-        fold: crate::kit::tui_render_unit::fold_for_status(FoldTarget::SubAgent, status),
-        user_modified: false,
-        content_hash: 0,
-    };
+        detail.nested_units.clone(),
+        detail.preview_omitted,
+        status,
+        detail.subagent_result.clone(),
+    );
     Some(group)
 }
 
@@ -610,6 +755,8 @@ use crate::kit::atoms::BRIDGE_RESET_COUNTER;
 use crate::kit::atoms::BgDisplayEntry;
 
 use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
 
 use crate::kit::atoms::SELECTED_SUBAGENT_ID;
 

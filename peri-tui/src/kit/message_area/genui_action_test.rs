@@ -5,6 +5,7 @@ use crate::kit::markdown::GenUiSegment;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::transcript::Transcript;
 use ratatui_kit::crossterm::event::{KeyModifiers, MouseEvent};
+use unicode_width::UnicodeWidthStr;
 
 struct Guard {
     focus: Option<FocusedEntry>,
@@ -313,7 +314,12 @@ fn wrapped_button_hit_rows_match_paragraph_after_viewport_width_correction() {
     Paragraph::new(line.clone())
         .wrap(Wrap { trim: false })
         .render(area, &mut buffer);
-    let rows = button_rows(slot, button, width);
+    let rows = super::super::artifact_hits::genui_button_rows(
+        button,
+        slot.lines.as_ref().unwrap().as_ref(),
+        &slot.wrap_map,
+        width,
+    );
     assert!(rows.len() > 1);
     let visual_start = slot.wrap_map[button.line_start].visual_start;
     for (visual, start, end) in rows {
@@ -361,7 +367,7 @@ fn pressed_overlay_covers_wrapped_hit_rows_without_changing_text() {
             &mut normal,
         );
     let mut pressed = normal.clone();
-    draw_pressed(&mut pressed, &hits, &key, &fixture.context.theme, false);
+    draw_pressed(&mut pressed, &hits, &key, &fixture.context.theme);
     for hit in &hits {
         for col in hit.x_start..hit.x_end {
             let cell = &pressed[(col, hit.row)];
@@ -392,13 +398,7 @@ fn pressed_overlay_covers_wrapped_hit_rows_without_changing_text() {
     assert_eq!(hits.last().unwrap().key.vm_hash, key.vm_hash);
     assert!(!hits.last().unwrap().key.matches(&key));
     let mut after_rebuild = normal.clone();
-    draw_pressed(
-        &mut after_rebuild,
-        &hits,
-        &key,
-        &fixture.context.theme,
-        false,
-    );
+    draw_pressed(&mut after_rebuild, &hits, &key, &fixture.context.theme);
     assert_eq!(after_rebuild, normal);
 }
 

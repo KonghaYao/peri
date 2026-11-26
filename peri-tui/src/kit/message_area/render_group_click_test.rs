@@ -10,6 +10,7 @@ use ratatui_kit::prelude::EventResult;
 use ratatui_kit::ratatui::text::Line;
 use serial_test::serial;
 
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::entry_nav::EntryClickHit;
 use crate::kit::message_area::grid::{GridSpec, TextLineSource, ZoneTransition};
 use crate::kit::message_area::render;
@@ -86,13 +87,12 @@ fn group(members: Vec<TuiRenderUnit>, fold: FoldState) -> TuiCollapsedGroup {
 
 fn rendered(group: &TuiCollapsedGroup) -> (Vec<Line<'static>>, Vec<(usize, FoldKey)>) {
     let grid = GridSpec::grid_for(120);
-    let (lines, _, _, _, _, _, fold_hits) = render::vm_to_lines_cached_with_layout(
+    let (lines, _, _, _, _, _, fold_hits) = render::vm_to_lines_with_options(
         &TuiRenderUnit::TuiCollapsedGroup(group.clone()),
         &grid,
         &mut Default::default(),
         None,
-        false,
-        ZoneTransition::None,
+        EntryRenderOptions::isolated(ZoneTransition::None, false),
     );
     (lines, fold_hits)
 }
@@ -243,13 +243,12 @@ fn test_entry_click_target_after_zone_step_shift() {
         FoldState::Expanded,
     );
     let grid = GridSpec::grid_for(120);
-    let (lines, _, _, _, _, _, hits) = render::vm_to_lines_cached_with_layout(
+    let (lines, _, _, _, _, _, hits) = render::vm_to_lines_with_options(
         &TuiRenderUnit::TuiCollapsedGroup(group),
         &grid,
         &mut Default::default(),
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert!(render::is_step_row(&lines[0]), "首行是入口台阶");
     assert_eq!(

@@ -18,6 +18,7 @@ use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::Style;
 use unicode_width::UnicodeWidthStr;
 
+use crate::kit::entry_render_cache::EntryRenderOptions;
 use crate::kit::message_area::grid::TextLineSource;
 use crate::kit::message_area::grid::ZoneTransition;
 use crate::kit::message_area::render::helpers;
@@ -259,13 +260,12 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
         ..super::tool_card("Read", "src/main.rs", false, false)
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &tool,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     // 入口台阶：` ╰─╮`（col1 `╰` 接上方文本竖线 / col3 `╮` 接过程区标记列）
     assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
@@ -398,13 +398,12 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
         // 转场形态存在也不落台阶（§9：Compact/Narrow 无缩进即无台阶）——逐列
         // 与改动前一致，仅前缀回退形态。
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-        let (transited, ..) = render::vm_to_lines_cached_with_layout(
+        let (transited, ..) = render::vm_to_lines_with_options(
             &vm,
             &grid,
             &mut cache,
             None,
-            false,
-            ZoneTransition::EnterProcess(TextLineSource::User),
+            EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
         );
         assert_eq!(
             transited.len(),
@@ -565,13 +564,12 @@ fn test_step_line_color_follows_text_line() {
     let tool = TuiRenderUnit::TuiToolCard(super::tool_card("Read", "src/main.rs", false, false));
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
 
-    let (user_step, ..) = render::vm_to_lines_cached_with_layout(
+    let (user_step, ..) = render::vm_to_lines_with_options(
         &tool,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert!(render::is_step_row(&user_step[0]), "首行应是入口台阶");
     assert_eq!(
@@ -580,13 +578,15 @@ fn test_step_line_color_follows_text_line() {
         "进入台阶线色 = user 文本竖线色"
     );
 
-    let (assistant_step, ..) = render::vm_to_lines_cached_with_layout(
+    let (assistant_step, ..) = render::vm_to_lines_with_options(
         &tool,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::Assistant),
+        EntryRenderOptions::isolated(
+            ZoneTransition::EnterProcess(TextLineSource::Assistant),
+            false,
+        ),
     );
     assert_eq!(
         assistant_step[0].spans[0].style.fg,
@@ -606,13 +606,15 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (exit_step, ..) = render::vm_to_lines_cached_with_layout(
+    let (exit_step, ..) = render::vm_to_lines_with_options(
         &answer,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::ExitProcess(TextLineSource::Assistant),
+        EntryRenderOptions::isolated(
+            ZoneTransition::ExitProcess(TextLineSource::Assistant),
+            false,
+        ),
     );
     assert!(render::is_step_row(&exit_step[0]), "首行应是退出台阶");
     assert_eq!(
@@ -640,13 +642,12 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (mixed_lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (mixed_lines, ..) = render::vm_to_lines_with_options(
         &mixed,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::None,
+        EntryRenderOptions::isolated(ZoneTransition::None, false),
     );
     let inner_step = mixed_lines
         .iter()
@@ -678,13 +679,12 @@ fn test_step_line_color_follows_text_line() {
         }
         .into(),
     );
-    let (brief_mixed_lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (brief_mixed_lines, ..) = render::vm_to_lines_with_options(
         &brief_mixed,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::None,
+        EntryRenderOptions::isolated(ZoneTransition::None, false),
     );
     assert!(
         !brief_mixed_lines.iter().any(render::is_step_row),
@@ -707,13 +707,12 @@ fn test_step_line_color_follows_text_line() {
         label: None,
         content_hash: 11,
     });
-    let (divider_exit, ..) = render::vm_to_lines_cached_with_layout(
+    let (divider_exit, ..) = render::vm_to_lines_with_options(
         &divider,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::ExitProcess(TextLineSource::Divider),
+        EntryRenderOptions::isolated(ZoneTransition::ExitProcess(TextLineSource::Divider), false),
     );
     assert!(
         render::is_step_row(&divider_exit[0]),
@@ -725,13 +724,12 @@ fn test_step_line_color_follows_text_line() {
         "退出台阶线色 = divider 左侧线色"
     );
 
-    let (divider_enter, ..) = render::vm_to_lines_cached_with_layout(
+    let (divider_enter, ..) = render::vm_to_lines_with_options(
         &tool,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::Divider),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::Divider), false),
     );
     assert_eq!(
         divider_enter[0].spans[0].style.fg,
@@ -754,13 +752,12 @@ fn test_system_reminder_renders_in_process_zone() {
 
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &vm,
         &grid,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     assert!(render::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(super::line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
@@ -790,13 +787,12 @@ fn test_system_reminder_renders_in_process_zone() {
     // <60 列：前缀回退基准形态（符号回 accent 列、无台阶）——逐列与改动前一致
     let narrow = GridSpec::grid_for(59);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, ..) = render::vm_to_lines_cached_with_layout(
+    let (lines, ..) = render::vm_to_lines_with_options(
         &vm,
         &narrow,
         &mut cache,
         None,
-        false,
-        ZoneTransition::EnterProcess(TextLineSource::User),
+        EntryRenderOptions::isolated(ZoneTransition::EnterProcess(TextLineSource::User), false),
     );
     let first = &lines[0];
     assert!(

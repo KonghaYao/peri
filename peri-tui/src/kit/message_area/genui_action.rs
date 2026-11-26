@@ -6,7 +6,6 @@ use peri_tui_components::{button::hit_test, genui::render::pressed_button_style}
 use ratatui_kit::crossterm::event::{Event, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
-use unicode_width::UnicodeWidthStr;
 
 use super::selection::{SlotIndex, SlotLines};
 use super::vm_cache::VmCacheSlot;
@@ -74,7 +73,12 @@ pub(super) fn button_hits(
         let slot_start = index.slot_visual_start(slot_index).unwrap_or(0);
         let mut vm_hash = None;
         for button in &slot.genui_buttons {
-            for (visual, start, end) in button_rows(slot, button, width) {
+            for (visual, start, end) in super::artifact_hits::genui_button_rows(
+                button,
+                lines.as_ref(),
+                &slot.wrap_map,
+                width,
+            ) {
                 let Some(row) = slot_start
                     .saturating_add(visual)
                     .checked_sub(scroll_y)
@@ -107,50 +111,10 @@ pub(super) fn button_hits(
     hits
 }
 
-fn button_rows(slot: &VmCacheSlot, button: &GenUiButtonInfo, width: u16) -> Vec<(usize, u16, u16)> {
-    let mut rows = Vec::new();
-    for logical in button.line_start..button.line_end {
-        let Some(entry) = slot.wrap_map.get(logical) else {
-            continue;
-        };
-        let Some(line) = slot.lines.as_ref().and_then(|lines| lines.line(logical)) else {
-            continue;
-        };
-        let plain = line.to_string();
-        // 与选择器使用同一折行边界，避免 resize 校正帧把续行热区留在旧列。
-        let starts = peri_tui_components::selection::wrap_row_byte_starts(line, &plain, width);
-        for (offset, bytes) in starts.windows(2).enumerate() {
-            let Some(before) = plain.get(..bytes[0]) else {
-                continue;
-            };
-            let Some(text) = plain.get(bytes[0]..bytes[1]) else {
-                continue;
-            };
-            let col = before.width();
-            let start = (button.x_start as usize)
-                .saturating_sub(col)
-                .min(width as usize);
-            let end = (button.x_end as usize)
-                .saturating_sub(col)
-                .min(text.width())
-                .min(width as usize);
-            if start < end {
-                rows.push((
-                    entry.visual_start.saturating_add(offset),
-                    start as u16,
-                    end as u16,
-                ));
-            }
-        }
-    }
-    rows
-}
-
 pub(super) struct PressedOverlay {
     pub(super) hits: State<Arc<Vec<GenUiButtonHit>>>,
     pub(super) pressed: State<Option<PressedGenuiKey>>,
     pub(super) area: Option<Rect>,
-    pub(super) strip_color: bool,
 }
 
 impl Hook for PressedOverlay {
@@ -161,13 +125,7 @@ impl Hook for PressedOverlay {
         }
         if let Some(key) = self.pressed.read().as_ref() {
             let theme = peri_theme::atoms::THEME_ATOM.state();
-            draw_pressed(
-                drawer.buffer_mut(),
-                &self.hits.read(),
-                key,
-                &theme.read(),
-                self.strip_color,
-            );
+            draw_pressed(drawer.buffer_mut(), &self.hits.read(), key, &theme.read());
         }
     }
 }
@@ -177,7 +135,6 @@ fn draw_pressed(
     hits: &[GenUiButtonHit],
     key: &PressedGenuiKey,
     theme: &ThemeDefinition,
-    strip_color: bool,
 ) {
     for hit in hits.iter().filter(|hit| key.matches(&hit.key)) {
         let rect =
@@ -195,14 +152,7 @@ fn draw_pressed(
             continue;
         };
         let style = pressed_button_style(normal.fg, theme);
-        buffer.set_style(
-            rect,
-            if strip_color {
-                peri_tui_components::style::strip_style_color(style)
-            } else {
-                style
-            },
-        );
+        buffer.set_style(rect, style);
     }
 }
 
@@ -288,7 +238,11 @@ fn dispatch_click(
     EventResult::Consumed
 }
 
-fn dispatch_action(button: &GenUiButtonInfo) {
+/// 执行 GenUI 按钮动作——主时间线与 SubAgent 面板共用的唯一分发点。
+///
+/// 动作只依赖按钮携带的块身份/解析结果与会话级 `view_state`，不依赖
+/// 消息区上下文，因此面板命中后可直接复用同一条路径。
+pub(crate) fn dispatch_action(button: &GenUiButtonInfo) {
     match &button.action {
         GenUiAction::ToAssistant(text) => {
             let text = if text.is_empty() { &button.label } else { text };

@@ -53,7 +53,7 @@ fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
 }
 
 /// entry 是否产出渲染行——0 行 entry（空 bubble / 空 user prompt）不参与相邻判定（§7）。
-/// 判定条件与 `render::vm_to_lines_cached_with_layout` 的 0 行早返回同源，两处须同步。
+/// 判定条件与 `render::vm_to_lines_with_options` 的 0 行早返回同源，两处须同步。
 #[must_use]
 fn produces_lines(vm: &TuiRenderUnit) -> bool {
     match vm {
@@ -93,7 +93,7 @@ fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
 /// 区间首 slot 也读 `items[slot - 1]`——相邻关系不因重建区间而变。
 ///
 /// transcript_index 的按需物化同用此判定，保证按需重渲染与常驻渲染同列。
-pub(super) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ZoneTransition {
+pub(crate) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ZoneTransition {
     let Some(vm) = items.get(slot) else {
         return ZoneTransition::None;
     };

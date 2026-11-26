@@ -1,4 +1,4 @@
-use super::fold::FoldState;
+use super::fold::{EntryStatus, FoldState, FoldTarget, fold_for_status};
 
 use super::unit::TuiRenderUnit;
 
@@ -50,6 +50,40 @@ pub struct TuiSubAgentGroup {
     pub user_modified: bool,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
+}
+
+impl TuiSubAgentGroup {
+    /// 组构造的唯一入口：状态 → running/error/fold 的映射与内容哈希在此一次算清。
+    ///
+    /// 消息区累计器（`SubAgentAccumulator::view_model`）与详情面板
+    /// （`find_live_detail_subagent`）都走这里，避免两处各写一遍字段与
+    /// `fold_for_status`/`recompute_hash` 的组合。
+    pub fn new(
+        instance_id: String,
+        agent_id: String,
+        agent_name: String,
+        view_models: im::Vector<TuiRenderUnit>,
+        preview_omitted: bool,
+        status: EntryStatus,
+        error_reason: Option<String>,
+    ) -> Self {
+        let mut group = Self {
+            instance_id,
+            agent_id,
+            agent_name,
+            view_models,
+            preview_omitted,
+            collapsed: false,
+            is_running: status == EntryStatus::Running,
+            is_error: status == EntryStatus::Error,
+            error_reason,
+            fold: fold_for_status(FoldTarget::SubAgent, status),
+            user_modified: false,
+            content_hash: 0,
+        };
+        group.recompute_hash();
+        group
+    }
 }
 
 impl TuiSubAgentGroup {
