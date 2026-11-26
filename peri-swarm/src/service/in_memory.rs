@@ -8,9 +8,10 @@ use serde_json::json;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
+use super::official_items::item_page;
 use super::{
-    resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
-    EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
+    AcceptedInput, CreateSessionCommand, CreateSessionResult, EventSubscription, PendingTurn,
+    SessionUpdateCommand, SwarmService,
 };
 use crate::config::SwarmConfig;
 use crate::domain::official::{unix_from_rfc3339, unix_now};
@@ -1250,23 +1251,7 @@ impl SwarmService for InMemorySwarmService {
             return Err(SwarmError::invalid_query("limit must be within 1..=500"));
         }
         let last_item_seq = self.last_seq(logical_id).await?;
-        let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
-        let page = self
-            .store
-            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
-            .await
-            .map_err(|error| store_failure("item_page", error))?;
-        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
-        let data = page.items.into_iter().map(|row| row.to_view()).collect();
-        Ok(ItemPage::new(
-            logical_id.as_str(),
-            items,
-            data,
-            page.next_cursor,
-            last_item_seq,
-            page.has_more,
-            window.order,
-        ))
+        item_page(self.store.as_ref(), logical_id, window, last_item_seq).await
     }
 
     async fn subscribe(

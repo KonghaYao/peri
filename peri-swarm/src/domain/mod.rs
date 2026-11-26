@@ -9,6 +9,7 @@ pub mod input;
 pub mod item;
 pub mod mcp;
 pub mod official;
+pub mod official_item;
 pub mod session;
 pub mod workspace;
 

@@ -5,6 +5,7 @@
 //! layer never branches on which implementation is present.
 
 mod in_memory;
+pub(crate) mod official_items;
 
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
@@ -387,7 +388,7 @@ struct TurnSeed {
 }
 
 /// A persisted turn whose opener is at or before the reconnect cursor.
-struct PreviousTurn {
+pub(crate) struct PreviousTurn {
     turn_id: String,
     created_at: i64,
     /// Last assistant final frame of this turn at or before the cursor.
@@ -420,6 +421,11 @@ enum RowFrame {
     Nothing,
 }
 
+/// 回放与 items 投影共享用户消息的开 turn 判定。
+fn user_opens_turn(has_turn: bool, has_output: bool, persisted_opener: bool) -> bool {
+    !has_turn || has_output || persisted_opener
+}
+
 /// Classify one persisted row and advance the open-turn state.
 fn classify_row(
     item: &crate::domain::ItemView,
@@ -445,7 +451,11 @@ fn classify_row(
             // no turn is open. Before that point it is a steer of the open turn.
             let produces_output = current.is_some_and(|turn| turns[turn].completed_at.is_some());
             let turn_id = crate::domain::turn_id_for_item(&item.item_id);
-            if current.is_none() || produces_output || persisted.contains_key(&turn_id) {
+            if user_opens_turn(
+                current.is_some(),
+                produces_output,
+                persisted.contains_key(&turn_id),
+            ) {
                 turns.push(ReplayTurn {
                     turn_id,
                     created_at: crate::domain::official::unix_from_rfc3339(&item.created_at),
@@ -1057,7 +1067,7 @@ fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str
 /// soon as the opener is confirmed, so a normal session reads only the tail of
 /// the previous turn; a session whose turns never produced output reads back to
 /// its first user item.
-async fn turn_at_cursor(
+pub(crate) async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,
     up_to: u64,
@@ -1068,7 +1078,12 @@ async fn turn_at_cursor(
     let mut opener: Option<crate::domain::ItemView> = None;
     let mut newest_complete: Option<(u64, i64)> = None;
     let mut complete_since_opener = false;
+    let mut scanned_pages = 0;
     while let Some(bound) = before {
+        scanned_pages += 1;
+        if scanned_pages == 11 {
+            tracing::warn!(logical_id, up_to, "turn history lookup exceeds ten pages");
+        }
         let page = store
             .swarm_items_before(logical_id, Some(bound), ItemsWindow::MAX_LIMIT)
             .await

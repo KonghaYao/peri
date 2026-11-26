@@ -45,9 +45,10 @@ use crate::domain::{
     SwarmError, TurnPage, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
+use crate::service::official_items::item_page;
 use crate::service::{
-    resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
-    EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
+    AcceptedInput, CreateSessionCommand, CreateSessionResult, EventSubscription, PendingTurn,
+    SessionUpdateCommand, SwarmService,
 };
 use crate::store::{
     store_failure, InputPut, SwarmBindingRow, SwarmInputRow, SwarmSessionPatch, SwarmSessionRow,
@@ -2020,26 +2021,7 @@ impl SwarmService for AcpSwarmService {
             return Err(SwarmError::invalid_query("limit must be within 1..=500"));
         }
         let last_item_seq = self.last_seq(logical_id).await?;
-        // The official `CursorPage` sends the last item's `id` as `after`; map
-        // it to that item's greatest seq before querying. The store then pages
-        // by item, so a long message cannot fill the row budget.
-        let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
-        let page = self
-            .store
-            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
-            .await
-            .map_err(|error| store_failure("item_page", error))?;
-        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
-        let data = page.items.into_iter().map(|row| row.to_view()).collect();
-        Ok(ItemPage::new(
-            logical_id.as_str(),
-            items,
-            data,
-            page.next_cursor,
-            last_item_seq,
-            page.has_more,
-            window.order,
-        ))
+        item_page(self.store.as_ref(), logical_id, window, last_item_seq).await
     }
 
     async fn subscribe(
