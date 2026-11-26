@@ -32,6 +32,9 @@ use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore};
 
 const LOGICAL_ID: &str = "agent-approval-test";
 
+#[path = "service_cancel_test.rs"]
+mod cancel_tests;
+
 struct Fixture {
     service: Arc<AcpSwarmService>,
     log: Arc<ItemLog>,

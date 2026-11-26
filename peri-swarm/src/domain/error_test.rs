@@ -34,6 +34,22 @@ fn error_codes_are_stable_strings() {
 }
 
 #[test]
+fn mutation_conflict_points_to_the_official_cancel_event() {
+    let error = SwarmError::turn_in_progress_for_mutation("agent-01");
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    assert!(!error.message().contains("steer"));
+    assert_eq!(
+        error.details(),
+        &serde_json::json!({
+            "suggest": "cancel",
+            "event": "agent.session.input.cancel",
+            "endpoint": "POST /v1/agents/sessions/agent-01/events",
+        })
+    );
+}
+
+#[test]
 fn constructors_keep_actions_diagnosable() {
     let busy = SwarmError::turn_in_progress();
     assert_eq!(busy.details()["suggest"], serde_json::json!("steer"));

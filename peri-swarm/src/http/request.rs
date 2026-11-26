@@ -6,6 +6,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
+use crate::domain::input::OFFICIAL_CANCEL_EVENT;
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
@@ -786,10 +787,7 @@ pub fn resolve_submission(
     Ok(submission)
 }
 
-/// Parse the official `{events: [...]}` envelope into the existing acceptance
-/// semantics: exactly one `agent.session.input.message` event carrying exactly
-/// one user message, plain `input_text` content, accepted as one `turn` input.
-/// Unsupported official features are reported explicitly, never dropped.
+/// 解析单条官方 message 或 cancel；不支持的字段不会被静默丢弃。
 fn resolve_official_envelope(
     events: &Value,
     body: &SubmitEventBody,
@@ -804,22 +802,31 @@ fn resolve_official_envelope(
     let Some(items) = events.as_array() else {
         return Err(official_invalid(
             "events",
-            "events must be an array containing exactly one `agent.session.input.message`",
+            "events must be an array containing exactly one event",
         ));
     };
     if items.len() != 1 {
         return Err(official_invalid(
             "events",
-            "only one event is supported; send a single `agent.session.input.message`",
+            "only one event is supported; send a single event",
         ));
     }
 
     let event: OfficialEventBody = serde_json::from_value(items[0].clone())
         .map_err(|error| official_event_shape_error(&items[0], error))?;
+    if event.kind == OFFICIAL_CANCEL_EVENT {
+        if items[0].get("input").is_some() {
+            return Err(official_invalid(
+                "events[0].input",
+                "the cancel event does not accept `input`",
+            ));
+        }
+        return official_submission(headers, InputKind::Control, "cancel".to_owned());
+    }
     if event.kind != OFFICIAL_INPUT_EVENT {
         return Err(official_invalid(
             "events[0].type",
-            "only the `agent.session.input.message` event is supported",
+            "only `agent.session.input.message` and `agent.session.input.cancel` are supported by this path",
         ));
     }
     let Some(input) = event.input else {
@@ -925,20 +932,23 @@ fn resolve_official_envelope(
     // envelope therefore ends at the existing `empty_input`.
     let text = texts.join("\n");
     check_len("text", &text, MAX_TEXT_BYTES)?;
+    official_submission(headers, InputKind::User, text)
+}
+
+fn official_submission(
+    headers: &HeaderMap,
+    kind: InputKind,
+    text: String,
+) -> Result<InputSubmission, SwarmError> {
+    // 官方信封没有 body inputId；没有调用方提供的键时不保证重试幂等。
     let input_id = match idempotency_key(headers)? {
-        Some(input_id) => input_id,
-        // Compatibility carve-out: the official envelope has no body inputId,
-        // and the official API does not promise retry idempotency without a
-        // caller key. The native path still never generates one.
+        Some(input_id) if Uuid::parse_str(&input_id).is_ok() => input_id,
+        Some(_) => return Err(SwarmError::invalid_input("inputId must be a UUID")),
         None => Uuid::now_v7().to_string(),
     };
-    if Uuid::parse_str(&input_id).is_err() {
-        return Err(SwarmError::invalid_input("inputId must be a UUID"));
-    }
-
     let submission = InputSubmission {
         input_id,
-        kind: InputKind::User,
+        kind,
         mode: InputMode::Turn,
         text: Some(text),
         attachments: Vec::new(),
@@ -991,7 +1001,7 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
     {
         return official_invalid(
             format!("events[0].{extra}"),
-            "this event field is not supported by the single-message compatibility path",
+            "this event field is not supported by the single-event compatibility path",
         );
     }
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))

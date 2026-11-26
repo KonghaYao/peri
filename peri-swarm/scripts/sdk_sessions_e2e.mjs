@@ -22,7 +22,7 @@
 // `session.in_progress` -> `turn.created` -> `turn.in_progress` start order,
 // assistant `turn.item.done` with `phase=final_answer` and non-empty
 // `output_text`, `turn.completed`, `agent.session.idle`. A deterministic
-// `control=cancel` probe against a slow stub stream asserts that the
+// `agent.session.input.cancel` probe against a slow stub stream asserts that the
 // cancellation request is accepted and the stream still reaches a terminal
 // without throwing. Cancellation is folded into
 // `turn.completed(status="cancelled")` by contract; the real host behavior is
@@ -562,7 +562,7 @@ async function main() {
   recordDifference(
     '模型 stub 的失败注入能力',
     { directives: stubAtStart.directives },
-    'stub 没有独立失败开关；未知 [[tool:<name>]] 指令会返回 400，但真实 host 将其折叠为 completed 空 turn（见末尾差异）。取消路径使用 control=cancel。',
+    'stub 没有独立失败开关；未知 [[tool:<name>]] 指令会返回 400，但真实 host 将其折叠为 completed 空 turn（见末尾差异）。取消路径使用 agent.session.input.cancel。',
   );
 
   const verificationCode = crypto.randomBytes(16).toString('hex');
@@ -1618,10 +1618,12 @@ async function main() {
     input: cancelAccepted,
   });
   cancelTiming.controlSentAtMs = Date.now() - cancelStreamStarted;
-  const cancelControl = await client.post(`/agents/sessions/${createdSessionId}/events`, {
-    body: { inputId: cancelControlId, kind: 'control', text: 'cancel' },
-    headers: CONTRACT_HEADERS,
-  });
+  const cancelResponse = await sessionEvents.create(createdSessionId, {
+    'Idempotency-Key': cancelControlId,
+    events: [{ type: 'agent.session.input.cancel' }],
+  }, { headers: CONTRACT_HEADERS }).asResponse();
+  check('SDK cancel returned HTTP 202', cancelResponse.status === 202, cancelResponse.status);
+  const cancelControl = await cancelResponse.json();
   cancelTiming.controlReturnedAtMs = Date.now() - cancelStreamStarted;
   summary.timings.cancelPostMs = Date.now() - cancelStreamStarted;
   summary.cancelAccepted = { input: cancelAccepted, control: cancelControl };
@@ -1680,18 +1682,13 @@ async function main() {
     gateway_stop_reason: cancelGatewayTurn?.stopReason ?? null,
     session_status: cancelIdle?.session?.status,
   };
-  recordDifference(
-    '真实 provider 流上的 control=cancel 终态',
-    {
-      turnStartedAtMs: cancelTiming.turnStartedAtMs,
-      controlSentAtMs: cancelTiming.controlSentAtMs,
-      controlReturnedAtMs: cancelTiming.controlReturnedAtMs,
-      terminalAtMs: cancelTiming.terminalAtMs,
-      officialStatus: cancelCompleted?.turn?.status,
-      gatewayStopReason: cancelGatewayTurn?.stopReason ?? null,
-    },
-    'control 在 turn.created 后约 1ms 到达，但真实 Peri host 没有中断在途 provider 流；turn 以 completed 结束，而不是 cancelled。脚本只断言取消请求被受理、终态可收敛且不崩溃。',
-  );
+  if (cancelCompleted?.turn?.status !== 'cancelled') {
+    recordDifference(
+      '真实 provider 流上的官方取消未以 cancelled 终止',
+      { ...cancelTiming, officialStatus: cancelCompleted?.turn?.status, gatewayStopReason: cancelGatewayTurn?.stopReason ?? null },
+      '网关受理了取消，但宿主未报告 cancelled。脚本将宿主终态原样记录，不把它算作取消成功。',
+    );
+  }
 
   const afterCancelWait = await waitForSession(
     client,

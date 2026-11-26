@@ -103,7 +103,15 @@ pub struct InputSubmission {
     pub original_draft: Option<String>,
 }
 
+pub(crate) const OFFICIAL_CANCEL_EVENT: &str = "agent.session.input.cancel";
+
 impl InputSubmission {
+    /// 原生控制输入和官方 cancel 共用同一取消判定。
+    pub(crate) fn is_cancel(&self) -> bool {
+        self.kind == InputKind::Control
+            && self.effective_text().trim().eq_ignore_ascii_case("cancel")
+    }
+
     /// `inputId` is the idempotency key; the fingerprint is the SHA-256 of a
     /// canonical JSON object with a fixed field order (`design §2.8`).
     /// Only the hash is persisted.

@@ -457,7 +457,8 @@ fn official_events_envelope_rejects_image_content_at_its_index() {
 #[test]
 fn official_events_envelope_rejects_unknown_event_types_by_name() {
     for kind in [
-        "agent.session.input.cancel",
+        "agent.session.input.tool_result",
+        "agent.session.input.computer_use_approval_request_result",
         "mcp_approval_request_result",
         "agent.session.input.unknown",
     ] {
@@ -469,6 +470,72 @@ fn official_events_envelope_rejects_unknown_event_types_by_name() {
         assert_eq!(error.code(), ErrorCode::InvalidInput, "{kind}");
         assert_eq!(field(&error), "events[0].type", "{kind}");
         assert!(error.message().contains("agent.session.input.message"));
+    }
+}
+
+#[test]
+fn official_cancel_resolves_to_control_without_a_user_input() {
+    for key in [None, Some("0192f0c5-0000-7000-8000-0000000000c1")] {
+        let headers = key.map(idempotency_headers).unwrap_or_default();
+        let event = super::resolve_event(
+            event_body(json!({"events": [{"type":"agent.session.input.cancel"}]})),
+            &headers,
+        )
+        .expect("cancel");
+        let super::SubmitEvent::Input(input) = event else {
+            panic!("expected control input")
+        };
+        assert_eq!(input.kind, InputKind::Control);
+        assert_eq!(input.mode, InputMode::Turn);
+        assert_eq!(input.text.as_deref(), Some("cancel"));
+        assert!(
+            input.attachments.is_empty()
+                && input.plugin_selections.is_empty()
+                && input.original_draft.is_none()
+        );
+        if let Some(key) = key {
+            assert_eq!(input.input_id, key);
+        } else {
+            assert_eq!(
+                uuid::Uuid::parse_str(&input.input_id)
+                    .unwrap()
+                    .get_version_num(),
+                7
+            );
+        }
+    }
+}
+
+#[test]
+fn official_cancel_rejects_input_fields_mixed_shapes_and_batches() {
+    let cancel = "agent.session.input.cancel";
+    for (body, expected) in [
+        (
+            json!({"events": [{"type": cancel, "input": []}]}),
+            "events[0].input",
+        ),
+        (
+            json!({"events": [{"type": cancel, "input": null}]}),
+            "events[0].input",
+        ),
+        (
+            json!({"events": [{"type": cancel, "reason": "stop"}]}),
+            "events[0].reason",
+        ),
+        (
+            json!({"events": [{"type": cancel}, {"type":"agent.session.input.message"}]}),
+            "events",
+        ),
+        (
+            json!({"events": [{"type": cancel}], "kind":"control"}),
+            "kind",
+        ),
+    ] {
+        let error = super::resolve_event(event_body(body), &HeaderMap::new())
+            .expect_err("malformed cancel");
+        assert_eq!(error.kind(), ErrorKind::BadRequest);
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert_eq!(field(&error), expected);
     }
 }
 

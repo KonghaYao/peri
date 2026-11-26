@@ -1760,7 +1760,9 @@ impl SwarmService for AcpSwarmService {
         if runtime.as_ref().is_some_and(|runtime| {
             runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
         }) {
-            return Err(SwarmError::turn_in_progress());
+            return Err(SwarmError::turn_in_progress_for_mutation(
+                logical_id.as_str(),
+            ));
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             // The live host is gone but the durable row still owns an open
@@ -1820,7 +1822,9 @@ impl SwarmService for AcpSwarmService {
         if runtime.as_ref().is_some_and(|runtime| {
             runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
         }) {
-            return Err(SwarmError::turn_in_progress());
+            return Err(SwarmError::turn_in_progress_for_mutation(
+                logical_id.as_str(),
+            ));
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             // No live host owns this row, but its durable turn is still open;
@@ -1867,7 +1871,7 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         submission: InputSubmission,
     ) -> Result<AcceptedInput, SwarmError> {
-        self.require_row(logical_id).await?;
+        let row = self.require_row(logical_id).await?;
         if submission.is_empty() {
             return Err(SwarmError::empty_input());
         }
@@ -1893,6 +1897,13 @@ impl SwarmService for AcpSwarmService {
         } else {
             self.sessions.lock().get(logical_id.as_str()).cloned()
         };
+        let cancel = submission.is_cancel();
+        if cancel
+            && runtime.is_none()
+            && crate::service::persisted_turn_resume_required(store, &row).await?
+        {
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
+        }
         let mut admission = match &runtime {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
@@ -1986,16 +1997,9 @@ impl SwarmService for AcpSwarmService {
         drop(admission);
 
         // 控制输入只记录收据；cancel 仍绑定在准入时看到的 turn。
-        if submission.kind == InputKind::Control
-            && submission
-                .effective_text()
-                .trim()
-                .eq_ignore_ascii_case("cancel")
-        {
-            if let Some(admitted) = admitted_slot.as_ref() {
-                self.cancel_turn(logical_id, Some(&admitted.request_id))
-                    .await?;
-            }
+        if let Some(admitted) = admitted_slot.as_ref().filter(|_| cancel) {
+            self.cancel_turn(logical_id, Some(&admitted.request_id))
+                .await?;
         }
         let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
         // 普通 turn 仍由调用方在 202 后运行，不能在受理时等待模型。

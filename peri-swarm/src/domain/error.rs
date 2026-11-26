@@ -258,6 +258,20 @@ impl SwarmError {
     }
 
     #[must_use]
+    pub fn turn_in_progress_for_mutation(logical_id: &str) -> Self {
+        Self::new(
+            ErrorKind::Conflict,
+            ErrorCode::TurnInProgress,
+            "a turn is already running; cancel it before updating or deleting the session",
+        )
+        .with_details(serde_json::json!({
+            "suggest": "cancel",
+            "event": super::input::OFFICIAL_CANCEL_EVENT,
+            "endpoint": format!("POST /v1/agents/sessions/{logical_id}/events"),
+        }))
+    }
+
+    #[must_use]
     pub fn turn_superseded() -> Self {
         Self::new(
             ErrorKind::Conflict,
