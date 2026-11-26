@@ -96,6 +96,7 @@ impl HostCapabilities {
         disabled: &std::collections::HashSet<String>,
     ) -> Self {
         Self {
+            cron: self.cron && !disabled.contains("cron"),
             plugins: self.plugins && !peri_middlewares::assembly::plugin_face_closed(disabled),
             stdio_mcp: self.stdio_mcp && !disabled.contains(STDIO_MCP_UNAVAILABLE),
             settings_hooks: self.settings_hooks && !disabled.contains(SETTINGS_HOOKS_UNAVAILABLE),
