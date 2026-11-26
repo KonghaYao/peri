@@ -11,10 +11,10 @@
 //!
 //! 纪律（与资源层一致）：
 //!
-//! - 只接受凭证**来源**（环境变量名），不接受 token 字面量，不读 `.env`；
+//! - 独立的密码参数只接受环境变量名；PostgreSQL DSN 可包含密码；
 //! - `engine` 只在 locator 形态无法唯一决定引擎时给出，资源层不按 scheme/端口猜；
 //! - `access` 是入口决定的意图，**不是权限**：能不能写由打开结果回答；
-//! - 本类型不含凭证值，`Debug` 也不回显任何 locator 取值（远程 locator 含主机与库名）。
+//! - `Debug` 隐藏 locator 原文（可能含 DSN 密码和连接参数）。
 
 use std::fmt;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ impl fmt::Debug for SessionStoreLocator {
         match self {
             Self::Default => formatter.write_str("Default"),
             Self::LocalPath(path) => formatter.debug_tuple("LocalPath").field(path).finish(),
-            Self::Locator(locator) => formatter.debug_tuple("Locator").field(locator).finish(),
+            Self::Locator(_) => formatter.write_str("Locator(<redacted>)"),
         }
     }
 }
@@ -101,7 +101,7 @@ impl SessionStoreDeployment {
         }
     }
 
-    /// `--session-store-engine <名>`：只在 locator 形态无法唯一决定引擎时需要。
+    /// `--session-store-engine <名>`：远程数据库引擎的可选显式选择。
     pub fn with_engine(mut self, engine: impl Into<String>) -> Self {
         self.engine = Some(engine.into());
         self

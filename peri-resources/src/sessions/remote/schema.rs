@@ -1,110 +1,57 @@
-//! 远程版本标记、store 身份与只读检查（C §4、§6）。
-//!
-//! 「两个存储模式一致」之后，远端会话表**就是**本地形状（`sessions::canonical` 是那份 DDL
-//! 的唯一来源），所以版本号也同源：`REMOTE_SCHEMA_VERSION` 直接取本机的
-//! `CURRENT_SCHEMA_VERSION`。两者仍有一处执行器差异，且只有这一处——远端写不了
-//! `PRAGMA user_version`（服务端直接拒绝，实测见母 issue §9.8 探测项 5b），版本标记只能落在
-//! 普通表的单行事实里（[`STORE_META_TABLE`]）。差异是**载体**，不是版本代数。
-//!
-//! 契约标签 [`STORE_CONTRACT`] 记的是形状代数，形状变化一次推进一代：`v2` 是远端会话表形状的
-//! 上一代（schema 10|11，执行登记独立成表、绑定行指向登记表），`v5` 是上一代当前形状
-//! （schema 11，执行登记已并入 `workspaces`，但没有 inherited 派生索引表），`v6` 是当前形状
-//! （schema 12，新增两张可重建的派生索引表）。契约不符的库被 [`acceptance`] /
-//! [`matches_build`] 判为不认识——这是有意的 fail-closed：不迁移、不覆盖，也不按旧语义读写。
-//! 两条写升级路径：`v2` 由 `schema_upgrade` 一条搬运批次升级到位；`v5` 走只补派生索引表与
-//! canonical 索引集的增量批次。两者都保留目标与扩展对象并推进版本，store 身份与账本保持不变。
-//!
-//! 契约与版本只说「这是哪个代数的库」，**不说**这个库的表真的长成那个样子。打开路径因此在
-//! 身份读取之后再做一次**只读的形状探测**（[`shape_probe`]）：读得动的库必须与契约声明的
-//! 形状逐项相符，不符即拒绝——旧构建、被手工改过的库与同名的别的对象都拦在读写之前，
-//! 而不是让第一句读写以「列不存在」这类下游错误暴露。形状探测不是迁移依据：写打开的迁移
-//! 批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
-//!
-//! 三条硬规则：
-//!
-//! - **读不写**：身份/版本读取与形状探测只有 SELECT 和只读 PRAGMA（`identity_read_plan` 可离线断言）。
-//! - **未知不覆盖**：版本高于本构建、契约不符或形状不可解释时一律拒绝，不做 DDL、
-//!   不猜列形状；初始化只在「确定不存在」时创建，已存在时读回而不改写。
-//! - **唯一身份**：`store_id` 由首次初始化竞争产生（元数据行主键），失败者读胜者，
-//!   不各造一个 StoreId；竞争结论是**结构化的**（[`StoreIdentityOutcome`]：胜者 `Created`、
-//!   败者与读已有库同为 `Existing`），首次登记资格只跟 `Created` 走，不由「打开前看到空库」
-//!   或「读回里现在有身份」推导。只有本事务确切插入元数据行并提交才算创建——结果未知
-//!   （丢响应、超时）不产生创建事实。
+//! PostgreSQL store identity. Every object, the version marker and its shape
+//! signature are committed together. Read-only opens only query the catalog.
 
-use std::collections::HashMap;
 use std::fmt;
 
-use peri_acp_types::session_resources::SessionResourceResult;
-use turso_serverless::Value;
+use super::sql::{self, StatementSpec, Value};
 
-use super::sql::StatementSpec;
-use crate::sessions::schema_shape::{self, ActualColumn};
+pub(super) const REMOTE_SCHEMA_VERSION: i64 = 1;
+pub(super) const STORE_CONTRACT: &str = "peri.session.postgres/v1";
 
-/// 本构建写入并接受的远端 schema 版本：**与本机 `CURRENT_SCHEMA_VERSION` 同一个常量**。
-///
-/// 两端形状相同，版本就不该各自一份；任何一侧推进版本，另一侧跟着走。
-pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURRENT_SCHEMA_VERSION;
-
-/// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
-///
-/// `v9` = 当前形状（schema 15）：`projects` 删 `object_identity` 并收窄为 `UNIQUE(locator)`，
-/// `workspaces` 删 `identity`，`session_bindings` 删 `evidence_origin`，两张 inherited 派生
-/// 索引表退役，绑定行的创建证据收缩为最小执行根。`v8` 是上一代当前形状（schema 14，含三列
-/// 与两表，写打开走 v15 清理批次）；`v7` 是再上一代（schema 13，已有 `thread_mq`，缺两列
-/// 工作快照）；`v6` 是 schema 12（缺 `thread_mq`）；`v5` 是 schema 11（连派生索引表也没有）；
-/// `v2` 是统一前远端会话表形状（schema 10|11，执行登记独立成表）。中间的 16..=19 是未发布的
-/// 开发期形状，本构建一律不认识。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v9";
-
-/// 唯一升级来源（压缩前形状）：远端会话表形状的上一代（schema 10|11），读得懂，
-/// 写打开先完成一次性搬运升级。
-pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v2";
-
-/// 上一代当前形状（schema 14）：canonical 会话表齐全，含 v15 要删的三列与两张派生索引表。
-/// 读打开直接可用；写打开走 v15 清理批次并推进版本与契约。
-pub(super) const PREVIOUS_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v8";
-
-/// 再上一代当前形状（schema 13）：canonical 会话表与本代相同，只缺 `threads` 的两列工作
-/// 快照。读打开直接可用；写打开做一次增量补齐与 v15 清理。
-pub(super) const LEGACY_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v7";
-
-/// 更早的当前形状（schema 12）：canonical 会话表齐全，缺 `thread_mq` 与两列。
-pub(super) const OLDER_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v6";
-
-/// 最早一档当前形状（schema 11）：canonical 会话表齐全，缺派生索引表、`thread_mq` 与两列。
-pub(super) const OLDEST_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v5";
-
-/// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
-///
-/// 只在「写打开 + 尚未初始化」这条路径上探测一次；命中即拒绝，不迁移也不覆盖。
-pub(super) const LEGACY_SHAPE_TABLES: &[&str] = &["peri_sessions", "peri_session_messages"];
-
-/// 旧形状探测（只读、全绑定）：库里有几张本构建不认识的旧会话表。
-pub(super) const COUNT_LEGACY_TABLES_SQL: &str = "SELECT COUNT(*) FROM sqlite_master
-    WHERE type = 'table' AND name IN (?1, ?2)";
-
-/// 单行元数据表：`singleton` 固定 0，主键即身份竞争的同一唯一键空间。
-pub(super) const STORE_META_TABLE: &str = "peri_store_meta";
-
-pub(super) const TABLE_EXISTS_SQL: &str =
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1";
+const TABLE_EXISTS_SQL: &str = "SELECT c.relname::text FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND c.relname = 'peri_store_meta'";
 
 const SELECT_META_SQL: &str =
     "SELECT schema_version, store_id, contract FROM peri_store_meta WHERE singleton = 0";
 
 pub(super) const CREATE_STORE_META_SQL: &str = "CREATE TABLE IF NOT EXISTS peri_store_meta (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
-    schema_version INTEGER NOT NULL,
+    singleton BIGINT PRIMARY KEY CHECK (singleton = 0),
+    schema_version BIGINT NOT NULL,
     store_id TEXT NOT NULL,
     contract TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    shape_signature TEXT NOT NULL DEFAULT ''
 )";
 
 const INSERT_STORE_META_SQL: &str = "INSERT INTO peri_store_meta
-    (singleton, schema_version, store_id, contract, created_at)
-    VALUES (0, ?1, ?2, ?3, ?4)";
+    (singleton, schema_version, store_id, contract, created_at, shape_signature)
+    VALUES (0, $1, $2, $3, $4, '')";
 
-/// 远端持久化的存储身份（权威来源是远端 `peri_store_meta`，不是 URL 别名）。
+// This runs under the transaction's initialization lock. IF NOT EXISTS in
+// shared canonical DDL may only see objects built by this very transaction.
+// Keep the identity INSERT the only insert into peri_store_meta in this batch.
+// HTTP proxies report the conflicting constraint but omit the statement index.
+const REFUSE_COLLISIONS_SQL: &str = "UPDATE peri_store_meta SET schema_version = NULL
+    WHERE singleton = 0 AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema() AND c.relname <> 'peri_store_meta'
+          AND c.relname::text = ANY(string_to_array($1, ','))
+    )";
+
+const RECORD_SHAPE_SQL: &str = concat!(
+    "UPDATE peri_store_meta SET shape_signature = (",
+    include_str!("schema_signature.sql"),
+    ") WHERE singleton = 0"
+);
+
+pub(super) const VERIFY_SHAPE_SQL: &str = concat!(
+    "SELECT (shape_signature = (",
+    include_str!("schema_signature.sql"),
+    "))::integer FROM peri_store_meta WHERE singleton = 0 AND store_id = $2"
+);
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct StoreId(String);
 
@@ -134,55 +81,14 @@ pub(super) struct StoreSnapshot {
 }
 
 impl StoreSnapshot {
-    /// 本构建是否认识这个库：契约一致且版本可接受。
     pub(super) fn matches_build(&self) -> bool {
-        self.contract == STORE_CONTRACT
-            && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
-    }
-
-    /// 本构建的读取面是否覆盖这个库：本代直接读；`v8` + 14、`v7` + 13、`v6` + 12 与
-    /// `v5` + 11（历代当前形状）以及统一前的 `v2`（10|11）只读可用，写打开走各自的升级路径。
-    /// 代际之外的形状一律不认识。
-    pub(super) fn readable(&self) -> bool {
-        self.matches_build()
-            || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 10 | 11))
-            || (self.contract == PREVIOUS_CURRENT_STORE_CONTRACT && self.schema_version == 14)
-            || (self.contract == LEGACY_CURRENT_STORE_CONTRACT && self.schema_version == 13)
-            || (self.contract == OLDER_CURRENT_STORE_CONTRACT && self.schema_version == 12)
-            || (self.contract == OLDEST_CURRENT_STORE_CONTRACT && self.schema_version == 11)
+        self.contract == STORE_CONTRACT && self.schema_version == REMOTE_SCHEMA_VERSION
     }
 }
-
-/// 版本判定（纯函数）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SchemaAcceptance {
-    /// 本构建可读写。
-    Accept,
-    /// 已识别的旧版（10..=14）：只读使用同一组查询，写打开按契约走搬运、增量补齐或
-    /// v15 清理批次。
-    Upgradeable,
-    /// 高于本构建：拒绝，不迁移、不降级写入。
-    TooNew,
-    /// 其他旧版或非法版本：拒绝，不猜。
-    Unusable,
-}
-
-pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
-    if version == REMOTE_SCHEMA_VERSION {
-        SchemaAcceptance::Accept
-    } else if matches!(version, 10..=14) {
-        SchemaAcceptance::Upgradeable
-    } else if version > REMOTE_SCHEMA_VERSION {
-        SchemaAcceptance::TooNew
-    } else {
-        SchemaAcceptance::Unusable
-    }
-}
-
 /// 只读身份读取的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum StoreIdentityRead {
-    /// 本任务 schema 尚未初始化（表不存在，或表存在但没有元数据行）。
+    /// 本任务 schema 尚未初始化（表不存在）。
     Uninitialized,
     /// 已初始化。
     Present(StoreSnapshot),
@@ -212,19 +118,13 @@ impl StoreIdentityOutcome {
     }
 }
 
-/// 初始化批的结果是否证明**本事务插入了**元数据行。
-///
-/// 只有 `META_INSERT_INDEX` 那条语句受影响行数为 1 才算：批成功但该语句没有插入任何行
-/// （行已存在、语句被跳过）不构成创建；批失败（唯一键冲突、超时、丢响应）时根本没有这个
-/// 结果，也无从证明。这是 created 的唯一证据，不由「打开前看到空库」推导。
-pub(super) fn inserted_meta_row(counts: &[u64]) -> bool {
-    counts.get(META_INSERT_INDEX) == Some(&1)
+pub(super) fn identity_read_plan() -> [StatementSpec; 2] {
+    [
+        StatementSpec::bare(TABLE_EXISTS_SQL),
+        StatementSpec::bare(SELECT_META_SQL),
+    ]
 }
 
-/// 只读读取的结果判定（纯函数）：表是否存在 + 元数据行原样交给它。
-///
-/// 表不存在与「表在但行不在」都是未初始化；行在但形状不可解释是 `Malformed`——不猜身份，
-/// 也不把读不懂当成「空库可用」。真引擎 seam 与生产读取共用这一处判定。
 pub(super) fn interpret_identity_read(
     table_exists: bool,
     row: Option<&[Value]>,
@@ -232,260 +132,40 @@ pub(super) fn interpret_identity_read(
     if !table_exists {
         return StoreIdentityRead::Uninitialized;
     }
-    match row {
-        Some(values) => match decode_identity(values) {
-            Some(snapshot) => StoreIdentityRead::Present(snapshot),
-            None => StoreIdentityRead::Malformed,
-        },
-        None => StoreIdentityRead::Uninitialized,
+    // Our creation transaction cannot leave an empty metadata table.
+    match row.and_then(decode_identity) {
+        Some(snapshot) => StoreIdentityRead::Present(snapshot),
+        None => StoreIdentityRead::Malformed,
     }
 }
 
-/// 只读身份读取的语句计划：全部是 SELECT。
-///
-/// `sqlite_master` 只用来判断表是否存在（其可用性由 cloud 实验断言，不作为身份判据）；
-/// 表存在时再读元数据行，缺列等形状问题会以读失败上报，绝不会触发写。
-pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
-    vec![
-        StatementSpec::new(
-            TABLE_EXISTS_SQL,
-            vec![Value::Text(STORE_META_TABLE.to_owned())],
-        ),
-        StatementSpec::bare(SELECT_META_SQL),
-    ]
-}
-
-/// 打开路径要探测的形状代数：由契约与版本决定（[`shape_probe`]）。
-///
-/// 远端在同一只读批内逐表执行 PRAGMA 读回列形状（`schema_shape` 的同一份声明与判定），
-/// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ShapeProbe {
-    /// 当前形状（`v8` + 14）：canonical 会话表（`threads` 含两列工作快照）+ `thread_mq`
-    /// 逐表严格判定；两张 inherited 派生索引表可选（缺表时读取回退扫描），存在时仍逐项相符。
-    Current,
-    /// 上一代与再上一代当前形状（`v8` + 14、`v7` + 13、`v6` + 12、`v5` + 11）：先按 v14 声明
-    /// 判定（11 张表，含两列工作快照与两张派生索引表），再依次退让到 v13（`threads` 少两列）、
-    /// v12（还缺 `thread_mq`）。写打开做增量补齐与 v15 清理。
-    PreviousCurrent,
-    /// 迁移输入形状（`v2` + 10|11）：搬运输入的上下界，外加要删除对象的严格判定。
-    Input,
-}
-
-pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
-    ("machines", "PRAGMA table_xinfo('machines')"),
-    ("projects", "PRAGMA table_xinfo('projects')"),
-    ("workspaces", "PRAGMA table_xinfo('workspaces')"),
-    ("threads", "PRAGMA table_xinfo('threads')"),
-    ("messages", "PRAGMA table_xinfo('messages')"),
-    ("session_bindings", "PRAGMA table_xinfo('session_bindings')"),
-    (
-        "mcp_oauth_credentials",
-        "PRAGMA table_xinfo('mcp_oauth_credentials')",
-    ),
-    (
-        "session_close_intents",
-        "PRAGMA table_xinfo('session_close_intents')",
-    ),
-    ("thread_mq", "PRAGMA table_xinfo('thread_mq')"),
-];
-
-/// 与列形状一起读取；缺失的 canonical 索引由可写打开补齐。
-pub(super) const CURRENT_INDEX_DEFINITIONS_SQL: &str =
-    "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'";
-
-fn same_index_sql(actual: &str, canonical: &str) -> bool {
-    actual
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .map(|byte| byte.to_ascii_lowercase())
-        .eq(canonical
-            .bytes()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .map(|byte| byte.to_ascii_lowercase()))
-}
-
-/// 必要索引缺失可以补建；同名异形必须拒绝，`IF NOT EXISTS` 无法修正它。
-pub(super) fn current_indexes_missing(rows: &[Vec<Value>]) -> Result<bool, String> {
-    let mut missing = false;
-    for create in crate::sessions::canonical::CREATE_INDEXES {
-        let name = create
-            .split_whitespace()
-            .nth(5)
-            .expect("canonical CREATE INDEX must declare its name");
-        let table = create
-            .split_whitespace()
-            .nth(7)
-            .and_then(|on| on.split('(').next())
-            .expect("canonical CREATE INDEX must name a table");
-        let expected_sql = create.replacen("IF NOT EXISTS ", "", 1);
-        let row = rows.iter().find(|row| {
-            super::sql::text_at(row, 0).is_some_and(|actual| actual.eq_ignore_ascii_case(name))
-        });
-        match row {
-            None => missing = true,
-            Some(row)
-                if super::sql::text_at(row, 1)
-                    .is_some_and(|actual| actual.eq_ignore_ascii_case(table))
-                    && super::sql::text_at(row, 2).is_some_and(|actual| {
-                        same_index_sql(actual, &expected_sql) || same_index_sql(actual, create)
-                    }) => {}
-            Some(_) => return Err(format!("index {name} definition drifted")),
-        }
+pub(super) fn decode_identity(values: &[Value]) -> Option<StoreSnapshot> {
+    let schema_version = sql::int_at(values, 0)?;
+    let store_id = sql::text_at(values, 1)?;
+    let contract = sql::text_at(values, 2)?;
+    if store_id.is_empty() {
+        return None;
     }
-    Ok(missing)
+    Some(StoreSnapshot {
+        store_id: StoreId(store_id.to_owned()),
+        schema_version,
+        contract: contract.to_owned(),
+    })
 }
 
-impl ShapeProbe {
-    /// 本机 SQLite 测试使用的单条 SELECT；远端打开使用逐表 PRAGMA，避免不兼容的表值函数。
-    pub(super) fn sql(self) -> &'static str {
-        match self {
-            Self::Current | Self::PreviousCurrent => schema_shape::CURRENT_COLUMNS_SQL,
-            Self::Input => schema_shape::INPUT_COLUMNS_SQL,
-        }
-    }
+// Writers acquire the transaction-scoped lock before executing this plan.
+// The loser of an initialization race reaches the occupied singleton first;
+// a different shape or a collision on a session table rolls back all new DDL.
+pub(super) const META_INSERT_INDEX: usize = 1;
 
-    pub(super) fn table_names(self) -> impl Iterator<Item = &'static str> {
-        match self {
-            Self::Current => schema_shape::current_table_names().collect::<Vec<_>>(),
-            // 上一代当前形状的表集合：v14 的 11 张表（含 `thread_mq` 与两张派生索引表）。
-            // v13/v12/v11 缺表时 PRAGMA 读回空行，判定按 v13/v12 声明继续退让。
-            Self::PreviousCurrent => schema_shape::v14_tables()
-                .iter()
-                .map(|table| table.name)
-                .collect::<Vec<_>>(),
-            Self::Input => schema_shape::INPUT_TABLES
-                .iter()
-                .map(|table| table.name)
-                .collect::<Vec<_>>(),
-        }
-        .into_iter()
-    }
-
-    pub(super) fn pragma_table_xinfo(table: &str) -> Option<&'static str> {
-        CURRENT_TABLE_PRAGMAS
-            .iter()
-            .find_map(|&(name, sql)| (name == table).then_some(sql))
-            .or(match table {
-                "session_environments" => Some("PRAGMA table_xinfo('session_environments')"),
-                "inherited_snapshot_index" => {
-                    Some("PRAGMA table_xinfo('inherited_snapshot_index')")
-                }
-                "inherited_payload_index" => Some("PRAGMA table_xinfo('inherited_payload_index')"),
-                _ => None,
-            })
-    }
-
-    /// 读回的列形状 → 判定结论（纯函数）。诊断只说明「哪张表/哪一列不符」，不含会话内容。
-    pub(super) fn check(self, tables: &HashMap<String, Vec<ActualColumn>>) -> StoreShapeRead {
-        // 声明里的表**一张都没有**：这不是「长得不一样」，而是会话形状还没建立——身份先于
-        // 会话表建立的库（只做过机制实测、或上一次打开在补齐 DDL 之前中断）就是这个样子。
-        // 它不是漂移，判成漂移会把写打开的补齐/升级路径连同空库分支一起关掉。
-        //
-        // 「部分表在」不在此列：补齐与迁移都是**一个**受管批（原子），半套表不可能是我们
-        // 中断留下的，只能来自别的构建或手工改动——那是不认识的形状，照样拒绝。
-        if tables.is_empty() {
-            return StoreShapeRead::Unbuilt;
-        }
-        let verdict = match self {
-            Self::Current => schema_shape::check_current_shape(tables),
-            Self::PreviousCurrent => schema_shape::check_v14_shape(tables)
-                .or_else(|_| schema_shape::check_v13_shape(tables))
-                .or_else(|_| schema_shape::check_v12_shape(tables)),
-            Self::Input => schema_shape::check_input_shape(tables)
-                .and_then(|()| schema_shape::check_dropped_shape(tables)),
-        };
-        match verdict {
-            Ok(()) => StoreShapeRead::Consistent,
-            Err(detail) => StoreShapeRead::Drifted(detail),
-        }
-    }
+pub(super) fn inserted_meta_row(counts: &[u64]) -> bool {
+    counts.get(META_INSERT_INDEX) == Some(&1)
 }
 
-/// 形状探测的结论。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum StoreShapeRead {
-    /// 声明的会话表一张都没建（见 [`ShapeProbe::check`]）：写打开按各自契约补齐/升级，
-    /// 只读打开没有可读的事实。
-    Unbuilt,
-    /// 与契约声明的代数相符。
-    Consistent,
-    /// 列形状完整，但关闭意图表或必要索引缺失；可写打开定向补齐。
-    NeedsCurrentRepair {
-        missing_indexes: bool,
-        missing_close_intents: bool,
-    },
-    /// 与声明不符：带上**具体哪个判定失败**（诊断），调用方一律折算成拒绝。
-    Drifted(String),
-}
-
-/// 契约 + 版本 → 本次打开要探哪一份形状（`None` = 本构建不读这个库，没什么可探）。
-///
-/// 与 [`StoreSnapshot::readable`] 同一份判据：探测面与读取面永远一致，不会出现「读得动但
-/// 不探测」或「探测了却不读」的库。
-pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
-    if snapshot.matches_build() {
-        Some(ShapeProbe::Current)
-    } else if snapshot.contract == PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 14
-    {
-        Some(ShapeProbe::PreviousCurrent)
-    } else if snapshot.contract == LEGACY_CURRENT_STORE_CONTRACT && snapshot.schema_version == 13 {
-        // v7 的库缺 `threads` 的两列工作快照；形状判定按 v14 → v13 → v12 退让。
-        Some(ShapeProbe::PreviousCurrent)
-    } else if snapshot.contract == OLDER_CURRENT_STORE_CONTRACT && snapshot.schema_version == 12 {
-        // schema 12（`v6`）缺 `thread_mq`；形状判定继续退让到 v12。
-        Some(ShapeProbe::PreviousCurrent)
-    } else if snapshot.contract == OLDEST_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11 {
-        // schema 11（`v5`）连 inherited 派生索引表都还没有；形状判定按 v12 声明（这两张表在
-        // 声明里是本可选表，缺表即通过），写打开做一次幂等补齐。
-        Some(ShapeProbe::PreviousCurrent)
-    } else if snapshot.readable() {
-        Some(ShapeProbe::Input)
-    } else {
-        None
-    }
-}
-
-/// 列形状读回（[`ShapeProbe::sql`] 的那条语句）→ 与 `schema_shape` 判定入口同形的逐表分组。
-///
-/// 四列 `(表名, 列名, NOT NULL, 主键)` 按读回顺序分组；形状不符的回复按不完整读上报——
-/// 「读不到」不会被当成「形状为空」。
-pub(super) fn decode_column_map(
-    rows: &[Vec<Value>],
-) -> SessionResourceResult<HashMap<String, Vec<ActualColumn>>> {
-    let malformed = || {
-        super::mutation::incomplete_reply("session shape probe returned a row it cannot explain")
-    };
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in rows {
-        decoded.push((
-            super::sql::text_at(row, 0)
-                .ok_or_else(malformed)?
-                .to_owned(),
-            super::sql::text_at(row, 1)
-                .ok_or_else(malformed)?
-                .to_owned(),
-            super::sql::int_at(row, 2).ok_or_else(malformed)? != 0,
-            super::sql::int_at(row, 3).ok_or_else(malformed)?,
-        ));
-    }
-    Ok(schema_shape::group_columns(decoded))
-}
-
-/// 初始化计划里元数据 INSERT 的下标：身份竞争发生在这一条。
-///
-/// 与 [`initialization_plan`] 的语句顺序绑定（建表在前，所以它不是 0），由离线测试守住；
-/// 初始化遇到该下标的唯一键冲突时读回胜者，不覆盖。
-pub(super) const META_INSERT_INDEX: usize = 2;
-
-/// 初始化计划：同一原子批内建表、写入本机铸造的身份、读回。
-///
-/// 语句顺序固定：两条 `CREATE TABLE IF NOT EXISTS`（已存在即 no-op，绝不改写）→
-/// 元数据行 INSERT（主键冲突即失去身份竞争）→ SELECT 读回本次写入的事实。
 pub(super) fn initialization_plan(store_id: &StoreId, now: &str) -> Vec<StatementSpec> {
-    vec![
+    let reserved = Value::Text(super::session_schema::reserved_objects());
+    let mut plan = vec![
         StatementSpec::bare(CREATE_STORE_META_SQL),
-        StatementSpec::bare(super::ledger::CREATE_OP_LEDGER_SQL),
         StatementSpec::new(
             INSERT_STORE_META_SQL,
             vec![
@@ -495,18 +175,10 @@ pub(super) fn initialization_plan(store_id: &StoreId, now: &str) -> Vec<Statemen
                 Value::Text(now.to_owned()),
             ],
         ),
-        StatementSpec::bare(SELECT_META_SQL),
-    ]
-}
-
-/// 解码元数据行（`schema_version, store_id, contract`）；形状不符即 `None`。
-pub(super) fn decode_identity(values: &[Value]) -> Option<StoreSnapshot> {
-    let schema_version = super::sql::int_at(values, 0)?;
-    let store_id = super::sql::text_at(values, 1)?;
-    let contract = super::sql::text_at(values, 2)?;
-    Some(StoreSnapshot {
-        store_id: StoreId(store_id.to_owned()),
-        schema_version,
-        contract: contract.to_owned(),
-    })
+        StatementSpec::new(REFUSE_COLLISIONS_SQL, vec![reserved.clone()]),
+        StatementSpec::bare(super::ledger::CREATE_OP_LEDGER_SQL),
+    ];
+    plan.extend(super::session_schema::initialization_plan());
+    plan.push(StatementSpec::new(RECORD_SHAPE_SQL, vec![reserved]));
+    plan
 }

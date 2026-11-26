@@ -13,7 +13,7 @@ Peri Swarm 是服务端部署的实现主线，不是生产就绪声明：Rivet 
 
 本地部署把一条 HTTP 调用链固定下来：客户端 → `peri-swarm`（axum 网关 + Rivet
 actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使用 Bun 托管的
-沙箱；Peri 与 Swarm 分别读写各自的 Loom 逻辑库。客户端断连不终止执行，重连可按
+沙箱；Peri 使用 PostgreSQL 会话库，Swarm 使用自己的 Loom 状态库。客户端断连不终止执行，重连可按
 序号续读。Rust 宿主退出后的恢复由新输入触发，详见 §7。
 
 非目标：
@@ -21,7 +21,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 - 不做跨机调度、租约或 fencing；网关默认只绑定 loopback，非 loopback 绑定（含
   `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关并输出 WARN；鉴权仍是
   单个部署 Bearer，TLS 必须由该入口终止。
-- 副本组共享同一 engine、namespace/pool 与两个 Loom 库；多副本不改变本机的恢复
+- 副本组共享同一 engine、namespace/pool 与会话库与状态库；多副本不改变本机的恢复
   语义（§7），也不提供跨实例在途 turn 接管。
 - 不新增 ACP 方法名或协议版本，不改 Peri 的通用 SQL 执行面。
 - 不把 `session/load` 的只读浏览路径变成命令重放入口。
@@ -32,18 +32,18 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 `src/gateway`、`src/sandbox`），运行说明见 [peri-swarm README](../../peri-swarm/README.md)，
 沙箱实现见 [Sandbox 设计](../../npm-packages/peri-sandbox/peri-sandbox-design.md)。
 
-## 2. 两个 Loom 逻辑库
+## 2. PostgreSQL 会话库与 Loom 状态库
 
-一个 `peri-swarm` 进程同时拥有两个独立的远端 Loom 逻辑库；没有本地 SQLite 回退。
+一个 `peri-swarm` 进程同时拥有独立的 PostgreSQL 会话库和 Loom 状态库；没有本地 SQLite 回退。
 
 | 库 | 所有者 | 版本 | 内容 |
 | --- | --- | --- | --- |
-| Peri 会话库 | Peri 会话存储（`SessionStoreDeployment`） | `peri_store_meta.schema_version=15`，contract `peri.session.store/v9` | 线程、消息、MQ、workspace 登记等 Peri 事实；不得出现 `swarm_*` 对象 |
+| Peri 会话库 | Peri 会话存储（`SessionStoreDeployment`） | `peri_store_meta.schema_version=1`，contract `peri.session.postgres/v1` | 线程、消息、MQ、workspace 登记等 Peri 事实；不得出现 `swarm_*` 对象 |
 | Swarm 状态库 | `peri-swarm`（`store::SwarmStateStore`） | `swarm_meta.version=1` | `swarm_sessions`、`swarm_items`、`swarm_inputs`、`swarm_bindings`、`swarm_turns` 与索引 |
 
 - 两个 locator 都是必填且必须不同；同一数据库、缺失 locator 或任一库打不开都会让
   进程启动失败，不复用另一库、不降级。
-- Peri 会话库在打开时执行 Peri schema 检查/升级；未知或更高版本 fail closed。
+- Peri 会话库在打开时检查 PostgreSQL schema，首次写打开在事务内初始化；未知或更高版本 fail closed。
 - Swarm 状态库自带 DDL 与版本判定：已存在 `swarm_*` 表但没有 `swarm_meta` 时拒绝
   接管，未知版本直接中止。版本内新增的列是加法式迁移：`PRAGMA table_info` 判断缺列后
   执行 `ALTER TABLE ... ADD COLUMN`，新库由 `CREATE TABLE` 一次建好；版本号不因加列
@@ -601,7 +601,7 @@ Loom：
 
 - 本地开发用 Loom 的 loopback HTTP 模式（`PERI_HRANA_EXPERIMENTAL=1`）；Rust 存储
   SDK 自建 `reqwest::Client`，无法注入 fixture CA 或关闭校验，因此不支持 Loom TLS。
-- `dev.py` 只种 Peri 会话库（`local_default/demo/main`）；Swarm 状态库
+- Peri 会话库由部署提供 PostgreSQL 连接串；Swarm 状态库
   （`local_default/swarm/main`）由 `peri-swarm/scripts/provision_state_db.py` 通过平台
   管理 API 创建，并对同 `request_id` 幂等。不同 `request_id` 指向已存在身份会显式
   失败，不静默复用。
@@ -611,7 +611,7 @@ Rivet：
 - 本地 engine 为 Rivet 3.1.1（`~/.rivetkit/engine/v3`）；默认 endpoint
   `http://127.0.0.1:6420`、namespace `default`、pool `peri-swarm`，默认
   `PERI_SWARM_RIVET_ENGINE_SPAWN=always` 在 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1` 时按需
-  拉起本地 engine。副本组的进程只有共享同一 engine、namespace、pool、两个 Loom 库
+  拉起本地 engine。副本组的进程只有共享同一 engine、namespace、pool、会话库与状态库
   与部署身份时才看到同一批 actor。
 - 配置面：`PERI_SWARM_RIVET_ENDPOINT`（仅明文 `http`，必须显式端口：写下默认端口
   `http://host:80`、`http://[::1]:80` 也算显式；`https` 显式拒绝，engine TLS 终止需
@@ -626,7 +626,7 @@ Rivet：
 - namespace 与 pool 是部署身份：一个环境一套；多个环境共用一个 engine 时必须使用
   不同值，否则 actor 会串台。
 - 外置 engine 必须 `never` 且提供 token 变量名；`always`/`auto` 只允许 loopback
-  endpoint，矛盾在解析阶段失败。`never` 时进程在打开两个 Loom 库之前做一次 5 秒
+  endpoint，矛盾在解析阶段失败。`never` 时进程在打开会话库与状态库之前做一次 5 秒
   TCP 预检；失败即启动失败，消息写明 endpoint 且说明不会拉起本地 engine。预检只
   证明 TCP 可达，engine 握手与健康仍由 registry 任务报告。
 - 未验证：engine 多节点/集群入口、engine 重启后的客户端重连、逐副本 engine 凭据
@@ -679,7 +679,7 @@ Bun：
 - actor 无状态且空闲 300s 后由 engine 回收，下一次交互可能在**任一**副本唤醒；
   跨副本重建沿用上面的读历史与交互恢复规则。
 - 因此所有副本必须使用同一 `PERI_SWARM_MACHINE_ID`、同一绝对路径的
-  `PERI_SWARM_WORKSPACE_ROOT`（共享卷或同路径挂载）、可写的两个 Loom 库，并保证
+  `PERI_SWARM_WORKSPACE_ROOT`（共享卷或同路径挂载）、可写的会话库与状态库，并保证
   Bun（hosted）从每个副本可达；actor 重建副本上的 `cwd` 必须本机存在。
 - 滚动部署与多副本接管的验收范围见 §8。
 

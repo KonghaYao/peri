@@ -52,6 +52,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+sqlx = { workspace = true, features = ["postgres"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tower.workspace = true

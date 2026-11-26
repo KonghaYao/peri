@@ -2,11 +2,8 @@
 //!
 //! 由 `full_remote_test.rs` 挂载（`include!` 装载，故用 `#[path]` 显式指向）。
 
-use super::{schema, Arc, SqlitePoolOptions, SqliteTransport};
+use super::{database, Arc, PgTestTransport};
 use super::{virtual_remote_facade, MessageId, PersistedPayload, RewindBoundary};
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
 
 // ─── rewind 有效视图重建（远端批，与本机同一套语义） ──────────────────────────
 
@@ -24,7 +21,7 @@ struct RemoteTwoFull {
 async fn remote_two_full_fixture(
     directory: &tempfile::TempDir,
 ) -> (
-    Arc<SqliteTransport>,
+    Arc<PgTestTransport>,
     Arc<crate::sessions::SessionResourcesImpl>,
     String,
     RemoteTwoFull,
@@ -38,44 +35,7 @@ async fn remote_two_full_fixture(
     use peri_acp_types::thread::CancelPolicy;
     use peri_acp_types::workspace::SessionBinding;
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("rewind-view-wire.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in crate::sessions::remote::session_schema::initialization_plan() {
-        sqlx::query(statement.sql).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(crate::sessions::remote::ledger::CREATE_OP_LEDGER_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'rewind-view-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION)
-        .bind(schema::STORE_CONTRACT)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool: pool.clone(),
-        writes: AtomicUsize::new(0),
-        read_batches: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        fail_recovery_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        before_batch: Mutex::new(None),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
+    let (_pool, transport) = database().await;
     let machine = uuid::Uuid::new_v4().to_string();
     let workspace_dir = directory.path().join("workspace");
     std::fs::create_dir(&workspace_dir).unwrap();
@@ -236,6 +196,7 @@ async fn remote_effective_ids(
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_between_two_fulls_restores_every_retained_body() {
     use peri_acp_types::session_resources::SessionResources;
 
@@ -263,6 +224,7 @@ async fn remote_rewind_between_two_fulls_restores_every_retained_body() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_after_the_second_full_keeps_the_prefix_excluded() {
     use peri_acp_types::session_resources::SessionResources;
 
@@ -283,6 +245,7 @@ async fn remote_rewind_after_the_second_full_keeps_the_prefix_excluded() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_with_a_foreign_clear_id_changes_nothing() {
     use peri_acp_types::session_resources::{SessionResourceErrorKind, SessionResources};
 

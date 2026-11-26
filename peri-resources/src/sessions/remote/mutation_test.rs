@@ -1,31 +1,16 @@
 //! `mutation` 的离线测试：确定性分类、只读拒绝与未决映射。全部不联网。
 
+use super::connection::TransportError;
+use super::sql::Value;
 use peri_acp_types::session_resources::{
     MutationOutcome as DomainOutcome, SessionResourceErrorKind,
 };
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::Error as SdkError;
-use turso_serverless::Value;
 
 use super::failure::RemoteFailureClass;
 use super::mutation::BatchFailure;
 use super::mutation::MutationOutcome;
 use super::mutation::StoreAccess;
-
-fn managed_failure(index: usize, error: SdkError) -> SdkError {
-    SdkError::BatchStatementFailed {
-        index,
-        error: Box::new(error),
-        results: Vec::new(),
-    }
-}
-
-fn rollback_failure(inner: SdkError) -> SdkError {
-    SdkError::BatchRollbackFailed {
-        error: Box::new(inner),
-        rollback_error: Box::new(SdkError::Http("transport".to_owned())),
-    }
-}
 
 #[test]
 fn read_only_access_refuses_before_any_request() {
@@ -39,96 +24,85 @@ fn read_only_access_refuses_before_any_request() {
 }
 
 #[test]
-fn managed_batch_failure_is_determinate_not_applied() {
-    let failure = super::mutation::classify_batch_failure(&managed_failure(
-        2,
-        SdkError::Constraint("unique".to_owned()),
-    ));
-    assert_eq!(
-        failure,
-        BatchFailure::NotApplied {
-            class: RemoteFailureClass::Constraint,
-            index: Some(2),
-        }
-    );
-
-    // 资格写（第 0 条）自身失败：整批同样回滚，且能指出是哪条被拒。
-    let qualification = super::mutation::classify_batch_failure(&managed_failure(
-        0,
-        SdkError::Error("no such table".to_owned()),
-    ));
-    assert_eq!(
-        qualification,
-        BatchFailure::NotApplied {
-            class: RemoteFailureClass::ServerError,
-            index: Some(0),
-        }
-    );
-}
-
-#[test]
-fn qualification_conflict_is_only_recognized_on_the_first_statement() {
-    let conflict = super::mutation::classify_batch_failure(&managed_failure(
-        0,
-        SdkError::Constraint("primary key".to_owned()),
-    ));
-    assert_eq!(conflict, BatchFailure::QualificationConflict);
-
-    // 效果语句上的唯一键冲突是业务冲突，不是资格占用。
-    let effect = super::mutation::classify_batch_failure(&managed_failure(
-        1,
-        SdkError::Constraint("primary key".to_owned()),
-    ));
-    assert_eq!(
-        effect,
-        BatchFailure::NotApplied {
-            class: RemoteFailureClass::Constraint,
-            index: Some(1),
-        }
-    );
-}
-
-#[test]
-fn rollback_failure_is_never_reported_as_not_applied() {
-    let failure = super::mutation::classify_batch_failure(&rollback_failure(managed_failure(
-        0,
-        SdkError::Constraint("primary key".to_owned()),
-    )));
-    assert_eq!(
-        failure,
-        BatchFailure::Unknown {
-            class: RemoteFailureClass::Unknown,
-        }
-    );
-}
-
-#[test]
-fn transport_busy_and_timeout_stay_unresolved() {
-    for error in [
-        SdkError::Http("connection reset".to_owned()),
-        SdkError::Busy("locked".to_owned()),
-        SdkError::BusySnapshot("snapshot".to_owned()),
-        SdkError::Interrupt("interrupted".to_owned()),
+fn only_a_confirmed_first_statement_unique_violation_identifies_a_replay() {
+    use RemoteFailureClass::{Constraint, ServerError};
+    for (class, index, unique, expected) in [
+        (
+            Constraint,
+            Some(0),
+            true,
+            BatchFailure::QualificationConflict,
+        ),
+        (
+            Constraint,
+            Some(0),
+            false,
+            BatchFailure::NotApplied {
+                class: Constraint,
+                index: Some(0),
+            },
+        ),
+        (
+            Constraint,
+            Some(2),
+            true,
+            BatchFailure::NotApplied {
+                class: Constraint,
+                index: Some(2),
+            },
+        ),
+        (
+            ServerError,
+            None,
+            false,
+            BatchFailure::NotApplied {
+                class: ServerError,
+                index: None,
+            },
+        ),
     ] {
-        match super::mutation::classify_batch_failure(&error) {
-            BatchFailure::Unknown { .. } => {}
-            other => panic!("expected unresolved for {error:?}, got {other:?}"),
-        }
+        assert_eq!(
+            super::mutation::classify_batch_failure(&TransportError::RolledBack {
+                class,
+                index,
+                unique
+            }),
+            expected
+        );
     }
 }
 
 #[test]
-fn client_side_rejection_is_not_applied() {
-    let failure = super::mutation::classify_batch_failure(&SdkError::ToSqlConversionFailure(
-        Box::new(std::io::Error::other("bad param")),
-    ));
+fn a_lost_commit_response_stays_unknown_and_a_pre_send_failure_does_not() {
+    use RemoteFailureClass::Transport;
     assert_eq!(
-        failure,
+        super::mutation::classify_batch_failure(&TransportError::Uncertain(Transport)),
+        BatchFailure::Unknown { class: Transport }
+    );
+    assert_eq!(
+        super::mutation::classify_batch_failure(&TransportError::Before(Transport)),
         BatchFailure::NotApplied {
-            class: RemoteFailureClass::Unsupported,
-            index: None,
+            class: Transport,
+            index: None
         }
     );
+}
+
+#[test]
+fn postgresql_diagnostics_are_classified_without_server_text() {
+    use RemoteFailureClass::*;
+    for (sqlstate, expected) in [
+        ("23505", Constraint),
+        ("23503", Constraint),
+        ("40001", Busy),
+        ("40P01", Busy),
+        ("28P01", AuthRejected),
+        ("25006", Readonly),
+        ("08006", Transport),
+        ("XX001", Corrupt),
+    ] {
+        assert_eq!(super::failure::sqlstate_class(sqlstate), expected);
+    }
 }
 
 #[test]

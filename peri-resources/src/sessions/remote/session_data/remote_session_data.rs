@@ -1,9 +1,9 @@
 //! Leaf implementation for `crate::sessions::remote::session_data`.
 pub(super) use super::super::generation::{ConnectionFactory, ConnectionGate};
 pub(super) use super::super::schema::StoreId;
-pub(super) use super::super::session_sql;
 pub(super) use super::super::sql::StatementSpec;
 pub(super) use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
+pub(super) use crate::sessions::remote::sql::Value;
 pub(super) use async_trait::async_trait;
 pub(super) use peri_acp_types::history_page::{
     HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
@@ -24,7 +24,6 @@ pub(super) use peri_acp_types::workspace::{
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::Arc;
 pub(super) use tokio::sync::RwLock;
-pub(super) use turso_serverless::Value;
 
 pub(super) use super::connection_lifecycle::{connection_closed, ConnectionSlot};
 use std::collections::HashSet;
@@ -61,21 +60,12 @@ pub(in crate::sessions::remote) struct RemoteSessionData {
     /// 连接代际门禁：哪一代已经不可信。
     pub(super) gate: Arc<ConnectionGate>,
     pub(super) store_id: StoreId,
-    /// 压缩前的形状（`v2` 契约，10|11）：只读打开下它没有当前形状的归属列与机器目录，
-    /// 读路径按老形状服务。写打开会先升级，升级后的实例不再带这一位。
-    pub(in crate::sessions::remote) legacy_shape: bool,
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     pub(super) roots: RwLock<HashMap<ThreadId, ThreadId>>,
 }
 
 impl RemoteSessionData {
-    /// metadata 投影代数：打开时的身份读回判为旧代只读形状（`legacy_shape`）时，
-    /// `threads` 没有两列工作快照，读取改用同形占位列；codec 仍是同一套。
-    pub(in crate::sessions::remote) fn meta_projection(&self) -> session_sql::MetaProjection {
-        session_sql::MetaProjection::from_legacy_shape(self.legacy_shape)
-    }
-
     /// 操作所属 root：已有会话沿父链上溯（带缓存），解析失败退回自身。
     ///
     /// 退回自身只影响未决阻塞的范围（这一条会话而不是整棵树），不会把未知写当成已知：
@@ -133,10 +123,6 @@ impl SessionDataPort for RemoteSessionData {
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
-        // 压缩前的形状里凭证只有 machine 作用域，给不出 workspace 归属。
-        if self.legacy_shape {
-            return None;
-        }
         Some(Arc::new(
             super::super::oauth_credentials::RemoteOAuthCredentials(self, workspace_id),
         ))
@@ -385,7 +371,7 @@ impl SessionDataPort for RemoteSessionData {
         let store = self.store().await?;
         let row = store
             .fetch_row(&StatementSpec::new(
-                "SELECT parent_thread_id, frozen_context FROM threads WHERE id = ?1",
+                "SELECT parent_thread_id, frozen_context FROM threads WHERE id = $1",
                 vec![Value::Text(id.clone())],
             ))
             .await?
@@ -398,7 +384,7 @@ impl SessionDataPort for RemoteSessionData {
         }
         let counts = self.commit_effects("set_session_archived", &[id.clone(), archived.to_string()],
             vec![StatementSpec::new(
-                "UPDATE threads SET archived = ?1 WHERE id = ?2 AND parent_thread_id IS NULL AND frozen_context IS NOT NULL",
+                "UPDATE threads SET archived = $1 WHERE id = $2 AND parent_thread_id IS NULL AND frozen_context IS NOT NULL",
                 vec![Value::Integer(i64::from(archived)), Value::Text(id.clone())],
             )], id).await?;
         match counts.first() {

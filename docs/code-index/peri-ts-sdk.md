@@ -7,7 +7,7 @@
 
 | 入口 | 文件 | 内容 |
 | --- | --- | --- |
-| 主入口 | `npm-packages/@peri-sdk/src/entries/index.ts` → `src/entries/chat.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`TursoStorage`、`ChatActivityTracker`/`ChatActivitySource`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`KvStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
+| 主入口 | `npm-packages/@peri-sdk/src/entries/index.ts` → `src/entries/chat.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`PostgresStorage`、`ChatActivityTracker`/`ChatActivitySource`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`KvStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
 | `/portable` | `src/entries/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
 | `/view` | `src/entries/view.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
@@ -57,7 +57,7 @@
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
 | Session ownership（内部） | `src/chat/ownership.ts`、`src/chat/types.ts` | `ChatManager` 接收 3 方法 `KvStorage` 并在内部构造 `KvSessionOwnership`（owner 为实例随机 UUID）；key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；无 TTL/续租/CAS，路由层负责串行化与 `clearSessionOwnership`；`LocalSessionIndex` 负责同 Manager 内句柄互斥。`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError`/key 函数仅模块内使用；入口只导出 `KvStorage` 与 `clearSessionOwnership` |
 | 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-context.ts` | 把 Chat 上下文转换为一次 `PeriInstance`；WASM 启动传 per-chat `agentConfigJson`/`runtimeEnv`/诊断回调，transport factory 收到 `{ signal, chatId, agentConfig }`，`payloadBudgets` 直接传实例；生产默认装配，测试可注入 |
-| 会话目录 | `src/storage/turso-storage.ts` | `TursoStorage` 直接实现 `ChatDatabase`；`storageConfig` getter 返回只含 `url`/`authToken` 的纯 JSON（token 为 undefined 时省略该键，不含 cwd），供 `store.storage`；显式 `path` 查单个 cwd，省略时串行合并 `legacyCwd`/`currentCwd`；同 id 以当前 cwd 为准，按 `updatedAt` 倒序；缺表为空目录；实例复用单条连接，查询与幂等 `close()` 共用串行队列；close 失败时保留连接供再次 close 重试，成功后才清空，closed 后新查询立即拒绝；连接归宿主所有，`ChatManager.shutdown()` 不关闭注入的 database |
+| 会话目录 | `src/storage/postgres-storage.ts` | `PostgresStorage` 直接实现 `ChatDatabase`；`storageConfig` getter 返回只含 `url`/`httpEndpoint` 的纯 JSON（httpEndpoint 为 undefined 时省略该键，不含 cwd），供 `store.storage`；显式 `path` 查单个 cwd，省略时串行合并 `legacyCwd`/`currentCwd`；同 id 以当前 cwd 为准，按 `updatedAt` 倒序；缺表为空目录；实例复用单条连接，查询与幂等 `close()` 共用串行队列；close 失败时保留连接供再次 close 重试，成功后才清空，closed 后新查询立即拒绝；连接归宿主所有，`ChatManager.shutdown()` 不关闭注入的 database |
 | 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 
 ## 运行侧
@@ -89,10 +89,10 @@
 - `bun run typecheck`：`tsc --noEmit` + demo tsconfig + `tsconfig.type-tests.json`（仅包含 `tests/sandbox-adapter-compat.test.ts` 的跨包类型兼容检查）；该文件通过 devDependency `peri-sandbox: file:../peri-sandbox` 读取其 `dist` 类型，需先在 `npm-packages/peri-sandbox` 执行 `bun run build`。
 - `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 SessionOwnership。
 - `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
-- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 Turso listener + fixture 模型）。
+- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 PostgreSQL listener + fixture 模型）。
 - 容量基准：1 GiB 宿主 RSS 下 WASM Agent 容量复测规程见 [SDK WASM Agent 容量基准](../verification/benchmarks/sdk-wasm-capacity.md)；目录索引与其他规程见 [验证基准](../verification/benchmarks/README.md)。
 - `bun run smoke:workers`：本地 workerd 探针；Hosted Workers 未部署。
-- 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/view-registry.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/turso-storage.test.ts`、`tests/wasm-acp-integration.test.ts`。
+- 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/view-registry.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/postgres-storage.test.ts`、`tests/wasm-acp-integration.test.ts`。
 - 公共出口负向断言：`tests/public-view.test.ts`，同时确认 `ChatViewRegistry` 只在主入口、不在 `/view`。
 
 ## 消费者

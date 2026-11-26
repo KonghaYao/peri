@@ -261,11 +261,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .as_ref()
         .and_then(|sa| sa.goal_controller(&ctx.session_id));
     // 待投递结果的重试会等待持久 MQ 提交；放到阻塞池，避免拖住当前 worker。
-    let retry_manager = Arc::clone(&task_manager_for_cmd);
-    if let Err(error) =
-        tokio::task::spawn_blocking(move || retry_manager.retry_pending_deliveries()).await
-    {
-        tracing::warn!(%error, "task delivery retry task failed");
+    if task_manager_for_cmd.has_pending_deliveries() {
+        let retry_manager = Arc::clone(&task_manager_for_cmd);
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || retry_manager.retry_pending_deliveries()).await
+        {
+            tracing::warn!(%error, "task delivery retry task failed");
+        }
     }
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──

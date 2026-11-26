@@ -95,20 +95,6 @@ fn damaged_parent_relation_and_relative_cwd_fail_instead_of_reassigning() {
 }
 
 #[test]
-fn remote_root_inversion_preserves_posix_and_windows_saved_paths() {
-    assert_eq!(
-        super::derive_remote_root("/repo/src/lib", "src/lib").unwrap(),
-        PathBuf::from("/repo")
-    );
-    assert_eq!(
-        super::derive_remote_root("C:\\repo\\src", "src").unwrap(),
-        PathBuf::from("C:\\repo")
-    );
-    assert!(super::derive_remote_root("/other/src", "repo/src").is_err());
-    assert!(super::derive_remote_root("/repo/src", "../src").is_err());
-}
-
-#[test]
 fn saved_paths_accept_foreign_absolute_formats_but_reject_relative_paths() {
     for saved in [
         "/",

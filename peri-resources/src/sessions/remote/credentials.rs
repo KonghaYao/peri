@@ -74,7 +74,7 @@ impl CredentialSource {
             Ok(value) if value.is_empty() => Err(CredentialError::Empty {
                 name: self.name.clone(),
             }),
-            Ok(value) => Ok(SessionStoreCredential(value)),
+            Ok(value) => Ok(SessionStoreCredential(Some(value))),
             Err(std::env::VarError::NotPresent) => Err(CredentialError::Missing {
                 name: self.name.clone(),
             }),
@@ -101,7 +101,8 @@ impl fmt::Display for CredentialSource {
 }
 
 /// 凭证值：仅在运行时使用，不序列化；`expose` 给 adapter 边界调用。
-pub(crate) struct SessionStoreCredential(String);
+#[derive(Default)]
+pub(crate) struct SessionStoreCredential(Option<String>);
 
 impl SessionStoreCredential {
     /// 直接注入（云实验 runner 在受控进程内解析 `.env` 后注入）。
@@ -110,12 +111,12 @@ impl SessionStoreCredential {
         if value.is_empty() {
             return Err(CredentialError::EmptyValue);
         }
-        Ok(Self(value))
+        Ok(Self(Some(value)))
     }
 
     /// 给 SDK 调用边界使用。
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
+    pub(crate) fn expose(&self) -> Option<&str> {
+        self.0.as_deref()
     }
 
     /// 复制一份凭证值：**只为让受保护的连接工厂持有**（adapter 生命周期长于一次打开，
@@ -126,18 +127,10 @@ impl SessionStoreCredential {
     pub(crate) fn duplicate(&self) -> Self {
         Self(self.0.clone())
     }
-
-    /// 诊断用的粗粒度长度类（值本身不泄露）。
-    pub(crate) fn length_class(&self) -> usize {
-        self.0.len() / 16
-    }
 }
 
 impl fmt::Debug for SessionStoreCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("SessionStoreCredential")
-            .field(&self.0)
-            .finish()
+        formatter.write_str("SessionStoreCredential(<redacted>)")
     }
 }

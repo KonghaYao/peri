@@ -29,6 +29,7 @@ use super::session_data::RemoteSessionData;
 
 use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
+use crate::sessions::remote::sql::Value;
 
 /// 归属行上的完整发现快照 → 绑定行入库的最小执行根。
 ///
@@ -71,17 +72,17 @@ impl RemoteSessionData {
             .iter()
             .any(|field| snapshot.get(*field).is_some_and(|value| !value.is_null()));
         Ok(vec![
-            StatementSpec::new("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
-                vec![turso_serverless::Value::Text(machine_id.to_owned())]),
-            StatementSpec::new("INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, ?4)",
-                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
-                    turso_serverless::Value::Text(machine_id.to_owned()),
-                    turso_serverless::Value::Text(path.to_owned()),
-                    turso_serverless::Value::Text(if discovered { "discovered" } else { "unverified" }.to_owned())]),
-            StatementSpec::new("INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND machine_id = ?2 AND path = ?3)",
-                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
-                    turso_serverless::Value::Text(machine_id.to_owned()),
-                    turso_serverless::Value::Text(path.to_owned())]),
+            StatementSpec::new("INSERT INTO machines(id, name, identity_kind) VALUES ($1, '我的电脑', 'known') ON CONFLICT DO NOTHING",
+                vec![Value::Text(machine_id.to_owned())]),
+            StatementSpec::new("INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                vec![Value::Text(workspace.workspace_id.to_string()),
+                    Value::Text(machine_id.to_owned()),
+                    Value::Text(path.to_owned()),
+                    Value::Text(if discovered { "discovered" } else { "unverified" }.to_owned())]),
+            StatementSpec::new("INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM workspaces WHERE id = $1 AND machine_id = $2 AND path = $3)",
+                vec![Value::Text(workspace.workspace_id.to_string()),
+                    Value::Text(machine_id.to_owned()),
+                    Value::Text(path.to_owned())]),
         ])
     }
 

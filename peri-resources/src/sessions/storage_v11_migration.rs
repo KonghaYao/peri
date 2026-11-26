@@ -14,7 +14,7 @@
 //! - 旧凭证只有 machine 作用域，无法证明 workspace 归属，不搬运（按当前形状重建）。
 //! - 压缩前独有的 `session_environments` 在搬运后删除。
 //!
-//! 改写之前先做形状判定（`sessions::schema_shape`，与远端批次同一份声明）：输入表的列必须落在
+//! 改写之前先做形状判定（`sessions::schema_shape`）：输入表的列必须落在
 //! 本构建认识的边界内（未知列没有去处，不能静默搬丢），要删除的压缩前对象必须与声明同形
 //! （同名的别的表不删）。判定不过即拒绝——库保持原版本，旧二进制仍可打开。
 //!
@@ -225,8 +225,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .execute(&mut *connection)
         .await?;
     // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
-    // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
-    // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。
+    // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。重放完整索引清单可补回缺失索引。
     for statement in canonical::CREATE_INDEXES {
         // 语句文本来自 `canonical` 的静态清单，不含外部输入。
         sqlx::query(sqlx::AssertSqlSafe(*statement))
@@ -270,9 +269,9 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
 /// 调用前 `workspace_id` 必须已逐行回填。无归属的会话行在重建后无法满足 `NOT NULL`，
 /// 因此这里先显式拒绝（库保持原版本），而不是让重建在搬到一半时失败。
 ///
-/// 重建路径与远端批次逐条对应（`canonical` 的同一份文本）：建暂存 → 搬入 → 删旧 →
+/// 使用 `canonical` 的重建语句：建暂存 → 搬入 → 删旧 →
 /// 建新 → 搬回 → 删暂存。`DROP TABLE` 会把旧表上的索引一并删掉，索引由调用方在迁移末尾
-/// 整表重放 `canonical::CREATE_INDEXES` 补回。两端都不依赖 `ALTER TABLE ... RENAME`。
+/// 整表重放 `canonical::CREATE_INDEXES` 补回。
 pub(super) async fn rebuild_threads(connection: &mut SqliteConnection) -> Result<()> {
     let (unassigned,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM threads WHERE workspace_id IS NULL")

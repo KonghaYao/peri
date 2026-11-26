@@ -1,12 +1,12 @@
 //! Session projections, bounded history reads, and scoped listing statements.
 
 use super::super::sql::StatementSpec;
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session_resources::SessionResourceError;
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::workspace::ScopedThreadQuery;
 use peri_acp_types::workspace::ThreadScope;
-use turso_serverless::Value;
 
 /// 会话行投影的公共前缀：一列一行，顺序即解码下标。
 ///
@@ -20,18 +20,6 @@ macro_rules! meta_columns {
     0 as content_size,
     s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status,
     s.context_usage_tokens, s.work_state"
-    };
-}
-
-/// 旧代际（schema ≤ 13）的同一投影：`threads` 还没有两列工作快照，用同形占位列。
-///
-/// 只读打开不迁移，必须能读旧库；列数与顺序与本代一致，解码因此只有一套。
-macro_rules! meta_columns_legacy {
-    () => {
-        "s.id, s.title, s.cwd, s.created_at, s.updated_at, s.message_count,
-    0 as content_size,
-    s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status,
-    NULL as context_usage_tokens, 'idle' as work_state"
     };
 }
 
@@ -54,65 +42,11 @@ macro_rules! fact_columns {
     };
 }
 
-macro_rules! fact_columns_legacy {
-    () => {
-        concat!(
-            meta_columns_legacy!(),
-            ", s.frozen_context, s.inherited_context, ",
-            binding_columns!()
-        )
-    };
-}
-
 /// 列表投影 = meta 投影 + 绑定四列（分页列举需要绑定分类，但不要 frozen/继承区正文）。
 macro_rules! page_columns {
     () => {
         concat!(meta_columns!(), ", ", binding_columns!())
     };
-}
-
-macro_rules! page_columns_legacy {
-    () => {
-        concat!(meta_columns_legacy!(), ", ", binding_columns!())
-    };
-}
-
-/// 同一条语句的两份投影文本：列清单来自同一组宏，`$tail` 只写一次。
-macro_rules! select_pair {
-    ($current:ident, $legacy:ident, $current_columns:ident, $legacy_columns:ident, $tail:literal) => {
-        const $current: &str = concat!("SELECT ", $current_columns!(), $tail);
-        const $legacy: &str = concat!("SELECT ", $legacy_columns!(), $tail);
-    };
-}
-
-// ─── 列下标（由投影顺序决定，测试核对） ────────────────────────────────────────
-
-/// metadata 投影的代数：两列工作快照只在当前代（schema 14）的 `threads` 上存在。
-///
-/// 旧代只读库用同形占位列（`NULL` / `'idle'`），列数与下标不变：读取面只切换投影文本，
-/// 解码只有一套。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::sessions::remote) enum MetaProjection {
-    Current,
-    Legacy,
-}
-
-impl MetaProjection {
-    /// 由「压缩前的形状」判定选择投影；该判定来自打开时的身份与形状探测。
-    pub(in crate::sessions::remote) fn from_legacy_shape(legacy: bool) -> Self {
-        if legacy {
-            Self::Legacy
-        } else {
-            Self::Current
-        }
-    }
-
-    pub(super) fn sql(self, current: &'static str, legacy: &'static str) -> &'static str {
-        match self {
-            Self::Current => current,
-            Self::Legacy => legacy,
-        }
-    }
 }
 
 pub(in crate::sessions::remote) const META_ID: usize = 0;
@@ -128,7 +62,7 @@ pub(in crate::sessions::remote) const META_HIDDEN: usize = 9;
 pub(in crate::sessions::remote) const META_CANCEL_POLICY: usize = 10;
 pub(in crate::sessions::remote) const META_CONFIG: usize = 11;
 pub(in crate::sessions::remote) const META_AGENT_STATUS: usize = 12;
-/// 两列工作快照（旧代投影用同形占位列，下标不变）。
+/// 两列工作快照。
 pub(in crate::sessions::remote) const META_CONTEXT_USAGE_TOKENS: usize = META_AGENT_STATUS + 1;
 pub(in crate::sessions::remote) const META_WORK_STATE: usize = META_CONTEXT_USAGE_TOKENS + 1;
 /// meta 投影列数由最后一个下标推出，不另写一遍数字：投影追加列时只改下标。
@@ -150,48 +84,39 @@ pub(in crate::sessions::remote) const PAGE_COLUMN_TOTAL: usize = PAGE_BINDING_RE
 
 /// 会话事实行（单会话读取）的投影。
 pub(in crate::sessions::remote) const META_PROJECTION: &str = meta_columns!();
-pub(in crate::sessions::remote) const META_PROJECTION_LEGACY: &str = meta_columns_legacy!();
 pub(in crate::sessions::remote) const FACT_PROJECTION: &str = fact_columns!();
-pub(in crate::sessions::remote) const FACT_PROJECTION_LEGACY: &str = fact_columns_legacy!();
 pub(in crate::sessions::remote) const PAGE_PROJECTION: &str = page_columns!();
-pub(in crate::sessions::remote) const PAGE_PROJECTION_LEGACY: &str = page_columns_legacy!();
 
 // ─── 读取语句 ─────────────────────────────────────────────────────────────────
 
-select_pair!(
-    SELECT_SESSION_SQL,
-    SELECT_SESSION_SQL_LEGACY,
-    fact_columns,
-    fact_columns_legacy,
-    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id WHERE s.id = ?1"
+const SELECT_SESSION_SQL: &str = concat!(
+    "SELECT ",
+    fact_columns!(),
+    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id WHERE s.id = $1"
 );
 
-select_pair!(
-    SELECT_META_SQL,
-    SELECT_META_SQL_LEGACY,
-    meta_columns,
-    meta_columns_legacy,
-    " FROM threads s WHERE s.id = ?1"
+const SELECT_META_SQL: &str = concat!(
+    "SELECT ",
+    meta_columns!(),
+    " FROM threads s WHERE s.id = $1"
 );
 
 /// 恢复准入的轻量 frozen 读取：只取一列，不拉绑定、继承区或任何正文。
-pub(super) const SELECT_FROZEN_SQL: &str = "SELECT s.frozen_context FROM threads s WHERE s.id = ?1";
+pub(super) const SELECT_FROZEN_SQL: &str = "SELECT s.frozen_context FROM threads s WHERE s.id = $1";
 
-select_pair!(
-    SELECT_CHILDREN_SQL,
-    SELECT_CHILDREN_SQL_LEGACY,
-    meta_columns,
-    meta_columns_legacy,
-    " FROM threads s WHERE s.parent_thread_id = ?1 ORDER BY s.created_at ASC, s.id ASC"
+const SELECT_CHILDREN_SQL: &str = concat!(
+    "SELECT ",
+    meta_columns!(),
+    " FROM threads s WHERE s.parent_thread_id = $1 ORDER BY s.created_at ASC, s.id ASC"
 );
 
-/// 以 `?1` 为根的整棵树（含自身）。CTE 名与投影别名同为 `s`，投影常量因此可复用
+/// 以 `$1` 为根的整棵树（含自身）。CTE 名与投影别名同为 `s`，投影常量因此可复用
 /// （内层 `SELECT *` 的形状与表一致，列名即投影里的 `s.<column>`）。
 macro_rules! tree_select {
     ($columns:ident) => {
         concat!(
             "WITH RECURSIVE s AS (
-        SELECT * FROM threads WHERE id = ?1
+        SELECT * FROM threads WHERE id = $1
         UNION ALL
         SELECT p.* FROM threads p INNER JOIN s ON p.parent_thread_id = s.id
     )
@@ -203,17 +128,16 @@ macro_rules! tree_select {
 }
 
 pub(super) const SELECT_TREE_SQL: &str = tree_select!(meta_columns);
-pub(super) const SELECT_TREE_SQL_LEGACY: &str = tree_select!(meta_columns_legacy);
 
 pub(super) const SELECT_MESSAGES_SQL: &str =
     "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
-    FROM messages m WHERE m.thread_id = ?1 ORDER BY m.rowid ASC";
+    FROM messages m WHERE m.thread_id = $1 ORDER BY m.rowid ASC";
 
 /// 有效范围的自有 payload 行：`excluded = 0` 是读取条件的一部分，已排除正文不出库、
 /// 不进入内存；顺序仍是 canonical 插入序（`rowid`）。
 pub(super) const SELECT_ACTIVE_MESSAGES_SQL: &str =
     "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
-    FROM messages m WHERE m.thread_id = ?1 AND m.excluded = 0 ORDER BY m.rowid ASC";
+    FROM messages m WHERE m.thread_id = $1 AND m.excluded = 0 ORDER BY m.rowid ASC";
 
 /// 浏览范围的边界事实（分页读取与初始 load 共用的**唯一**一条边界语句）：会话存在吗、
 /// 浏览范围起点是谁、锚点行在不在。
@@ -224,39 +148,39 @@ pub(super) const SELECT_ACTIVE_MESSAGES_SQL: &str =
 /// 「从最新一页开始」。
 pub(super) const SELECT_HISTORY_PAGE_BOUNDS_SQL: &str = "SELECT
         (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
-        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
-    FROM threads t WHERE t.id = ?1";
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = $2)
+    FROM threads t WHERE t.id = $1";
 
 /// 一页候选行的**阶段一**读取：（身份 + 存储序键 + 正文长度），keyset 遍历，最多
 /// `limit + 1` 行，**不取正文**。
 ///
-/// `?2` 为空 = 首屏，从最新一行开始——只有首屏允许这条路径：带游标时锚点行的存在性已由
+/// `$2` 为空 = 首屏，从最新一行开始——只有首屏允许这条路径：带游标时锚点行的存在性已由
 /// [`SELECT_HISTORY_PAGE_BOUNDS_SQL`] 证明，`NULL` 在那里已经变成失败。锚点用**子查询按
 /// `message_id` 定位**（同一条语句内完成，两次语句之间不引入新的时间点），排序才用
-/// `rowid`：删掉尾部行之后新插入的行会复用这些 rowid，rowid 不是稳定的条目身份。
+/// `rowid`。序列值用于排序，游标身份绑定消息 ID。
 ///
-/// 长度是**字节数**（`length(CAST(content AS BLOB))`；直接 `length(content)` 数的是字符），
+/// 长度是**字节数**（`octet_length(content)`；直接 `length(content)` 数的是字符），
 /// 与页预算同一口径。
 pub(super) const SELECT_HISTORY_PAGE_ROWS_SQL: &str = "SELECT s.message_id, s.rowid,
-        length(CAST(s.content AS BLOB))
+        octet_length(s.content)
     FROM messages s
-    WHERE s.thread_id = ?1 AND (?2 IS NULL OR s.rowid < (
-        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
-    ORDER BY s.rowid DESC LIMIT ?3";
+    WHERE s.thread_id = $1 AND ($2::text IS NULL OR s.rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = $1 AND m.message_id = $2))
+    ORDER BY s.rowid DESC LIMIT $3";
 
 /// 页内一条条目的正文：**阶段二**只按本页那些行的 id 取，一条语句一个 id，同一批次读出。
 ///
 /// 批内 `LIMIT 1` 与唯一约束共同保证「一个 id 至多一行」：多行即回复形状不符（调用方
 /// 按损坏失败），绝不取第一行。
 pub(super) const SELECT_HISTORY_PAGE_BODY_SQL: &str =
-    "SELECT s.content FROM messages s WHERE s.thread_id = ?1 AND s.message_id = ?2 LIMIT 1";
+    "SELECT s.content FROM messages s WHERE s.thread_id = $1 AND s.message_id = $2 LIMIT 1";
 
 /// 自有**有效**条目的存储序键（`message_id → rowid`）：不读正文、不做全历史扫描。
 ///
 /// 读取条件与有效视图一致（`excluded = 0`）：归档正文连行都不必返回，客户端要的只是
 /// 「这一条自有有效条目排在哪儿」（初始 load 回放的位置戳）。
 pub(super) const SELECT_ACTIVE_ENTRY_POSITIONS_SQL: &str =
-    "SELECT m.message_id, m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.excluded = 0
+    "SELECT m.message_id, m.rowid FROM messages m WHERE m.thread_id = $1 AND m.excluded = 0
     ORDER BY m.rowid ASC";
 
 // ─── 回退候选（有界读取） ──────────────────────────────────────────────────────
@@ -267,12 +191,12 @@ pub(super) const SELECT_ACTIVE_ENTRY_POSITIONS_SQL: &str =
 /// `excluded` 不是读取条件：归档 user 消息仍是合法回退目标。
 pub(super) const SELECT_REWIND_CANDIDATE_ROWS_SQL: &str = "SELECT m.message_id, m.rowid
     FROM messages m
-    WHERE m.thread_id = ?1 AND m.role = 'user' AND (?2 IS NULL OR m.rowid < ?2)
-    ORDER BY m.rowid DESC LIMIT ?3";
+    WHERE m.thread_id = $1 AND m.role = 'user' AND ($2::bigint IS NULL OR m.rowid < $2)
+    ORDER BY m.rowid DESC LIMIT $3";
 
 /// 阶段二：按本批命中的 id 逐条取正文（主键单行）。
 pub(super) const SELECT_REWIND_CANDIDATE_BODY_SQL: &str =
-    "SELECT m.content FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2 LIMIT 1";
+    "SELECT m.content FROM messages m WHERE m.thread_id = $1 AND m.message_id = $2 LIMIT 1";
 
 // ─── 向前段读取（canonical 完整回放，REQ §5.3） ──────────────────────────────
 
@@ -285,37 +209,37 @@ pub(super) const SELECT_REWIND_CANDIDATE_BODY_SQL: &str =
 /// 落在同一个只读批次里，区间与行同源。
 pub(super) const SELECT_HISTORY_SEGMENT_TAIL_SQL: &str = "SELECT
         (SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = t.id)
-    FROM threads t WHERE t.id = ?1";
+    FROM threads t WHERE t.id = $1";
 
 /// 首段候选行（**阶段一**：身份 + 存储序键 + 正文长度），最多 `limit + 1` 行，**升序**
 /// （canonical 完整回放方向），**不取正文**。
 ///
-/// 与非首段同形，只是去掉 `rowid > ?2`，并把上界交给同一条语句内的 `MAX(rowid)` 子查询：
+/// 与非首段同形，只是去掉 `rowid > $2`，并把上界交给同一条语句内的 `MAX(rowid)` 子查询：
 /// 首段的上界就是这一刻的最大 `rowid`，没有可以预先绑定的值（它由本次读取确定）。
 pub(super) const SELECT_HISTORY_SEGMENT_HEAD_SQL: &str = "SELECT s.message_id, s.rowid,
-        length(CAST(s.content AS BLOB))
+        octet_length(s.content)
     FROM messages s
-    WHERE s.thread_id = ?1 AND s.rowid <= (
-        SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = ?1)
-    ORDER BY s.rowid ASC LIMIT ?2";
+    WHERE s.thread_id = $1 AND s.rowid <= (
+        SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = $1)
+    ORDER BY s.rowid ASC LIMIT $2";
 
-/// 锚点存在性 + 会话存在性（一次单行读取）：`rowid = ?2` 的那一行就是游标的 `after`。
+/// 锚点存在性 + 会话存在性（一次单行读取）：`rowid = $2` 的那一行就是游标的 `after`。
 ///
 /// `NULL` = 锚点已不在（游标失效）；一条行都没有 = 会话不存在（`NotFound`）。刻意不写
 /// `COALESCE(..., 0)` 这类兜底：锚点消失必须失败关闭，不能悄悄退化成一个从头开始的区间。
 pub(super) const SELECT_HISTORY_SEGMENT_ANCHOR_SQL: &str = "SELECT
-        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.rowid = ?2)
-    FROM threads t WHERE t.id = ?1";
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.rowid = $2)
+    FROM threads t WHERE t.id = $1";
 
 /// 非首段候选行：`rowid > after` 且 `rowid <= tail`，升序，最多 `limit + 1` 行。
 ///
 /// `tail` 是**数值**上界，不是一条要查回来的行：回放期间追加的行 `rowid > tail`，因此不进入
 /// 本次遍历；`tail` 那一行自己被删掉也不影响区间。
 pub(super) const SELECT_HISTORY_SEGMENT_NEXT_SQL: &str = "SELECT s.message_id, s.rowid,
-        length(CAST(s.content AS BLOB))
+        octet_length(s.content)
     FROM messages s
-    WHERE s.thread_id = ?1 AND s.rowid > ?2 AND s.rowid <= ?3
-    ORDER BY s.rowid ASC LIMIT ?4";
+    WHERE s.thread_id = $1 AND s.rowid > $2 AND s.rowid <= $3
+    ORDER BY s.rowid ASC LIMIT $4";
 
 /// 首段要放在最前面的继承区快照（`threads.inherited_context` 单行）：一列，与本地
 /// `INHERITED_CONTEXT_SQL` 说同一件事。
@@ -323,20 +247,20 @@ pub(super) const SELECT_HISTORY_SEGMENT_NEXT_SQL: &str = "SELECT s.message_id, s
 /// 不借会话事实行（`SELECT_SESSION_SQL`）来读它：那条语句还会拉上绑定四列与 frozen 正文，
 /// 而首段只要继承区 payload。
 pub(super) const SELECT_INHERITED_CONTEXT_SQL: &str =
-    "SELECT s.inherited_context FROM threads s WHERE s.id = ?1";
+    "SELECT s.inherited_context FROM threads s WHERE s.id = $1";
 
-/// 有界 flags 读取的单条语句：`?1` 是会话、`?2` 是条目。
+/// 有界 flags 读取的单条语句：`$1` 是会话、`$2` 是条目。
 ///
 /// 范围由调用方给出的 id 集合决定（一条语句一个 id，同一批次读出），不做全历史扫描；
 /// 与全量 flags 视图同一规则：只返回非默认标记。
 pub(super) const SELECT_MESSAGE_FLAGS_SQL: &str =
     "SELECT message_id, truncated, excluded, projection
-    FROM messages WHERE thread_id = ?1 AND message_id = ?2
+    FROM messages WHERE thread_id = $1 AND message_id = $2
       AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)";
 
 /// 沿父链上溯到的根（含自身即根的情形）；链上没有根时不返回行，由调用方判为事实不完整。
 pub(super) const SELECT_ROOT_SQL: &str = "WITH RECURSIVE a AS (
-    SELECT s.id, s.parent_thread_id FROM threads s WHERE s.id = ?1
+    SELECT s.id, s.parent_thread_id FROM threads s WHERE s.id = $1
     UNION ALL
     SELECT p.id, p.parent_thread_id FROM threads p INNER JOIN a ON p.id = a.parent_thread_id
 ) SELECT a.id FROM a WHERE a.parent_thread_id IS NULL";
@@ -351,7 +275,7 @@ pub(in crate::sessions::remote) fn select_root_statement(id: &str) -> StatementS
 /// `UNION`（非 `ALL`）保证父链成环时终止；根已由调用方严格解析，语句本身不再兜底。
 /// 远端投影与本地同代际形状，没有 legacy 分支。
 pub(super) const SELECT_WORKING_TREE_SQL: &str = "WITH RECURSIVE thread_scope(id) AS (
-    SELECT id FROM threads WHERE id = ?1
+    SELECT id FROM threads WHERE id = $1
     UNION
     SELECT child.id FROM threads AS child
     JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
@@ -367,13 +291,13 @@ pub(in crate::sessions::remote) fn select_working_tree_statement(root: &str) -> 
 
 /// 进入根时待收敛的 child：根子树中非根、`active` 且 `idle`/`stopped` 的 thread。
 pub(super) const SELECT_INTERRUPTED_TREE_SQL: &str = "WITH RECURSIVE thread_scope(id) AS (
-    SELECT id FROM threads WHERE id = ?1
+    SELECT id FROM threads WHERE id = $1
     UNION
     SELECT child.id FROM threads AS child
     JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
 ) SELECT t.id, t.work_state
   FROM threads AS t JOIN thread_scope AS scope ON scope.id = t.id
-  WHERE t.id <> ?1 AND t.agent_status = 'active' AND t.work_state IN ('idle', 'stopped')
+  WHERE t.id <> $1 AND t.agent_status = 'active' AND t.work_state IN ('idle', 'stopped')
   ORDER BY t.created_at ASC";
 
 /// 遗留 Active 收敛候选行（根子树 + 非根 + `idle`/`stopped`）。
@@ -386,82 +310,29 @@ pub(in crate::sessions::remote) fn select_interrupted_tree_statement(root: &str)
 
 // 分页列举：scope 过滤、游标与上限全部是绑定参数，SQL 文本静态。
 //
-// scope 用整数判别位 + 绑定值表达（`?1`）：0 = 全部、1 = project、2 = workspace、
+// scope 用整数判别位 + 绑定值表达（`$1`）：0 = 全部、1 = project、2 = workspace、
 // 3 = 精确目录。没有绑定行的会话（远端不应存在，本机 legacy 才有的形状）不匹配任何
 // 带 scope 的查询——远端不借用本机 workspace 登记，也就不假装能做 legacy 路径归属。
-select_pair!(
-    SELECT_PAGE_SQL,
-    SELECT_PAGE_SQL_LEGACY,
-    page_columns,
-    page_columns_legacy,
+const SELECT_PAGE_SQL: &str = concat!("SELECT ", page_columns!(),
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
-    WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
-      AND (?1 = 0
-        OR (?1 = 1 AND b.project_id = ?2)
-        OR (?1 = 2 AND s.workspace_id = ?2)
-        OR (?1 = 3 AND s.workspace_id = ?2 AND b.relative_cwd = ?3))
-      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
-    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
-);
-
-select_pair!(
-    SELECT_ENV_PAGE_SQL,
-    SELECT_ENV_PAGE_SQL_LEGACY,
-    page_columns,
-    page_columns_legacy,
-    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
-    WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
-      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = s.workspace_id AND w.machine_id = ?2)
-      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
-    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
-);
-
-select_pair!(
-    SELECT_PAGE_V11_SQL,
-    SELECT_PAGE_V11_SQL_LEGACY,
-    page_columns,
-    page_columns_legacy,
-    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
-    WHERE s.hidden = 0 AND s.message_count > 0
-      AND (?1 = 0 OR (?1 = 1 AND b.project_id = ?2)
-        OR (?1 = 2 AND b.workspace_id = ?2)
-        OR (?1 = 3 AND b.workspace_id = ?2 AND b.relative_cwd = ?3))
-      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
-    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
-);
-
-select_pair!(
-    SELECT_ENV_PAGE_V11_SQL,
-    SELECT_ENV_PAGE_V11_SQL_LEGACY,
-    page_columns,
-    page_columns_legacy,
-    " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
-    WHERE s.hidden = 0 AND s.message_count > 0
-      AND EXISTS (SELECT 1 FROM session_environments env WHERE env.thread_id = s.id AND env.machine_id = ?2)
-      AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
-    ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
+    WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = $8 AND s.message_count > 0
+      AND ($1 = 0
+        OR ($1 = 1 AND b.project_id = $2)
+        OR ($1 = 2 AND s.workspace_id = $2)
+        OR ($1 = 3 AND s.workspace_id = $2 AND b.relative_cwd = $3)
+        OR ($1 = 4 AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = s.workspace_id AND w.machine_id = $2)))
+      AND ($4 = 0 OR (s.updated_at, s.id) < ($5, $6))
+    ORDER BY s.updated_at DESC, s.id DESC LIMIT $7"
 );
 
 /// 会话事实行（含绑定、frozen、继承区）。
-pub(in crate::sessions::remote) fn select_session_statement(
-    id: &str,
-    projection: MetaProjection,
-) -> StatementSpec {
-    StatementSpec::new(
-        projection.sql(SELECT_SESSION_SQL, SELECT_SESSION_SQL_LEGACY),
-        vec![Value::Text(id.to_owned())],
-    )
+pub(in crate::sessions::remote) fn select_session_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_SESSION_SQL, vec![Value::Text(id.to_owned())])
 }
 
 /// 会话 metadata 行（不含大字段）。
-pub(in crate::sessions::remote) fn select_meta_statement(
-    id: &str,
-    projection: MetaProjection,
-) -> StatementSpec {
-    StatementSpec::new(
-        projection.sql(SELECT_META_SQL, SELECT_META_SQL_LEGACY),
-        vec![Value::Text(id.to_owned())],
-    )
+pub(in crate::sessions::remote) fn select_meta_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_META_SQL, vec![Value::Text(id.to_owned())])
 }
 
 /// 恢复准入的 frozen 单列读取。
@@ -470,25 +341,13 @@ pub(in crate::sessions::remote) fn select_frozen_statement(id: &str) -> Statemen
 }
 
 /// 直接子会话 metadata。
-pub(in crate::sessions::remote) fn select_children_statement(
-    parent: &str,
-    projection: MetaProjection,
-) -> StatementSpec {
-    StatementSpec::new(
-        projection.sql(SELECT_CHILDREN_SQL, SELECT_CHILDREN_SQL_LEGACY),
-        vec![Value::Text(parent.to_owned())],
-    )
+pub(in crate::sessions::remote) fn select_children_statement(parent: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_CHILDREN_SQL, vec![Value::Text(parent.to_owned())])
 }
 
 /// 整棵树 metadata（含根自身）。
-pub(in crate::sessions::remote) fn select_tree_statement(
-    root: &str,
-    projection: MetaProjection,
-) -> StatementSpec {
-    StatementSpec::new(
-        projection.sql(SELECT_TREE_SQL, SELECT_TREE_SQL_LEGACY),
-        vec![Value::Text(root.to_owned())],
-    )
+pub(in crate::sessions::remote) fn select_tree_statement(root: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_TREE_SQL, vec![Value::Text(root.to_owned())])
 }
 
 /// 自有 payload 行（按 canonical 插入序，即 `rowid`）。
@@ -667,15 +526,13 @@ pub(in crate::sessions::remote) fn select_message_flags_statement(
 /// 也不把「无法比较」静默当成「匹配为空」）。
 pub(in crate::sessions::remote) fn page_statement(
     query: &ScopedThreadQuery,
-    projection: MetaProjection,
 ) -> SessionResourceResult<StatementSpec> {
-    page_statement_for_archive(query, false, projection)
+    page_statement_for_archive(query, false)
 }
 
 pub(in crate::sessions::remote) fn page_statement_for_archive(
     query: &ScopedThreadQuery,
     archived: bool,
-    projection: MetaProjection,
 ) -> SessionResourceResult<StatementSpec> {
     let (kind, scope_id, relative) = match &query.scope {
         ThreadScope::Environment(machine_id) => (4, Value::Text(machine_id.clone()), Value::Null),
@@ -708,11 +565,7 @@ pub(in crate::sessions::remote) fn page_statement_for_archive(
     };
     let limit = i64::from(query.limit.clamp(1, 200)) + 1;
     Ok(StatementSpec::new(
-        if matches!(query.scope, ThreadScope::Environment(_)) {
-            projection.sql(SELECT_ENV_PAGE_SQL, SELECT_ENV_PAGE_SQL_LEGACY)
-        } else {
-            projection.sql(SELECT_PAGE_SQL, SELECT_PAGE_SQL_LEGACY)
-        },
+        SELECT_PAGE_SQL,
         vec![
             super::super::session_codec::int_value(kind),
             scope_id,
@@ -724,18 +577,4 @@ pub(in crate::sessions::remote) fn page_statement_for_archive(
             super::super::session_codec::int_value(i64::from(archived)),
         ],
     ))
-}
-
-pub(in crate::sessions::remote) fn page_statement_v11(
-    query: &ScopedThreadQuery,
-    projection: MetaProjection,
-) -> SessionResourceResult<StatementSpec> {
-    let mut spec = page_statement_for_archive(query, false, projection)?;
-    spec.sql = if matches!(query.scope, ThreadScope::Environment(_)) {
-        projection.sql(SELECT_ENV_PAGE_V11_SQL, SELECT_ENV_PAGE_V11_SQL_LEGACY)
-    } else {
-        projection.sql(SELECT_PAGE_V11_SQL, SELECT_PAGE_V11_SQL_LEGACY)
-    };
-    spec.params.pop();
-    Ok(spec)
 }

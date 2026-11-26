@@ -137,7 +137,7 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | --- | --- | --- |
 | Peri `config.env`、Claude settings `env` | TUI 启动时注入字符串值，已存在的进程变量优先。注入后是否控制 Peri 取决于本表中的消费方或外部子进程。 | `peri-tui/src/main.rs` |
 | MCP 配置的 `${VAR}`、hook 的 `allowed_env_vars` | 按配置引用或白名单读取变量，用于命令、参数、HTTP header 等；这不会为每个 `VAR` 新增 Peri 全局开关。 | `peri-middlewares/src/mcp/config.rs`、`peri-middlewares/src/hooks/variables.rs` |
-| `--session-store-token-env=<NAME>` | 按 CLI 给定名称读取远端 Session Store 凭据；文档只传名称，不登记 secret 值。 | `peri-resources/src/sessions/remote/credentials.rs` |
+| `--session-store-token-env=<NAME>` | 按 CLI 给定名称读取 PostgreSQL 会话库密码并覆盖 DSN 密码；文档只传名称，不登记 secret 值。 | `peri-resources/src/sessions/remote/credentials.rs` |
 | 子进程运行环境 | MCP、hook、Workflow 和工具进程各自按配置或 allowlist 接收环境；Peri 注入的 `CLAUDE_*`、`GIT_OPTIONAL_LOCKS`、`TERM` 等是子进程输入，不是启动 Peri 的用户开关。 | 对应进程构造器 |
 
 真实运行密钥值不得主动写入本表或示例；运行时日志不做内容脱敏，按完整运行数据管理访问，见 [ARC-SECRET-001](architecture-contracts.md#arc-secret-001)。

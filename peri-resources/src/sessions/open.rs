@@ -7,10 +7,8 @@
 //! - `--session-store` 原文里的本机路径保留 Windows drive/UNC 语义，`C:` 不会被当成
 //!   URI scheme；
 //! - `env:<变量名>` 只解引用一次、不递归，用于把 URL 之类的值放在环境变量里；
-//! - 远程 locator 的引擎只能由已确认语法（`turso://` / `libsql://`）或显式选择给出，
-//!   `https://` 单独出现时明确要求显式选择，不按 scheme、端口或响应猜；
-//! - 凭证只经 [`CredentialSource`]（环境变量名）表达，本模块不读 `.env`、不搜索 cwd
-//!   或父目录、不内置默认名或别名；远程模式缺少凭证来源直接报配置错误；
+//! - PostgreSQL URLs may carry connection parameters and a password. An explicit
+//!   credential environment variable overrides the DSN password at connect time.
 //! - [`AccessIntent`] 只表达「打算怎么用」，只接受确认过的拼写；参数存在不等于拿到写权限，
 //!   能不能写由打开结果回答；
 //! - 只有 `env:` 形式的 locator 会读进程环境：环境里存在某个云 URL 变量**不会**切换后端，
@@ -53,10 +51,9 @@ pub(crate) enum LocatorError {
         name: String,
     },
     Remote(EndpointError),
-    /// 显式引擎名不是已知取值（`turso` / `libsql`）。
+    /// Unknown explicit engine name.
     UnknownEngine,
-    /// 远程 locator 但没有给出凭证来源。
-    MissingCredentialSource,
+    EmptyCredential,
     /// 本机 locator 却给了凭证来源：不静默忽略配置。
     CredentialSourceForLocalStore,
     /// 本机 locator 却给了引擎名：不静默忽略配置。
@@ -68,9 +65,13 @@ impl fmt::Display for LocatorError {
         match self {
             Self::Empty => formatter.write_str("session store locator is empty"),
             #[cfg(target_os = "emscripten")]
-            Self::LocalStoreUnsupported => formatter.write_str("local session store is unavailable on WASM"),
+            Self::LocalStoreUnsupported => {
+                formatter.write_str("local session store is unavailable on WASM")
+            }
             #[cfg(target_os = "emscripten")]
-            Self::ExecutionUnsupported => formatter.write_str("WASM session execution host is unavailable"),
+            Self::ExecutionUnsupported => {
+                formatter.write_str("WASM session execution host is unavailable")
+            }
             Self::InvalidEnvReference => {
                 formatter.write_str("session store env reference is not a valid variable name")
             }
@@ -90,12 +91,10 @@ impl fmt::Display for LocatorError {
                 "session store env variable {name} is itself an env reference; only one level is resolved"
             ),
             Self::Remote(error) => write!(formatter, "{error}"),
-            Self::UnknownEngine => formatter.write_str(
-                "unknown session store engine; expected one of the confirmed engine names",
-            ),
-            Self::MissingCredentialSource => formatter.write_str(
-                "remote session store requires an explicit credential source; no default is assumed",
-            ),
+            Self::UnknownEngine => {
+                formatter.write_str("unknown session store engine; expected postgres or postgresql")
+            }
+            Self::EmptyCredential => formatter.write_str("session store password is empty"),
             Self::CredentialSourceForLocalStore => formatter.write_str(
                 "credential source was given for a local session store; it is not silently ignored",
             ),
@@ -121,7 +120,7 @@ impl From<CredentialError> for LocatorError {
             CredentialError::Missing { name } => Self::EnvValueMissing { name },
             CredentialError::Empty { name } => Self::EnvValueEmpty { name },
             CredentialError::NotUnicode { name } => Self::EnvValueNotUnicode { name },
-            CredentialError::EmptyValue => Self::MissingCredentialSource,
+            CredentialError::EmptyValue => Self::EmptyCredential,
         }
     }
 }
@@ -153,6 +152,7 @@ impl AccessIntent {
         }
     }
 
+    #[cfg(any(test, not(target_os = "emscripten")))]
     pub(crate) fn is_read_only(self) -> bool {
         matches!(self, Self::ReadOnly)
     }
@@ -314,20 +314,27 @@ impl SessionStoreOpenRequest {
         }
     }
 
-    /// 访问模式视图（等价于 `self.intent().mode()`）：装配层把它交给组合层，
+    /// 访问模式视图：装配层把它交给组合层，
     /// 由组合层决定数据面按只读还是读写打开。
     pub(crate) fn access(&self) -> AccessMode {
         self.intent.mode()
     }
 
     /// 部署参数层的访问意图（只读选择走独立 seam 的依据）。
+    #[cfg(any(test, not(target_os = "emscripten")))]
     pub(crate) fn intent(&self) -> AccessIntent {
         self.intent
     }
 
-    /// 凭证**来源**（环境变量名，不含值）：远程装配按它取值，值从不进入本结构。
-    pub(crate) fn credential_source(&self) -> Option<&CredentialSource> {
-        self.credential.as_ref()
+    /// Resolve an explicitly named password before opening a connection.
+    pub(crate) fn resolve_credential(
+        &self,
+    ) -> Result<super::remote::SessionStoreCredential, CredentialError> {
+        self.credential
+            .as_ref()
+            .map(CredentialSource::resolve)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     /// 解析最终 location；同时校验凭证来源与 locator 形态是否匹配。
@@ -339,7 +346,7 @@ impl SessionStoreOpenRequest {
             StorageLocator::LocalPath(path) => ResolvedLocator::Local(path.clone()),
             StorageLocator::Literal(raw) => {
                 if looks_like_remote_url(raw) {
-                    ResolvedLocator::Remote(Box::new(RemoteEndpoint::parse(raw, self.engine)?))
+                    ResolvedLocator::Remote(Box::new(RemoteEndpoint::parse(raw)?))
                 } else {
                     ResolvedLocator::Local(PathBuf::from(raw))
                 }
@@ -348,10 +355,10 @@ impl SessionStoreOpenRequest {
                 let value = match std::env::var(name) {
                     Ok(value) => value,
                     Err(std::env::VarError::NotPresent) => {
-                        return Err(LocatorError::EnvValueMissing { name: name.clone() })
+                        return Err(LocatorError::EnvValueMissing { name: name.clone() });
                     }
                     Err(std::env::VarError::NotUnicode(_)) => {
-                        return Err(LocatorError::EnvValueNotUnicode { name: name.clone() })
+                        return Err(LocatorError::EnvValueNotUnicode { name: name.clone() });
                     }
                 };
                 let value = value.trim().to_owned();
@@ -362,14 +369,13 @@ impl SessionStoreOpenRequest {
                     return Err(LocatorError::EnvValueIsReference { name: name.clone() });
                 }
                 if looks_like_remote_url(&value) {
-                    ResolvedLocator::Remote(Box::new(RemoteEndpoint::parse(&value, self.engine)?))
+                    ResolvedLocator::Remote(Box::new(RemoteEndpoint::parse(&value)?))
                 } else {
                     ResolvedLocator::Local(PathBuf::from(value))
                 }
             }
         };
         match (&resolved, &self.credential, &self.engine) {
-            (ResolvedLocator::Remote(_), None, _) => Err(LocatorError::MissingCredentialSource),
             (ResolvedLocator::Default | ResolvedLocator::Local(_), Some(_), _) => {
                 Err(LocatorError::CredentialSourceForLocalStore)
             }
@@ -411,5 +417,9 @@ fn looks_like_remote_url(raw: &str) -> bool {
     let Some((scheme, _)) = raw.split_once("://") else {
         return false;
     };
-    scheme.len() >= 2 && scheme.chars().all(|c| c.is_ascii_alphanumeric())
+    scheme.len() >= 2
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }

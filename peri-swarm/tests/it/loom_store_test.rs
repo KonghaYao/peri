@@ -1,37 +1,7 @@
-//! S6b2/S6b3/S6c2: a real Loom deployment with **two** logical databases: the
-//! Peri session store (session/history/MQ facts) and the independent Swarm
-//! state store (`swarm_meta` + `swarm_*` rows, `design §4.1`, §4.3, §7.2-S6).
-//!
-//! These tests are ignored by default because they need a running Loom. They are
-//! driven purely by environment:
-//!
-//! - `PERI_SWARM_LOOM_LOCATOR` — the Hrana base URL of the Peri session database
-//!   branch, e.g. `http://127.0.0.1:9497/db/local_default/demo/main/`.
-//! - `PERI_SWARM_STATE_STORE` — the Hrana base URL of the Swarm state database.
-//!   It must be a different logical database (the bootstrap rejects a shared
-//!   locator); the test asserts the two locators differ.
-//! - `PERI_SWARM_STORE_TOKEN` — the Loom project API key. Only the **name** is
-//!   part of the deployment (credential source). The raw schema probes read the
-//!   value to authenticate their own connection; it is never printed, asserted,
-//!   or written into a failure message.
-//! - `HOME` — a scratch directory (set by the harness). The test asserts that no
-//!   local Peri session database appears under it.
-//!
-//! What is real here: Loom, the Peri ACP host, the session/history/MQ writes on
-//! the session store, the Swarm rows (including the turn's delta + complete
-//! items) on the state store, the closes, and the reopen on new connections.
-//! The model endpoint stays a deterministic stub (`design §7.3`).
-//!
-//! S6c1b rewired this test away from the removed single-database adapter (the
-//! S6b path that read `peri-resources`' Swarm port) to [`SwarmStateStore`]
-//! opened from `PERI_SWARM_STATE_STORE`. S6c2 is the real dual-database
-//! acceptance run: provision the state database with
-//! `peri-swarm/scripts/provision_state_db.py`, then run these tests against the
-//! two locators it prints.
-//!
-//! Commands and observed output for the single-database era live in
-//! `.peri/plans/S6b2-report.md` and `.peri/plans/S6b3-report.md`; the
-//! dual-database run is recorded in `.peri/plans/S6c2-report.md`.
+//! Swarm deployment with a PostgreSQL session database and an independent Loom state store.
+//! Set PERI_SWARM_SESSION_STORE to the PostgreSQL DSN, PERI_SWARM_STATE_STORE to
+//! the Hrana base URL, PERI_SWARM_STORE_TOKEN to its project key, and HOME to
+//! a scratch directory. The model endpoint is a deterministic stub.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,7 +44,7 @@ use peri_swarm::store::{
 };
 use turso_serverless::{Builder, Value as SqlValue};
 
-const LOCATOR_ENV: &str = "PERI_SWARM_LOOM_LOCATOR";
+const LOCATOR_ENV: &str = "PERI_SWARM_SESSION_STORE";
 /// Swarm state database locator (`design §4.1`, S6c1a). A separate logical
 /// database from `LOCATOR_ENV`; the bootstrap rejects sharing one.
 const STATE_LOCATOR_ENV: &str = "PERI_SWARM_STATE_STORE";
@@ -267,14 +237,11 @@ fn local_session_db(home: &Path) -> PathBuf {
 }
 
 fn deployment() -> SessionStoreDeployment {
-    SessionStoreDeployment::from_locator(required_env(LOCATOR_ENV))
-        .with_engine("turso")
-        .with_credential_env(CREDENTIAL_ENV)
+    SessionStoreDeployment::from_locator(required_env(LOCATOR_ENV)).with_engine("postgres")
 }
 
 /// Where the independent Swarm state database is and which variable holds its
-/// token. The credential name is shared with the session store, the locator is
-/// not.
+/// token. The session DSN carries PostgreSQL authentication separately.
 fn state_store_config() -> SwarmStateStoreConfig {
     SwarmStateStoreConfig {
         locator: Url::parse(&required_env(STATE_LOCATOR_ENV)).expect("state store locator URL"),
@@ -286,8 +253,8 @@ fn state_store_config() -> SwarmStateStoreConfig {
 fn assert_distinct_locators() {
     let session = Url::parse(&required_env(LOCATOR_ENV)).expect("session store locator URL");
     let state = Url::parse(&required_env(STATE_LOCATOR_ENV)).expect("state store locator URL");
-    assert_ne!(
-        session, state,
+    assert!(
+        session != state,
         "the Swarm state store must be a different logical database from the Peri session store"
     );
 }
@@ -329,7 +296,7 @@ fn environment(machine_id: &uuid::Uuid, root: &Path) -> RemoteWorkspaceEnvironme
 async fn open(store: &SessionStoreDeployment, env: &RemoteWorkspaceEnvironment) -> Resources {
     Resources::open_deployment_in_remote_environment(store, env.clone())
         .await
-        .expect("open the Peri session Loom store")
+        .expect("open the Peri PostgreSQL session store")
 }
 
 /// Consume the deployment shutdown owner: drop the business handle, then close.
@@ -339,15 +306,13 @@ async fn close(resources: Resources) {
     shutdown
         .shutdown()
         .await
-        .expect("close the remote Loom store");
+        .expect("close the remote session store");
 }
 
 // ── raw schema probes ───────────────────────────────────────────────────────
 
-/// The Peri session schema this build writes and accepts
-/// (`peri-resources/src/sessions/canonical.rs`, `CURRENT_SCHEMA_VERSION`, 15
-/// since S6c1b). A remote database carries it in `peri_store_meta`.
-const PERI_SCHEMA_VERSION: &str = "15";
+/// PostgreSQL session contract version, stored in `peri_store_meta`.
+const PERI_SCHEMA_VERSION: i64 = 1;
 
 /// Tables the Swarm state database owns (`peri-swarm/src/store/turso.rs`).
 const SWARM_TABLES: [&str; 6] = [
@@ -446,23 +411,25 @@ fn render_value(value: &SqlValue) -> String {
 /// `swarm_*` table or index shows up) and the single `peri_store_meta` row.
 #[derive(Debug, PartialEq)]
 struct PeriSchema {
-    objects: Vec<Vec<String>>,
-    swarm_objects: Vec<Vec<String>>,
-    meta: Vec<Vec<String>>,
+    objects: Vec<(String, String)>,
+    meta: Vec<(i64, String, String)>,
 }
 
-async fn peri_schema(probe: &SchemaProbe) -> PeriSchema {
-    PeriSchema {
-        objects: probe
-            .rows("SELECT type, name, tbl_name FROM sqlite_master ORDER BY type, name")
-            .await,
-        swarm_objects: probe
-            .rows("SELECT type, name FROM sqlite_master WHERE name LIKE 'swarm%' ORDER BY type, name")
-            .await,
-        meta: probe
-            .rows("SELECT singleton, schema_version, store_id, contract FROM peri_store_meta ORDER BY singleton")
-            .await,
-    }
+async fn peri_schema(probe: &sqlx::PgPool) -> PeriSchema {
+    let objects = sqlx::query_as(
+        "SELECT relkind::text, relname::text FROM pg_class
+         WHERE relnamespace = current_schema()::regnamespace ORDER BY relkind, relname",
+    )
+    .fetch_all(probe)
+    .await
+    .expect("PostgreSQL schema objects");
+    let meta = sqlx::query_as(
+        "SELECT schema_version, store_id, contract FROM peri_store_meta ORDER BY singleton",
+    )
+    .fetch_all(probe)
+    .await
+    .expect("PostgreSQL schema metadata");
+    PeriSchema { objects, meta }
 }
 
 /// The state database owns exactly the Swarm schema, at the version this build
@@ -561,7 +528,7 @@ fn history_texts(history: &[PersistedPayload]) -> Vec<(String, String)> {
 /// session/item/input/binding rows, and both stay readable after the child and
 /// every process connection are closed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a running Loom; the dual-database acceptance run is S6c2"]
+#[ignore = "requires PostgreSQL and a Loom state store"]
 async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     if std::env::var_os("SWARM_TRACE_LOG").is_some() {
         let _ = tracing_subscriber::fmt()
@@ -592,8 +559,10 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
 
     // ── schema, before the state database exists in this process ────────────
     // The session database carries the Peri schema only, at the version this
-    // build writes (15 since S6c1b removed the `swarm_*` tables from it).
-    let peri_probe = SchemaProbe::open("peri", LOCATOR_ENV).await;
+    // build writes.
+    let peri_probe = sqlx::PgPool::connect(&required_env(LOCATOR_ENV))
+        .await
+        .expect("PostgreSQL schema probe");
     let peri_before = peri_schema(&peri_probe).await;
     assert_eq!(
         peri_before.meta.len(),
@@ -602,21 +571,23 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         peri_before.meta
     );
     assert_eq!(
-        peri_before.meta[0][1], PERI_SCHEMA_VERSION,
+        peri_before.meta[0].0, PERI_SCHEMA_VERSION,
         "the session database is at the Peri schema version: {:?}",
         peri_before.meta
     );
     assert!(
-        peri_before.swarm_objects.is_empty(),
+        peri_before
+            .objects
+            .iter()
+            .all(|(_, name)| !name.starts_with("swarm_")),
         "the session database must carry no swarm table or index: {:?}",
-        peri_before.swarm_objects
+        peri_before.objects
     );
     eprintln!(
-        "S6c2: peri schema_version={} contract={} schema_objects={} swarm_objects={}",
-        peri_before.meta[0][1],
-        peri_before.meta[0][3],
-        peri_before.objects.len(),
-        peri_before.swarm_objects.len()
+        "S6c2: peri schema_version={} contract={} schema_objects={}",
+        peri_before.meta[0].0,
+        peri_before.meta[0].2,
+        peri_before.objects.len()
     );
 
     // The state store opens a second, independent database. Its first open in a
@@ -710,7 +681,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         Arc::clone(&log),
     )
     .await
-    .expect("spawn the Peri host on the remote Loom store");
+    .expect("spawn the Peri host on the PostgreSQL session store");
     assert_eq!(
         child.session_id(),
         root_session_id,
@@ -894,13 +865,13 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     let meta = reader
         .load_session_meta(&root_session_id)
         .await
-        .expect("Peri session metadata from Loom");
+        .expect("Peri session metadata from PostgreSQL");
     assert_eq!(meta.id, root_session_id);
     assert_eq!(meta.cwd, cwd.to_string_lossy());
     let history = reader
         .load_session_history(&root_session_id)
         .await
-        .expect("Peri history from Loom");
+        .expect("Peri history from PostgreSQL");
     let texts = history_texts(&history);
     assert!(
         texts
@@ -1051,13 +1022,12 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     assert_eq!(
         peri_after_swarm, peri_before,
         "creating and writing the Swarm state database must leave the session \
-         database's sqlite_master and peri_store_meta untouched"
+         database's catalog and peri_store_meta untouched"
     );
     eprintln!(
-        "S6c2: isolation OK; peri schema_version={} objects={} swarm_objects={}",
-        peri_after_swarm.meta[0][1],
-        peri_after_swarm.objects.len(),
-        peri_after_swarm.swarm_objects.len()
+        "S6c2: isolation OK; peri schema_version={} objects={}",
+        peri_after_swarm.meta[0].0,
+        peri_after_swarm.objects.len()
     );
     let swarm_schema_after_writes = swarm_probe
         .rows("SELECT type, name FROM sqlite_master ORDER BY type, name")
@@ -1251,7 +1221,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         local_db.display()
     );
     eprintln!(
-        "S6c2: dual-database Loom run OK; checked absent: {}",
+        "S6c2: PostgreSQL/Loom run OK; checked absent: {}",
         local_db.display()
     );
 }
@@ -1263,7 +1233,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
 /// created. `bootstrap::run` maps the open failure to `StateStoreOpen` and
 /// closes the session store instead of continuing on one database.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a running Loom for the session-store half of the probe"]
+#[ignore = "requires a running PostgreSQL session store"]
 async fn missing_or_unreachable_state_locator_fails_closed() {
     clear_telemetry_env();
     assert_credential_present();
@@ -1367,7 +1337,7 @@ async fn missing_or_unreachable_state_locator_fails_closed() {
 /// `d`: an unreachable locator fails the deployment **and** the child open, and
 /// neither path creates a local SQLite session database.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a running Loom (see .peri/plans/S6b3-report.md)"]
+#[ignore = "requires the remote store integration environment"]
 async fn unreachable_loom_fails_without_creating_a_local_store() {
     clear_telemetry_env();
     assert_credential_present();
@@ -1385,14 +1355,11 @@ async fn unreachable_loom_fails_without_creating_a_local_store() {
 
     // Closed loopback port: the failure is a connection failure, not a locator
     // shape rejection (that path never reaches I/O).
-    let unreachable =
-        SessionStoreDeployment::from_locator("http://127.0.0.1:9/db/local_default/demo/main/")
-            .with_engine("turso")
-            .with_credential_env(CREDENTIAL_ENV);
+    let unreachable = SessionStoreDeployment::from_locator("postgresql://localhost:9/peri");
 
     let error = Resources::open_deployment_in_remote_environment(&unreachable, env.clone())
         .await
-        .expect_err("an unreachable Loom must fail the deployment open");
+        .expect_err("an unreachable PostgreSQL server must fail the deployment open");
     let message = format!("{error:#}");
     assert!(
         message.contains("无法打开远程会话存储") || message.contains("remote"),

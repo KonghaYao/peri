@@ -1,14 +1,6 @@
 //! 远程会话语句：静态 SQL 文本 + 全绑定参数，**表名与列名就是本机形状**。
 //!
-//! 统一之后远端不再有自己的会话表：语句里的 `threads` / `messages` / `session_bindings`
-//! 与 `sqlite_store` 说的是同一份 canonical schema（`sessions::canonical` 是那份 DDL 的
-//! 唯一来源）。列语义、`messages.rowid` 承载的 canonical 历史顺序、绑定四列所在的表都逐项
-//! 对应；远端独有的只剩执行器机制（托管批与幂等账本），不体现在会话形状上。
-//!
-//! 规则与 [`super::sql`] 一致，只是范围更大：SQL 文本在编译期定型（`concat!` + `const`），
-//! 会话 id、绑定、时间戳、分页游标、scope 过滤值全部走绑定参数。列投影只有一处来源
-//! （宏 `meta_columns!`），事实投影与前缀投影由它拼出，避免「同一列清单手抄三遍」漂移；
-//! 旧代只读库（schema ≤ 13）用同形占位列的 `meta_columns_legacy!`，解码仍是同一套。
+//! PostgreSQL 使用独立的 DDL 与显式标识列 `messages.rowid`。所有外部值走绑定参数。
 //!
 //! 解码用的列下标与投影同处一个模块，且由最后一个下标推出（[`reads::META_COLUMN_COUNT`]），
 //! 测试拿真实列文本核对前缀关系。
@@ -20,15 +12,15 @@ pub(super) use reads::{
     active_entry_positions_statement, history_page_body_statement, history_page_bounds_statement,
     history_page_rows_statement, history_segment_anchor_statement, history_segment_head_statement,
     history_segment_next_statement, history_segment_tail_statement, inherited_context_statement,
-    page_statement_for_archive, page_statement_v11, rewind_candidate_body_statement,
-    rewind_candidate_rows_statement, select_active_messages_statement, select_children_statement,
-    select_frozen_statement, select_interrupted_tree_statement, select_message_flags_statement,
-    select_messages_statement, select_meta_statement, select_root_statement,
-    select_session_statement, select_tree_statement, select_working_tree_statement, MetaProjection,
-    FACT_BINDING_VERSION, FACT_FROZEN, FACT_INHERITED, META_AGENT_STATUS, META_CANCEL_POLICY,
-    META_CONFIG, META_CONTENT_SIZE, META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD,
-    META_HIDDEN, META_ID, META_MESSAGE_COUNT, META_PARENT, META_SNAPSHOT_AT, META_TITLE,
-    META_UPDATED_AT, META_WORK_STATE, PAGE_BINDING_VERSION,
+    page_statement_for_archive, rewind_candidate_body_statement, rewind_candidate_rows_statement,
+    select_active_messages_statement, select_children_statement, select_frozen_statement,
+    select_interrupted_tree_statement, select_message_flags_statement, select_messages_statement,
+    select_meta_statement, select_root_statement, select_session_statement, select_tree_statement,
+    select_working_tree_statement, FACT_BINDING_VERSION, FACT_FROZEN, FACT_INHERITED,
+    META_AGENT_STATUS, META_CANCEL_POLICY, META_CONFIG, META_CONTENT_SIZE,
+    META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD, META_HIDDEN, META_ID, META_MESSAGE_COUNT,
+    META_PARENT, META_SNAPSHOT_AT, META_TITLE, META_UPDATED_AT, META_WORK_STATE,
+    PAGE_BINDING_VERSION,
 };
 pub(super) use writes::{
     commit_frozen_statement, context_usage_statement, insert_message_statement,
@@ -40,9 +32,8 @@ pub(super) use writes::{
 #[cfg(test)]
 pub(super) use reads::{
     page_statement, FACT_BINDING_PROJECT, FACT_BINDING_RELATIVE_CWD, FACT_BINDING_WORKSPACE,
-    FACT_COLUMN_TOTAL, FACT_PROJECTION, FACT_PROJECTION_LEGACY, META_COLUMN_COUNT, META_PROJECTION,
-    META_PROJECTION_LEGACY, PAGE_BINDING_PROJECT, PAGE_BINDING_RELATIVE_CWD,
-    PAGE_BINDING_WORKSPACE, PAGE_COLUMN_TOTAL, PAGE_PROJECTION, PAGE_PROJECTION_LEGACY,
+    FACT_COLUMN_TOTAL, FACT_PROJECTION, META_COLUMN_COUNT, META_PROJECTION, PAGE_BINDING_PROJECT,
+    PAGE_BINDING_RELATIVE_CWD, PAGE_BINDING_WORKSPACE, PAGE_COLUMN_TOTAL, PAGE_PROJECTION,
 };
 #[cfg(test)]
 pub(super) use writes::{
@@ -52,7 +43,7 @@ pub(super) use writes::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turso_serverless::Value;
+    use crate::sessions::remote::sql::Value;
 
     /// 远端两条撤销入口的判据点：write-once（fork 补偿）不叠加 frozen 判据，
     /// 两阶段草稿的三条删除全部带 `frozen_context IS NULL`。
@@ -122,7 +113,7 @@ mod tests {
         let first = rewind_candidate_rows_statement("s", None, 128);
         assert!(first.is_read_only(), "阶段一必须是只读语句");
         assert!(first.sql.contains("m.role = 'user'"));
-        assert!(first.sql.contains("ORDER BY m.rowid DESC LIMIT ?3"));
+        assert!(first.sql.contains("ORDER BY m.rowid DESC LIMIT $3"));
         assert!(!first.sql.contains("excluded"), "归档 user 仍是合法目标");
         assert_eq!(
             first.params,
@@ -146,7 +137,7 @@ mod tests {
 
         let body = rewind_candidate_body_statement("s", "m-1");
         assert!(body.is_read_only());
-        assert!(body.sql.contains("m.message_id = ?2"));
+        assert!(body.sql.contains("m.message_id = $2"));
         assert_eq!(
             body.params,
             vec![Value::Text("s".to_owned()), Value::Text("m-1".to_owned())]

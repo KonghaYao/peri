@@ -1,4 +1,4 @@
-//! 数据端口 — 资源模块内部行为 seam，由两个 adapter（本机 SQLite / Turso Cloud）实现。
+//! 数据端口 — 资源模块内部行为 seam，由两个 adapter（本机 SQLite / PostgreSQL Cloud）实现。
 //!
 //! 边界规则：
 //!

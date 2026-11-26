@@ -434,20 +434,20 @@ fn test_session_store_deployment_normalizes_locator_options() {
     let cli = Cli::try_parse_from([
         "peri",
         "--session-store",
-        "env:TURSO_URL",
+        "env:DATABASE_URL",
         "--session-store-token-env",
-        "TURSO_TOEKN",
+        "PERI_PG_PASSWORD",
         "--session-store-engine",
-        "turso",
+        "postgres",
     ])
     .expect("session store deployment normalizes locator options: the fixture command-line arguments must parse");
     let deployment = super::session_store_deployment(&cli, AccessMode::ReadOnly).expect("session store deployment normalizes locator options: the session_store_deployment fixture operation uses valid inputs");
     assert_eq!(
         deployment.locator(),
-        &SessionStoreLocator::Locator("env:TURSO_URL".to_owned())
+        &SessionStoreLocator::Locator("env:DATABASE_URL".to_owned())
     );
-    assert_eq!(deployment.engine_name(), Some("turso"));
-    assert_eq!(deployment.credential_env_name(), Some("TURSO_TOEKN"));
+    assert_eq!(deployment.engine_name(), Some("postgres"));
+    assert_eq!(deployment.credential_env_name(), Some("PERI_PG_PASSWORD"));
     assert_eq!(deployment.access(), AccessMode::ReadOnly);
 }
 
@@ -477,22 +477,22 @@ fn test_local_session_db_path_absolutizes_relative_local_path() {
 
 #[test]
 fn test_local_session_db_path_ignores_remote_locator() {
-    let deployment = SessionStoreDeployment::from_locator("libsql://example/db");
+    let deployment = SessionStoreDeployment::from_locator("postgresql://example/db");
     assert_eq!(super::local_session_db_path(&deployment), None);
 }
 
-/// `Debug` 保留 locator 原文，供运行时诊断。
+/// 部署诊断隐藏可能含密码的 DSN。
 #[test]
-fn test_session_store_deployment_debug_preserves_locator() {
+fn test_session_store_deployment_debug_redacts_locator() {
     let cli = Cli::try_parse_from([
         "peri",
         "--session-store",
-        "turso://sentinel-db-sentinel.turso.io",
+        "postgres://sentinel-db-sentinel.invalid",
     ])
     .expect("session store deployment debug preserves locator: the fixture command-line arguments must parse");
     let deployment = super::session_store_deployment(&cli, AccessMode::ReadWrite).expect("session store deployment debug preserves locator: the session_store_deployment fixture operation uses valid inputs");
     let rendered = format!("{deployment:?}");
-    assert!(rendered.contains("sentinel-db-sentinel"));
+    assert!(!rendered.contains("sentinel-db-sentinel"));
 }
 
 /// meta 的受限 grammar 同步：只接受定位参数与 session 自身的 `--json`。
@@ -502,9 +502,9 @@ fn test_meta_grammar_allows_session_store_options() {
     let cli = Cli::try_parse_from([
         "peri",
         "--session-store",
-        "env:TURSO_URL",
+        "env:DATABASE_URL",
         "--session-store-token-env",
-        "TURSO_TOEKN",
+        "PERI_PG_PASSWORD",
         "meta",
         "session",
         session_id,

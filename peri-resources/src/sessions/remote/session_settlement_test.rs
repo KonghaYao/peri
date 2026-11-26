@@ -8,7 +8,7 @@ use crate::sessions::data::SessionDataPort;
 
 /// 让夹具回到「child 尚未结算」的状态，用于在同一 child 上制造重复/竞态结算。
 async fn reset_child_active(fixture: &Fixture, child: &ThreadId) {
-    sqlx::query("UPDATE threads SET agent_status = 'active', work_state = 'working' WHERE id = ?1")
+    sqlx::query("UPDATE threads SET agent_status = 'active', work_state = 'working' WHERE id = $1")
         .bind(child.as_str())
         .execute(&fixture.pool)
         .await
@@ -17,6 +17,7 @@ async fn reset_child_active(fixture: &Fixture, child: &ThreadId) {
 
 /// 插入与提升同批：只让提升语句失败时，插入也必须一起回滚，不能留下 `idle + pending`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
     let fixture = super::fixture().await;
     let thread = super::thread("mq-thread");
@@ -27,8 +28,7 @@ async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
         .unwrap();
     sqlx::query(
         "CREATE TRIGGER fail_work_promote BEFORE UPDATE ON threads
-         WHEN NEW.work_state = 'working'
-         BEGIN SELECT RAISE(ABORT, 'injected promote failure'); END",
+         FOR EACH ROW WHEN (NEW.work_state = 'working') EXECUTE FUNCTION pg_temp.reject_fixture_write()",
     )
     .execute(&fixture.pool)
     .await
@@ -58,6 +58,7 @@ async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
 
 /// 整批在发出前丢失：不返回已接纳，也不留下任何行。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_enqueue_dropped_batch_is_not_accepted() {
     let fixture = super::fixture().await;
     let thread = super::thread("mq-thread");
@@ -93,6 +94,7 @@ async fn remote_enqueue_dropped_batch_is_not_accepted() {
 /// Existing 路径的提升失败必须 fail-closed：返回可重试错误，调用方用同一 ID 重试后变
 /// `working`，不把「已接纳、意图未落地」伪装成成功。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_promotes() {
     let fixture = super::fixture().await;
     let thread = super::thread("mq-thread");
@@ -153,6 +155,7 @@ async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_prom
 
 /// 结算批在发出前丢失：终态、意图与结果都不落库。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_is_single_batch_before_send() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -197,6 +200,7 @@ async fn remote_finalize_is_single_batch_before_send() {
 
 /// 结果插入失败时终态与工作意图必须一起回滚：不能留下「终态已写、结果未入队」。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_rolls_back_when_the_result_insert_fails() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -210,8 +214,7 @@ async fn remote_finalize_rolls_back_when_the_result_insert_fails() {
     // 语句文本只由本测试的固定前缀与 UUID 组成，不含外部输入。
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE TRIGGER fail_result_insert BEFORE INSERT ON thread_mq
-         WHEN NEW.id = '{}'
-         BEGIN SELECT RAISE(ABORT, 'injected result failure'); END",
+         FOR EACH ROW WHEN (NEW.id = '{}') EXECUTE FUNCTION pg_temp.reject_fixture_write()",
         id.as_uuid()
     )))
     .execute(&fixture.pool)
@@ -240,6 +243,7 @@ async fn remote_finalize_rolls_back_when_the_result_insert_fails() {
 
 /// 批次已提交但响应丢失：返回未决；同一 ID 重试读到已落地事实，不重复写结果。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_unknown_reply_is_retryable() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -302,6 +306,7 @@ async fn remote_finalize_unknown_reply_is_retryable() {
 
 /// 结算维护接收方工作意图：EnsureProcessing 提升、passive 不提升、stopped 不解除。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_maintains_receiver_work_intent() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -364,6 +369,7 @@ async fn remote_finalize_maintains_receiver_work_intent() {
 /// 目标已终态：结果行就绪、child 仍 `active` 也不得把 target 从终态 + `idle` 提升为
 /// `working`。结果本身仍按 MQ 规则接纳，改变的只有接收方工作意图。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_does_not_promote_a_terminal_receiver() {
     for terminal in [
         AgentStatus::Error,
@@ -374,7 +380,7 @@ async fn remote_finalize_does_not_promote_a_terminal_receiver() {
         let child = super::thread("other-thread");
         let target = super::thread("mq-thread");
         // 终态 target 的 `work_state` 是派生值；旧路径可能停在 `idle`。
-        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'idle' WHERE id = ?2")
+        sqlx::query("UPDATE threads SET agent_status = $1, work_state = 'idle' WHERE id = $2")
             .bind(terminal.as_str())
             .bind(target.as_str())
             .execute(&fixture.pool)
@@ -414,6 +420,7 @@ async fn remote_finalize_does_not_promote_a_terminal_receiver() {
 /// 终态只写一次：同一 child 先 Done 再 Error（不同结果 ID）。后到的结算既不能覆盖终态，
 /// 也不能再投递一条结果；结果未落地时按批后读取归类为冲突。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -470,6 +477,7 @@ async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
 /// 批前读到 `active`、批间另一个结算提交：本批的结果插入与终态更新都因守卫失效，
 /// 批后按读取归类为 `Existing`；终态与结果行都只保留先提交的那一份。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_does_not_overwrite_a_settlement_committed_after_the_read() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -526,6 +534,7 @@ async fn remote_finalize_does_not_overwrite_a_settlement_committed_after_the_rea
 
 /// 结果投递回 child 自己（恢复期）不构成新的接收方，不得把刚写的终态重新提升为 `working`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_target_equals_child_keeps_work_state() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -556,6 +565,7 @@ async fn remote_finalize_target_equals_child_keeps_work_state() {
 
 /// 同 ID 结果已落地：重复结算（甚至状态与正文不同）必须成功 no-op，不改写任何事实。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_is_idempotent_once_landed() {
     let fixture = super::fixture().await;
     let child = super::thread("other-thread");
@@ -601,6 +611,7 @@ async fn remote_finalize_is_idempotent_once_landed() {
 
 /// 结果 ID 已属于别的 thread：冲突在批内被守卫拦下，终态与工作意图都不得提交。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_conflict_does_not_write_terminal_state() {
     let fixture = super::fixture().await;
     let child = super::thread("child-thread");
@@ -655,6 +666,7 @@ async fn remote_finalize_conflict_does_not_write_terminal_state() {
 
 /// 批前读取与提交之间的冲突由批内守卫拦下：终态不得越过守卫提交。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
     let fixture = super::fixture().await;
     let child = super::thread("child-thread");
@@ -704,6 +716,7 @@ async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
 
 /// 无结果终态：单批条件更新同时写终态与工作意图。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_settle_terminal_without_result_commits_status_and_work_state() {
     use peri_acp_types::session_resources::TerminalSettlementOutcome;
 
@@ -729,6 +742,7 @@ async fn remote_settle_terminal_without_result_commits_status_and_work_state() {
 
 /// 重复结算不产生第二次写入，也不覆盖既有终态。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_settle_terminal_without_result_duplicate_is_noop() {
     use peri_acp_types::session_resources::TerminalSettlementOutcome;
 
@@ -756,6 +770,7 @@ async fn remote_settle_terminal_without_result_duplicate_is_noop() {
 
 /// 批内会话守卫拒绝不存在的 child，并按 NotFound 分类。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_settle_terminal_without_result_rejects_missing_child() {
     let fixture = super::fixture().await;
     let child = super::thread("missing-child");
@@ -794,6 +809,7 @@ fn reminder(body: &str) -> peri_acp_types::system_reminder::TrustedSystemReminde
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_retained_mq_settlement_commits_together() {
     use peri_acp_types::session::RetainedReminder;
 
@@ -823,6 +839,7 @@ async fn remote_retained_mq_settlement_commits_together() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_retained_mq_dropped_batch_changes_nothing() {
     use peri_acp_types::session::RetainedReminder;
 
@@ -869,6 +886,7 @@ async fn remote_retained_mq_dropped_batch_changes_nothing() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempotent() {
     use peri_acp_types::session::RetainedReminder;
     let fixture = super::fixture().await;
@@ -884,7 +902,7 @@ async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempot
     }];
     sqlx::query(
         "CREATE TRIGGER fail_retained_delete BEFORE DELETE ON thread_mq
-        BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
+        FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_fixture_write()",
     )
     .execute(&fixture.pool)
     .await
@@ -900,7 +918,7 @@ async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempot
         "提醒必须随删除失败回滚"
     );
     assert_eq!(super::mq_rows(&fixture, &thread).await, 1);
-    sqlx::query("DROP TRIGGER fail_retained_delete")
+    sqlx::query("DROP TRIGGER fail_retained_delete ON thread_mq")
         .execute(&fixture.pool)
         .await
         .unwrap();

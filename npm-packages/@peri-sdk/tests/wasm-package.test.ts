@@ -4,8 +4,8 @@ import { instantiatePeriWasm } from "../dist/wasm.js";
 import { startWasmRuntime } from "../dist/wasm-node.js";
 
 test("公开 Store 查询常量保留参数化查询契约", () => {
-  expect(SESSION_LIST_SQL).toContain("WHERE hidden = 0 AND cwd = ?");
-  expect(SESSION_BY_ID_SQL).toContain("WHERE id = ?");
+  expect(SESSION_LIST_SQL).toContain("WHERE hidden = 0 AND cwd = $1");
+  expect(SESSION_BY_ID_SQL).toContain("WHERE id = $1");
 });
 
 test("运行后端产物保留 node: 端口说明符且不引入进程控制", async () => {

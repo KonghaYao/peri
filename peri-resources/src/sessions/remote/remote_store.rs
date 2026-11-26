@@ -1,29 +1,19 @@
-//! 远程可变连接：请求预算、访问模式拒绝、结果确定性与终态封闭（C §5.1/§7）。
-//!
-//! 本层是本 crate 里唯一发 mutation 的地方，形状由四条规矩定死：
-//!
-//! - **只读打开不写**：`StoreAccess::ReadOnly` 下任何写入在发请求前就拒绝。
-//! - **一次 mutation = 一个托管事务批**：资格写入是第一条语句，效果随后，全部在
-//!   同一 HTTP 请求的 `BEGIN IMMEDIATE`/`COMMIT` 里；连接已有打开事务时拒绝执行
-//!   （SDK 会让批静默加入该事务，all-or-nothing 就不由我们掌控）。
-//! - **确定性只有三种**：已生效、确定未生效、无法证明。回滚失败、超时、网络失败、
-//!   写忙一律是「无法证明」，绝不折叠成「确定未生效」；未决由终态封闭收敛。
-//! - **预算只约束本机等待**：超时或取消 future 都不代表远端没执行（C §5.1）。
+//! Mutation evidence and read access for a PostgreSQL session store.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::connection::{TransportError, TransportResult};
+use super::sql::Value;
 use peri_acp_types::session_resources::{
     AccessMode, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::{Error as SdkError, Value};
 
 use super::connection::Budgeted;
 use super::connection::RemoteTransport;
-use super::connection::SdkTransport;
-use super::connection::REQUEST_BUDGET;
+use super::connection::{batch_budget, REQUEST_BUDGET};
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::failure::{self, RemoteFailureClass};
@@ -31,9 +21,6 @@ use super::generation::ConnectionGate;
 use super::ledger::{self, LedgerRow, OperationId, OperationIdentity, Receipt};
 use super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
 use super::sql::StatementSpec;
-
-/// 单次 mutation 的时间预算（与只读调用同一上界；精确值由 C-01/F 测量确定）。
-pub(super) const MUTATION_BUDGET: Duration = REQUEST_BUDGET;
 
 /// 打开意图：只读打开时本层不发任何写入。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,34 +117,18 @@ pub(super) enum BatchFailure {
     Unknown { class: RemoteFailureClass },
 }
 
-/// 批失败分类。**不**沿用只读路径的折叠规则：`BatchRollbackFailed` 内层即使是约束
-/// 冲突，也说明回滚本身失败，只能判未决。
-pub(super) fn classify_batch_failure(error: &SdkError) -> BatchFailure {
-    match error {
-        // 托管事务批：SDK 保证失败即回滚，除非被 BatchRollbackFailed 包住（下面按未决处理）。
-        SdkError::BatchStatementFailed { index, error, .. } => {
-            let class = failure::classify(error);
-            if *index == 0 && class == RemoteFailureClass::Constraint {
-                BatchFailure::QualificationConflict
-            } else {
-                BatchFailure::NotApplied {
-                    class,
-                    index: Some(*index),
-                }
-            }
+pub(super) fn classify_batch_failure(error: &TransportError) -> BatchFailure {
+    match *error {
+        TransportError::RolledBack {
+            index: Some(0),
+            unique: true,
+            ..
+        } => BatchFailure::QualificationConflict,
+        TransportError::RolledBack { class, index, .. } => {
+            BatchFailure::NotApplied { class, index }
         }
-        // 回滚失败：连「零部分结果」都不成立，类别本身也无从确定。
-        SdkError::BatchRollbackFailed { .. } => BatchFailure::Unknown {
-            class: RemoteFailureClass::Unknown,
-        },
-        _ => {
-            let class = failure::classify(error);
-            if rejected_before_commit(error) {
-                BatchFailure::NotApplied { class, index: None }
-            } else {
-                BatchFailure::Unknown { class }
-            }
-        }
+        TransportError::Before(class) => BatchFailure::NotApplied { class, index: None },
+        TransportError::Uncertain(class) => BatchFailure::Unknown { class },
     }
 }
 
@@ -212,19 +183,6 @@ pub(super) fn existing_identity_from_read(
     }
 }
 
-/// 没有托管包装时，只有「提交前被拒绝」的类别才可判确定未生效。
-fn rejected_before_commit(error: &SdkError) -> bool {
-    matches!(
-        error,
-        SdkError::ToSqlConversionFailure(_)
-            | SdkError::ConversionFailure(_)
-            | SdkError::Misuse(_)
-            | SdkError::Constraint(_)
-            | SdkError::Readonly(_)
-            | SdkError::QueryReturnedNoRows
-    )
-}
-
 /// 故障注入（仅测试构建）：把「网络把结果吞掉」这类不可控故障变成可控的观察点。
 ///
 /// 生产构建里没有这个类型，也没有它的字段——故障面只在测试里存在。
@@ -260,32 +218,6 @@ impl RemoteStore {
         self.access
     }
 
-    /// 下发一段迁移批（`schema_upgrade` 的唯一出口）并**确认版本推进落地**。
-    ///
-    /// 收尾不变量：批次的末条语句是 `peri_store_meta` 的版本与契约推进，它必须影响 **1** 行。
-    /// 影响 0 行说明批内守卫挡住了推进（库其实还是旧代数，例如快照读完之后身份被改写），
-    /// 或者推进的 `WHERE` 没匹配上——两种都不能按成功上报，只能报不确定。索引重放一类
-    /// `IF NOT EXISTS` 语句因此排在推进**之前**（它们的行数是 0，放末尾会把这条判定变成
-    /// 「永远不成立」）。
-    pub(super) async fn apply_schema_upgrade(
-        &self,
-        statements: Vec<StatementSpec>,
-    ) -> SessionResourceResult<()> {
-        self.access.ensure_writable()?;
-        self.ensure_autocommit()?;
-        let expected = statements.len();
-        match self.run_managed_batch(statements).await {
-            Ok(counts) if counts.len() == expected && counts.last() == Some(&1) => Ok(()),
-            Ok(_) | Err(BatchFailure::Unknown { .. }) => Err(SessionResourceError::new(
-                SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
-            )),
-            Err(BatchFailure::QualificationConflict) => {
-                Err(RemoteFailureClass::Constraint.into_session_resource_error())
-            }
-            Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
-        }
-    }
-
     /// 装配一条连接：传输面、访问意图、代际号与门禁都是既有事实。
     pub(super) fn new(
         transport: Arc<dyn RemoteTransport>,
@@ -311,14 +243,9 @@ impl RemoteStore {
         credential: &SessionStoreCredential,
         access: StoreAccess,
     ) -> Result<Self, SessionResourceError> {
-        let connection = super::connection::connect_sdk(endpoint, credential).await?;
+        let connection = super::connection::connect(endpoint, credential).await?;
         let gate = Arc::new(ConnectionGate::default());
-        Ok(Self::new(
-            Arc::new(SdkTransport::new(connection)),
-            access,
-            gate.mint(),
-            gate,
-        ))
+        Ok(Self::new(connection, access, gate.mint(), gate))
     }
 
     /// 本连接的代际号。
@@ -333,7 +260,8 @@ impl RemoteStore {
     /// 是确定回答，本代际保留。
     async fn guarded<T>(
         &self,
-        call: impl Future<Output = turso_serverless::Result<T>>,
+        budget: Duration,
+        call: impl Future<Output = TransportResult<T>>,
     ) -> Budgeted<T> {
         let lease = self.gate.lease(self.generation);
         super::connection::within_budget(
@@ -348,17 +276,14 @@ impl RemoteStore {
                 }
                 outcome
             },
-            MUTATION_BUDGET,
+            budget,
         )
         .await
     }
 
     /// 不受代际守卫约束的传输调用（退场路径：连接本来就不再用）。
-    async fn budgeted<T>(
-        &self,
-        call: impl Future<Output = turso_serverless::Result<T>>,
-    ) -> Budgeted<T> {
-        super::connection::within_budget(call, MUTATION_BUDGET).await
+    async fn budgeted<T>(&self, call: impl Future<Output = TransportResult<T>>) -> Budgeted<T> {
+        super::connection::within_budget(call, REQUEST_BUDGET).await
     }
 
     /// 装载故障计划（仅测试构建）。
@@ -420,7 +345,6 @@ impl RemoteStore {
     /// 不可解释时拒绝。调用方不得从「打开前读到空库」自行推定创建。
     pub(super) async fn initialize_store(&self) -> SessionResourceResult<StoreIdentityOutcome> {
         self.access.ensure_writable()?;
-        self.ensure_autocommit()?;
         let store_id = StoreId::mint();
         let result = self
             .run_managed_batch(schema::initialization_plan(&store_id, &now_stamp()))
@@ -458,7 +382,6 @@ impl RemoteStore {
         mutation: &QualifiedMutation,
     ) -> SessionResourceResult<(MutationOutcome, Vec<u64>)> {
         self.access.ensure_writable()?;
-        self.ensure_autocommit()?;
         #[cfg(test)]
         if self.take_drop_before_send(&mutation.identity.kind) {
             // 等价物：请求在发出之前消失（取消、发送前崩溃）。远端什么都没发生，
@@ -522,7 +445,6 @@ impl RemoteStore {
         identity: &OperationIdentity,
     ) -> SessionResourceResult<OperationResolution> {
         self.access.ensure_writable()?;
-        self.ensure_autocommit()?;
         let closure = ledger::closure_statement(identity, &now_stamp());
         Ok(match self.run_managed_batch(vec![closure]).await {
             Ok(_) => OperationResolution::ClosedNeverApplied,
@@ -545,33 +467,6 @@ impl RemoteStore {
         })
     }
 
-    /// 把这条连接的**父行检查**归位（`PRAGMA foreign_keys = OFF`）。
-    ///
-    /// 为什么远端要显式归位：canonical DDL 带 `REFERENCES`，而远端的数据面是在**没有强制**的
-    /// 前提下自己保证引用顺序的——远端确实会写 `machines` / `workspaces` 行（升级批次与新建
-    /// 会话都写），但不写 `projects` 行：那是本机 workspace 证据（目录与 Git 对象身份），远端
-    /// 没有来源，归属行上的 `project_id` 只是随行搬来的历史证据值。父行检查一旦被打开，
-    /// `workspaces.project_id` 这类指向缺席父行的写入会以约束失败收场；`DROP TABLE` 还会变成
-    /// **隐式删除 + 级联**——重建 `threads` 时 `messages.thread_id`（`ON DELETE CASCADE`）
-    /// 会连带清掉全部历史。
-    ///
-    /// 服务端的 `PRAGMA foreign_keys` 是**跨连接共享的可变状态**（实测默认为 0，但别的连接
-    /// 可以打开它），所以每次写打开都归位一次，而不是假设它一直是 0。
-    ///
-    /// 归位之后的引用完整性由数据面保证：父行先写、删除时显式先清子行
-    /// （[`crate::sessions::canonical::THREAD_CHILD_DELETES`]）；远端迁移另有一条结果守卫
-    /// 核对重建之后历史行数没有变（`schema_upgrade::GUARD_MESSAGES_COUNT_SQL`），归位失效
-    /// 不会变成一次静默丢历史。
-    ///
-    /// 只发一条**不在事务里**的语句（PRAGMA 在事务内不生效）；失败按原分类上报。
-    pub(super) async fn force_parent_checks_off(&self) -> SessionResourceResult<()> {
-        self.transport
-            .sql_values(&StatementSpec::bare("PRAGMA foreign_keys = OFF"))
-            .await
-            .map_err(|error| failure::from_sdk_error(&error))?;
-        Ok(())
-    }
-
     /// 只读终态解析：不尝试写入，不推断。
     pub(super) async fn resolve_operation(
         &self,
@@ -588,7 +483,7 @@ impl RemoteStore {
     pub(super) async fn close(&self) -> SessionResourceResult<()> {
         match self.budgeted(self.transport.close()).await {
             Budgeted::Done(()) => Ok(()),
-            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
+            Budgeted::Failed(error) => Err(failure::from_transport_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
         }
     }
@@ -642,7 +537,6 @@ impl RemoteStore {
         statements: Vec<StatementSpec>,
     ) -> SessionResourceResult<()> {
         self.access.ensure_writable()?;
-        self.ensure_autocommit()?;
         match self.run_managed_batch(statements).await {
             Ok(_) => Ok(()),
             // 批内没有资格写，主键冲突只可能来自并发建同名对象；如实按约束失败上报。
@@ -655,7 +549,7 @@ impl RemoteStore {
         }
     }
 
-    /// 只读一致读：同一请求内的 `BEGIN DEFERRED` … `COMMIT`，多段读取落在同一快照上。
+    /// 只读一致读：同一请求内的 `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` … `COMMIT`，多段读取落在同一快照上。
     ///
     /// 只读打开（[`StoreAccess::ReadOnly`]）也可用：批内只有 SELECT，不申请写锁。
     /// 读没有副作用，因此不套用 mutation 的确定性三分类——失败只表示「这次没读到」。
@@ -663,10 +557,12 @@ impl RemoteStore {
         &self,
         statements: Vec<StatementSpec>,
     ) -> SessionResourceResult<Vec<Vec<Vec<Value>>>> {
-        self.ensure_autocommit()?;
         let expected = statements.len();
         match self
-            .guarded(self.transport.consistent_read(statements))
+            .guarded(
+                batch_budget(expected),
+                self.transport.consistent_read(statements),
+            )
             .await
         {
             // 回复少了结果集时，调用方绝不能把它读成「这段查询没有数据」，所以在唯一的
@@ -699,7 +595,7 @@ impl RemoteStore {
         Ok((facts, rows))
     }
 
-    /// 一个托管事务批：`BEGIN IMMEDIATE` … `COMMIT`，失败整批回滚。
+    /// 一个托管事务批：`BEGIN ISOLATION LEVEL READ COMMITTED` … `COMMIT`，失败整批回滚。
     ///
     /// 返回每条语句的受影响行数（与传入顺序对齐），供上层核对「恰好一行」这类后置条件。
     /// 语句构造失败与远端拒绝走同一分类（都是 `Failed`），不因为失败发生在本地就降级成
@@ -708,7 +604,11 @@ impl RemoteStore {
         &self,
         statements: Vec<StatementSpec>,
     ) -> Result<Vec<u64>, BatchFailure> {
-        match self.guarded(self.transport.managed_batch(statements)).await {
+        let budget = batch_budget(statements.len());
+        match self
+            .guarded(budget, self.transport.managed_batch(statements))
+            .await
+        {
             Budgeted::Done(counts) => Ok(counts),
             Budgeted::Failed(error) => Err(classify_batch_failure(&error)),
             Budgeted::Exceeded => Err(BatchFailure::Unknown {
@@ -735,24 +635,13 @@ impl RemoteStore {
 
     /// 单条语句的全部行（值矩阵在传输边界已经解码）。
     async fn rows(&self, spec: &StatementSpec) -> SessionResourceResult<Vec<Vec<Value>>> {
-        match self.guarded(self.transport.sql_values(spec)).await {
+        match self
+            .guarded(REQUEST_BUDGET, self.transport.sql_values(spec))
+            .await
+        {
             Budgeted::Done(rows) => Ok(rows),
-            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
+            Budgeted::Failed(error) => Err(failure::from_transport_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
-        }
-    }
-
-    /// 托管事务批在「连接已有打开事务」时会静默加入该事务（SDK `run_batch` 的 wrap 判定），
-    /// 那时 all-or-nothing 不由我们掌控，因此显式拒绝而不是顺手执行。
-    fn ensure_autocommit(&self) -> SessionResourceResult<()> {
-        match self.transport.is_autocommit() {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(internal(
-                "remote mutation refused: connection has an open transaction",
-            )),
-            Err(_) => Err(internal(
-                "remote mutation refused: transaction state is unreadable",
-            )),
         }
     }
 }
@@ -763,7 +652,7 @@ fn now_stamp() -> String {
 }
 
 /// 只读批失败 → 领域失败：直接按分类上报（读没有副作用，不存在「不确定生效」）。
-fn read_batch_error(error: &SdkError) -> SessionResourceError {
+fn read_batch_error(error: &TransportError) -> SessionResourceError {
     match classify_batch_failure(error) {
         BatchFailure::NotApplied { class, .. } | BatchFailure::Unknown { class } => {
             class.into_session_resource_error()

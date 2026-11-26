@@ -347,6 +347,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             .map_err(|error| error.to_string())
     }
 
+    fn has_pending_deliveries(&self) -> bool {
+        self.registry.has_pending_deliveries()
+    }
+
     fn retry_pending_deliveries(&self) -> usize {
         self.retry_pending_deliveries()
     }
@@ -394,11 +398,14 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             self.cancel_all();
             let execution_stopped = self.registry.scope.wait().await;
             // 关闭结算同样不能占住 worker：重试复用同步投递桥。
-            let retry_registry = Arc::clone(&self.registry);
-            if let Err(error) =
-                tokio::task::spawn_blocking(move || retry_registry.retry_pending_deliveries()).await
-            {
-                tracing::warn!(%error, "shutdown terminal delivery retry task failed");
+            if self.registry.has_pending_deliveries() {
+                let retry_registry = Arc::clone(&self.registry);
+                if let Err(error) =
+                    tokio::task::spawn_blocking(move || retry_registry.retry_pending_deliveries())
+                        .await
+                {
+                    tracing::warn!(%error, "shutdown terminal delivery retry task failed");
+                }
             }
             if execution_stopped && self.registry.external_settled() {
                 peri_acp_types::tasks::TaskShutdownReport::Complete

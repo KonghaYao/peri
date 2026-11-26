@@ -7,9 +7,9 @@
 //! 边界：本模块不写库、不开事务，只给 SQL 文本与纯函数。写入的顺序与事务边界由各 adapter
 //! 自己保证（见 `docs/design/thread-mq.md` §5.4）。
 
-use peri_acp_types::session::{
-    MqEntry, MqFilter, MqHeader, MqReceiveItemOutcome, MqReceiveStatus, MqWatermark,
-};
+use peri_acp_types::session::{MqEntry, MqFilter, MqReceiveItemOutcome, MqReceiveStatus};
+#[cfg(not(target_os = "emscripten"))]
+use peri_acp_types::session::{MqHeader, MqWatermark};
 use peri_acp_types::session_resources::SessionResourceResult;
 
 /// 按 thread 读取全部 MQ 行：`ORDER BY (enqueued_at, id)` 就是消费顺序。
@@ -18,19 +18,20 @@ use peri_acp_types::session_resources::SessionResourceResult;
 /// 为「来源集合」拼可变长度的 `IN (?, ?, ...)`。
 pub(in crate::sessions) const SELECT_THREAD_MQ_SQL: &str =
     "SELECT id, enqueued_at, kind, source, policy_json, payload_json, original_draft
-    FROM thread_mq WHERE thread_id = ?1 ORDER BY enqueued_at, id";
+    FROM thread_mq WHERE thread_id = $1 ORDER BY enqueued_at, id";
 
 /// 按稳定 ID 读取单行（`UNIQUE(id)`，不带 thread 条件即可判定跨 thread 复用）。
 pub(in crate::sessions) const SELECT_THREAD_MQ_BY_ID_SQL: &str =
     "SELECT thread_id, id, enqueued_at, kind, source, policy_json, payload_json, original_draft
-    FROM thread_mq WHERE id = ?1";
+    FROM thread_mq WHERE id = $1";
 
 /// 收尾判定用：只读待发行的策略列，不解释正文。
 ///
 /// 行在 `thread_mq` 里就是「尚未移交」。工作意图收尾据此确认没有仍要求继续处理
 /// 的新工作（`docs/design/session-durability.md` §5.1）。
+#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) const SELECT_THREAD_MQ_POLICIES_SQL: &str =
-    "SELECT policy_json FROM thread_mq WHERE thread_id = ?1";
+    "SELECT policy_json FROM thread_mq WHERE thread_id = $1";
 
 /// 条件插入：历史或 MQ 已有同 ID、或目标 thread 不存在时不插入（影响 0 行）。
 ///
@@ -38,24 +39,24 @@ pub(in crate::sessions) const SELECT_THREAD_MQ_POLICIES_SQL: &str =
 /// 两个语句之间会让重复接纳成立。
 pub(in crate::sessions) const INSERT_THREAD_MQ_SQL: &str = "INSERT INTO thread_mq
     (thread_id, id, enqueued_at, kind, source, policy_json, payload_json, original_draft)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)
-      AND NOT EXISTS (SELECT 1 FROM thread_mq WHERE id = ?2)
-      AND EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
+    SELECT $1, $2, $3, $4, $5, $6, $7, $8
+    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = $2)
+      AND NOT EXISTS (SELECT 1 FROM thread_mq WHERE id = $2)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = $1)";
 
 /// 按 `(thread_id, id, enqueued_at)` 删除：`enqueued_at` 参与条件，避免误删同 ID 重新入队的行。
 pub(in crate::sessions) const DELETE_THREAD_MQ_ROW_SQL: &str =
-    "DELETE FROM thread_mq WHERE thread_id = ?1 AND id = ?2 AND enqueued_at = ?3";
+    "DELETE FROM thread_mq WHERE thread_id = $1 AND id = $2 AND enqueued_at = $3";
 
 /// 消息历史里同 ID 的归属与正文（内容冲突判定用）。
 pub(in crate::sessions) const SELECT_MESSAGE_ROW_SQL: &str =
-    "SELECT thread_id, content FROM messages WHERE message_id = ?1";
+    "SELECT thread_id, content FROM messages WHERE message_id = $1";
 
 /// 条件写入历史：同 ID 已存在时不插入（影响 0 行）。
 pub(in crate::sessions) const INSERT_MESSAGE_SQL: &str =
     "INSERT INTO messages (message_id, thread_id, role, content)
-    SELECT ?1, ?2, ?3, ?4
-    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?1)";
+    SELECT $1, $2, $3, $4
+    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = $1)";
 
 /// 远端移交用：正文直接取自 `thread_mq` 的同一行（远端批次读不回结果集）。
 ///
@@ -63,22 +64,21 @@ pub(in crate::sessions) const INSERT_MESSAGE_SQL: &str =
 /// 一致——选择基于旧快照时不会把别的行写进历史。
 pub(in crate::sessions) const INSERT_MESSAGE_FROM_MQ_SQL: &str =
     "INSERT INTO messages (message_id, thread_id, role, content)
-    SELECT m.id, m.thread_id, ?4, m.payload_json FROM thread_mq m
-    WHERE m.thread_id = ?1 AND m.id = ?2 AND m.enqueued_at = ?3
-      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)";
+    SELECT m.id, m.thread_id, $4, m.payload_json FROM thread_mq m
+    WHERE m.thread_id = $1 AND m.id = $2 AND m.enqueued_at = $3
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = $2)";
 
 /// 派生计数与更新时间：只在历史条数真的变化时推进 `updated_at`。
 ///
 /// 远端在批次里无法按「本批插入了几条」分支，因此把条件写成「计数是否变化」——它等价于
 /// 「本次确实写了历史」，同时不会给 `AlreadyPresent`/`Conflict` 路径制造虚假的时间推进。
-pub(in crate::sessions) const REFRESH_THREAD_COUNT_SQL: &str = "UPDATE threads SET updated_at = ?2,
-        message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?1)
-    WHERE id = ?1
-      AND message_count <> (SELECT COUNT(*) FROM messages WHERE thread_id = ?1)";
+pub(in crate::sessions) const REFRESH_THREAD_COUNT_SQL: &str = "UPDATE threads SET updated_at = $2,
+        message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = $1)
+    WHERE id = $1
+      AND message_count <> (SELECT COUNT(*) FROM messages WHERE thread_id = $1)";
 
-/// 首条用户消息派生标题：仅在标题为空时写入；`?2` 为 `NULL` 时是空操作。
-pub(in crate::sessions) const DERIVE_THREAD_TITLE_SQL: &str =
-    "UPDATE threads SET title = ?2 WHERE id = ?1 AND title IS NULL AND ?2 IS NOT NULL";
+/// 首条用户消息派生标题：仅在标题为空时写入；`$2` 为 `NULL` 时是空操作。
+pub(in crate::sessions) const DERIVE_THREAD_TITLE_SQL: &str = "UPDATE threads SET title = $2 WHERE id = $1 AND title IS NULL AND CAST($2 AS TEXT) IS NOT NULL";
 
 const ENQUEUED_AT_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.6fZ";
 
@@ -132,6 +132,7 @@ pub(in crate::sessions) struct RawMqRow<'row> {
 }
 
 /// 控制面行的文本形态：没有正文列。
+#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) struct RawMqHeader<'row> {
     pub id: &'row str,
     pub enqueued_at: &'row str,
@@ -141,6 +142,7 @@ pub(in crate::sessions) struct RawMqHeader<'row> {
 }
 
 /// 文本行 → 控制面事实；不接触 `payload_json`。
+#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn decode_header(row: RawMqHeader<'_>) -> SessionResourceResult<MqHeader> {
     let kind = serde_json::from_value(serde_json::Value::String(row.kind.to_owned()))
         .map_err(|_| super::failure::corrupt("MQ row has an unknown message kind"))?;
@@ -194,6 +196,7 @@ pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceRes
 /// 行内策略是否要求「继续处理」：收尾判定复用同一份领域规则，不按来源或 kind 猜。
 ///
 /// 读不懂的策略按损坏失败关闭：把一条待发行当成无需处理会让收尾提前写 `idle`。
+#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn policy_ensures_processing(
     policy_json: &str,
 ) -> SessionResourceResult<bool> {
@@ -261,6 +264,7 @@ pub(in crate::sessions) fn item_outcome(
 }
 
 /// 水位比较：`(enqueued_at, id)` 字典序。
+#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn is_same_watermark(entry: &MqEntry, watermark: &MqWatermark) -> bool {
     entry.enqueued_at == watermark.enqueued_at && entry.id == watermark.id
 }

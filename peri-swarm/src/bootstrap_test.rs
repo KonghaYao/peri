@@ -37,7 +37,7 @@ fn workspace_root() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-const SESSION_STORE_VALUE: &str = "http://127.0.0.1:8342/db/main/main/dev/";
+const SESSION_STORE_VALUE: &str = "postgresql://alice:private-pg-password@127.0.0.1:5432/session";
 const STATE_STORE_VALUE: &str = "http://127.0.0.1:9497/db/local_default/swarm/main/";
 
 fn base_env() -> Vec<(&'static str, String)> {
@@ -236,10 +236,11 @@ fn actor_configuration_carries_the_remote_deployment() {
     assert!(actor.session_store_path.is_none());
     let deployment = actor.session_store.expect("remote deployment");
     assert_eq!(deployment.engine_name(), Some(DEFAULT_STORE_ENGINE));
-    assert_eq!(deployment.credential_env_name(), Some(TOKEN_ENV_NAME));
+    assert_eq!(deployment.credential_env_name(), None);
+    assert!(!format!("{deployment:?} {config:?}").contains("private-pg-password"));
     match deployment.locator() {
         SessionStoreLocator::Locator(raw) => {
-            assert_eq!(raw, "http://127.0.0.1:8342/db/main/main/dev/");
+            assert_eq!(raw, SESSION_STORE_VALUE);
         }
         other => panic!("expected a remote locator, got {other:?}"),
     }
@@ -339,7 +340,7 @@ fn local_store_locators_are_rejected() {
 }
 
 #[test]
-fn embedded_locator_credentials_are_rejected() {
+fn http_session_store_is_rejected() {
     expect_invalid(
         parse(&[(
             SESSION_STORE_ENV,
@@ -350,7 +351,7 @@ fn embedded_locator_credentials_are_rejected() {
 }
 
 #[test]
-fn state_store_locators_are_validated_like_the_session_store() {
+fn state_store_requires_its_own_http_locator() {
     expect_invalid(
         parse(&[(STATE_STORE_ENV, Some("/tmp/swarm.db"))]),
         STATE_STORE_ENV,
@@ -369,17 +370,9 @@ fn state_store_locators_are_validated_like_the_session_store() {
 }
 
 #[test]
-fn state_store_must_not_be_the_session_store() {
-    let reason = expect_invalid(
-        parse(&[(STATE_STORE_ENV, Some(SESSION_STORE_VALUE))]),
-        STATE_STORE_ENV,
-    );
-    assert!(reason.contains(SESSION_STORE_ENV), "{reason}");
-
-    // The trailing slash is not part of the database identity.
-    let without_trailing_slash = SESSION_STORE_VALUE.trim_end_matches('/');
+fn state_store_rejects_the_postgres_session_dsn() {
     expect_invalid(
-        parse(&[(STATE_STORE_ENV, Some(without_trailing_slash))]),
+        parse(&[(STATE_STORE_ENV, Some(SESSION_STORE_VALUE))]),
         STATE_STORE_ENV,
     );
 }

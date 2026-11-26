@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import {
     BareHarnessConfig,
     ChatManager,
-    TursoStorage,
+    PostgresStorage,
     type PeriConfig,
 } from "../../src/entries/index";
 import { createDemoApp } from "./chat-demo";
@@ -21,14 +21,8 @@ const wasmEnv = Object.fromEntries(
         entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined),
 );
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
-const databaseUrl = Bun.env.PERI_DEMO_TURSO_URL ?? Bun.env.PERI_STORAGE_URL
-    ?? "http://127.0.0.1:8091/db/local_default/demo/main";
-const databaseEndpoint = new URL(databaseUrl);
-if (databaseEndpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(databaseEndpoint.hostname))
-    throw new Error("Demo Session Store must be a local HTTP libSQL listener");
-const storageToken = Bun.env.PERI_STORAGE_TOKEN;
-if (!storageToken)
-    throw new Error("PERI_STORAGE_TOKEN is required; copy project_api_key from the local peri-loom connection.json");
+const databaseUrl = Bun.env.PERI_STORAGE_URL;
+if (!databaseUrl) throw new Error("PERI_STORAGE_URL must identify the PostgreSQL database");
 const sseClient = await Bun.build({
     entrypoints: [resolve(import.meta.dir, "../../node_modules/@microsoft/fetch-event-source/lib/esm/index.js")],
     target: "browser",
@@ -44,9 +38,9 @@ const sessionView = await Bun.build({
 if (!sessionView.success) throw new Error(`Cannot bundle Session view: ${sessionView.logs.join("; ")}`);
 const sessionViewJs = await sessionView.outputs[0]!.text();
 
-const database = new TursoStorage({
+const database = new PostgresStorage({
     url: databaseUrl,
-    authToken: storageToken,
+    httpEndpoint: Bun.env.PERI_STORAGE_HTTP_ENDPOINT,
 });
 const config = {
     config: {
@@ -115,7 +109,7 @@ try {
     try {
         await database.listSessions(workspace);
     } catch {
-        throw new Error("Local Session Store is unavailable; run `bun run db:dev` or check PERI_DEMO_TURSO_URL");
+        throw new Error("Local Session Store is unavailable; run `bun run db:dev` or check PERI_STORAGE_URL and PERI_STORAGE_HTTP_ENDPOINT");
     }
     const port = Number(Bun.env.PORT ?? "3000");
     server = Bun.serve({

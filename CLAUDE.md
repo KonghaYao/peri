@@ -7,7 +7,7 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 
 - V5 同时推进分布式资源分离与 system 控制机制；目标、实现、验证分别说明。
 - 分布式部署目标为 1000 Agent 同时运行；这是目标，本轮没有吞吐验收证据。
-- Peri Loom 是优先支持的 libSQL 兼容后端目标；实际适配及验证范围以存储设计和源码为准。
+- Peri 会话存储使用本地 SQLite 或远程 PostgreSQL。Swarm 状态库另行配置。
 - Community Swarms 仍为规划层，只组合 Managed Agents API 的通信、认知与记忆，不旁路 Session 执行归属或另建调度存储。
 - 控制链为 MetaHarness → Middleware → Harness；宿主组合与注入，不维护另一套能力策略。
 - 分布式复用同一 Agent 规则；SDK 管 Chat/Session/ACP，Rivet 管 actor 路由与生命周期，Peri Swarm 是 actor 对接与部署主线，对接层只接线。

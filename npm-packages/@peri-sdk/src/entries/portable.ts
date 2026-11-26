@@ -24,7 +24,7 @@ export type { ExecutionCoordinatorOptions, AdmissionResult } from "../execution/
 export { ExecutionMutationConflictError } from "../execution/registry-ledger";
 export type * from "../execution/types";
 
-export { TursoStorage } from "../storage/turso-storage";
+export { PostgresStorage } from "../storage/postgres-storage";
 export { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "../storage/session-summary";
 
 export { RpcError } from "../transport/rpc-error";

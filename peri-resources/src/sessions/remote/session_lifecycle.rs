@@ -18,11 +18,11 @@
 
 use std::str::FromStr;
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
-use turso_serverless::Value;
 
 use super::session_codec as codec;
 use super::session_data::RemoteSessionData;
@@ -33,12 +33,12 @@ use crate::sessions::data::ChildResumeRecord;
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
 
 const GUARD_SESSION_ABSENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
-    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
+    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = $1)";
 
 /// 撤销批内的子会话守卫：`COUNT` 的读与删除不在同一事务时，另一个实例可能在这两步之间
 /// 提交 child；谓词成立就撞 `peri_store_meta` 的单行主键，整批回滚。
 const GUARD_CHILDREN_PRESENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
-    SELECT 0 WHERE EXISTS (SELECT 1 FROM threads WHERE parent_thread_id = ?1)";
+    SELECT 0 WHERE EXISTS (SELECT 1 FROM threads WHERE parent_thread_id = $1)";
 
 // ─── 效果语句 ─────────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ macro_rules! tree_scoped {
     ($tail:literal) => {
         concat!(
             "WITH RECURSIVE tree(id) AS (",
-            " SELECT id FROM threads WHERE id = ?1",
+            " SELECT id FROM threads WHERE id = $1",
             " UNION ALL",
             " SELECT s.id FROM threads s JOIN tree t ON s.parent_thread_id = t.id",
             ") ",
@@ -76,13 +76,13 @@ const DELETE_TREE_THREADS_SQL: &str =
     tree_scoped!("DELETE FROM threads WHERE id IN (SELECT id FROM tree)");
 
 /// 直接子会话计数（撤销必须拒绝「已有子会话」的 identity，否则子会话会指向不存在的父）。
-const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thread_id = ?1";
+const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thread_id = $1";
 
 /// child resume 认领事实：状态 + 更新时间（`claimed` 由状态派生，不是独立列）。
 const UPDATE_AGENT_STATUS_SQL: &str =
-    "UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3";
+    "UPDATE threads SET agent_status = $1, updated_at = $2 WHERE id = $3";
 
-const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
+const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = $1";
 
 impl RemoteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -93,7 +93,7 @@ impl RemoteSessionData {
             "mark_session_closing",
             &[id.as_str().to_owned()],
             vec![StatementSpec::new(
-                "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
+                "INSERT INTO session_close_intents(thread_id, requested_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 vec![Value::Text(id.as_str().to_owned()), Value::Text(peri_time::now_utc_rfc3339())],
             )],
             id,
@@ -102,15 +102,9 @@ impl RemoteSessionData {
 
     pub(super) async fn read_close_intent(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         let store = self.store().await?;
-        let table = store.fetch_row(&StatementSpec::bare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_close_intents'",
-        )).await?;
-        if table.is_none() {
-            return Ok(false);
-        }
         Ok(store
             .fetch_row(&StatementSpec::new(
-                "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
+                "SELECT 1 FROM session_close_intents WHERE thread_id = $1",
                 vec![Value::Text(id.as_str().to_owned())],
             ))
             .await?
@@ -425,7 +419,7 @@ mod tests {
     use super::*;
 
     fn placeholders(sql: &str) -> usize {
-        sql.matches('?').count()
+        sql.matches('$').count()
     }
 
     const TREE_DELETES: [(&str, &str); 5] = [
@@ -491,10 +485,10 @@ mod tests {
     /// 撤销必须先问「有没有子会话」：有子会话的 identity 被补偿掉会让子会话指向空父节点。
     #[test]
     fn revocation_checks_published_children_first() {
-        assert!(COUNT_CHILDREN_SQL.contains("parent_thread_id = ?1"));
+        assert!(COUNT_CHILDREN_SQL.contains("parent_thread_id = $1"));
         // 预检之外还有批内守卫：计数与删除之间的并发 child 由它挡住。
         assert!(GUARD_CHILDREN_PRESENT_SQL.contains("EXISTS"));
-        assert!(GUARD_CHILDREN_PRESENT_SQL.contains("parent_thread_id = ?1"));
+        assert!(GUARD_CHILDREN_PRESENT_SQL.contains("parent_thread_id = $1"));
     }
 
     /// 撤销门槛只有三种落点，且「读不到计数」不是「没有子会话」。
@@ -522,14 +516,14 @@ mod tests {
     #[test]
     fn absent_root_is_rejected_inside_the_batch() {
         assert!(GUARD_SESSION_ABSENT_SQL.contains("NOT EXISTS"));
-        assert!(GUARD_SESSION_ABSENT_SQL.contains("FROM threads WHERE id = ?1"));
-        assert!(!DELETE_TREE_THREADS_SQL.contains("SELECT 1 FROM threads WHERE id = ?1"));
+        assert!(GUARD_SESSION_ABSENT_SQL.contains("FROM threads WHERE id = $1"));
+        assert!(!DELETE_TREE_THREADS_SQL.contains("SELECT 1 FROM threads WHERE id = $1"));
     }
 
     /// 认领标记由状态派生，不是独立列：写入只动 `agent_status` 与更新时间。
     #[test]
     fn child_resume_claim_is_derived_from_status() {
-        assert!(UPDATE_AGENT_STATUS_SQL.contains("agent_status = ?1"));
+        assert!(UPDATE_AGENT_STATUS_SQL.contains("agent_status = $1"));
         assert!(!UPDATE_AGENT_STATUS_SQL.contains("claimed"));
     }
 }

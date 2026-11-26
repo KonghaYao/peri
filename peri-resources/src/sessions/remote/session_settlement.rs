@@ -4,13 +4,13 @@
 //! 承担；这里只保留 `SessionDataPort` 覆写所需的方法体，避免 `session_mq.rs` 与
 //! `session_data.rs` 继续变长。
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session::{MqEnqueueOutcome, MqEntry, MqInput, RetainedReminder};
 use peri_acp_types::session_resources::{
     SessionResourceErrorKind, SessionResourceResult, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
-use turso_serverless::Value;
 
 use crate::sessions::mq_rows::{
     DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, REFRESH_THREAD_COUNT_SQL,
@@ -56,8 +56,8 @@ impl RemoteSessionData {
             // 批内必须仍是已核对的同一内容，防止读写之间发生 ID 碰撞。
             effects.push(StatementSpec::new(
                 "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE EXISTS (
-                    SELECT 1 FROM messages WHERE message_id = ?1
-                    AND (thread_id <> ?2 OR content <> ?3))",
+                    SELECT 1 FROM messages WHERE message_id = $1
+                    AND (thread_id <> $2 OR content <> $3))",
                 vec![
                     Value::Text(id.clone()),
                     Value::Text(thread.to_string()),

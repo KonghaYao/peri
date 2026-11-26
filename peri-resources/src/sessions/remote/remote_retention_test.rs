@@ -1,6 +1,6 @@
 //! 远端长驻适配器的本机缓存回收（issue #473）。
 //!
-//! 本地 SQLite 扮演远端服务端；只断言本机缓存，不断言网络。
+//! 在独立 PostgreSQL 测试 schema 上验证进程内缓存回收。
 //!
 //! | 用例 | 断言的事实 |
 //! | --- | --- |
@@ -15,15 +15,14 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::thread::CancelPolicy;
 use peri_acp_types::workspace::SessionBinding;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
 use super::environment::RemoteWorkspaceEnvironment;
 use super::execution::RemoteExecution;
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{RemoteStore, StoreAccess};
+use super::postgres_fixture::{test_pool, PgTestTransport};
 use super::schema::{self, StoreId};
-use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::local_port::LocalExecutionPort;
@@ -32,13 +31,12 @@ use crate::sessions::SessionResourcesImpl;
 const CREATED_AT: &str = "2026-01-01T00:00:00Z";
 
 struct Fixture {
-    _directory: tempfile::TempDir,
-    pool: SqlitePool,
-    transport: Arc<SqliteTransport>,
+    pool: PgPool,
+    transport: Arc<PgTestTransport>,
 }
 
 struct TestFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     gate: Arc<ConnectionGate>,
 }
 
@@ -57,17 +55,7 @@ impl ConnectionFactory for TestFactory {
 }
 
 async fn fixture() -> Fixture {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-retention.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
+    let pool = test_pool().await;
     for statement in super::session_schema::initialization_plan() {
         sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
@@ -79,21 +67,20 @@ async fn fixture() -> Fixture {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'retention-test', ?2, 'now')")
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, $1, 'retention-test', $2, 'now')")
         .bind(schema::REMOTE_SCHEMA_VERSION)
         .bind(schema::STORE_CONTRACT)
         .execute(&pool)
         .await
         .unwrap();
-    let transport = Arc::new(SqliteTransport::for_test(pool.clone()));
-    Fixture {
-        _directory: directory,
-        pool,
-        transport,
-    }
+    sqlx::raw_sql("INSERT INTO machines VALUES ('machine', 'machine', 'known');
+        INSERT INTO workspaces (id, machine_id, path, path_source) VALUES ('ws','machine','/tmp','unverified')")
+        .execute(&pool).await.unwrap();
+    let transport = Arc::new(PgTestTransport::for_test(pool.clone()));
+    Fixture { pool, transport }
 }
 
-fn remote_adapter(transport: &Arc<SqliteTransport>, machine_id: String) -> Arc<RemoteSessionData> {
+fn remote_adapter(transport: &Arc<PgTestTransport>, machine_id: String) -> Arc<RemoteSessionData> {
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(
         transport.clone(),
@@ -127,11 +114,11 @@ fn facade(
     ))
 }
 
-async fn seed_thread(pool: &SqlitePool, id: &str, parent: Option<&str>) {
+async fn seed_thread(pool: &PgPool, id: &str, parent: Option<&str>) {
     sqlx::query(
         "INSERT INTO threads (id, cwd, created_at, updated_at, parent_thread_id,
             frozen_context, workspace_id)
-         VALUES (?1, '/tmp', ?2, ?2, ?3, '{}', 'ws')",
+         VALUES ($1, '/tmp', $2, $2, $3, '{}', 'ws')",
     )
     .bind(id)
     .bind(CREATED_AT)
@@ -159,6 +146,7 @@ fn session_input(thread_id: &str, cwd: &std::path::Path, binding: SessionBinding
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn deleting_a_subtree_reclaims_its_cached_roots_and_keeps_other_trees() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "ret-root", None).await;
@@ -201,6 +189,7 @@ async fn deleting_a_subtree_reclaims_its_cached_roots_and_keeps_other_trees() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn deleted_session_directories_release_observations_and_other_bindings_still_validate() {
     let fixture = fixture().await;
     let workspace_dir = tempfile::tempdir().unwrap();

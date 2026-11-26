@@ -32,10 +32,11 @@ The output is `target/wasm32-unknown-emscripten/debug/peri-wasm.js` with
 
 Run `node scripts/smoke-wasm-acp.mjs` after a debug build, or set
 `PERI_WASM_PROFILE=release` after a release build. The smoke starts a local
-peri-loom container (libSQL-compatible Hrana) and a model fixture, then
-verifies ACP prompt, store persistence and Host restart. It requires docker;
-set `PERI_TEST_STORAGE_URL` and `PERI_TEST_STORAGE_TOKEN` together to use an
-external endpoint instead. `scripts/smoke-wasm-remote-mcp.mjs` verifies an
+PostgreSQL container with a Neon SQL-over-HTTP proxy and a model fixture, then
+verifies ACP prompt, store persistence and Host restart. It requires Docker Compose. For an external database set
+`PERI_TEST_STORAGE_URL` to its PostgreSQL DSN and `PERI_TEST_STORAGE_HTTP_ENDPOINT`
+to its trusted Neon-compatible SQL-over-HTTP endpoint. Hosted Neon DSNs can omit the
+endpoint. `scripts/smoke-wasm-remote-mcp.mjs` verifies an
 ACP-carried MCP tool.
 
 ## ACP port
@@ -47,7 +48,7 @@ const wasm = await Module();
 const acp = await wasm.PeriWasmAcp.start(JSON.stringify({
   cwd: '/workspace',
   settings: { config: { /* provider and model configuration */ } },
-  storage: { url: 'https://your-turso-endpoint', authToken: 'token' },
+  storage: { url: postgresDsn, httpEndpoint: trustedPostgresHttpEndpoint },
   machineId: '9c64df8f-f145-4f67-9ee8-ebacaa667f50',
 }));
 
@@ -79,7 +80,7 @@ Agent/Session API. See the [HTTP demo](../npm-packages/@peri-sdk/examples/demo/d
 
 The probe lives in `@peri-code/sdk` and uses its Bun dependencies with
 Wrangler's local `workerd`.
-It starts a real local peri-loom container, a simulated model HTTP endpoint
+It starts a local PostgreSQL database and HTTP proxy, a simulated model HTTP endpoint
 and the existing ACP Host. The smoke covers the SDK runtime entry
 (`startWasmRuntime` with only `moduleFactory`), queued input delivery, a
 direct `session/prompt` turn and list/load after restarting the Host.

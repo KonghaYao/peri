@@ -1,88 +1,51 @@
-//! 远程模块的确定性测试：解析、身份归一、Debug 脱敏、失败分类与脱敏。
-//!
-//! 全部离线：不连接任何远程服务，不读 `.env`，不依赖网络。
-
-use turso_serverless::Error as SdkError;
+//! PostgreSQL locator validation and password handling never require a live server.
 
 use super::credentials::{CredentialError, CredentialSource, SessionStoreCredential};
-use super::endpoint::{EndpointError, RemoteEndpoint, RemoteEngine};
-use super::failure;
+use super::endpoint::{EndpointError, RemoteEndpoint};
 use super::RemoteFailureClass;
 
 const FAKE_SECRET: &str = "sentinel-credential-000000000000";
-const FAKE_HOST: &str = "sentinel-db-sentinel-org.turso.io";
+const FAKE_HOST: &str = "db.example.invalid";
 
 #[test]
-fn scheme_aliases_share_one_identity() {
-    let turso =
-        RemoteEndpoint::parse(&format!("turso://{FAKE_HOST}"), None).expect("turso locator");
-    let https = RemoteEndpoint::parse(&format!("https://{FAKE_HOST}/"), Some(RemoteEngine::Turso))
-        .expect("https locator with explicit engine");
-    assert_eq!(turso.engine(), RemoteEngine::Turso);
-    assert_eq!(turso.locator_digest(), https.locator_digest());
+fn postgres_dsn_reaches_transport_without_disclosing_parameters() {
+    for scheme in ["postgres", "postgresql"] {
+        let dsn =
+            format!("{scheme}://alice:{FAKE_SECRET}@{FAKE_HOST}:5444/sessions?sslmode=verify-full");
+        let endpoint = RemoteEndpoint::parse(&dsn).unwrap();
+        assert_eq!(endpoint.sdk_url(), dsn);
+        assert_eq!(format!("{endpoint:?}"), "RemoteEndpoint(PostgreSQL)");
+    }
 }
 
 #[test]
-fn engine_comes_from_confirmed_syntax_only() {
-    let from_scheme =
-        RemoteEndpoint::parse(&format!("libsql://{FAKE_HOST}"), None).expect("libsql locator");
-    assert_eq!(from_scheme.engine(), RemoteEngine::LibSql);
-    assert_eq!(from_scheme.engine().as_str(), "libsql");
-    assert_eq!(RemoteEngine::parse("turso"), Some(RemoteEngine::Turso));
-    assert_eq!(RemoteEngine::parse("mysql"), None);
-
-    // https 无法判定引擎：必须显式选择，不轮流试两种 SDK。
+fn old_remote_adapters_are_rejected() {
+    for scheme in ["libsql", "turso", "http", "https"] {
+        assert_eq!(
+            RemoteEndpoint::parse(&format!("{scheme}://{FAKE_HOST}/db")).unwrap_err(),
+            EndpointError::UnsupportedScheme
+        );
+    }
     assert_eq!(
-        RemoteEndpoint::parse(&format!("https://{FAKE_HOST}"), None).unwrap_err(),
-        EndpointError::AmbiguousEngine
-    );
-    assert_eq!(
-        RemoteEndpoint::parse(&format!("turso://{FAKE_HOST}"), Some(RemoteEngine::LibSql))
-            .unwrap_err(),
-        EndpointError::EngineConflict
+        RemoteEndpoint::parse("postgres://user:password@host/db#part").unwrap_err(),
+        EndpointError::UnparsableUrl
     );
 }
 
 #[test]
-fn locator_rejects_credentials_and_sync_forms() {
-    assert_eq!(
-        RemoteEndpoint::parse(&format!("turso://user:{FAKE_SECRET}@{FAKE_HOST}"), None)
-            .unwrap_err(),
-        EndpointError::UserInfoPresent
-    );
-    assert_eq!(
-        RemoteEndpoint::parse(&format!("turso://{FAKE_HOST}?sync_interval=1"), None).unwrap_err(),
-        EndpointError::QueryOrFragmentUnsupported
-    );
-    assert_eq!(
-        RemoteEndpoint::parse("/tmp/threads.db", None).unwrap_err(),
-        EndpointError::NotARemoteUrl
-    );
-    assert_eq!(
-        RemoteEndpoint::parse("ftp://example.invalid/db", None).unwrap_err(),
-        EndpointError::UnsupportedScheme
-    );
+#[cfg(not(target_os = "emscripten"))]
+fn unknown_driver_options_are_rejected_without_logging_their_values() {
+    let error = RemoteEndpoint::parse("postgres://db.invalid/peri?apikey=secret").unwrap_err();
+    assert_eq!(error, EndpointError::UnsupportedConnectParameter);
+    assert!(!format!("{error}").contains("secret"));
 }
 
 #[test]
-fn endpoint_debug_preserves_host_and_path() {
-    let endpoint = RemoteEndpoint::parse(
-        &format!("turso://{FAKE_HOST}/sessions"),
-        Some(RemoteEngine::Turso),
-    )
-    .expect("endpoint");
-    let rendered = format!("{endpoint:?}");
-    assert!(rendered.contains(FAKE_HOST));
-    assert!(rendered.contains("sentinel-db"));
-    assert!(rendered.contains("sessions"));
-}
-
-#[test]
-fn credential_value_debug_preserves_diagnostics() {
+fn password_override_is_optional_and_redacted() {
     let credential = SessionStoreCredential::try_new(FAKE_SECRET).expect("credential");
-    let rendered = format!("{credential:?}");
-    assert!(rendered.contains(FAKE_SECRET));
-    assert_eq!(credential.expose(), FAKE_SECRET);
+    assert!(!format!("{credential:?}").contains(FAKE_SECRET));
+    assert_eq!(credential.expose(), Some(FAKE_SECRET));
+    assert_eq!(SessionStoreCredential::default().expose(), None);
     assert_eq!(
         SessionStoreCredential::try_new("").unwrap_err(),
         CredentialError::EmptyValue
@@ -126,48 +89,6 @@ fn empty_environment_variable_is_a_typed_error() {
         }
     );
     std::env::remove_var(name);
-}
-
-#[test]
-fn sdk_failures_map_to_stable_classes() {
-    assert_eq!(
-        failure::classify(&SdkError::Constraint("UNIQUE".to_owned())),
-        RemoteFailureClass::Constraint
-    );
-    assert_eq!(
-        failure::classify(&SdkError::Readonly("readonly".to_owned())),
-        RemoteFailureClass::Readonly
-    );
-    assert_eq!(
-        failure::classify(&SdkError::Busy("locked".to_owned())),
-        RemoteFailureClass::Busy
-    );
-    assert_eq!(
-        failure::classify(&SdkError::Http(
-            "HTTP status 401 for https://db.turso.io".to_owned()
-        )),
-        RemoteFailureClass::AuthRejected
-    );
-    assert_eq!(
-        failure::classify(&SdkError::Http("request timed out".to_owned())),
-        RemoteFailureClass::Timeout
-    );
-    assert_eq!(
-        failure::classify(&SdkError::Http("connection refused".to_owned())),
-        RemoteFailureClass::Transport
-    );
-}
-
-#[test]
-fn domain_failure_preserves_sdk_text() {
-    // SDK 载荷可能含 URL/凭证/SQL：领域失败只能带稳定分类文本。
-    let raw = format!("HTTP status 403 for https://user:{FAKE_SECRET}@{FAKE_HOST}/v2/pipeline");
-    let mapped = failure::from_sdk_error(&SdkError::Http(raw.clone()));
-    let rendered = format!("{mapped}");
-    assert!(rendered.contains(FAKE_SECRET));
-    assert!(rendered.contains(FAKE_HOST));
-    assert!(rendered.contains("403"));
-    assert!(rendered.contains(&raw));
 }
 
 #[test]

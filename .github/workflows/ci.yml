@@ -150,7 +150,7 @@ jobs:
             # 加速点 2（核心根因修复）：独立缓存补丁 crate 并固化 mtime + 写入全局 CARGO_HOME/config.toml
             # 原问题：Swatinem/rust-cache 只缓存 target/debug/{deps,build,.fingerprint}，
             # 不会保存 target/peri-*-patches/。每轮 CI 运行 cargo-rmcp-patched.sh 都会重新下载解压
-            # hyper-util / rmcp / turso_serverless，文件 mtime 变成当前时间（比恢复的 .fingerprint 更新），
+            # hyper-util / rmcp，文件 mtime 变成当前时间（比恢复的 .fingerprint 更新），
             # 导致 Cargo 判定 hyper-util -> reqwest -> axum -> rmcp 及全部下游 workspace 过期并全量重编！
             # 修复：
             #   1) 用 actions/cache/restore+save 单独缓存补丁目录（~2MB，秒级恢复）；
@@ -167,7 +167,6 @@ jobs:
                   path: |
                       target/peri-rmcp-patches
                       target/peri-hyper-util-patches
-                      target/peri-turso-patches
                   key: ${{ matrix.cache_key }}-peri-patches-${{ hashFiles('patches/*.patch', 'scripts/cargo-rmcp-patched.sh') }}
 
             - name: Materialize patched crates & install Cargo patch config
@@ -181,7 +180,6 @@ jobs:
                   path: |
                       target/peri-rmcp-patches
                       target/peri-hyper-util-patches
-                      target/peri-turso-patches
                   key: ${{ steps.patches-cache.outputs.cache-primary-key }}
 
             # ==================================================================
@@ -224,6 +222,20 @@ jobs:
                   | package(=peri-agent) & binary(=compact_session_adversarial_test)
                   | package(=peri-agent) & binary(=compact_session_manual_adversarial_test)
                   | package(=peri-agent) & binary(=compact_authority_projection_test))'
+
+            - name: Run PostgreSQL session storage contracts
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  db=$(docker run -d --rm -p 127.0.0.1::5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine)
+                  trap 'docker stop "$db" >/dev/null' EXIT
+                  for _ in {1..60}; do
+                    docker exec "$db" pg_isready -q -U postgres && break
+                    sleep 1
+                  done
+                  address=$(docker port "$db" 5432/tcp)
+                  export PERI_TEST_POSTGRES_URL="postgresql://postgres@${address}/postgres"
+                  cargo test --locked -p peri-resources --lib -- --ignored sessions::remote:: --test-threads=2
 
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash
@@ -308,7 +320,6 @@ jobs:
                   path: |
                       target/peri-rmcp-patches
                       target/peri-hyper-util-patches
-                      target/peri-turso-patches
                   key: linux-x86_64-peri-patches-${{ hashFiles('patches/*.patch', 'scripts/cargo-rmcp-patched.sh') }}
 
             - name: Materialize patched crates & install Cargo patch config
@@ -321,7 +332,6 @@ jobs:
                   path: |
                       target/peri-rmcp-patches
                       target/peri-hyper-util-patches
-                      target/peri-turso-patches
                   key: ${{ steps.patches-cache.outputs.cache-primary-key }}
 
             # 修复原 e2e-replay 缺失补丁配置导致 rust-cache 只存 ~11MB 的问题；

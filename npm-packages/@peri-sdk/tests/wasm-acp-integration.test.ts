@@ -2,29 +2,17 @@ import { expect, test } from "bun:test";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createServer } from "node:net";
-import { once } from "node:events";
 import {
   ChatManager,
   ChatUserAction,
   SessionBindingConflictError,
-  TursoStorage,
+  PostgresStorage,
   startWasmRuntime,
 } from "../dist/index.js";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
 import { OwnershipProbe } from "./ownership-probe";
 import { lookupEnv } from "../../../scripts/lib/local-store.mjs";
-
-async function unusedPort(): Promise<number> {
-  const listener = createServer();
-  listener.listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const address = listener.address();
-  if (!address || typeof address === "string") throw new Error("no TCP port");
-  await new Promise<void>((done) => listener.close(done));
-  return address.port;
-}
 
 async function settled(model: () => number, expected: number, budgetMs = 20_000): Promise<void> {
   const deadline = Date.now() + budgetMs;
@@ -47,13 +35,13 @@ function otlpBody(bytes: Uint8Array): unknown {
 /** Chat 事实 → 纯展示文档；测试不直接读运行侧内部状态。 */
 
 /**
- * 真实链路：打包的 peri-wasm 产物 + 真实 Turso listener + 模拟模型端点。
+ * 真实链路：打包的 peri-wasm 产物 + 真实 PostgreSQL listener + 模拟模型端点。
  * ChatManager 按激活装配独立 WASM 宿主；SDK 不启动任何 Peri 或 Workspace 子进程。
  */
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), "peri-sdk-wasm-chat-"));
-  // 真实后端：默认起本地平台版 peri-loom；CI 或排障时用 PERI_TEST_STORAGE_* 直连外部端点。
-  const loom = await lookupEnv({ port: await unusedPort() });
+  // 真实后端：默认起本地平台版 PostgreSQL；CI 或排障时用 PERI_TEST_STORAGE_* 直连外部端点。
+  const pgStore = await lookupEnv();
   const prompts: string[] = [];
   const telemetry: unknown[] = [];
   const langfuse = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -77,7 +65,7 @@ async function fixture() {
   // ACP cwd 必须与 Chat path 一致；macOS 的 /var 是指向 /private/var 的符号链接。
   const workspace = await realpath(root);
   const moduleUrl = resolve(import.meta.dir, "../dist/wasm/peri-wasm.js");
-  const databaseUrl = loom.url;
+  const databaseUrl = pgStore.url;
   const settings = {
     config: {
       active_alias: "sonnet",
@@ -85,10 +73,10 @@ async function fixture() {
       profiles: { sonnet: { provider: "fixture", model: "fixture-model" } },
     },
   };
-  const storage = new TursoStorage({ url: databaseUrl, authToken: loom.token });
+  const storage = new PostgresStorage({ url: databaseUrl, httpEndpoint: pgStore.httpEndpoint });
   // Manager 的部署边界：Store 与机器身份；per-chat 只提供 cwd/settings。
   const store = {
-    storage: { url: databaseUrl, authToken: loom.token },
+    storage: storage.storageConfig,
     machineId: "00000000-0000-4000-8000-000000000003",
   };
   const workspaceRef = { id: `ws:${workspace}`, hostPath: workspace, runtimePath: workspace };
@@ -117,10 +105,10 @@ async function fixture() {
     model.stop(true);
     langfuse.stop(true);
     if (primaryError) {
-      const serverLog = await loom.logs();
+      const serverLog = await pgStore.logs();
       if (serverLog) console.error(serverLog);
     }
-    await loom.stop();
+    await pgStore.stop();
     await rm(root, { recursive: true, force: true });
     if (cleanupErrors.length) throw new AggregateError(primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
       "WASM integration domain or startup cleanup failed", { cause: primaryError });
@@ -201,7 +189,7 @@ test("a second manager cannot own the same real Session and never starts its tra
     // 第二管理器只提供会记录启动的 transport 运行后端；ownership 必须先于激活。
     const transportManager = new ChatManager({
       store: {
-        storage: { url: "http://127.0.0.1:1", authToken: "x" },
+        storage: { url: "postgresql://test@localhost/db", httpEndpoint: "http://127.0.0.1:1/sql" },
         machineId: "m",
       },
       database: f.storage,

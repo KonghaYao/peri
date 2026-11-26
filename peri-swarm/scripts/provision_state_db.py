@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Provision the Swarm state database on a running Loom dev stack.
 
-S6c2 (`design §4.1`): the Peri session store and the Swarm state store are two
-independent logical databases. `dev.py` seeds only the session database
-(`local_default/demo/main`); the Swarm database (`local_default/swarm/main`) is
-created here through the platform management API, before the test runs.
+The gateway uses PostgreSQL for Peri sessions. This helper provisions only
+the Loom database used for Swarm state.
 
 Usage::
 
@@ -20,7 +18,7 @@ The helper reads `connection.json`, which holds:
 - `endpoint` — the management/Hrana origin (`http://127.0.0.1:9497`);
 - `project_api_key` — the project credential. It is used only in the
   `Authorization` header. It is never printed, logged, or written to disk;
-- `database` — the seeded session database (`namespace` + `branch`), used as
+- `database` — the seeded Loom database (`namespace` + `branch`), used as
   the default tenant/branch for the state database;
 - `ca_file` — present when the stack runs with `--tls`.
 
@@ -301,9 +299,6 @@ def main(argv):
         "request_id": arguments.request_id,
         "existed_before": existed_before,
         "hrana_url": hrana_url,
-        "session_locator": "{}/db/{}/{}/{}/".format(
-            endpoint, tenant, seeded["namespace"]["database"], seeded["branch"]
-        ),
         "state_locator": "{}/db/{}/{}/{}/".format(endpoint, tenant, arguments.database, branch),
     }
     if arguments.json:
@@ -329,7 +324,6 @@ def main(argv):
                 "ok via " + hrana_url if hrana_url else "skipped (--skip-hrana)"
             )
         )
-        print("export PERI_SWARM_SESSION_STORE={}".format(public["session_locator"]))
         print("export PERI_SWARM_STATE_STORE={}".format(public["state_locator"]))
         print("export PERI_SWARM_STORE_TOKEN=<connection.json project_api_key>")
     return 0

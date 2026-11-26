@@ -1,7 +1,7 @@
 //! 会话资源门面 — 消费侧唯一的会话行为契约。
 //!
 //! 业务侧（Agent / ACP / Controller / TUI）只依赖本 trait 的行为语义，注入的是
-//! `Arc<dyn SessionResources>`。数据的持久化位置（本机 SQLite / Turso Cloud）与
+//! `Arc<dyn SessionResources>`。数据的持久化位置（本机 SQLite / PostgreSQL Cloud）与
 //! 本机执行事实（发现、绑定、排空）由资源内部两面分别实现，
 //! 数据端口不向业务暴露事务、CAS、SQL batch、连接或补偿令牌。
 //!

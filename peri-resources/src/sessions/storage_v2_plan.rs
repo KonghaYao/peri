@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{WorkspaceId, WorkspacePathSource};
-#[cfg(not(target_os = "emscripten"))]
 use sqlx::SqliteConnection;
 
-#[cfg(not(target_os = "emscripten"))]
+use super::binding_evidence::validate_saved_cwd;
 use super::discovery::Discovery;
 
 /// 旧登记（压缩前形状里 `workspaces` 的一行）：归属身份 + 最后观测证据。
@@ -60,12 +59,10 @@ pub(crate) struct LocalMigrationInput {
 }
 
 /// 旧表会话行：`(thread id, parent id, cwd, machine id, workspace id)`。
-#[cfg(not(target_os = "emscripten"))]
 type LegacySessionRow = (String, Option<String>, String, String, Option<String>);
 
 /// 在旧表仍完整时读取迁移输入。执行登记的 `discovery` 只是最后观测值，
 /// 这里仅用它判断路径来源，绝不把它标成创建时的执行快照。
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn read_local_plan(
     connection: &mut SqliteConnection,
 ) -> Result<LocalMigrationInput> {
@@ -456,60 +453,6 @@ pub(crate) fn plan_local_workspaces(
         workspaces,
         session_workspace_ids,
     })
-}
-
-pub(crate) fn validate_saved_cwd(path: &Path) -> Result<()> {
-    let text = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("legacy session path is not UTF-8"))?;
-    let posix_absolute = text.starts_with('/');
-    let windows_drive = text.as_bytes().get(1) == Some(&b':')
-        && text
-            .as_bytes()
-            .get(2)
-            .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
-        && text.as_bytes()[0].is_ascii_alphabetic();
-    let windows_unc = text.starts_with("\\\\")
-        && text[2..]
-            .split('\\')
-            .filter(|part| !part.is_empty())
-            .count()
-            >= 2;
-    if !posix_absolute && !windows_drive && !windows_unc {
-        bail!("legacy session path is not absolute");
-    }
-    Ok(())
-}
-
-/// Infer a remote v11 root only when the saved relative path is an exact
-/// suffix of the saved execution cwd. This is grouping evidence, not a Git or
-/// filesystem identity check.
-pub(crate) fn derive_remote_root(cwd: &str, relative: &str) -> Result<PathBuf> {
-    validate_saved_cwd(Path::new(cwd))?;
-    if relative.is_empty() {
-        return Ok(PathBuf::from(cwd));
-    }
-    if relative
-        .split(['/', '\\'])
-        .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        bail!("remote binding relative cwd is invalid");
-    }
-    let separator = if cwd.contains('\\') { '\\' } else { '/' };
-    let relative = relative.replace(['/', '\\'], &separator.to_string());
-    let suffix = format!("{separator}{relative}");
-    let prefix = cwd
-        .strip_suffix(&suffix)
-        .ok_or_else(|| anyhow::anyhow!("remote binding cwd does not match relative path"))?;
-    let root = if prefix.is_empty() {
-        separator.to_string()
-    } else if prefix.len() == 2 && prefix.as_bytes()[1] == b':' {
-        format!("{prefix}{separator}")
-    } else {
-        prefix.to_owned()
-    };
-    validate_saved_cwd(Path::new(&root))?;
-    Ok(PathBuf::from(root))
 }
 
 #[cfg(test)]

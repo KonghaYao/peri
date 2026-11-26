@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::messages::{BaseMessage, MessageContent, MessageId};
 use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
@@ -19,7 +20,6 @@ use peri_acp_types::thread::{AgentStatus, CancelPolicy, WorkState};
 use peri_acp_types::workspace::{
     ProjectId, ScopedThreadQuery, SessionBinding, ThreadScope, WorkspaceId,
 };
-use turso_serverless::Value;
 
 use super::session_codec as codec;
 use super::session_sql::{
@@ -95,38 +95,11 @@ fn meta_projection_matches_decoding_indices() {
 /// 旧代投影与当前投影**同形**：同一套解码、同一组下标，只有最后两列换成占位常量。
 ///
 /// 这条断言把「列数常量 ↔ SELECT 列表 ↔ codec 下标」钉在一起：三者任一漂移都会失败。
-#[test]
-fn legacy_projection_keeps_the_same_meta_shape_for_one_codec() {
-    let current = projected_columns(session_sql::META_PROJECTION);
-    let legacy = projected_columns(session_sql::META_PROJECTION_LEGACY);
-    assert_eq!(legacy.len(), current.len(), "列数必须一致");
-    assert_eq!(legacy.len(), session_sql::META_COLUMN_COUNT);
-    assert_eq!(
-        legacy[..session_sql::META_AGENT_STATUS],
-        current[..session_sql::META_AGENT_STATUS],
-        "占位只替换两列工作快照，前缀逐列相同"
-    );
-    assert_eq!(
-        &legacy[session_sql::META_CONTEXT_USAGE_TOKENS..],
-        ["context_usage_tokens", "work_state"]
-    );
-    assert_eq!(
-        legacy[session_sql::META_CONTEXT_USAGE_TOKENS],
-        "context_usage_tokens"
-    );
-    assert!(
-        session_sql::META_PROJECTION_LEGACY.contains("NULL as context_usage_tokens")
-            && session_sql::META_PROJECTION_LEGACY.contains("'idle' as work_state"),
-        "旧代两列读作本代默认值，而不是读取不存在的列"
-    );
-}
 
 #[test]
 fn bigger_projections_extend_the_same_meta_source() {
     assert!(session_sql::FACT_PROJECTION.starts_with(session_sql::META_PROJECTION));
     assert!(session_sql::PAGE_PROJECTION.starts_with(session_sql::META_PROJECTION));
-    assert!(session_sql::FACT_PROJECTION_LEGACY.starts_with(session_sql::META_PROJECTION_LEGACY));
-    assert!(session_sql::PAGE_PROJECTION_LEGACY.starts_with(session_sql::META_PROJECTION_LEGACY));
     assert_eq!(
         appended_columns(session_sql::FACT_PROJECTION),
         [
@@ -179,83 +152,6 @@ fn bigger_projections_extend_the_same_meta_source() {
         session_sql::PAGE_COLUMN_TOTAL,
         session_sql::META_COLUMN_COUNT + 4
     );
-}
-
-#[test]
-fn schema_ddl_matches_the_canonical_shape() {
-    let plan = super::session_schema::initialization_plan();
-    // 一条语句一个 spec：远端执行器的语句单元就是一条语句，多句拼一个请求只会执行第一条。
-    let expected: Vec<&str> = crate::sessions::canonical::CREATE_TABLES
-        .iter()
-        .chain(crate::sessions::canonical::CREATE_INDEXES.iter())
-        .copied()
-        .collect();
-    let actual: Vec<&str> = plan.iter().map(|spec| spec.sql).collect();
-    assert_eq!(
-        actual, expected,
-        "远端 DDL：canonical 建表段 + canonical 索引段"
-    );
-    for spec in &plan {
-        assert!(
-            spec.sql.contains("IF NOT EXISTS"),
-            "初始化 DDL 必须幂等: {}",
-            spec.sql
-        );
-        assert!(spec.params.is_empty(), "DDL 不带绑定参数");
-        assert!(
-            !spec.sql.contains(';'),
-            "一个 spec 只能是一条语句: {}",
-            spec.sql
-        );
-    }
-    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。v19 起
-    // `legacy_execution_registrations` 不在其中：它只作为升级入参存在，不由新库建出。
-    for table in [
-        "machines",
-        "workspaces",
-        "threads",
-        "messages",
-        "projects",
-        "session_bindings",
-        "mcp_oauth_credentials",
-    ] {
-        assert!(
-            plan.iter().any(|spec| spec.sql.contains(table)),
-            "canonical 表必须有建表语句: {table}"
-        );
-    }
-    // 索引段必须晚于建表（`idx_threads_updated` 引用建表时的列）：清单顺序就是执行顺序。
-    let first_index = plan
-        .iter()
-        .position(|spec| spec.sql.starts_with("CREATE INDEX"))
-        .expect("索引段存在");
-    assert_eq!(
-        first_index,
-        crate::sessions::canonical::CREATE_TABLES.len(),
-        "建表段在前、索引段在后"
-    );
-    for index_sql in crate::sessions::canonical::CREATE_INDEXES {
-        assert!(
-            plan.iter().any(|spec| spec.sql == *index_sql),
-            "v2 canonical index missing: {index_sql}"
-        );
-    }
-    // 会话表主键是会话 id（canonical 列名），历史表主键是消息 id（同一条消息不属于两个会话）。
-    let sessions = plan
-        .iter()
-        .find(|spec| spec.sql.contains("CREATE TABLE IF NOT EXISTS threads"))
-        .expect("会话表建表语句");
-    assert!(sessions.sql.contains("id TEXT PRIMARY KEY"));
-    let messages = plan
-        .iter()
-        .find(|spec| spec.sql.contains("CREATE TABLE IF NOT EXISTS messages"))
-        .expect("历史表建表语句");
-    assert!(messages.sql.contains("message_id TEXT PRIMARY KEY"));
-    // 统一之后不再有远端自己的会话表名。
-    for spec in &plan {
-        assert!(!spec.sql.contains("peri_sessions"));
-        assert!(!spec.sql.contains("peri_session_messages"));
-    }
 }
 
 // ─── 解码 ─────────────────────────────────────────────────────────────────────
@@ -321,15 +217,6 @@ fn meta_row_decodes_field_by_field() {
 }
 
 /// 旧代投影送的占位值（`NULL` / `'idle'`）经同一份解码得到本代默认值。
-#[test]
-fn legacy_placeholders_decode_to_idle_and_unknown_usage() {
-    let mut row = fact_row();
-    row[session_sql::META_CONTEXT_USAGE_TOKENS] = Value::Null;
-    row[session_sql::META_WORK_STATE] = text("idle");
-    let meta = codec::decode_meta(&row).expect("legacy placeholder row is a valid meta row");
-    assert_eq!(meta.work_state, WorkState::Idle);
-    assert_eq!(meta.context_usage_tokens, None);
-}
 
 #[test]
 fn binding_decodes_from_the_appended_columns() {
@@ -637,41 +524,35 @@ fn binding_cwd_must_be_relative_and_textual() {
 }
 
 #[tokio::test]
-async fn draft_revocation_cleans_environment_without_cascade_and_preserves_committed_rows() {
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn draft_revocation_removes_only_uncommitted_rows() {
     use sqlx::Connection;
 
-    let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA foreign_keys = OFF")
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    let foreign_keys: (i64,) = sqlx::query_as("PRAGMA foreign_keys")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(foreign_keys.0, 0);
-    for sql in crate::sessions::canonical::CREATE_TABLES {
-        sqlx::query(*sql).execute(&mut connection).await.unwrap();
+    let pool = super::postgres_fixture::test_pool().await;
+    let mut connection = pool.acquire().await.unwrap();
+    for ddl in super::session_schema::initialization_plan() {
+        sqlx::query(ddl.sql)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
     }
     sqlx::query(
         "INSERT INTO machines(id, name, identity_kind) VALUES ('machine', '测试机', 'known')",
     )
-    .execute(&mut connection)
+    .execute(&mut *connection)
     .await
     .unwrap();
     sqlx::query("INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ('owner', 'machine', '/home/u/project', 'unverified')")
-        .execute(&mut connection)
+        .execute(&mut *connection)
         .await
         .unwrap();
     for (id, frozen, expected_deleted) in [("draft", None, 1), ("committed", Some("{}"), 0)] {
-        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context, workspace_id) VALUES (?1, 'now', 'now', ?2, 'owner')")
-            .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
-            .bind(id).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot) VALUES (?1, 1, 'project', 'owner', '', '{\"root\":\"/home/u/project\"}')")
-            .bind(id).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context, workspace_id) VALUES ($1, 'now', 'now', $2, 'owner')")
+            .bind(id).bind(frozen).execute(&mut *connection).await.unwrap();
+        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES ($1, $1, 'human', '{}')")
+            .bind(id).execute(&mut *connection).await.unwrap();
+        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot) VALUES ($1, 1, 'project', 'owner', '', '{\"root\":\"/home/u/project\"}')")
+            .bind(id).execute(&mut *connection).await.unwrap();
         let statements = session_sql::revoke_draft_statements(id);
         assert_eq!(statements.len(), 3);
         assert!(statements[2].sql.starts_with("DELETE FROM threads"));
@@ -695,7 +576,7 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
         for statement in &statements {
             let result = sqlx::query(statement.sql)
                 .bind(id)
-                .execute(&mut connection)
+                .execute(&mut *connection)
                 .await
                 .unwrap();
             assert_eq!(result.rows_affected(), 0);
@@ -709,10 +590,10 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
 #[test]
 fn read_statements_are_read_only_and_parameterized() {
     let single_id_reads = [
-        session_sql::select_session_statement("s", session_sql::MetaProjection::Current),
-        session_sql::select_meta_statement("s", session_sql::MetaProjection::Current),
-        session_sql::select_children_statement("s", session_sql::MetaProjection::Current),
-        session_sql::select_tree_statement("s", session_sql::MetaProjection::Current),
+        session_sql::select_session_statement("s"),
+        session_sql::select_meta_statement("s"),
+        session_sql::select_children_statement("s"),
+        session_sql::select_tree_statement("s"),
         session_sql::select_messages_statement("s"),
         session_sql::select_root_statement("s"),
         session_sql::select_active_messages_statement("s"),
@@ -728,11 +609,7 @@ fn read_statements_are_read_only_and_parameterized() {
     // 树查询是递归 CTE，不是「查一层再查一层」。
     assert!(single_id_reads[3].sql.starts_with("WITH RECURSIVE"));
 
-    let page = session_sql::page_statement(
-        &query(ThreadScope::All, None),
-        session_sql::MetaProjection::Current,
-    )
-    .expect("bindable");
+    let page = session_sql::page_statement(&query(ThreadScope::All, None)).expect("bindable");
     assert!(page.is_read_only(), "分页列举不得写: {}", page.sql);
     assert_eq!(
         page.params.len(),
@@ -760,7 +637,7 @@ fn active_and_bounded_flag_reads_carry_their_own_scope_conditions() {
 
     let flags = session_sql::select_message_flags_statement("s", "m");
     assert!(flags.is_read_only(), "flags 读取不得写: {}", flags.sql);
-    assert_eq!(flags.sql.matches('?').count(), 2, "绑定会话与条目两个值");
+    assert_eq!(flags.sql.matches('$').count(), 2, "绑定会话与条目两个值");
     assert!(!flags.sql.contains('\''), "值只能走绑定: {}", flags.sql);
     assert_eq!(
         flags.params,
@@ -776,15 +653,13 @@ fn active_and_bounded_flag_reads_carry_their_own_scope_conditions() {
 fn page_statement_binds_scope_cursor_and_limit() {
     let project = ProjectId::from_str_expect("11111111-1111-1111-1111-111111111111");
     let all = query(ThreadScope::All, None);
-    let spec =
-        session_sql::page_statement(&all, session_sql::MetaProjection::Current).expect("bindable");
+    let spec = session_sql::page_statement(&all).expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(0));
     assert_eq!(spec.params[1], Value::Null);
     assert_eq!(spec.params[3], Value::Integer(0), "无游标时不带比较值");
 
     let scoped = query(ThreadScope::Project(project), None);
-    let spec = session_sql::page_statement(&scoped, session_sql::MetaProjection::Current)
-        .expect("bindable");
+    let spec = session_sql::page_statement(&scoped).expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(1));
     assert_eq!(spec.params[1], Value::Text(project.to_string()));
 
@@ -799,8 +674,7 @@ fn page_statement_binds_scope_cursor_and_limit() {
         },
         Some(cursor),
     );
-    let spec = session_sql::page_statement(&paged, session_sql::MetaProjection::Current)
-        .expect("bindable");
+    let spec = session_sql::page_statement(&paged).expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(3));
     assert_eq!(spec.params[2], Value::Text("sub".to_owned()));
     assert_eq!(spec.params[3], Value::Integer(1));
@@ -818,18 +692,13 @@ fn page_statement_binds_scope_cursor_and_limit() {
     // 上限被夹到 200：请求 1000 行时仍然只取 201 行。
     let mut oversized = query(ThreadScope::All, None);
     oversized.limit = 1000;
-    let spec = session_sql::page_statement(&oversized, session_sql::MetaProjection::Current)
-        .expect("bindable");
+    let spec = session_sql::page_statement(&oversized).expect("bindable");
     assert_eq!(spec.params[6], Value::Integer(201));
 
     // 两次不同 scope 的 SQL 文本相同：过滤值全在参数里。
     assert_eq!(
-        session_sql::page_statement(&all, session_sql::MetaProjection::Current)
-            .expect("bindable")
-            .sql,
-        session_sql::page_statement(&scoped, session_sql::MetaProjection::Current)
-            .expect("bindable")
-            .sql
+        session_sql::page_statement(&all).expect("bindable").sql,
+        session_sql::page_statement(&scoped).expect("bindable").sql
     );
 }
 
@@ -886,11 +755,11 @@ impl OpaqueIdExt for WorkspaceId {
     }
 }
 
-/// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 保留绑定值供诊断。
+/// Diagnostics describe the statement without exposing session data.
 #[test]
-fn statement_debug_preserves_bound_values() {
-    let spec: StatementSpec =
-        session_sql::select_meta_statement("session-secret", session_sql::MetaProjection::Current);
+fn statement_debug_redacts_bound_values() {
+    let spec: StatementSpec = session_sql::select_meta_statement("session-secret");
     let rendered = format!("{spec:?}");
-    assert!(rendered.contains("session-secret"));
+    assert!(rendered.contains("parameter_count: 1"));
+    assert!(!rendered.contains("session-secret"));
 }

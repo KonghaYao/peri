@@ -1,4 +1,4 @@
-//! 远端分页读取与边界读取：同一个 `SqliteTransport` 夹具扮演远端服务端，走真实批次与账本。
+//! 远端分页读取与边界读取：同一个 `PgTestTransport` 夹具扮演远端服务端，走真实批次与账本。
 //!
 //! 夹具与 [`crate::sessions::sqlite_store`] 的分页测试同形（同样的消息、limit 与字节预算），
 //! 断言的是调用方能观察到的东西：页内顺序与内容、游标、错误分类。两个后端必须给出同一页
@@ -18,12 +18,11 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{ProjectId, ResolvedWorkspace, SessionBinding, WorkspaceId};
-use sqlx::sqlite::SqlitePoolOptions;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{RemoteStore, StoreAccess};
+use super::postgres_fixture::PgTestTransport;
 use super::schema::{self, StoreId};
-use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 
@@ -72,7 +71,7 @@ fn workspace(binding: &SessionBinding) -> ResolvedWorkspace {
 
 /// 与生产同一条重建路径的工厂：连接换代时重新建到同一份夹具的连接。
 struct PageFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     gate: Arc<ConnectionGate>,
 }
 
@@ -88,8 +87,8 @@ impl ConnectionFactory for PageFactory {
     }
 }
 
-/// 夹具适配器：一个真 SQLite 池扮演远端服务端（当前契约的库，走真实批次与账本）。
-fn remote_data(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
+/// 夹具适配器：隔离的 PostgreSQL 测试库（当前契约的库，走真实批次与账本）。
+fn remote_data(transport: &Arc<PgTestTransport>) -> RemoteSessionData {
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(
         transport.clone(),
@@ -108,10 +107,8 @@ fn remote_data(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
     )
 }
 
-/// 建库 + 一条新会话（历史为空时不发空批）。返回临时目录，调用方须持有它。
-pub(super) async fn remote_with_history(
-    history: &[PersistedPayload],
-) -> (tempfile::TempDir, RemoteSessionData) {
+/// 建库 + 一条新会话（历史为空时不发空批）。每次调用使用独立的 PostgreSQL 临时 schema。
+pub(super) async fn remote_with_history(history: &[PersistedPayload]) -> RemoteSessionData {
     remote_fixture(Some("{}"), history).await
 }
 
@@ -119,22 +116,9 @@ pub(super) async fn remote_with_history(
 ///
 /// `None` 表示 SQL NULL：创建 API 总是写非空值，这里在建会话后用 SQL 改成 NULL，
 /// 模拟尚未持久化快照的 legacy 会话。
-async fn remote_fixture(
-    frozen: Option<&str>,
-    history: &[PersistedPayload],
-) -> (tempfile::TempDir, RemoteSessionData) {
-    let directory = tempfile::tempdir().unwrap();
+async fn remote_fixture(frozen: Option<&str>, history: &[PersistedPayload]) -> RemoteSessionData {
     // 单连接足够：每个测试自己顺序使用这条夹具，不必与全量测试集的并行度抢连接。
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-history-page.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
     for statement in super::session_schema::initialization_plan() {
         sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
@@ -146,7 +130,7 @@ async fn remote_fixture(
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'history-page-test', ?2, 'now')")
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, $1, 'history-page-test', $2, 'now')")
         .bind(schema::REMOTE_SCHEMA_VERSION)
         .bind(schema::STORE_CONTRACT)
         .execute(&pool)
@@ -154,7 +138,7 @@ async fn remote_fixture(
         .unwrap();
     // legacy 夹具在建会话后要直改列：先留一条连接，传输面仍拿到同一个池。
     let fixture_pool = pool.clone();
-    let data = remote_data(&Arc::new(SqliteTransport::for_test(pool)));
+    let data = remote_data(&Arc::new(PgTestTransport::for_test(pool)));
     let id: ThreadId = PAGE_SESSION.to_owned();
     let binding = binding();
     data.save_new_session_in_workspace(
@@ -177,7 +161,7 @@ async fn remote_fixture(
     .await
     .unwrap();
     if frozen.is_none() {
-        sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = ?1")
+        sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = $1")
             .bind(PAGE_SESSION)
             .execute(&fixture_pool)
             .await
@@ -186,13 +170,14 @@ async fn remote_fixture(
     if !history.is_empty() {
         data.append_history(&id, history).await.unwrap();
     }
-    (directory, data)
+    data
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_pages_the_same_fixture_as_the_local_backend() {
     let history = messages(7);
-    let (_fixture, data) = remote_with_history(&history).await;
+    let data = remote_with_history(&history).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     let first = data
@@ -235,9 +220,10 @@ async fn remote_pages_the_same_fixture_as_the_local_backend() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_returns_archived_rows_and_fails_closed_when_the_anchor_is_gone() {
     let history = messages(4);
-    let (_fixture, data) = remote_with_history(&history).await;
+    let data = remote_with_history(&history).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     data.apply_message_projections(
@@ -284,8 +270,9 @@ async fn remote_returns_archived_rows_and_fails_closed_when_the_anchor_is_gone()
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_bounds_answer_the_range_head_and_empty_sessions_have_none() {
-    let (_fixture, data) = remote_with_history(&[]).await;
+    let data = remote_with_history(&[]).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     // 空会话：没有自有历史，因此没有起点，也不编造范围身份；首屏不给出游标（A15）。
@@ -353,9 +340,10 @@ fn segment_ids(segment: &HistorySegment) -> Vec<MessageId> {
 /// 与本机 adapter 的段语义逐条同形（同一份 [`peri_acp_types::history_page::HistorySegmentPlan`]），
 /// 差别只在执行器：远端把上界、候选行（首段还多一列继承区）放进同一个只读批次。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_history_segment_replay_matches_the_local_backend() {
     let history = messages(7);
-    let (_fixture, data) = remote_with_history(&history).await;
+    let data = remote_with_history(&history).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     let first = data
@@ -403,13 +391,14 @@ async fn remote_history_segment_replay_matches_the_local_backend() {
 
 /// 完整回放**不过滤**条目：已排除的归档原文与 System 条目都在段里（与本机 adapter 同一口径）。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_history_segment_returns_archived_and_system_rows() {
     let mut history = messages(2);
     history.insert(
         1,
         PersistedPayload::Message(BaseMessage::system("tool notice")),
     );
-    let (_fixture, data) = remote_with_history(&history).await;
+    let data = remote_with_history(&history).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     data.apply_message_projections(
@@ -440,9 +429,10 @@ async fn remote_history_segment_returns_archived_and_system_rows() {
 
 /// 续段锚点消失即明确失效：不回退成首段，也不用空段冒充回放结束。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_history_segment_fails_closed_when_the_after_row_is_gone() {
     let history = messages(4);
-    let (_fixture, data) = remote_with_history(&history).await;
+    let data = remote_with_history(&history).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     let first = data
@@ -474,9 +464,10 @@ async fn remote_history_segment_fails_closed_when_the_after_row_is_gone() {
 
 /// Present：存储层原样返回，不解析、不改写、不因版本未知丢弃字节。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_frozen_state_returns_present_bytes_verbatim() {
     let frozen = r#"{"v":1,"x":"原文"}"#;
-    let (_fixture, data) = remote_fixture(Some(frozen), &[]).await;
+    let data = remote_fixture(Some(frozen), &[]).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     match data.load_frozen_state(&id).await.unwrap() {
@@ -489,8 +480,9 @@ async fn remote_frozen_state_returns_present_bytes_verbatim() {
 
 /// LegacyAbsent：`frozen_context IS NULL` 按实现语义是 legacy 缺失，不是 NotFound。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_frozen_state_reports_sql_null_as_legacy_absent() {
-    let (_fixture, data) = remote_fixture(None, &[]).await;
+    let data = remote_fixture(None, &[]).await;
     let id: ThreadId = PAGE_SESSION.to_owned();
 
     assert_eq!(
@@ -501,8 +493,9 @@ async fn remote_frozen_state_reports_sql_null_as_legacy_absent() {
 
 /// NotFound：没有该线程行时明确失败，不把缺失误报成 LegacyAbsent。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_frozen_state_rejects_unknown_thread() {
-    let (_fixture, data) = remote_fixture(Some("{}"), &[]).await;
+    let data = remote_fixture(Some("{}"), &[]).await;
 
     let error = data
         .load_frozen_state(&"missing-session".to_owned())

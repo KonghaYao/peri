@@ -34,7 +34,7 @@ export interface CreateChatSessionInput {
         readonly workspace: WorkspaceRef;
         readonly agent: ChatAgentConfig;
         /** 写入 agentConfig 的 Store 描述；工厂只做快照，不解析 URL。 */
-        readonly storage: { readonly url: string; readonly authToken?: string };
+        readonly storage: { readonly url: string; readonly httpEndpoint?: string };
         /** 相对 `workspace.runtimePath` 的会话 cwd；省略时为 workspace 根。 */
         readonly sessionPath?: string;
         readonly session?: ChatConfig["session"];
@@ -228,14 +228,14 @@ function resolveRuntime(chatConfig: ChatConfig): ChatRuntime {
 }
 
 /**
- * 快照 Store 描述：只保留 string 字段，避免 `authToken: undefined` 破坏 JSON 校验。
+ * 快照 Store 描述：只保留 string 字段，避免 `httpEndpoint: undefined` 破坏 JSON 校验。
  */
 function snapshotStorage(
     storage: CreateChatSessionInput["target"]["storage"],
 ): Record<string, unknown> {
     if (!storage || typeof storage !== "object") {
         throw new TypeError(
-            "createChatSession target.storage requires { url, authToken? }",
+            "createChatSession target.storage requires { url, httpEndpoint? }",
         );
     }
     if (typeof storage.url !== "string" || storage.url.length === 0) {
@@ -244,18 +244,18 @@ function snapshotStorage(
         );
     }
     if (
-        storage.authToken !== undefined &&
-        typeof storage.authToken !== "string"
+        storage.httpEndpoint !== undefined &&
+        typeof storage.httpEndpoint !== "string"
     ) {
         throw new TypeError(
-            "createChatSession target.storage.authToken must be a string",
+            "createChatSession target.storage.httpEndpoint must be a string",
         );
     }
     return {
         url: storage.url,
-        ...(storage.authToken === undefined
+        ...(storage.httpEndpoint === undefined
             ? {}
-            : { authToken: storage.authToken }),
+            : { httpEndpoint: storage.httpEndpoint }),
     };
 }
 

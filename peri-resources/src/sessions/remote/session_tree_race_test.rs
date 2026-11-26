@@ -1,6 +1,6 @@
-//! 远端「删除会话树 / 撤销」与「创建子会话」之间的并发边界（本地 SQLite 扮演远端服务端）。
+//! 远端「删除会话树 / 撤销」与「创建子会话」之间的并发边界（PostgreSQL 临时 schema）。
 //!
-//! 竞态窗口由 [`SqliteTransport::before_batch`] 固定：它在删除路径的只读快照之后、托管事务批
+//! 竞态窗口由 [`PgTestTransport::before_batch`] 固定：它在删除路径的只读快照之后、托管事务批
 //! 开始之前执行一条测试语句，等价于另一个实例在两步之间提交。断言只看落库结果——不允许留下
 //! 指向已删除父行的 `threads` 行。
 
@@ -10,13 +10,12 @@ use peri_acp_types::session_resources::{
     ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
 };
 use peri_acp_types::store::InheritedContext;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{RemoteStore, StoreAccess};
+use super::postgres_fixture::PgTestTransport;
 use super::schema::{self, StoreId};
-use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 
@@ -24,14 +23,13 @@ const FROZEN: &str = r#"{"frozen":"race"}"#;
 const CREATED_AT: &str = "2026-01-01T00:00:00Z";
 
 struct Fixture {
-    _directory: tempfile::TempDir,
-    pool: SqlitePool,
-    transport: Arc<SqliteTransport>,
+    pool: PgPool,
+    transport: Arc<PgTestTransport>,
     data: RemoteSessionData,
 }
 
 struct RaceFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     access: StoreAccess,
     gate: Arc<ConnectionGate>,
 }
@@ -51,20 +49,13 @@ impl ConnectionFactory for RaceFactory {
 }
 
 async fn fixture() -> Fixture {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-tree-race.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
     for statement in super::session_schema::initialization_plan() {
         sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
+    sqlx::raw_sql("INSERT INTO machines VALUES ('host', 'host', 'known');
+         INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ('ws','host','/tmp','unverified')")
+        .execute(&pool).await.unwrap();
     sqlx::query(schema::CREATE_STORE_META_SQL)
         .execute(&pool)
         .await
@@ -73,17 +64,16 @@ async fn fixture() -> Fixture {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'tree-race-test', ?2, 'now')")
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, $1, 'tree-race-test', $2, 'now')")
         .bind(schema::REMOTE_SCHEMA_VERSION)
         .bind(schema::STORE_CONTRACT)
         .execute(&pool)
         .await
         .unwrap();
 
-    let transport = Arc::new(SqliteTransport::for_test(pool.clone()));
+    let transport = Arc::new(PgTestTransport::for_test(pool.clone()));
     let data = remote_adapter(&transport);
     Fixture {
-        _directory: directory,
         pool,
         transport,
         data,
@@ -91,7 +81,7 @@ async fn fixture() -> Fixture {
 }
 
 /// 第二个独立 adapter：与第一个共享同一个「远端库」，用于两实例并发用例。
-fn remote_adapter(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
+fn remote_adapter(transport: &Arc<PgTestTransport>) -> RemoteSessionData {
     let access = StoreAccess::ReadWrite;
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(transport.clone(), access, gate.mint(), gate.clone());
@@ -107,11 +97,11 @@ fn remote_adapter(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
     )
 }
 
-async fn seed_thread(pool: &SqlitePool, id: &str, parent: Option<&str>, frozen: Option<&str>) {
+async fn seed_thread(pool: &PgPool, id: &str, parent: Option<&str>, frozen: Option<&str>) {
     sqlx::query(
         "INSERT INTO threads (id, cwd, created_at, updated_at, parent_thread_id,
             frozen_context, workspace_id)
-         VALUES (?1, '/tmp', ?2, ?2, ?3, ?4, 'ws')",
+         VALUES ($1, '/tmp', $2, $2, $3, $4, 'ws')",
     )
     .bind(id)
     .bind(CREATED_AT)
@@ -122,10 +112,10 @@ async fn seed_thread(pool: &SqlitePool, id: &str, parent: Option<&str>, frozen: 
     .unwrap();
 }
 
-async fn count_threads(pool: &SqlitePool, ids: &[&str]) -> i64 {
+async fn count_threads(pool: &PgPool, ids: &[&str]) -> i64 {
     let mut total = 0;
     for id in ids {
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads WHERE id = ?1")
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads WHERE id = $1")
             .bind(*id)
             .fetch_one(pool)
             .await
@@ -135,7 +125,7 @@ async fn count_threads(pool: &SqlitePool, ids: &[&str]) -> i64 {
     total
 }
 
-async fn count_orphans(pool: &SqlitePool) -> i64 {
+async fn count_orphans(pool: &PgPool) -> i64 {
     let row: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM threads child
          WHERE child.parent_thread_id IS NOT NULL
@@ -178,6 +168,7 @@ fn late_child_insert(child: &str, parent: &str) -> String {
 
 /// 正常路径：整棵子树（含并发提交的新 child）一起消失，不留孤儿。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn delete_tree_removes_a_child_committed_after_the_tree_snapshot() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "root", None, Some(FROZEN)).await;
@@ -203,6 +194,7 @@ async fn delete_tree_removes_a_child_committed_after_the_tree_snapshot() {
 
 /// 撤销与 child 创建：撤销必须拒绝已经提交的子会话，不能先把父行删掉。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn revoke_refuses_a_child_committed_after_the_child_count() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "parent", None, Some(FROZEN)).await;
@@ -230,6 +222,7 @@ async fn revoke_refuses_a_child_committed_after_the_child_count() {
 
 /// child 创建与父行删除：父行在批开始前消失时，创建必须整体不生效并报 `NotFound`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn save_child_refuses_a_parent_deleted_before_its_batch() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "root", None, Some(FROZEN)).await;
@@ -254,6 +247,7 @@ async fn save_child_refuses_a_parent_deleted_before_its_batch() {
 
 /// 正常路径不回归：合法 child 创建后仍能按父子关系删除整棵树。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn child_creation_then_tree_deletion_round_trips() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "root", None, Some(FROZEN)).await;
@@ -276,6 +270,7 @@ async fn child_creation_then_tree_deletion_round_trips() {
 /// 两实例并发：一个 adapter 删树，另一个创建 child。无论谁先拿到写锁，都不允许留下
 /// 指向已删除父行的 child；child 存活时父行必须同时存活。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn two_instances_deleting_a_tree_and_creating_a_child_leave_no_orphan() {
     let fixture = fixture().await;
     for round in 0..25 {
@@ -304,6 +299,7 @@ async fn two_instances_deleting_a_tree_and_creating_a_child_leave_no_orphan() {
 /// 两实例并发：一个 adapter 撤销会话，另一个创建 child。撤销要么在 child 提交后拒绝，
 /// 要么在 child 之前完成并让 child 创建失败；不允许父行消失而 child 留下。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn two_instances_revoking_and_creating_a_child_leave_no_orphan() {
     let fixture = fixture().await;
     for round in 0..25 {

@@ -1,13 +1,30 @@
 use super::session_data::RemoteSessionData;
 use super::sql::StatementSpec;
 use crate::sessions::archive as query;
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::context_archive::{
     ArchiveChunk, ArchiveChunkBatch, ArchiveChunkQuery, ArchiveMetadataPage, ArchiveMetadataQuery,
     ArchiveRoot, ARCHIVE_MAX_METADATA_BYTES,
 };
 use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::Value;
+
+const CHUNK_SQL: &str = "SELECT substring(convert_to(content, 'UTF8') FROM (LEAST($4::bigint, 2147483646) + 1)::integer FOR $5::integer), octet_length(content)
+ FROM messages WHERE thread_id = $1 AND message_id = $2
+ AND rowid <= (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $3)";
+
+const INHERITED_GRANT_SQL: &str = "SELECT root.value::text
+ FROM threads child
+ CROSS JOIN LATERAL jsonb_each(child.inherited_context::jsonb -> 'flags') flag
+ CROSS JOIN LATERAL jsonb_array_elements(flag.value #> '{projection,archive_roots}') root(value)
+ JOIN messages anchor ON anchor.thread_id = $2 AND anchor.message_id = $3
+ JOIN messages first ON first.thread_id = $2 AND first.message_id = (root.value ->> 'first_anchor')
+ JOIN messages last ON last.thread_id = $2 AND last.message_id = (root.value ->> 'last_anchor')
+ JOIN messages tail ON tail.thread_id = $2 AND tail.message_id = (root.value ->> 'committed_tail')
+ WHERE child.id = $1 AND (root.value ->> 'source_thread_id') = $2
+ AND anchor.rowid BETWEEN first.rowid AND last.rowid AND anchor.rowid <= tail.rowid
+ AND octet_length(root.value::text) <= 4096
+ ORDER BY tail.rowid DESC, last.rowid DESC, first.rowid ASC LIMIT 1";
 
 fn optional_id(id: Option<peri_acp_types::messages::MessageId>) -> Value {
     id.map(|id| Value::Text(id.as_uuid().to_string()))
@@ -117,7 +134,7 @@ impl RemoteSessionData {
             .iter()
             .map(|plan| {
                 StatementSpec::new(
-                    query::CHUNK_SQL,
+                    CHUNK_SQL,
                     vec![
                         Value::Text(id.to_string()),
                         optional_id(Some(plan.message_id)),
@@ -163,7 +180,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let rows = store
             .read_batch(vec![StatementSpec::new(
-                query::INHERITED_GRANT_SQL,
+                INHERITED_GRANT_SQL,
                 vec![
                     Value::Text(id.to_owned()),
                     Value::Text(source.to_owned()),

@@ -32,7 +32,6 @@ impl RemoteSessionData {
             factory: Arc::new(NoConnectionFactory),
             gate: Arc::new(ConnectionGate::default()),
             store_id,
-            legacy_shape: false,
             roots: RwLock::new(HashMap::new()),
         }
     }
@@ -56,7 +55,6 @@ impl RemoteSessionData {
             factory,
             gate,
             store_id,
-            legacy_shape: false,
             roots: RwLock::new(HashMap::new()),
         }
     }

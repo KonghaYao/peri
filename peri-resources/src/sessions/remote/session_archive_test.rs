@@ -1,6 +1,6 @@
 use super::{
-    Arc, BaseMessage, MessageFlags, PersistedPayload, SessionResourceErrorKind, SqlitePoolOptions,
-    SqliteTransport, PAGE_SESSION,
+    Arc, BaseMessage, MessageFlags, PersistedPayload, PgTestTransport, SessionResourceErrorKind,
+    PAGE_SESSION,
 };
 use crate::sessions::data::SessionDataPort;
 
@@ -11,11 +11,12 @@ use peri_acp_types::context_archive::{
 use peri_acp_types::projection::MessageProjectionDirective;
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn archive_remote_exact_chunks_and_scoped_catalog_after_exclusion() {
     let history = vec![PersistedPayload::Message(BaseMessage::ai(
         "original code: \"中文\"\n".repeat(1000),
     ))];
-    let (_directory, data) = super::remote_with_history(&history).await;
+    let data = super::remote_with_history(&history).await;
     let id = PAGE_SESSION.to_owned();
     let catalog = peri_acp_types::context_archive::build_catalog(
         id.clone(),
@@ -116,27 +117,24 @@ async fn archive_remote_exact_chunks_and_scoped_catalog_after_exclusion() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
     use std::sync::atomic::Ordering;
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::query("CREATE TABLE messages(thread_id TEXT, message_id TEXT, content TEXT)")
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
+    sqlx::query("CREATE TABLE messages(thread_id TEXT, message_id TEXT, content TEXT, rowid bigint GENERATED ALWAYS AS IDENTITY)")
         .execute(&pool)
         .await
         .unwrap();
     let payload = PersistedPayload::Message(BaseMessage::ai("original".repeat(20000)));
     let original = peri_acp_types::store::serialize_persisted_payload(&payload).unwrap();
-    sqlx::query("INSERT INTO messages VALUES (?1, ?2, ?3)")
+    sqlx::query("INSERT INTO messages(thread_id, message_id, content) VALUES ($1, $2, $3)")
         .bind(PAGE_SESSION)
         .bind(payload.id().as_uuid().to_string())
         .bind(&original)
         .execute(&pool)
         .await
         .unwrap();
-    let transport = Arc::new(SqliteTransport::for_test(pool));
+    let transport = Arc::new(PgTestTransport::for_test(pool));
     let data = super::remote_data(&transport);
     let queries = (0..ARCHIVE_CHUNKS_PER_BATCH)
         .map(|index| ArchiveChunkQuery {
@@ -176,4 +174,57 @@ async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
         matches!(error.kind(), SessionResourceErrorKind::NotFound),
         "批量读取仍须校验会话和尾界: {error}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn inherited_grant_is_scoped_to_source_anchor_range_and_committed_tail() {
+    use peri_acp_types::context_archive::ArchiveRoot;
+    use peri_acp_types::messages::MessageId;
+
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
+    sqlx::raw_sql("CREATE TABLE threads(id text primary key, inherited_context text);
+        CREATE TABLE messages(thread_id text, message_id text, rowid bigint GENERATED ALWAYS AS IDENTITY)")
+        .execute(&pool).await.unwrap();
+    let [first, inside, tail, after] = std::array::from_fn(|_| MessageId::new());
+    let root = ArchiveRoot {
+        source_thread_id: "source".into(),
+        first_anchor: first,
+        last_anchor: after,
+        committed_tail: tail,
+    };
+    for id in [first, inside, tail, after] {
+        sqlx::query("INSERT INTO messages(thread_id, message_id) VALUES ('source', $1)")
+            .bind(id.as_uuid().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let inherited = serde_json::json!({
+        "flags": {
+            first.as_uuid().to_string(): { "projection": { "archive_roots": [root] } }
+        }
+    });
+    sqlx::query("INSERT INTO threads VALUES ('child',$1)")
+        .bind(inherited.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let data = super::remote_data(&Arc::new(PgTestTransport::for_test(pool)));
+    let child = "child".to_owned();
+    let source = "source".to_owned();
+    assert_eq!(
+        data.inherited_archive_root(&child, &source, inside)
+            .await
+            .unwrap(),
+        root
+    );
+    assert!(data
+        .inherited_archive_root(&child, &source, after)
+        .await
+        .is_err());
+    assert!(data
+        .inherited_archive_root(&child, &"other".into(), inside)
+        .await
+        .is_err());
 }

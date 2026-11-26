@@ -1,7 +1,7 @@
 //! Bound statements for session creation, metadata, and work state changes.
 
 use super::super::sql::StatementSpec;
-use crate::sessions::canonical;
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session_resources::NewSession;
 use peri_acp_types::session_resources::NewSessionDraft;
 use peri_acp_types::session_resources::SessionMetaPatch;
@@ -14,7 +14,6 @@ use peri_acp_types::thread::AgentStatus;
 use peri_acp_types::thread::WorkState;
 use peri_acp_types::workspace::SessionBinding;
 use peri_acp_types::workspace::WorkspaceId;
-use turso_serverless::Value;
 
 // ─── 写入语句 ─────────────────────────────────────────────────────────────────
 
@@ -22,8 +21,8 @@ pub(super) const INSERT_THREAD_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
         parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
         frozen_context, agent_status, workspace_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-        COALESCE(?14, (SELECT workspace_id FROM threads WHERE id = ?7)))";
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        COALESCE($14, (SELECT workspace_id FROM threads WHERE id = $7)))";
 
 /// 未发布创建（J2 第一阶段）：与整份创建同一列形状，只有 `frozen_context` 写 NULL。
 ///
@@ -33,23 +32,24 @@ pub(super) const INSERT_THREAD_DRAFT_SQL: &str =
     "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
         parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
         frozen_context, agent_status, workspace_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12,
-        COALESCE(?13, (SELECT workspace_id FROM threads WHERE id = ?7)))";
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12,
+        COALESCE($13, (SELECT workspace_id FROM threads WHERE id = $7)))";
 
 /// 一次性提交 frozen（write-once CAS）：只对尚未提交的草稿生效。
 pub(super) const COMMIT_FROZEN_SQL: &str =
-    "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL";
+    "UPDATE threads SET frozen_context = $1 WHERE id = $2 AND frozen_context IS NULL";
 
 /// 删除整段会话历史的全部条目（与 `canonical::THREAD_CHILD_DELETES` 同一份语句）。
 pub(in crate::sessions::remote) const DELETE_SESSION_MESSAGES_SQL: &str =
-    canonical::DELETE_MESSAGES_BY_THREAD_SQL;
+    crate::sessions::canonical::DELETE_MESSAGES_BY_THREAD_SQL;
 
 /// 删除会话的不可变绑定行（统一后绑定住在 `session_bindings`，不再是会话行上的扁平列）。
 pub(in crate::sessions::remote) const DELETE_SESSION_BINDINGS_SQL: &str =
-    canonical::DELETE_BINDINGS_BY_THREAD_SQL;
+    crate::sessions::canonical::DELETE_BINDINGS_BY_THREAD_SQL;
 
-/// 删除会话行（与 `canonical::DELETE_THREAD_ROW_SQL` 同一份语句）。
-pub(in crate::sessions::remote) const DELETE_SESSION_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
+/// 删除会话行。
+pub(in crate::sessions::remote) const DELETE_SESSION_SQL: &str =
+    crate::sessions::canonical::DELETE_THREAD_ROW_SQL;
 
 /// write-once 未发布创建的撤销语句集（fork 等失败补偿）：四条删除**不带** frozen 判据。
 ///
@@ -69,50 +69,50 @@ pub(in crate::sessions::remote) fn revoke_session_statements(id: &str) -> Vec<St
 /// 未发布创建的撤销：各条删除都带同一判据（`frozen_context IS NULL`），因此同一批里
 /// 「会话行还在不在」与「历史/绑定删没删」不会分叉——已提交 frozen 的会话一条都不删。
 pub(super) const DELETE_DRAFT_MESSAGES_SQL: &str = concat!(
-    "DELETE FROM messages WHERE thread_id = ?1",
-    " AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)"
+    "DELETE FROM messages WHERE thread_id = $1",
+    " AND EXISTS (SELECT 1 FROM threads WHERE id = $1 AND frozen_context IS NULL)"
 );
 pub(super) const DELETE_DRAFT_BINDINGS_SQL: &str = concat!(
-    "DELETE FROM session_bindings WHERE thread_id = ?1",
-    " AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)"
+    "DELETE FROM session_bindings WHERE thread_id = $1",
+    " AND EXISTS (SELECT 1 FROM threads WHERE id = $1 AND frozen_context IS NULL)"
 );
 pub(super) const DELETE_DRAFT_SESSION_SQL: &str =
-    "DELETE FROM threads WHERE id = ?1 AND frozen_context IS NULL";
+    "DELETE FROM threads WHERE id = $1 AND frozen_context IS NULL";
 
 /// 不可变绑定行插入：与本机 `session_rows.rs::insert_binding_row` 同一份语句，绑定住在
 /// `session_bindings` 表里（不再是会话行上的四个扁平列）。
 ///
 /// `discovery_snapshot` 由调用方投影成最小执行根后传入（native `{"root":...}`、virtual
-/// 另带 `kind`）；`?6` 为空时从父行复制——父行已是最小形态，自复制天然正确。
+/// 另带 `kind`）；`$6` 为空时从父行复制——父行已是最小形态，自复制天然正确。
 pub(super) const INSERT_BINDING_SQL: &str =
     "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
         discovery_snapshot)
-     VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6,
-        (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?7)))";
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6,
+        (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = $7)))";
 
 /// 继承区写入：与本机 child 路径同一份语句（创建行之后单独写一次，INSERT 不多带一列）。
 ///
 /// 不在这里写 `inherited_*_index` 派生行：远端读取一次性取完整列，从不查询派生索引；
 /// 索引缺行是合法状态（本地读取会回退扫描并按需回填）。
 pub(super) const UPDATE_INHERITED_SQL: &str =
-    "UPDATE threads SET inherited_context = ?1 WHERE id = ?2";
+    "UPDATE threads SET inherited_context = $1 WHERE id = $2";
 
 /// 历史行插入：列清单与本机 `messages` 一致（含 `role`），顺序由 `rowid` 承载。
 pub(super) const INSERT_MESSAGE_SQL: &str = "INSERT INTO messages (
     message_id, thread_id, role, content, truncated, excluded, projection)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+    VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
 /// 定向更新：`Some(None)` 清除、`None` 保持不变、`None` 之外的值照写。
 ///
 /// 用「标志位 + 值」的 CASE 表达，SQL 文本保持静态；没有字段要改时调用方不该调用它
 /// （门面与本地 adapter 同一约定：不写、也不假装更新了时间戳）。
 pub(super) const UPDATE_META_SQL: &str = "UPDATE threads SET
-    updated_at = ?1,
-    title = CASE WHEN ?2 = 1 THEN ?3 ELSE title END,
-    agent_status = CASE WHEN ?4 = 1 THEN ?5 ELSE agent_status END,
-    cancel_policy = CASE WHEN ?6 = 1 THEN ?7 ELSE cancel_policy END,
-    config = CASE WHEN ?8 = 1 THEN ?9 ELSE config END
-    WHERE id = ?10";
+    updated_at = $1,
+    title = CASE WHEN $2 = 1 THEN $3 ELSE title END,
+    agent_status = CASE WHEN $4 = 1 THEN $5 ELSE agent_status END,
+    cancel_policy = CASE WHEN $6 = 1 THEN $7 ELSE cancel_policy END,
+    config = CASE WHEN $8 = 1 THEN $9 ELSE config END
+    WHERE id = $10";
 
 /// 一行新会话的写入参数；派生计数与时间戳由调用方给定，本层不读时钟。
 pub(in crate::sessions::remote) struct SessionInsert<'session> {
@@ -329,11 +329,11 @@ pub(in crate::sessions::remote) fn insert_message_statement(
 }
 
 /// durable 工作意图：只写这一列，不碰 `updated_at`，也不改运行态。
-pub(super) const UPDATE_WORK_STATE_SQL: &str = "UPDATE threads SET work_state = ?1 WHERE id = ?2";
+pub(super) const UPDATE_WORK_STATE_SQL: &str = "UPDATE threads SET work_state = $1 WHERE id = $2";
 
 /// 上下文占用快照：只写这一列，不碰 `updated_at`；`None` 绑定 NULL（未知，不是零占用）。
 pub(super) const UPDATE_CONTEXT_USAGE_SQL: &str =
-    "UPDATE threads SET context_usage_tokens = ?1 WHERE id = ?2";
+    "UPDATE threads SET context_usage_tokens = $1 WHERE id = $2";
 
 /// 工作意图写入语句。
 pub(in crate::sessions::remote) fn work_state_statement(

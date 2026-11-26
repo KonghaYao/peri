@@ -7,7 +7,6 @@
 //! - 冷恢复：同一 HOME 的**新进程** → 未决收敛 → workspace 证据复核 → rewind → 删除；
 //! - 只读：`fresh`（全新 HOME，本机无库）与 `registered`（沿用写入期 HOME）两种本机状态。
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use peri_acp_types::messages::BaseMessage;
@@ -33,7 +32,6 @@ struct ChildContext {
     home: PathBuf,
     workspace: PathBuf,
     run: String,
-    env: BTreeMap<String, String>,
 }
 
 fn child_context() -> Option<ChildContext> {
@@ -44,34 +42,15 @@ fn child_context() -> Option<ChildContext> {
         home: PathBuf::from(home),
         workspace: PathBuf::from(workspace),
         run,
-        env: super::cloud_tests::load_env(),
     })
 }
 
 impl ChildContext {
-    /// 部署参数：locator 原文 + 显式引擎名 + 凭证**来源**（环境变量名）。
-    ///
-    /// 凭证值只在本进程内注入同名变量：部署参数按设计只接受来源名，门面再按名取值。
     fn deployment(&self, access: AccessMode) -> Result<SessionStoreDeployment, String> {
-        let (_, token_key) = super::cloud_tests::required_credential_keys();
-        let (url, token) = super::cloud_tests::required_credentials(&self.env);
-        std::env::set_var(&token_key, &token);
-        let engine = self
-            .endpoint()
-            .map_err(|error| error.to_string())?
-            .engine()
-            .as_str()
-            .to_owned();
-        Ok(SessionStoreDeployment::from_locator(url)
-            .with_engine(engine)
-            .with_credential_env(token_key)
-            .with_access(access))
-    }
-
-    /// 端点（与门面解析 locator 用的是同一段纯解析，因此引擎名与摘要一致）。
-    fn endpoint(&self) -> Result<super::RemoteEndpoint, super::EndpointError> {
-        let (url, _) = super::cloud_tests::required_credentials(&self.env);
-        super::RemoteEndpoint::parse(&url, None)
+        Ok(
+            SessionStoreDeployment::from_locator(super::cloud_tests::test_url())
+                .with_access(access),
+        )
     }
 
     fn path(&self, suffix: &str) -> String {

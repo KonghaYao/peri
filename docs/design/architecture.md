@@ -111,7 +111,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 
 - 外部系统门面：抽象外部数据，对上提供抓手
   - 配置来源 I/O：由独立 `peri-mcp-config` bootstrap 能力提供文件正文、具名环境与字节 CAS；有效配置规则归 `peri-config`，不归 Resources 或输入 provider
-  - 会话持久化：SessionResources 契约与本地 SQLite、远端 Turso adapter，保存身份、
+  - 会话持久化：SessionResources 契约与本地 SQLite、远端 PostgreSQL adapter，保存身份、
     transcript、配置、frozen/inherited、环境绑定、待发 MQ 与粗粒度工作意图；不保存旧执行的阶段或调用账本。
   - Workspace 级 OAuth 凭据的持久存储；MCP 连接由 Middleware 持有，交互 broker
     由 ACP 宿主提供，不归 Resources。

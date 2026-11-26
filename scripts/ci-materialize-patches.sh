@@ -20,7 +20,6 @@ ts = 1577836800  # 2020-01-01T00:00:00Z
 for root in (
     "target/peri-rmcp-patches",
     "target/peri-hyper-util-patches",
-    "target/peri-turso-patches",
 ):
     p = pathlib.Path(root)
     if not p.exists():

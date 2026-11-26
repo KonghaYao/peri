@@ -169,7 +169,7 @@ Reason 只恢复已提交指令，不重做规划或读取所有归档正文。�
 | 附件 | 返回历史存储的 Base64/Text 内容；UTF-8 边界片段必要时使用显式 hex 编码；不从当前 URL/文件补齐 |
 | 错误 | 不存在、无权限、摘要不匹配、Unsupported、暂不可读/非法请求均明确失败；不返回成功空占位或执行兜底 |
 
-SQLite 与远端 Turso adapter 使用同一有界读取规则。未实现这些端口的 adapter 默认 `Unsupported`，不回退 `load_session_snapshot` 或整历史读取。完整 projection directive（含 entries、目录、组链接和根）共用 64 KiB 元数据预算；规划先校验，Micro、Full 与 fork 在写入前再次校验。目录按源消息缓存；每次强闭包最多 32 个交换，同一 inline 结果消息每次最多 32 个预览，超限内容保留并报告原因。
+SQLite 与远端 PostgreSQL adapter 使用同一有界读取规则。未实现这些端口的 adapter 默认 `Unsupported`，不回退 `load_session_snapshot` 或整历史读取。完整 projection directive（含 entries、目录、组链接和根）共用 64 KiB 元数据预算；规划先校验，Micro、Full 与 fork 在写入前再次校验。目录按源消息缓存；每次强闭包最多 32 个交换，同一 inline 结果消息每次最多 32 个预览，超限内容保留并报告原因。
 
 ## 7. Full、继承、fork 与 rewind
 
