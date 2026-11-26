@@ -16,12 +16,16 @@ use fluent_bundle::FluentValue;
 // These replaceable derived snapshots are committed through whole-value assignments.
 use parking_lot::Mutex;
 
+/// 发布构建的重试上限：构建期间若点击路径改写了当帧快照（generation 前进），
+/// 本轮构建结果作废并重建；上限内仍冲突则退化为持写锁构建。
+const PUBLICATION_BUILD_RETRIES: usize = 3;
+
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
 /// 从 `state.committed`（im::Vector）clone（O(1)引用计数）后并入
 /// `current_turn.view_models()`（见 [`join_into`]：按尾长选择 `push_back` 或树合并，
 /// 与 current_turn 增量缓存共享元素，不逐条深拷贝），构成扁平单层列表。
-/// generation 每次调用递增+1。
+/// generation 每次发布递增+1。
 ///
 /// 快照后处理流水线（均为纯视觉变换，不触碰 segment↔cache 对齐）：
 /// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
@@ -29,7 +33,15 @@ use parking_lot::Mutex;
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_body_gaps`（正文空档分组：正文段落之间的工具 / thinking / 通知等
 ///    合成一张折叠组，一组一行）。
+///
+/// [并发] 点击路径（`apply_fold_toggle`）持 `VIEW_MODELS` 写锁写 `FOLD_OVERRIDES`
+/// 并推进当帧快照的 generation；发布是「读覆盖表 → 组装 → 整体写入」，若点击落在
+/// 组装之后、写锁之前，旧折叠结果会覆盖点击结果且回合末不再发布——展开态永久
+/// 丢失。因此提交是**有界重试**：起点 generation 在读取覆盖表之前取一次，写锁内
+/// 比对 generation，冲突就丢弃本轮构建重建（上限 [`PUBLICATION_BUILD_RETRIES`]）。
+/// 锁序恒为 `VIEW_MODELS → FOLD_OVERRIDES`，与点击一致（见 [`build_publication_snapshot`]）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    // ── 一次性 housekeeping：每次发布只执行一次，快照构建重试不得重复执行 ──
     super::super::subagent_preview::enforce(state);
     super::super::display_retention::enforce(state);
     state
@@ -52,6 +64,63 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         is_loading,
         "push_view_models: writing VIEW_MODELS atom",
     );
+
+    let view_models = VIEW_MODELS.state();
+    // [并发/锁序] 起点 generation 必须在读 FOLD_OVERRIDES 之前捕获，且只取一次
+    // VIEW_MODELS 读锁后立即释放：点击是 `VIEW_MODELS 写 → FOLD_OVERRIDES 写`，
+    // 构建段内若再嵌套 `FOLD_OVERRIDES → VIEW_MODELS` 就构成 ABBA。
+    let mut build_start_generation = view_models.read().generation;
+    let mut retries = 0usize;
+    loop {
+        let (items, changed_from) = build_publication_snapshot(state);
+        // [测试] 构建完成、尚未取写锁——交错点可确定性地模拟并发点击。
+        #[cfg(test)]
+        run_publication_interleave_hook(state);
+        let mut published = view_models.write();
+        if published.generation == build_start_generation {
+            commit_publication(
+                state,
+                &mut published,
+                items,
+                changed_from,
+                build_start_generation,
+            );
+            break;
+        }
+        drop(published);
+        if retries >= PUBLICATION_BUILD_RETRIES {
+            // 兜底：持写锁构建提交。写锁内只读 FOLD_OVERRIDES（`VM → FO`，与点击
+            // 同序）；覆盖表旁的缓存锁（分组 / 分隔线 / todo 摘要）不存在「持缓存锁
+            // 再取 VIEW_MODELS」的路径，不引入新的反序。
+            let mut published = view_models.write();
+            let fallback_start_generation = published.generation;
+            let (items, changed_from) = build_publication_snapshot(state);
+            commit_publication(
+                state,
+                &mut published,
+                items,
+                changed_from,
+                fallback_start_generation,
+            );
+            break;
+        }
+        retries += 1;
+        build_start_generation = view_models.read().generation;
+    }
+    tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
+    super::super::history_window::settle_after_publication(state);
+}
+
+/// 组装一帧快照（可重试段）：读 `state` 与当时的 `FOLD_OVERRIDES`，只产出局部
+/// `items` 与 `changed_from`，不写任何全局状态。
+///
+/// 幂等：`state` 侧只有 memoization（`current_turn` 投影缓存、`folded_history`
+/// 折叠缓存、todo 摘要/分隔线/分组缓存），重复执行与首次执行结果一致；重试不会
+/// 产生非幂等副作用（`#[cfg(test)]` 的 PerfCounter 计数重复可接受）。
+///
+/// [锁序] 调用方不得持 `VIEW_MODELS` 锁再等别处的 `FOLD_OVERRIDES` 写；本函数
+/// 只在内部取 `FOLD_OVERRIDES` 读锁，末尾随 `overrides` 释放。
+fn build_publication_snapshot(state: &mut BridgeState) -> (im::Vector<TuiRenderUnit>, usize) {
     // [PERF] 阶段计时（仅测试构建）——见 `PerfCounters::stage_*_ns`；每段末尾
     // 记一次 elapsed 并重置 `__t`，供定向测量按阶段定位成本归属。
     #[cfg(test)]
@@ -86,7 +155,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     }
 
     let history = items.clone();
-    let previous_generation = VIEW_MODELS.state().read().generation;
     let (mut items, has_history_prompt) = decorated_history(&history);
     let visual_active_start = items.len();
     join_into(&mut items, active);
@@ -127,12 +195,25 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     );
     drop(overrides);
 
-    let view_models = VIEW_MODELS.state();
-    let mut published_snapshot = view_models.write();
-    state.generation = state
-        .generation
-        .max(published_snapshot.generation)
-        .wrapping_add(1);
+    (items, changed_from)
+}
+
+/// 提交一帧快照：调用方必须持 `VIEW_MODELS` 写锁。
+///
+/// `previous_generation` 是**成功那次构建的起点** generation——交给 Transcript
+/// 判断能否走增量。构建期间若发生手动折叠，点击已推进过 generation 且当帧快照
+/// 自带新折叠，Transcript 的上一帧 generation 与 `previous_generation` 不衔接，
+/// 会走整段重建（安全行为）；这里不伪造 adjacency。
+fn commit_publication(
+    state: &mut BridgeState,
+    published: &mut ViewModelsSnapshot,
+    items: im::Vector<TuiRenderUnit>,
+    changed_from: usize,
+    previous_generation: u64,
+) {
+    #[cfg(test)]
+    let __t = peri_time::monotonic_now();
+    state.generation = state.generation.max(published.generation).wrapping_add(1);
     #[cfg(test)]
     crate::kit::acp_bridge::observe_publication(crate::kit::acp_bridge::PublicationObservation {
         generation: state.generation,
@@ -157,15 +238,68 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         items,
         generation: state.generation,
     };
-    *published_snapshot = snapshot;
-    drop(published_snapshot);
+    *published = snapshot;
     #[cfg(test)]
     crate::kit::acp_bridge::observe_perf(
         crate::kit::acp_bridge::PerfCounter::StageWriteNs,
         peri_time::elapsed_since(__t).as_nanos() as u64,
     );
-    tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
-    super::super::history_window::settle_after_publication(state);
+}
+
+// ---------------------------------------------------------------------------
+// [测试] 发布 / 点击交错点
+// ---------------------------------------------------------------------------
+
+/// 测试探针：在「快照构建完成、尚未取 `VIEW_MODELS` 写锁」处触发，用于确定性
+/// 复现点击与发布的交错（生产构建不编译）。
+///
+/// 探针只在当次发布的 `(session_id, request_id)` 与挂载时一致时触发，避免同进程
+/// 并发运行的其他测试的发布消费掉它。
+#[cfg(test)]
+pub(crate) struct PublicationInterleaveHook {
+    session_id: String,
+    request_id: Option<String>,
+    probe: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(test)]
+static PUBLICATION_INTERLEAVE_HOOK: Mutex<Option<PublicationInterleaveHook>> = Mutex::new(None);
+
+/// 挂载交错探针：每次快照构建后调用一次，调用方自行决定是否只模拟一次点击
+/// （重试路径会多次进入）。测试收尾须 [`disarm_publication_interleave_hook`]。
+#[cfg(test)]
+pub(crate) fn arm_publication_interleave_hook(
+    state: &BridgeState,
+    probe: impl Fn() + Send + Sync + 'static,
+) {
+    *PUBLICATION_INTERLEAVE_HOOK.lock() = Some(PublicationInterleaveHook {
+        session_id: state.active_session_id.clone(),
+        request_id: state.current_request_id.clone(),
+        probe: std::sync::Arc::new(probe),
+    });
+}
+
+/// 卸载交错探针（测试收尾——探针不跨用例残留）。
+#[cfg(test)]
+pub(crate) fn disarm_publication_interleave_hook() {
+    *PUBLICATION_INTERLEAVE_HOOK.lock() = None;
+}
+
+#[cfg(test)]
+fn run_publication_interleave_hook(state: &BridgeState) {
+    let probe = {
+        let hook = PUBLICATION_INTERLEAVE_HOOK.lock();
+        hook.as_ref()
+            .filter(|hook| {
+                hook.session_id == state.active_session_id
+                    && hook.request_id == state.current_request_id
+            })
+            .map(|hook| std::sync::Arc::clone(&hook.probe))
+    };
+    // 探针在锁外执行：它会取 VIEW_MODELS 写锁（模拟点击）。
+    if let Some(probe) = probe {
+        probe();
+    }
 }
 
 /// [PERF] insert_todo_summary 摘要文本缓存——键 = (TODO_ITEMS 指纹, LANG_VERSION)。
