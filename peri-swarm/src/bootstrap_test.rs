@@ -1,6 +1,6 @@
 //! Configuration and failure-path tests for the S6b process entry.
 //!
-//! No Loom is contacted: these tests only prove that the entry parses one
+//! No database is contacted: these tests only prove that the entry parses one
 //! environment shape and fails visibly when the remote deployment is missing,
 //! instead of degrading to a local store.
 
@@ -14,7 +14,7 @@ use super::{
     DEFAULT_BOOTSTRAP_BIND, DEFAULT_RIVET_ENDPOINT, DEFAULT_RIVET_NAMESPACE, DEFAULT_RIVET_POOL,
     DEFAULT_STORE_ENGINE, MACHINE_ID_ENV, RIVET_ENDPOINT_ENV, RIVET_ENGINE_SPAWN_ENV,
     RIVET_NAMESPACE_ENV, RIVET_POOL_ENV, RIVET_TOKEN_ENV, SESSION_STORE_ENV, SETTINGS_JSON_ENV,
-    STATE_STORE_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
+    STATE_STORE_ENV, STORE_ENGINE_ENV,
 };
 use crate::config::{
     ConfigError, API_KEY_ENV, BIND_ALLOW_NON_LOOPBACK_ENV, BIND_ENV, BUN_BASE_URL_ENV,
@@ -22,8 +22,9 @@ use crate::config::{
     SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV,
 };
 
-const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
-const TOKEN_VALUE: &str = "loom-secret-value";
+/// A named variable for the Bun bearer-token indirection.
+const NAMED_TOKEN_ENV: &str = "PERI_TEST_NAMED_TOKEN";
+const NAMED_TOKEN_VALUE: &str = "named-secret-value";
 const RIVET_TOKEN_ENV_NAME: &str = "PERI_TEST_ENGINE_TOKEN";
 const RIVET_TOKEN_VALUE: &str = "engine-secret-value";
 /// A private plaintext address: syntactically valid but not loopback.
@@ -38,15 +39,14 @@ fn workspace_root() -> String {
 }
 
 const SESSION_STORE_VALUE: &str = "postgresql://alice:private-pg-password@127.0.0.1:5432/session";
-const STATE_STORE_VALUE: &str = "http://127.0.0.1:9497/db/local_default/swarm/main/";
+/// Same instance, **different database**: the supported deployment.
+const STATE_STORE_VALUE: &str = "postgresql://alice:private-pg-password@127.0.0.1:5432/swarm_state";
 
 fn base_env() -> Vec<(&'static str, String)> {
     vec![
         (API_KEY_ENV, "deployment-key".to_owned()),
         (SESSION_STORE_ENV, SESSION_STORE_VALUE.to_owned()),
         (STATE_STORE_ENV, STATE_STORE_VALUE.to_owned()),
-        (STORE_TOKEN_ENV, TOKEN_ENV_NAME.to_owned()),
-        (TOKEN_ENV_NAME, TOKEN_VALUE.to_owned()),
         (MACHINE_ID_ENV, MACHINE_ID.to_owned()),
         (WORKSPACE_ROOT_ENV, workspace_root()),
     ]
@@ -97,7 +97,6 @@ fn complete_environment_parses_with_bootstrap_defaults() {
     let config = parse(&[]).expect("configuration");
     assert_eq!(config.bind_addr.to_string(), DEFAULT_BOOTSTRAP_BIND);
     assert_eq!(config.store_engine, DEFAULT_STORE_ENGINE);
-    assert_eq!(config.store_token_env, TOKEN_ENV_NAME);
     assert_eq!(config.machine_id.to_string(), MACHINE_ID);
     let root = workspace_root();
     assert_eq!(config.workspace_root.to_str(), Some(root.as_str()));
@@ -141,11 +140,19 @@ fn invalid_heartbeat_fails_the_start() {
 }
 
 #[test]
-fn state_store_configuration_carries_the_locator_and_the_shared_credential_name() {
+fn state_store_configuration_carries_the_dsn_and_nothing_else() {
     let config = parse(&[]).expect("configuration");
     let state = config.state_store_config();
     assert_eq!(state.locator.as_str(), STATE_STORE_VALUE);
-    assert_eq!(state.credential_env, TOKEN_ENV_NAME);
+    let rendered = format!("{state:?}");
+    assert!(
+        !rendered.contains("private-pg-password"),
+        "the state store config must not render its DSN: {rendered}"
+    );
+    assert_eq!(
+        state.locator.target(),
+        "postgres://127.0.0.1:5432/swarm_state"
+    );
 }
 
 #[test]
@@ -185,13 +192,14 @@ fn a_configured_bun_bridge_carries_the_url_and_outer_token() {
 fn the_bun_url_alias_and_named_token_variable_are_accepted() {
     let config = parse(&[
         (BUN_URL_ALIAS_ENV, Some("http://127.0.0.1:8082")),
-        (BUN_BEARER_ENV, Some(TOKEN_ENV_NAME)),
+        (BUN_BEARER_ENV, Some(NAMED_TOKEN_ENV)),
+        (NAMED_TOKEN_ENV, Some(NAMED_TOKEN_VALUE)),
     ])
     .expect("configuration");
     let sandbox = config.sandbox.as_ref().expect("sandbox bridge");
     assert_eq!(sandbox.base_url.as_str(), "http://127.0.0.1:8082/");
-    assert_eq!(sandbox.token.as_deref(), Some(TOKEN_VALUE));
-    assert_eq!(config.bun.bearer_env.as_deref(), Some(TOKEN_ENV_NAME));
+    assert_eq!(sandbox.token.as_deref(), Some(NAMED_TOKEN_VALUE));
+    assert_eq!(config.bun.bearer_env.as_deref(), Some(NAMED_TOKEN_ENV));
 }
 
 #[test]
@@ -222,7 +230,7 @@ fn invalid_bun_token_configuration_fails_the_start() {
         parse(&[
             (BUN_BASE_URL_ENV, Some("http://127.0.0.1:8081")),
             (BUN_TOKEN_ENV, Some("outer-secret")),
-            (BUN_BEARER_ENV, Some(TOKEN_ENV_NAME)),
+            (BUN_BEARER_ENV, Some(NAMED_TOKEN_ENV)),
         ]),
         BUN_TOKEN_ENV,
     );
@@ -256,11 +264,11 @@ fn actor_configuration_carries_the_remote_deployment() {
 }
 
 #[test]
-fn debug_output_never_renders_the_api_key_or_store_token() {
+fn debug_output_never_renders_the_api_key_or_a_dsn_credential() {
     let config = parse(&[]).expect("configuration");
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("deployment-key"), "{rendered}");
-    assert!(!rendered.contains(TOKEN_VALUE), "{rendered}");
+    assert!(!rendered.contains("private-pg-password"), "{rendered}");
     assert!(rendered.contains(MACHINE_ID), "{rendered}");
 }
 
@@ -290,11 +298,6 @@ fn one_remote_store_alone_is_not_enough() {
 }
 
 #[test]
-fn missing_token_variable_name_fails_the_start() {
-    expect_missing(parse(&[(STORE_TOKEN_ENV, None)]), STORE_TOKEN_ENV);
-}
-
-#[test]
 fn missing_machine_id_fails_the_start() {
     expect_missing(parse(&[(MACHINE_ID_ENV, None)]), MACHINE_ID_ENV);
 }
@@ -305,24 +308,12 @@ fn missing_workspace_root_fails_the_start() {
 }
 
 #[test]
-fn unset_credential_variable_is_named_in_the_error() {
-    let reason = expect_invalid(parse(&[(TOKEN_ENV_NAME, None)]), STORE_TOKEN_ENV);
-    assert!(reason.contains(TOKEN_ENV_NAME), "{reason}");
-}
-
-#[test]
-fn empty_credential_variable_is_rejected() {
-    let reason = expect_invalid(parse(&[(TOKEN_ENV_NAME, Some("   "))]), STORE_TOKEN_ENV);
-    assert!(reason.contains(TOKEN_ENV_NAME), "{reason}");
-}
-
-#[test]
-fn a_token_value_in_the_name_slot_is_rejected() {
-    let reason = expect_invalid(
-        parse(&[(STORE_TOKEN_ENV, Some("tok-literal"))]),
-        STORE_TOKEN_ENV,
-    );
-    assert!(reason.contains("variable name"), "{reason}");
+fn the_removed_store_token_variable_is_ignored() {
+    // A deployment that still exports the Loom-era variable must keep starting:
+    // the variable is simply not read any more (rollback convenience).
+    let config = parse(&[("PERI_SWARM_STORE_TOKEN_ENV", Some("ignored"))])
+        .expect("an unknown variable is not an error");
+    assert_eq!(config.state_store_locator.as_str(), STATE_STORE_VALUE);
 }
 
 // ── shape validation ───────────────────────────────────────────────────────
@@ -351,30 +342,63 @@ fn http_session_store_is_rejected() {
 }
 
 #[test]
-fn state_store_requires_its_own_http_locator() {
+fn state_store_requires_a_postgres_dsn() {
     expect_invalid(
         parse(&[(STATE_STORE_ENV, Some("/tmp/swarm.db"))]),
         STATE_STORE_ENV,
     );
-    expect_invalid(
+    let reason = expect_invalid(
         parse(&[(STATE_STORE_ENV, Some("libsql://example.test/db"))]),
         STATE_STORE_ENV,
     );
-    expect_invalid(
+    assert!(reason.contains("no longer supported"), "{reason}");
+    let reason = expect_invalid(
         parse(&[(
             STATE_STORE_ENV,
-            Some("http://user:pass@127.0.0.1:9497/db/swarm/main/"),
+            Some("http://127.0.0.1:9497/db/swarm/main/"),
         )]),
         STATE_STORE_ENV,
     );
+    assert!(reason.contains("no longer supported"), "{reason}");
 }
 
 #[test]
-fn state_store_rejects_the_postgres_session_dsn() {
-    expect_invalid(
+fn state_store_rejects_the_postgres_session_database() {
+    let reason = expect_invalid(
         parse(&[(STATE_STORE_ENV, Some(SESSION_STORE_VALUE))]),
         STATE_STORE_ENV,
     );
+    assert!(reason.contains("dedicated PostgreSQL database"), "{reason}");
+    assert!(
+        reason.contains("postgres://127.0.0.1:5432/session"),
+        "the error names the shared database: {reason}"
+    );
+    assert!(
+        !reason.contains("private-pg-password"),
+        "the error must not echo the DSN: {reason}"
+    );
+
+    // Credentials and query parameters do not make it a different database.
+    for same in [
+        "postgres://bob:other@127.0.0.1:5432/session",
+        "postgresql://alice@127.0.0.1/session",
+        "postgresql://alice@127.0.0.1:5432/session?sslmode=require",
+    ] {
+        expect_invalid(parse(&[(STATE_STORE_ENV, Some(same))]), STATE_STORE_ENV);
+    }
+}
+
+#[test]
+fn a_second_database_on_the_same_instance_is_accepted() {
+    for distinct in [
+        "postgres://127.0.0.1:5432/swarm_state",
+        "postgresql://127.0.0.1/session_2",
+        "postgresql://db.internal:5432/session",
+        "postgresql://127.0.0.1:55432/session",
+    ] {
+        let config = parse(&[(STATE_STORE_ENV, Some(distinct))]).expect("distinct database");
+        assert_eq!(config.state_store_locator.as_str(), distinct);
+    }
 }
 
 #[test]
@@ -579,7 +603,6 @@ fn an_external_engine_configuration_keeps_only_the_token_variable_name() {
 
     let rendered = format!("{config:?}");
     assert!(!rendered.contains(RIVET_TOKEN_VALUE), "{rendered}");
-    assert!(!rendered.contains(TOKEN_VALUE), "{rendered}");
     assert!(rendered.contains(RIVET_TOKEN_ENV_NAME), "{rendered}");
     let rivet = format!("{:?}", config.rivet);
     assert!(!rivet.contains(RIVET_TOKEN_VALUE), "{rivet}");
@@ -593,13 +616,6 @@ fn token_variable_name_and_lookup_failures_are_reported() {
         RIVET_TOKEN_ENV,
     );
     assert!(reason.contains("variable name"), "{reason}");
-
-    // Naming the Loom credential would leak it to the engine.
-    let reason = expect_invalid(
-        parse(&[(RIVET_TOKEN_ENV, Some(TOKEN_ENV_NAME))]),
-        RIVET_TOKEN_ENV,
-    );
-    assert!(reason.contains(STORE_TOKEN_ENV), "{reason}");
 
     // The named variable must exist and be non-empty.
     let reason = expect_invalid(

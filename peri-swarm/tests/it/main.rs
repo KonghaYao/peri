@@ -6,9 +6,9 @@
 mod actor_runtime_test;
 mod http_contract_test;
 mod items_pagination_test;
-mod loom_store_test;
 mod mcp_injection_test;
 mod openai_hosted_test;
 mod rivet_actor_test;
 mod session_resources_test;
+mod state_store_test;
 mod streaming_test;

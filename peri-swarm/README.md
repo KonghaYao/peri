@@ -1,12 +1,14 @@
 # peri-swarm
 
 本地单机 Agent 网关：HTTP 客户端 → Rivet actor → 进程内 Peri ACP Host。Hosted 工具经
-Bun 托管的 workspace MCP 执行。Peri 会话保存在 PostgreSQL，Swarm 状态保存在独立的 Loom 数据库。
+Bun 托管的 workspace MCP 执行。Peri 会话与 Swarm 状态分别保存在两个 PostgreSQL 数据库
+（同一实例、不同数据库即可），只部署 PostgreSQL 就能同时支撑「会话库 + 状态库」。
 
 - **接入**：[启动顺序](#启动顺序)、[Node SDK 示例](#node-sdk-同会话追问与续读)。
 - **实现契约**：[Peri Swarm 设计](../docs/design/peri-swarm.md)；[生产拓扑](#生产部署拓扑目标)仅为目标。
 - **验收**：[本地环境](../docs/verification/peri-swarm-local-dev.md)、
-  [追问、空闲回收与宿主中断](../docs/verification/peri-swarm-local-followup-2026-11-23.md)。
+  [追问、空闲回收与宿主中断](../docs/verification/peri-swarm-local-followup-2026-11-23.md)、
+  [状态库 PostgreSQL 迁移](../docs/verification/peri-swarm-postgres-state-2026-11-24.md)。
 
 这是从源码构建的本地开发路径。Agent CLI 的 `agent-v*` 发布资产不分发 Swarm 服务；
 Swarm 的 OpenAI 兼容客户端使用 npm `openai`，不是 `@peri-code/sdk`。本文是操作手册，
@@ -15,9 +17,8 @@ Swarm 的 OpenAI 兼容客户端使用 npm `openai`，不是 `@peri-code/sdk`。
 ## 前置
 
 - macOS（SRT 走 `sandbox-exec`）或带 `systemd-run --user` 的 Linux；非 root。
-- PostgreSQL 数据库及可建表、读写的账号。
-- Docker（Loom 容器）；镜像可从 `ghcr.io` 拉取或本机已缓存。
-- Rust（仓库补丁脚本）、Bun >= 1.4、Node >= 22.12、Python 3（provision 脚本）。
+- PostgreSQL 数据库及可建表、读写的账号；**两个**数据库（会话库 + 状态库）。
+- Rust（仓库补丁脚本）、Bun >= 1.4、Node >= 22.12。
 - 沙箱内运行的 Peri 二进制：`./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri`（产物 `<repo>/target/debug/peri`）。
 - 本机 8080 若被占用，同时改 `PERI_SWARM_BIND` 和 SDK 的 `baseURL`；不要只改一处。
 
@@ -43,11 +44,10 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
 | `PERI_SWARM_BIND` | 否 | `src/bootstrap.rs` → `src/config.rs::parse_bind` | 默认 `127.0.0.1:8080`；非 loopback 需同时开 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` |
 | `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` | 否 | `src/config.rs::parse_bind_allow_non_loopback` → `parse_bind`（`BootstrapConfig` 与 `SwarmConfig` 共用）；启动日志 | 默认关；`1/true/yes/on` / `0/false/no/off`，其他值启动失败；开启后 WARN：Bearer 是唯一鉴权、TLS 由入口终止 |
 | `PERI_SWARM_SESSION_STORE` | 是 | `src/bootstrap.rs` → `src/actor/runtime.rs::SessionStoreDeployment` | PostgreSQL DSN，可包含用户名、密码和 TLS 参数 |
-| `PERI_SWARM_STATE_STORE` | 是 | `src/bootstrap.rs` → `src/store/turso.rs::SwarmStateStore` | Swarm 状态库；必须与会话库不同 |
+| `PERI_SWARM_STATE_STORE` | 是 | `src/bootstrap.rs` → `src/store/postgres/mod.rs::SwarmStateStore` | Swarm 状态库 PostgreSQL DSN；必须与会话库指向**不同数据库**（同实例允许）；库须为空或已是本 build 的 `swarm_meta` schema，否则启动失败 |
 | `PERI_SWARM_STORE_ENGINE` | 否 | `src/bootstrap.rs` → `src/actor/runtime.rs::SessionStoreDeployment` | 默认 `postgres`；只影响会话库 |
-| `PERI_SWARM_STORE_TOKEN_ENV` | 是 | `src/bootstrap.rs` 校验变量名；`src/store/turso.rs` 按名取状态库 token | **变量名**，不是 token 值 |
 | `PERI_SWARM_RIVET_ENDPOINT` | 否 | `src/bootstrap.rs::rivet_config` → `rivetkit::ServeConfig.endpoint` | 默认 `http://127.0.0.1:6420`；只接受明文 `http`、显式端口（写出的默认端口如 `:80` 也算），无 userinfo/query/fragment，path 为空或 `/`；字面 IP 只接受环回/RFC1918/ULA/link-local，域名不解析；`https` 拒绝 |
-| `PERI_SWARM_RIVET_TOKEN_ENV` | 视 endpoint | `src/bootstrap.rs::rivet_config` 校验变量名；`RivetConfig::resolve_token`（`run()` 一次取值）→ `ServeConfig.token` | **变量名**，不是 token 值；非 loopback endpoint 必填；不得与 `PERI_SWARM_STORE_TOKEN_ENV` 同名 |
+| `PERI_SWARM_RIVET_TOKEN_ENV` | 视 endpoint | `src/bootstrap.rs::rivet_config` 校验变量名；`RivetConfig::resolve_token`（`run()` 一次取值）→ `ServeConfig.token` | **变量名**，不是 token 值；非 loopback endpoint 必填 |
 | `PERI_SWARM_RIVET_NAMESPACE` | 否 | `src/bootstrap.rs::rivet_config` → `ServeConfig.namespace` | 默认 `default`；非空、无空白、≤128 |
 | `PERI_SWARM_RIVET_POOL` | 否 | `src/bootstrap.rs::rivet_config` → `ServeConfig.pool_name` | 默认 `peri-swarm`；规则同上 |
 | `PERI_SWARM_RIVET_ENGINE_SPAWN` | 否 | `src/bootstrap.rs::RivetEngineSpawn::rivetkit_mode` → `ServeConfig.engine_spawn`；`preflight_external_engine` | 默认 `always`；`always`/`auto` 只允许 loopback；非 loopback 必须 `never`，启动前 5s TCP 预检 |
@@ -61,15 +61,17 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
 | `PERI_SWARM_BUN_BEARER_ENV` | 否 | `src/bootstrap.rs` 校验变量名并取值 → `SandboxClientConfig.token`；`src/sandbox/client.rs` 使用 | 变量名；与 `PERI_SWARM_BUN_TOKEN` 互斥 |
 | `PERI_SWARM_SSE_HEARTBEAT_MS` | 否 | `src/config.rs::parse_sse_heartbeat`（bootstrap 调用）→ `src/http/handlers.rs` / `src/http/sse.rs` | `1..=600000`，默认 `15000`；非法值启动失败 |
 
-- `PERI_SWARM_STORE_TOKEN_ENV` 的取值必须是环境变量名；被命名变量必须非空。
-  启动示例里的 `PERI_SWARM_STORE_TOKEN` 只是这个名字的示例，读取点是
-  `src/store/turso.rs`。
+- `PERI_SWARM_STORE_TOKEN_ENV`（Loom 时代的状态库 token 变量）已删除；旧部署残留的
+  同名变量不会被读取，可原样保留以便回退。
 - 未配置 `PERI_SWARM_BUN_BASE_URL`/`PERI_SWARM_BUN_URL` 时，
   `environment.type=openai_hosted` 在创建会话时显式失败；`type=none` 不受影响。
 - `src/config.rs` 另有 `PERI_SWARM_STORE_LOCATOR`、`PERI_SWARM_STORE_CREDENTIAL_ENV`、
   `PERI_SWARM_MODEL_CREDENTIAL_ENV`，只用于 `SwarmConfig::from_env` 的独立调用/测试；
   网关进程入口不读它们。
-- `peri-swarm/tests/it/loom_store_test.rs` 使用相同的 PostgreSQL 会话库与 Loom 状态库变量。
+- `peri-swarm/tests/it/state_store_test.rs` 使用同样的两个 DSN 变量（`PERI_SWARM_SESSION_STORE`
+  / `PERI_SWARM_STATE_STORE`），`#[ignore]`，未设置时干净跳过。
+- 状态库的 PostgreSQL 契约测试用 `PERI_TEST_POSTGRES_URL`（先例见
+  `peri-resources` 的 PostgreSQL 夹具），同样 `#[ignore]`，每个用例建独立 schema。
 - Rivet 与 bind 的六个变量不设置时，endpoint/token/namespace/pool/spawn 与旧常量逐字节
   一致；token 值只在 `run()` 解析一次，不进入 `Debug`、启动日志或错误消息。
 - Bun 侧完整变量清单见
@@ -79,7 +81,6 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
 
 | 变量 | 读取方 | 用途 |
 | --- | --- | --- |
-| `PERI_HRANA_EXPERIMENTAL` | Loom 镜像内的 `dev.py` | 启用本地 Hrana |
 | `RIVETKIT_ENGINE_AUTO_DOWNLOAD` | `rivetkit` engine spawn | 首次按需拉起 6420 |
 | `PERI_PATH` | `peri-sandbox` | 沙箱内 Peri 二进制 |
 | `PERI_SWARM_IDLE_MS` | `peri-sandbox` | 空闲回收，`0` 关闭 |
@@ -88,69 +89,43 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
 
 ```mermaid
 flowchart LR
-  BUILD["构建网关"] --> LOOM["Loom Docker<br/>:9497"]
-  LOOM --> PROV["provision state DB"]
-  PROV --> GW["启动网关<br/>:8080"]
-  PG["PostgreSQL 会话库"] --> GW
+  BUILD["构建网关"] --> DB["PostgreSQL<br/>会话库 + 状态库"]
+  DB --> GW["启动网关<br/>:8080"]
   BUILD --> BUN["Bun 沙箱<br/>:8081"]
   GW -.->|"hosted"| BUN
 ```
 
-### 1. Loom（Docker）
+### 1. PostgreSQL（会话库 + 状态库）
 
-Loom 有 Docker 镜像，不需要源码构建。上游 `compose.yaml` 是 S3/TLS 生产模板；本地
-HTTP 开发直接用镜像里的 `dev.py` 入口，如下。无 TLS 本地模式只允许 loopback 监听，
-因此容器使用 host network；桥接网络 + `-p` 配 `0.0.0.0` 会被平台拒绝。
-
-```bash
-# 本次验证的 v1.1.24 digest；部署时换成你审阅过的 digest
-PERI_LOOM_IMAGE='ghcr.io/konghayao/peri-loom@sha256:aa72d8742e6162c11de539eb7e99d8a0934f5d14cd8f2d80b017c2fdd7ae53f1'
-
-docker volume create peri-loom-data
-docker run -d --name peri-loom \
-  --network host \
-  -e PERI_HRANA_EXPERIMENTAL=1 \
-  -v peri-loom-data:/data/peri \
-  "$PERI_LOOM_IMAGE" \
-  --run-dir /data/peri --backend local \
-  --listen 127.0.0.1:9497 --no-build
-```
-
-如果 9497 被占用，改 `--listen`，并同步改网关的状态库 locator；`connection.json`
-的 endpoint 会跟随 `--listen` 变化。
-
-就绪日志：
-
-```text
-{"ready": true, "service": "local-project", "address": "http://127.0.0.1:9497", ...}
-```
-
-用 `docker logs --tail 20 peri-loom` 查看。Loom 没有 `/healthz`，不要用 HTTP 探针判断
-就绪。`dev.py` 会生成 Loom 连接配置。把连接文件复制到宿主机
-（含密钥，权限 0600）：
+两个独立数据库，可以在同一实例上。会话库由 `peri-resources` 的 Peri schema 管理，
+状态库由网关自己建表并记录 `swarm_meta`；两者互不探测对方的 schema。
 
 ```bash
-mkdir -p /private/tmp/peri-loom-run
-chmod 700 /private/tmp/peri-loom-run
-docker cp peri-loom:/data/peri/connection.json /private/tmp/peri-loom-run/connection.json
-chmod 600 /private/tmp/peri-loom-run/connection.json
+# 示例：本地 PostgreSQL 16（端口按你的实例改）
+docker run -d --rm --name peri-swarm-pg \
+  -e POSTGRES_USER=peri -e POSTGRES_PASSWORD=peri -e POSTGRES_DB=postgres \
+  -p 127.0.0.1:55432:5432 postgres:16-alpine
+docker exec peri-swarm-pg createdb -U peri peri_session
+docker exec peri-swarm-pg createdb -U peri peri_swarm_state
+
+export PERI_SWARM_SESSION_STORE='postgresql://peri:peri@127.0.0.1:55432/peri_session'
+export PERI_SWARM_STATE_STORE='postgresql://peri:peri@127.0.0.1:55432/peri_swarm_state'
 ```
 
-macOS 的 `/tmp` 是符号链接，统一用 `/private/tmp`。如果 Docker Desktop 不支持 host
-network，请在 Linux 主机或 OrbStack 上运行 Loom。
+状态库的要求：
 
-### 2. Swarm 状态库
+- **空库**：首次启动由网关建 6 张表（`swarm_meta`、`swarm_sessions`、`swarm_items`、
+  `swarm_inputs`、`swarm_bindings`、`swarm_turns`）与 2 个索引，并写入
+  `swarm_meta(version=1, engine='postgres', contract='peri.swarm.postgres/v1')`。
+- **非空但没有 `swarm_meta`**：拒绝初始化（fail closed）。误把会话库填进
+  `PERI_SWARM_STATE_STORE` 会得到「这是 Peri 会话库」的专门错误。
+- **版本/引擎/契约不匹配**：启动失败，不自动升级或重写身份行。已知版本只幂等修复缺表/缺索引。
+- DSN 的 `search_path` 必须解析到已存在的 schema（默认 `public`）；表建在 `current_schema()`。
 
-```bash
-python3 peri-swarm/scripts/provision_state_db.py \
-  --connection-file /private/tmp/peri-loom-run/connection.json
-```
+账号权限：会话库需要可建表/读写；状态库需要 `CREATE`（首次）以及表的读写权限。
+两个库的 DSN 都不要写进日志或工单。
 
-脚本创建 `local_default/swarm/main` 并探测 Hrana；同一 `request_id` 幂等。它只从
-`connection.json` 读取密钥，不打印、不落盘；成功后打印
-`PERI_SWARM_STATE_STORE` 和状态库 token 变量提示。会话库使用单独准备好的 PostgreSQL 数据库。
-
-### 3. Rivet
+### 2. Rivet
 
 本地 engine 为 Rivet 3.1.1，默认 endpoint `http://127.0.0.1:6420`
 （`PERI_SWARM_RIVET_ENDPOINT` 可改）。首次运行设置 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1`，
@@ -161,18 +136,14 @@ engine 是 Rivet 官方组件，不归 Peri 代码所有。
 `lsof -nP -iTCP:6420 -sTCP:LISTEN`，再用 `ps -p <pid> -o pid,command` 核对；不要为
 释放端口杀无关进程。
 
-### 4. 网关
+### 3. 网关
 
 ```bash
-TOKEN=$(python3 -c "import json;print(json.load(open('/private/tmp/peri-loom-run/connection.json'))['project_api_key'])")
-
 export PERI_SWARM_BIND=127.0.0.1:8080
 export PERI_SWARM_API_KEY='<gateway-bearer-key>'
 export PERI_SWARM_SESSION_STORE="${DATABASE_URL:?请设置 PostgreSQL 会话库 DSN}"
-export PERI_SWARM_STATE_STORE='http://127.0.0.1:9497/db/local_default/swarm/main/'
+export PERI_SWARM_STATE_STORE="${SWARM_STATE_DATABASE_URL:?请设置 PostgreSQL 状态库 DSN}"
 export PERI_SWARM_STORE_ENGINE=postgres
-export PERI_SWARM_STORE_TOKEN_ENV=PERI_SWARM_STORE_TOKEN
-export PERI_SWARM_STORE_TOKEN="$TOKEN"
 export PERI_SWARM_MACHINE_ID='<持久化 UUID>'
 
 mkdir -p /private/tmp/peri-swarm-workspace
@@ -193,7 +164,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 # {"status":"ok"}
 ```
 
-### 5. Bun 沙箱（仅 hosted）
+### 4. Bun 沙箱（仅 hosted）
 
 `openai_hosted` 会话必需；`type=none` 不需要。
 
@@ -218,6 +189,64 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 `bun run src/cli.ts init --settings ...`，详见
 [peri-sandbox README](../npm-packages/peri-sandbox/README.md#本地-swarm-服务devswarm)。
 网关可以先于 Bun 启动；Bun 就绪前创建 hosted 会话会得到 `502 upstream_unavailable`。
+
+## 升级与回退（状态库）
+
+### 从 Loom 割接
+
+本版本**不做跨引擎自动迁移**：Loom 是 SQLite/libSQL，网关不读取它的数据文件，也没有
+导出客户端。割接按下面的顺序做，旧库只读保留：
+
+1. 等客户端空闲后停掉旧网关；旧状态库不再被写入。
+2. 准备**专用** PostgreSQL 数据库（不要与会话库同库）：
+   `createdb peri_swarm_state`，或 `psql "$PG_ADMIN_DSN" -c 'CREATE DATABASE peri_swarm_state'`。
+3. 用新镜像 + `PERI_SWARM_STATE_STORE=<新库 DSN>` 启动。启动日志出现
+   `opening the independent swarm state store` / `postgres://host:port/peri_swarm_state`；
+   库内出现 `swarm_meta(version=1, engine=postgres, contract=peri.swarm.postgres/v1)`。
+4. 旧 Loom 库原样保留（只读，供事后核对）。新 build 从不连接它。
+
+影响声明：**既有 Loom 会话不会被新部署看到**（`sessions.list` 从空开始，旧
+`logicalId` 的 `GET` 返回 404）。Peri 会话历史在会话库里不受影响，丢的是 Swarm 侧的
+投影行（会话/items/turns/bindings 游标）。需要保留旧状态库内容时，只能继续用旧镜像，
+或等后续的导出/导入工具（本版本不提供）。
+
+### 校验 SQL
+
+按语义核对（在状态库执行）：
+
+```sql
+SELECT version, engine, contract FROM swarm_meta;                  -- 1 | postgres | peri.swarm.postgres/v1
+SELECT COUNT(*) FROM swarm_sessions;
+SELECT COUNT(*) FROM swarm_items;
+SELECT COUNT(*) FROM swarm_inputs;
+SELECT COUNT(*) FROM swarm_turns;
+SELECT COUNT(*) FROM swarm_bindings;
+-- (logical_id, seq) 是主键，不存在重复 seq
+SELECT COUNT(*) - COUNT(DISTINCT (logical_id, seq)) FROM swarm_items;
+-- 缓存投影 = MAX(seq)：结果应为空
+SELECT s.logical_id, s.last_item_seq, COALESCE(MAX(i.seq), 0) AS max_seq
+  FROM swarm_sessions s LEFT JOIN swarm_items i USING (logical_id)
+ GROUP BY s.logical_id, s.last_item_seq
+HAVING s.last_item_seq <> COALESCE(MAX(i.seq), 0);
+-- item 内最大 seq 用于分页游标；seq 从 1 起、按会话连续
+SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logical_id ORDER BY 1;
+```
+
+人工导入（可选，本版本不提供工具）时按列显式写入，注意 `truncated` 是 `BOOLEAN`、
+`seq`/`last_item_seq`/turn 时间是 `BIGINT`、JSON 列是 `TEXT`（原样字节）；导入前后用上面
+的计数与 `MAX(seq)` 对账。
+
+### 回退
+
+- **回退到 Loom 版本**：停新网关 → 换回上一版镜像 → 恢复旧的
+  `PERI_SWARM_STATE_STORE`（Loom locator）与 `PERI_SWARM_STORE_TOKEN_ENV`/token。
+  新 build 从未写过 Loom，旧库内容与割接前一致；割接窗口内产生的新会话只存在于
+  PostgreSQL，不会回灌。
+- **回退 PostgreSQL 内的一次升级**（未来）：升级前 `pg_dump -Fc peri_swarm_state >
+  peri_swarm_state.dump`；回退 = 旧镜像 + `pg_restore`。`swarm_meta.version` 比当前
+  build 高时进程会 fail closed，不会静默降级。
+- **不确定时**：停进程即可，两个库都只读不写；重新指向正确的 DSN 再启动。实现层面
+  不会把有数据的库当空库初始化（非空且无 `swarm_meta` 直接拒绝）。
 
 ## 官方 SDK 差异
 
@@ -369,7 +398,7 @@ const body = /** @type {any} */ (page).body;
 
 共享环境的绑定在创建时与会话行一起提交。删除会话时由其余引用者保留绑定，最后一个会话删除后才移除绑定。
 
-`swarm_bindings` 是绑定权威，Bun 侧 `bindings.json` 只是派生缓存；恢复时先读 Loom
+`swarm_bindings` 是绑定权威，Bun 侧 `bindings.json` 只是派生缓存；恢复时先读状态库
 绑定，缺失即失败，`sandboxId`/`workspacePath` 变化按 `sandbox_binding_changed` 拒绝。
 
 ### 创建中断与恢复
@@ -397,9 +426,9 @@ stateDiagram-v2
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 宿主在 turn 中退出后，历史查询返回已存状态。下一条新用户输入触发原会话恢复；同步中断的旧 turn 记录为失败，Peri 按持久 MQ 恢复待处理工作。
-- 真实双库 Loom 已验证 Swarm 共享绑定转交和最后引用删除；这不等于清除 Bun 的
-  工作目录或预留。旧库迁移、双副本并发迁移、真实 Loom 的 metadata 过滤和删除事务的
-  故障边界尚待验收。
+- 真实两库 PostgreSQL 已验证 Swarm 共享绑定转交和最后引用删除；这不等于清除 Bun 的
+  工作目录或预留。Loom 存量自动迁移（本版本不支持）、双副本并发首启与删除事务的故障
+  边界尚待验收。
 - `turns.usage`/`subagent_id` 恒 `null`；`prompt_cache_options` 只持久化/回显，本地模型链
   是否使用未验证。官方 SDK 的删除已通过本地 Rivet engine，后台 `ctx.destroy` 的完成时机仍待独立观测。
 - 沙箱空闲回收关闭运行实例但保留 MCP URL、sandboxId 和工作区；下一次工具调用
@@ -411,7 +440,7 @@ stateDiagram-v2
   不随后续运行更新；实时状态以 Bun 为准。
 - `peri-swarm` 默认只绑定 loopback，非 loopback 需显式开关；只有单 Bearer，自身不做
   TLS，入口依赖外部 Nginx/Gateway。外部 engine 配置面已实现，但未在活体 engine 上验收；
-  Bun bridge 仍只接受 loopback；多副本部署、Loom 远端、多租户、跨机调度、1000 Agent
+  Bun bridge 仍只接受 loopback；多副本部署、跨机调度、多租户、1000 Agent
   规模、Linux SRT 与真实第三方 MCP 未验收。
 
 ## 生产部署拓扑（目标）
@@ -472,8 +501,8 @@ flowchart TB
   end
 
   S1[("PostgreSQL 会话库")]
-  subgraph LOOM["Loom 部署（Docker，独立主机）"]
-    S2[("Swarm 状态库<br/>swarm/main")]
+  subgraph STATE["PostgreSQL 状态库（可同实例）"]
+    S2[("swarm_meta + swarm_* 表")]
   end
 
   MODEL["模型供应商<br/>HTTPS"]
@@ -509,11 +538,12 @@ flowchart TB
 
 ### 网络分段
 
-- 公网只暴露入口层；Peri Swarm Server、Rivet engine、PostgreSQL 和 Loom 全部在私网，客户端不直连
-  `8080`。
+- 公网只暴露入口层；Peri Swarm Server、Rivet engine 与两个 PostgreSQL 库全部在私网，
+  客户端不直连 `8080`。
 - 入口层只做南北向 HTTP；`agent/<logicalId>` 的 actor 分配由 Rivet engine 负责，
   Ingress 不需要粘滞会话。
-- 会话库与状态库由两个 locator 分别指向，Server 分别直连 PostgreSQL 与 Loom，两库都需要写权限。
+- 会话库与状态库由两个 DSN 分别指向（可以是同一实例的两个数据库），Server 分别直连，
+  两库都需要写权限；状态库 DSN 不得指向会话库的数据库。
 
 ### 进程内分层
 
@@ -525,7 +555,7 @@ flowchart TB
 | 入口 | axum `/v1`、Bearer、body limit | `SwarmActor` action、`GET /events` |
 | 职责 | 校验、公开契约投影、SSE 包装 | 会话执行、进程内 ACP Host、事件序列 |
 | 内存状态 | 无会话状态；只有 client 与 store 句柄 | live ACP Host、事件广播、会话视图 |
-| 持久状态 | 少量前置读（`rootSessionId`、404） | 以 Loom 为准写行、items、绑定 |
+| 持久状态 | 少量前置读（`rootSessionId`、404） | 以状态库为准写行、items、绑定 |
 | 多副本 | 任意副本处理任意请求 | 一个 `agent/<logicalId>` 同一时刻只在一个副本 |
 | 转发 | 经 Rivet client 发 typed action | 由 engine 定位；副本间不直连 |
 | 失败/重建 | 副本可随时替换 | 只读恢复 + `session/load`；在途 turn 502 |
@@ -543,7 +573,7 @@ flowchart TB
 | Peri Swarm Server（`peri-swarm`） | 可替换副本组（每副本同时是 Rivet node） | 仓库内无多副本编排；副本间共享 engine、namespace、pool 与部署身份；在途 turn 的跨实例接管是设计非目标 |
 | Rivet engine | 3+ 实例 + LB（独立主机组） | endpoint/token/namespace/pool 与 spawn 已可配置；非 loopback 必须 `never`；客户端只接受明文 `http`，TLS/CA 未支持 |
 | `peri-sandbox` | 沙箱主机池 | `validate_bun_url` 只接受 loopback `http`；远程需 HTTPS 与主机认证 |
-| Loom | 独立 Docker 主机 | locator 已接受 `http(s)`；存储 SDK 无法注入 CA，跨机需私网明文 + 网络隔离，或前置终止 TLS 的代理 |
+| Swarm 状态库 | 同一 PostgreSQL 实例或独立实例 | 与会话库不同数据库即可；DSN 支持 TLS 参数（SQLx rustls），跨机需网络隔离 |
 | 模型供应商 | 公网 | 无 |
 
 ### Rivet engine 怎么部署？

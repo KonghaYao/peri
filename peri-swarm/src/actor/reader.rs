@@ -181,23 +181,14 @@ pub enum TurnOutcome {
 /// fix the stream kind and swallow the later answer text.
 type StreamKey = (String, String, &'static str);
 
-/// Payload bytes one item transaction may carry.
-///
-/// Loom answers a statement batch above `max_sql_bytes` (64 KiB in the v1.1.24
-/// dev profile) with `413`. The bound parameter is the payload JSON *as a JSON
-/// string*, so escaping can double it; a quarter of the cap plus the per-row
-/// overhead below keeps a full batch under the limit even for text full of
-/// quotes and newlines.
 /// Payload bytes one append group may carry.
 ///
-/// The limit is set by the remote store, not by this reader. Loom enforces a
-/// project `max_sql_bytes` (64 KiB by default) as an HTTP 413, and hrana makes
-/// any non-200 response fatal for the stream: the next statement opens a *new*
-/// session, and Loom counts opened sessions against a fixed project quota. A
-/// single oversized append therefore costs a permanent session, so the budget
-/// here stays well below the backend limit and leaves room for the wire
-/// overhead (SQL text, ids, source JSON, JSON escaping) which runs several
-/// times the payload bytes.
+/// The limit is set by the remote store, not by this reader. One group becomes
+/// one item transaction, and the payload JSON travels as a bound parameter whose
+/// escaped text can be several times the payload size (SQL text, ids, source
+/// JSON, JSON escaping). A small budget keeps each write short on a loaded
+/// server and bounds how much one failed transaction can lose; an item whose
+/// fitted payload alone exceeds it still gets its own group.
 const APPEND_BATCH_BYTES: usize = 8 * 1024;
 
 /// Non-payload bytes one row adds to the statement batch (SQL text, ids, source
@@ -2412,10 +2403,10 @@ impl ItemLog {
 
     /// End index of the group that starts at `start`.
     ///
-    /// One durable write must stay under the store's per-request budget: Loom
-    /// rejects a statement batch above `max_sql_bytes` with 413, and an item's
-    /// fitted payload alone can reach 1 MiB. A group always takes at least one
-    /// item so an oversized item still fails on its own rather than stalling.
+    /// One durable write must stay under the store's per-request budget: an
+    /// item's fitted payload alone can reach 1 MiB, so the batch stays below
+    /// [`APPEND_BATCH_BYTES`]. A group always takes at least one item so an
+    /// oversized item still fails on its own rather than stalling.
     fn batch_end(prepared: &[PreparedItem], start: usize) -> usize {
         let mut end = start + 1;
         let mut bytes = prepared[start].payload_bytes + APPEND_ROW_OVERHEAD;

@@ -73,7 +73,7 @@ filter = 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp
 test-group = 'serial-process-state'
 
 [[profile.default.overrides]]
-filter = '(package(=peri-process) | (package(=peri-swarm) & test(/^(actor_runtime_test|loom_store_test|mcp_injection_test|openai_hosted_test|rivet_actor_test)::/)))'
+filter = '(package(=peri-process) | (package(=peri-swarm) & test(/^(actor_runtime_test|mcp_injection_test|openai_hosted_test|rivet_actor_test|state_store_test)::/)))'
 test-group = 'process-isolation'
 
 # CI 专用 profile：继承 [profile.default] 的 default-filter、overrides 与 test-groups，

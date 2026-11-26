@@ -95,11 +95,16 @@ pub enum StoreAccess {
 }
 
 /// The PostgreSQL DSN may contain credentials in userinfo or query parameters.
+///
+/// `Debug` is redacted and [`Self::target`] renders only
+/// `postgres://host:port/database`; neither ever carries a credential.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PostgresLocator(Url);
 
 impl PostgresLocator {
-    pub(crate) fn parse(value: &str, variable: &'static str) -> Result<Self, ConfigError> {
+    /// Parse a deployment DSN. `variable` names the source for error text; the
+    /// value is never echoed.
+    pub fn parse(value: &str, variable: &'static str) -> Result<Self, ConfigError> {
         let url = Url::parse(value)
             .map_err(|_| ConfigError::invalid(variable, "invalid PostgreSQL URL"))?;
         if !matches!(url.scheme(), "postgres" | "postgresql")
@@ -117,6 +122,35 @@ impl PostgresLocator {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// Acceptable for logs and error messages: scheme, host, port and database
+    /// only. Userinfo, query parameters and the fragment are dropped.
+    #[must_use]
+    pub fn target(&self) -> String {
+        let host = self.0.host_str().unwrap_or_default();
+        let port = self.0.port().unwrap_or(5432);
+        let database = self.0.path().trim_start_matches('/');
+        format!("postgres://{host}:{port}/{database}")
+    }
+
+    /// Whether both DSNs address the same database on the same server.
+    ///
+    /// The key is `(lowercase host, port with the 5432 default, path)`;
+    /// credentials and query parameters are ignored on purpose. Two DSNs that
+    /// only differ in `options` (for example a `search_path`) still name one
+    /// database, and the Swarm state store needs its own.
+    #[must_use]
+    pub fn same_database(&self, other: &Self) -> bool {
+        self.database_key() == other.database_key()
+    }
+
+    fn database_key(&self) -> (String, u16, String) {
+        (
+            self.0.host_str().unwrap_or_default().to_ascii_lowercase(),
+            self.0.port().unwrap_or(5432),
+            self.0.path().to_owned(),
+        )
     }
 }
 
@@ -315,28 +349,41 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(canonical)
 }
 
-/// The independent Loom state store uses HTTP(S) and a separate bearer credential.
+/// Validate the Swarm state store DSN (S6c1a, moved to PostgreSQL).
 ///
-/// `variable` names the source in errors so the process entry can reuse the
-/// rule for its own environment names without forking the check.
+/// The value must be a PostgreSQL DSN naming a database **different** from the
+/// session store: sharing one would put the Swarm schema back into the session
+/// database, which is exactly what the split avoids. Same instance, different
+/// database is the supported deployment. `variable` names the source in errors
+/// so the process entry can reuse the rule for its own environment names.
 pub(crate) fn validate_state_store_locator(
     value: &str,
     variable: &'static str,
-) -> Result<Url, ConfigError> {
-    let url = Url::parse(value).map_err(|_| ConfigError::invalid(variable, "expected a URL"))?;
-    if !matches!(url.scheme(), "http" | "https") {
+    session: &PostgresLocator,
+) -> Result<PostgresLocator, ConfigError> {
+    if let Some((scheme, _)) = value.split_once("://") {
+        let scheme = scheme.trim().to_ascii_lowercase();
+        if matches!(scheme.as_str(), "http" | "https" | "ws" | "wss" | "libsql") {
+            return Err(ConfigError::invalid(
+                variable,
+                "expected a postgres:// or postgresql:// DSN; this build reads a PostgreSQL state \
+                 database and a Loom/Hrana locator is no longer supported (see \
+                 peri-swarm/README.md 的「升级与回退」)",
+            ));
+        }
+    }
+    let locator = PostgresLocator::parse(value, variable)?;
+    if locator.same_database(session) {
         return Err(ConfigError::invalid(
             variable,
-            "scheme must be http or https",
+            format!(
+                "must not resolve to the same database as the session store ({}); provision a \
+                 dedicated PostgreSQL database for the Swarm state store",
+                locator.target()
+            ),
         ));
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(ConfigError::invalid(
-            variable,
-            "embedded credentials are not allowed; use the credential env var",
-        ));
-    }
-    Ok(url)
+    Ok(locator)
 }
 
 /// Rivet engine endpoint (M1): plaintext `http` only, because the pinned
