@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::item::ItemView;
+use crate::domain::item::{ItemDelta, ItemView};
 use crate::domain::official::OfficialEvent;
 
 /// Turn lifecycle event carried by SSE `event: turn` (`design §2.5`).
@@ -83,9 +83,12 @@ pub struct TurnFailure {
 /// Everything the SSE layer can emit for a session.
 ///
 /// Only [`StreamEvent::Item`] carries a persisted `seq`; it is the only event
-/// that advances `Last-Event-ID`. `turn`/`gap`/official events have no SSE
-/// `id`, because `swarm_items` is the single replayable record (`design §6.1`).
-/// Official frames are additive: the gateway's own `item`/`turn` frames stay.
+/// that advances `Last-Event-ID`. [`StreamEvent::Delta`] is a live-only chunk of
+/// an assistant/thought stream: it has no `seq` and never becomes a row, so a
+/// client cannot resume from it. `turn`/`gap`/official events have no SSE `id`
+/// either, because `swarm_items` is the single replayable record
+/// (`design §6.1`). Official frames are additive: the gateway's own
+/// `item`/`turn` frames stay.
 ///
 /// `Official` is the largest variant (the SDK's full turn/session snapshot).
 /// Boxing it would push indirection into every match site for a frame emitted a
@@ -94,9 +97,14 @@ pub struct TurnFailure {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamEvent {
     Item(ItemView),
+    /// Live chunk of a stream whose merged `Item` row is written at turn end.
+    Delta(ItemDelta),
     Turn(TurnEvent),
     Official(OfficialEvent),
-    Gap { from_seq: u64, to_seq: u64 },
+    Gap {
+        from_seq: u64,
+        to_seq: u64,
+    },
 }
 
 impl StreamEvent {
@@ -104,7 +112,7 @@ impl StreamEvent {
     pub fn item_seq(&self) -> Option<u64> {
         match self {
             Self::Item(item) => Some(item.seq),
-            Self::Turn(_) | Self::Official(_) | Self::Gap { .. } => None,
+            Self::Delta(_) | Self::Turn(_) | Self::Official(_) | Self::Gap { .. } => None,
         }
     }
 }

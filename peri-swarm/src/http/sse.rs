@@ -73,15 +73,20 @@ fn event_response_with_initial(
 
 /// Persisted backlog, then live broadcasts, with a 15 s heartbeat by default.
 ///
-/// Only `item` events carry an SSE `id` equal to `seq`; `turn`, the official
-/// `agent.session.*` frames and `gap` are not persisted in `swarm_items` and
-/// therefore do not advance `Last-Event-ID`. Official frames are additive: the
-/// gateway's own `item`/`turn` events stay on the stream.
+/// Only persisted `item` events carry an SSE `id` equal to `seq`; a live delta
+/// frame (`StreamEvent::Delta`, same `item` event name, no `seq`) is never
+/// stored, so it has no `id` and does **not** advance `Last-Event-ID`. `turn`,
+/// the official `agent.session.*` frames and `gap` are not persisted in
+/// `swarm_items` either. Official frames are additive: the gateway's own
+/// `item`/`turn` events stay on the stream.
 ///
 /// A subscription that falls behind the broadcast channel receives one `gap`
 /// frame and the stream ends. The loss may include a turn terminal, so
 /// continuing would leave an official SDK waiting forever; reconnecting with
-/// the last rendered item `seq` replays the dropped rows from the store.
+/// the last rendered item `seq` replays the dropped rows from the store. Because
+/// the dropped events include unpersisted deltas, the `gap` range
+/// (`fromSeq`/`toSeq`) is an **upper bound** on persisted rows, not an exact
+/// interval.
 ///
 /// The heartbeat payload's `lastItemSeq` is the session's current
 /// `MAX(seq)` (read from the shared tail), not the last seq this stream
@@ -181,6 +186,9 @@ impl StreamState {
                 self.last_seq = item.seq;
                 Some(json_event("item", &item).id(item.seq.to_string()))
             }
+            // A live delta is not a row: no `id`, and the resume cursor must not
+            // move past the last persisted item.
+            StreamEvent::Delta(delta) => Some(json_event("item", &delta)),
             StreamEvent::Turn(turn) => Some(json_event("turn", &turn)),
             StreamEvent::Official(event) => Some(json_event(event.event_type(), &event)),
             StreamEvent::Gap { from_seq, to_seq } => Some(json_event(

@@ -104,6 +104,31 @@ impl ItemView {
     }
 }
 
+/// One live chunk of an assistant/thought stream (`design §9`).
+///
+/// It has **no `seq`**: a delta is never persisted, never returned by
+/// `/items` and never part of backlog replay, so it must not advance
+/// `Last-Event-ID`. The merged row of the same `item_id` (payload
+/// `complete: true`, written when the turn terminates) is the only durable
+/// fact a reconnect reads.
+///
+/// Rejected alternatives, kept here so they are not reopened: merging in place
+/// with `UPDATE` breaks append-only replay (a client resuming from `seq=N` would
+/// never see the final text); allocating an in-memory `seq` conflicts with the
+/// persisted cursor; renaming the frame (`item.delta`) gains nothing because
+/// clients render `item` and a missing `id` is already the signal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDelta {
+    /// Mirrors `item_id` so SDK types that extend `{ id }` can traverse it.
+    pub id: String,
+    pub item_id: String,
+    pub kind: ItemKind,
+    pub source: ItemSource,
+    pub payload: Value,
+    pub created_at: String,
+}
+
 /// Query window for `GET /items` (`design §2.6` plus the SDK `order` field).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,11 +184,12 @@ impl ItemsWindow {
 /// Pagination is **item-grouped** (`design §4.2`): `limit` counts items, and
 /// every row of the selected items is returned in `items`. `data` is the
 /// official `CursorPage` view of the same page — one row per item, the item's
-/// last persisted row (greatest `seq`). Because one assistant message can span
-/// several delta rows plus its `complete:true` row, `data` is usually shorter
-/// than `items`; `items` remains the raw row list existing delta consumers
-/// read. `has_more`/`hasMore` count items, and `nextCursor` is the greatest
-/// `seq` of the last item of the page in page order.
+/// last persisted row (greatest `seq`). New data writes one row per item, so
+/// `data` and `items` agree; history from before item granularity can hold
+/// several delta rows plus a `complete:true` row for one assistant message, and
+/// only there is `data` shorter than `items`. `has_more`/`hasMore` count items,
+/// and `nextCursor` is the greatest `seq` of the last item of the page in page
+/// order.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPage {

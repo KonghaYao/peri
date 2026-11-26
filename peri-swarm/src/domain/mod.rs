@@ -24,7 +24,7 @@ pub use identity::{new_root_session_id, ActorKey, LogicalId};
 pub use input::{
     ContentBlock, Disposition, InputKind, InputMode, InputOutcome, InputState, InputSubmission,
 };
-pub use item::{ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow};
+pub use item::{ItemDelta, ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow};
 pub use mcp::{McpHeader, McpToolKind, McpToolSpec};
 pub use official::{
     turn_id_for_item, OfficialContent, OfficialEvent, OfficialMessageItem, OfficialSession,
