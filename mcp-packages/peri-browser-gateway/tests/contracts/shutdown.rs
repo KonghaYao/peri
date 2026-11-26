@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::serve_client_with_lifecycle;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -55,7 +56,7 @@ async fn sse_resume_replays_a_reply_without_executing_the_write_twice() -> anyho
         .send()
         .await?
         .error_for_status()?;
-    let response = rpc(resumed).await?;
+    let response = rpc(resumed).await.context("读取 resume 重放回执")?;
     assert_eq!(response["id"], request_id);
     assert_ne!(response["result"]["isError"], true);
     assert_eq!(engine.events().iter().filter(|event| matches!(event, Event::Command(Role::Writer, _, method, _) if method == "Input.dispatchKeyEvent")).count(), 2, "一次按键只发 down/up");

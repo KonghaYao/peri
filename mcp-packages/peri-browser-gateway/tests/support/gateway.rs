@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anyhow::Context;
 use peri_browser_gateway::config::Config;
 use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
@@ -95,9 +96,7 @@ impl Gateway {
             .expect("会话 header")
             .to_str()?
             .to_owned();
-        let result = rpc(response)
-            .await
-            .map_err(|e| e.context("读取 initialize 回执"))?;
+        let result = rpc(response).await.context("读取 initialize 回执")?;
         assert_eq!(result["result"]["serverInfo"]["name"], "peri-browser-mcp");
         assert_eq!(result["result"]["protocolVersion"], LEGACY);
         let notification = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
@@ -118,7 +117,9 @@ impl Gateway {
     pub async fn call(&self, id: &str, name: &str, arguments: Value) -> anyhow::Result<Value> {
         let (request_id, message) = self.tool_request(name, arguments);
         let response = self.post(Some(id), message).send().await?;
-        let reply = rpc(response.error_for_status()?).await?;
+        let reply = rpc(response.error_for_status()?)
+            .await
+            .with_context(|| format!("读取 {name} 工具回执"))?;
         assert_eq!(reply["id"], request_id);
         anyhow::ensure!(
             reply.get("result").is_some(),
@@ -259,10 +260,15 @@ pub fn initialize(version: &str) -> Value {
 }
 
 pub async fn rpc(response: Response) -> anyhow::Result<Value> {
-    let text = response.text().await?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .with_context(|| format!("读取 SSE 响应体（HTTP {status}）"))?;
     let payload = text
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
         .find(|data| !data.trim().is_empty());
-    Ok(serde_json::from_str(payload.unwrap_or(&text))?)
+    serde_json::from_str(payload.unwrap_or(&text))
+        .with_context(|| format!("解析 SSE 响应（HTTP {status}，响应体 {text:?}）"))
 }
