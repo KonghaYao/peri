@@ -787,6 +787,7 @@ fn test_expanded_tool_card_claims_deferred_result_refetch() {
     );
     let card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t-big".into(),
         tool_name: "Bash".into(),
         input_summary: String::new(),

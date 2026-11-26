@@ -63,6 +63,7 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
         user_modified: false,
         tool_calls_count: 0,
         images: t.images.clone(),
+        images_omitted: t.images_omitted,
         content_hash: 0,
     };
     card.recompute_hash();
@@ -136,6 +137,8 @@ pub struct ToolCardAccumulator {
     pub claimed_by_subagent: bool,
     /// 工具结果携带的图片身份（载荷在上传仓库）。
     pub images: Vec<crate::kit::image_view::UploadId>,
+    /// 展示预算省略的图片数（服务端只在 `_meta` 报告计数，载荷不在事件里）。
+    pub images_omitted: u32,
 }
 
 impl ToolCardAccumulator {
@@ -144,6 +147,7 @@ impl ToolCardAccumulator {
         output: String,
         is_error: bool,
         images: Vec<crate::kit::image_view::UploadId>,
+        images_omitted: u32,
     ) -> bool {
         if self.output_summary.is_some() {
             return false;
@@ -151,6 +155,7 @@ impl ToolCardAccumulator {
         self.output_summary = Some(output);
         self.is_error = is_error;
         self.images = images;
+        self.images_omitted = images_omitted;
         self.completed_duration_ms =
             Some(peri_time::elapsed_since(self.started_at).as_millis() as u64);
         true
@@ -195,6 +200,7 @@ impl ToolCardAccumulator {
             completed_duration_ms: None,
             claimed_by_subagent: false,
             images: Vec::new(),
+            images_omitted: 0,
         }
     }
 }
@@ -279,17 +285,15 @@ impl SubAgentAccumulator {
         self.bound_preview();
     }
 
-    pub(super) fn end_tool(
-        &mut self,
-        tool_id: &str,
-        output: String,
-        is_error: bool,
-        images: Vec<crate::kit::image_view::UploadId>,
-    ) -> bool {
+    /// 子 Agent 工具结束：不接收图片，子 Agent 预览不渲染工具结果图片
+    /// （只有顶层工具卡有图片预算与绘制钩子）。
+    pub(super) fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
         if !self.is_running {
             return false;
         }
-        let ended = self.child_turn.end_tool(tool_id, output, is_error, images);
+        let ended = self
+            .child_turn
+            .end_tool(tool_id, output, is_error, Vec::new(), 0);
         if ended {
             self.cached_view_model.replace(None);
             self.bound_preview();

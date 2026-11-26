@@ -25,6 +25,7 @@ use crate::kit::tui_render_unit::{
 fn tool(id: &str, fold: FoldState) -> TuiRenderUnit {
     let mut card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: id.to_string(),
         tool_name: "Read".to_string(),
         input_summary: format!("{id}.rs"),

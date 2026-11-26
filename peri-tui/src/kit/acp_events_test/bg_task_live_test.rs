@@ -528,6 +528,7 @@ fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
         "child-upgrade",
         &TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: started.tool_id.clone(),
             output_summary: "workspace".into(),
             is_error: false,
@@ -815,6 +816,7 @@ fn test_bg_tool_sync_preserves_event_order() {
         "bg-order",
         &TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-1".into(),
             output_summary: "done".into(),
             is_error: false,

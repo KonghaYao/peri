@@ -37,6 +37,7 @@ fn test_edit_with_diff_keeps_diff_in_group() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "e1".into(),
             output_summary: diff_text.into(),
             is_error: false,
@@ -60,6 +61,7 @@ fn test_edit_with_diff_keeps_diff_in_group() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "r1".into(),
             output_summary: "ok".into(),
             is_error: false,
@@ -134,6 +136,7 @@ fn test_edit_plain_output_same_group_across_archive() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "e1".into(),
             output_summary: "Replaced text in src/x.rs".into(),
             is_error: false,
@@ -156,6 +159,7 @@ fn test_edit_plain_output_same_group_across_archive() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "e2".into(),
             output_summary: "Wrote 3 lines".into(),
             is_error: false,
@@ -240,6 +244,7 @@ fn test_edit_with_real_summary_diff_keeps_diff_in_group() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "s1".into(),
             output_summary: "Added 2 lines to src/s.rs".into(),
             is_error: false,
@@ -279,6 +284,7 @@ fn test_edit_with_real_summary_diff_keeps_diff_in_group() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "s2".into(),
             output_summary: "line1\nline2".into(),
             is_error: false,
@@ -324,6 +330,7 @@ fn test_edit_same_line_replacement_with_count_in_group() {
             &mut state,
             &AcpEventData::ToolEnded(TuiToolEnded {
                 images: Vec::new(),
+                images_omitted: 0,
                 tool_id: id.into(),
                 output_summary: output.into(),
                 is_error: false,

@@ -238,6 +238,7 @@ fn oversized_child_input_marks_unknown_then_small_success_restores_semantics() {
         &mut state,
         &crate::kit::stream_data::TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "restore".into(),
             output_summary: "saved".into(),
             is_error: false,

@@ -10,7 +10,7 @@ use peri_acp_types::event::{
     BackgroundTaskResult, CompactStrategy, CompactTrigger, ExecutorEvent, TodoEntry, TodoStatus,
 };
 use peri_acp_types::messages::{BaseMessage, MessageId};
-use peri_acp_types::tools::ToolDefinition;
+use peri_acp_types::tools::{ToolDefinition, ToolImage};
 use peri_acp_types::PeriCaps;
 use peri_model::{StopReason, TokenUsage};
 #[test]
@@ -581,6 +581,121 @@ fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
         },
         other => panic!("预期 AgentThoughtChunk，实际: {other:?}"),
     }
+}
+
+/// 展示面图片字节预算：单张 ≤ 256 KiB、单条合计 ≤ 384 KiB；超限图片不进
+/// `content`，省略数写进 `_meta.peri.toolImagesOmitted`，文本占位不变。
+#[test]
+fn test_tool_end_images_follow_display_byte_budget() {
+    let text = "Image read\n[image: image/png]";
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-budget".to_string(),
+        name: "Read".to_string(),
+        output: text.to_string(),
+        is_error: false,
+        images: vec![
+            ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "A".repeat(192 * 1024),
+            },
+            ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "B".repeat(192 * 1024),
+            },
+            // 单张超上限：省略。
+            ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "C".repeat(256 * 1024 + 1),
+            },
+        ],
+        source_agent_id: None,
+        subagent_failure: None,
+    };
+    let mapped = crate::event::mapper::map_event(&event, 200_000, &PeriCaps::default());
+    let SessionUpdate::ToolCallUpdate(update) = &mapped[0].updates[0] else {
+        panic!("expected ToolCallUpdate");
+    };
+    let content = update.fields.content.as_deref().expect("content");
+    let images: Vec<_> = content
+        .iter()
+        .filter_map(|block| match block {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Image(image) => Some(image),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 2, "合计 384 KiB 的两张图仍在展示预算内");
+    assert_eq!(
+        update
+            .meta
+            .as_ref()
+            .and_then(|meta| meta["peri"].get(peri_acp_types::tools::TOOL_IMAGES_OMITTED_META_KEY)),
+        Some(&serde_json::json!(1)),
+        "单张超限必须报告省略数"
+    );
+    assert_eq!(
+        tool_call_output_text(&update.fields),
+        text,
+        "文本占位 `[image: mime]` 不受展示预算影响"
+    );
+
+    let wire = serde_json::to_vec(&mapped[0].updates[0]).expect("serialize");
+    assert!(
+        wire.len() < crate::host::live_delivery::MAX_BUFFERED_BYTES,
+        "最大预算图片的 update 序列化后必须小于实时缓冲上限，实际 {} 字节",
+        wire.len()
+    );
+}
+
+/// 合计预算：第二张（150 KiB）加上第一张（250 KiB）超过 384 KiB 时省略，
+/// 只按张预算裁剪不会触发。
+#[test]
+fn test_tool_end_images_respect_cumulative_display_budget() {
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-cumulative".to_string(),
+        name: "Read".to_string(),
+        output: "Image read".to_string(),
+        is_error: false,
+        images: vec![
+            ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "A".repeat(250 * 1024),
+            },
+            ToolImage {
+                mime_type: "image/png".to_string(),
+                data: "B".repeat(150 * 1024),
+            },
+        ],
+        source_agent_id: None,
+        subagent_failure: None,
+    };
+    let mapped = crate::event::mapper::map_event(&event, 200_000, &PeriCaps::default());
+    let SessionUpdate::ToolCallUpdate(update) = &mapped[0].updates[0] else {
+        panic!("expected ToolCallUpdate");
+    };
+    let content = update.fields.content.as_deref().expect("content");
+    let image_count = content
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                ToolCallContent::Content(content)
+                    if matches!(&content.content, ContentBlock::Image(_))
+            )
+        })
+        .count();
+    assert_eq!(image_count, 1, "累计超过 384 KiB 的图片省略");
+    assert_eq!(
+        update
+            .meta
+            .as_ref()
+            .and_then(|meta| meta["peri"].get(peri_acp_types::tools::TOOL_IMAGES_OMITTED_META_KEY)),
+        Some(&serde_json::json!(1))
+    );
 }
 
 include!("mapper_test_part2_test.rs");

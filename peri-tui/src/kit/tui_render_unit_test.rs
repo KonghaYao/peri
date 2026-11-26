@@ -131,6 +131,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
     assert_eq!(assistant.content_hash(), 22);
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t1".into(),
         tool_name: "Bash".into(),
         input_summary: "ls".into(),
@@ -469,6 +470,7 @@ fn test_assistant_bubble_partial_eq_ignores_content_hash_but_keeps_message_id() 
 fn test_tool_card_partial_eq_ignores_content_hash() {
     let a = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tc-1".into(),
         tool_name: "Edit".into(),
         input_summary: "path: foo".into(),
@@ -507,6 +509,7 @@ fn test_tool_card_hash_includes_diff() {
     let mk = |diff: Option<TuiDiffBlock>| {
         let mut card = TuiToolCard {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tc-1".into(),
             tool_name: "Edit".into(),
             input_summary: "src/main.rs".into(),
@@ -930,6 +933,7 @@ fn keyed_bubble(message_id: Option<&str>) -> TuiAssistantBubble {
 fn keyed_tool() -> TuiToolCard {
     let mut tool = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tool-1".into(),
         tool_name: "Bash".into(),
         input_summary: "echo hi".into(),

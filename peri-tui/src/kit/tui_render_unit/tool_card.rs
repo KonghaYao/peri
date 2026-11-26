@@ -117,6 +117,8 @@ pub struct TuiToolCard {
     pub tool_calls_count: usize,
     /// 工具结果携带的图片身份（摘要 + 媒体）；base64 只在 `image_view` 上传仓库。
     pub images: Vec<crate::kit::image_view::UploadId>,
+    /// 服务端展示预算省略的图片数：渲染「图片过大未展示」meta 行。
+    pub images_omitted: u32,
 }
 
 impl TuiToolCard {
@@ -159,6 +161,9 @@ impl TuiToolCard {
         if !self.images.is_empty() {
             h = super::hash::tui_hash_combine(h, self.image_code());
         }
+        if self.images_omitted > 0 {
+            h = super::hash::tui_hash_combine(h, u64::from(self.images_omitted));
+        }
         self.content_hash = h;
     }
 
@@ -189,7 +194,7 @@ impl TuiToolCard {
     }
 }
 
-tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified, images);
+tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified, images, images_omitted);
 
 #[cfg(test)]
 #[path = "tool_card_test.rs"]

@@ -197,6 +197,13 @@ pub struct ToolImage {
     pub data: String,
 }
 
+/// `_meta.peri` 下「因展示体积预算被省略的工具图片数」的键。
+///
+/// 展示面（ACP 投影）对超限图片只保留 `[image: mime]` 文本；该计数让客户端
+/// 渲染明确的「图片过大未展示」meta 行，而不是静默少一张图。生产方是
+/// `peri-acp` 的 `tool_projection`，消费方是 TUI 的事件解码。
+pub const TOOL_IMAGES_OMITTED_META_KEY: &str = "toolImagesOmitted";
+
 /// Tool text plus optional execution evidence and typed result outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {

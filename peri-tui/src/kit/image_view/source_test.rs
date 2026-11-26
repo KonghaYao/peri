@@ -23,13 +23,32 @@ fn upload_id_pins_media_type() {
 
 #[test]
 fn local_paths_are_resolved_and_remote_rejected() {
-    assert_eq!(
-        resolve_local_path("/tmp/a.png"),
-        Some(std::path::PathBuf::from("/tmp/a.png"))
+    // 绝对路径按**平台**规则解析：Windows 上 `/tmp/a.png` 是「有根无盘符」，
+    // 会挂到当前盘符根目录。断言解析结果的后缀而不是 POSIX 字面量，
+    // 否则 Unix 通过、Windows 失败（PR #603 首轮 CI 复现）。
+    let parsed = resolve_local_path("/tmp/a.png").expect("绝对路径应被解析");
+    assert!(
+        parsed.is_absolute(),
+        "解析结果必须仍是绝对路径：{}",
+        parsed.display()
     );
-    assert_eq!(
-        resolve_local_path("file:///tmp/a%20b.png"),
-        Some(std::path::PathBuf::from("/tmp/a b.png"))
+    assert!(
+        parsed
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with("tmp/a.png"),
+        "绝对路径只按平台规则解析：{}",
+        parsed.display()
+    );
+
+    let from_uri = resolve_local_path("file:///tmp/a%20b.png").expect("file URI 应被解析");
+    assert!(
+        from_uri
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with("tmp/a b.png"),
+        "file:// 去 scheme + percent decode：{}",
+        from_uri.display()
     );
     assert!(resolve_local_path("https://example.com/a.png").is_none());
     assert!(resolve_local_path("javascript:alert(1)").is_none());

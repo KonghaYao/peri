@@ -224,6 +224,8 @@ fn render_tool_plan(
         spans.extend(detail.spans);
         lines.push(Line::from(spans));
     }
+    // 工具返回的图片属于结果本身：错误卡片同样展示（错误文本只占错误 preview 行）。
+    push_tool_image_lines(data, grid, inline_pixels, &mut lines, image_lines);
     if data.is_error {
         if data.fold != FoldState::Collapsed {
             let width = grid.process_content_width();
@@ -242,7 +244,6 @@ fn render_tool_plan(
             lines.push(Line::from(spans));
         }
     }
-    push_tool_image_lines(data, grid, inline_pixels, &mut lines, image_lines);
     lines
 }
 
@@ -250,8 +251,8 @@ fn render_tool_plan(
 /// 图片是 agent 回复的一部分，默认折叠也必须可见）。
 ///
 /// 预算：单图 [`TOOL_IMAGE_ROWS`] 行、合计 [`TOOL_IMAGE_TOTAL_ROWS`] 行、最多
-/// [`TOOL_IMAGE_MAX`] 张。编码中/失败不占行（展开输出里已有 `[image: mime]`
-/// 文本）；超出数量或行预算的图片降级为 meta 行。
+/// [`TOOL_IMAGE_MAX`] 张。编码中不占行（展开输出里已有 `[image: mime]` 文本）；
+/// 编码失败、超出数量/行预算、以及服务端展示预算省略的图片降级为 meta 行。
 fn push_tool_image_lines(
     data: &TuiToolCard,
     grid: &GridSpec,
@@ -262,7 +263,7 @@ fn push_tool_image_lines(
     use crate::kit::image_view::{Budget, ImageSource};
     use crate::kit::inline_image::{TOOL_IMAGE_MAX, TOOL_IMAGE_ROWS, TOOL_IMAGE_TOTAL_ROWS};
 
-    if !inline_pixels || data.images.is_empty() {
+    if !inline_pixels || (data.images.is_empty() && data.images_omitted == 0) {
         return;
     }
     let sem = THEME_ATOM.state().read().semantic;
@@ -300,10 +301,13 @@ fn push_tool_image_lines(
             rows_left = rows_left.saturating_sub(placement.rows);
             continue;
         }
-        let pending_or_failed = index < TOOL_IMAGE_MAX
-            && crate::kit::image_view::lookup(&ImageSource::Uploaded(*id), budget).is_none();
-        if pending_or_failed {
-            // 编码中/失败：输出文本已带 `[image: mime]`，不插入会跳变的占位。
+        if index < TOOL_IMAGE_MAX
+            && crate::kit::image_view::lookup(&ImageSource::Uploaded(*id), budget).is_none()
+            && crate::kit::image_view::upload_available(*id)
+            && !crate::kit::image_view::failed(&ImageSource::Uploaded(*id), budget)
+        {
+            // 编码中：输出文本已带 `[image: mime]`，不插入会跳变的占位。
+            // 编码失败、载荷已缺失、行预算不足会落到下面的 meta 行，明确告知不可见。
             continue;
         }
         let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.tool);
@@ -320,6 +324,20 @@ fn push_tool_image_lines(
                         fluent_bundle::FluentValue::from(id.media.mime()),
                     ),
                 ],
+            ),
+            Style::default().fg(sem.text.dim),
+        ));
+        lines.push(Line::from(spans));
+    }
+    if data.images_omitted > 0 {
+        let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.tool);
+        spans.push(Span::styled(
+            i18n::tr_args(
+                "tool-image-omitted",
+                &[(
+                    "count".to_string(),
+                    fluent_bundle::FluentValue::from(u64::from(data.images_omitted)),
+                )],
             ),
             Style::default().fg(sem.text.dim),
         ));
@@ -719,6 +737,7 @@ mod tests {
         };
         let card = TuiToolCard {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "todo".into(),
             tool_name: "TodoWrite".into(),
             input_summary: String::new(),

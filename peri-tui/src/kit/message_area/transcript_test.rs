@@ -673,6 +673,7 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
 fn tool_entry(name: &str) -> TuiRenderUnit {
     TuiRenderUnit::TuiToolCard(TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: format!("tc-{name}"),
         tool_name: name.to_string(),
         input_summary: name.to_string(),

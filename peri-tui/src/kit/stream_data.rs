@@ -68,6 +68,11 @@ pub struct TuiToolEnded {
     pub is_error: bool,
     /// 工具结果同时携带的图片（ACP 标准 content 块）。旧事件缺省为空。
     pub images: Vec<TuiToolImage>,
+    /// 服务端展示预算省略的图片数（`_meta.peri.toolImagesOmitted`）。
+    ///
+    /// 载荷本身从未到达客户端（`content` 里没有这些块），只有计数；工具卡据此
+    /// 显示「图片过大未展示」meta 行。旧服务端缺省 0（没有省略）。
+    pub images_omitted: u32,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

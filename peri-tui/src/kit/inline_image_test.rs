@@ -32,6 +32,7 @@ fn tool_card(images: Vec<crate::kit::image_view::UploadId>) -> TuiRenderUnit {
         fold: crate::kit::tui_render_unit::FoldState::Collapsed,
         user_modified: false,
         images,
+        images_omitted: 0,
         content_hash: 0,
         tool_calls_count: 0,
     })

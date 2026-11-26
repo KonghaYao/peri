@@ -193,6 +193,46 @@ fn byte_overflow_keeps_buffer_bounded() {
     );
 }
 
+/// 单条更新自身超过缓冲字节上限：只丢这一条，不得从队首连环弹出把整批清空。
+#[test]
+fn oversized_single_update_drops_only_itself() {
+    let live = LiveDelivery::new();
+    let boundary = live.begin("s1");
+    assert!(matches!(
+        live.publish("s1", text_payload("kept-one")),
+        PublishOutcome::Buffered
+    ));
+    assert!(matches!(
+        live.publish("s1", text_payload("kept-two")),
+        PublishOutcome::Buffered
+    ));
+
+    let oversized = "x".repeat(MAX_BUFFERED_BYTES + 1);
+    assert!(matches!(
+        live.publish("s1", text_payload(&oversized)),
+        PublishOutcome::Overflow
+    ));
+    assert_eq!(
+        live.buffered_len("s1"),
+        2,
+        "超大单条不得挤掉已缓冲的其余更新"
+    );
+    assert!(live.buffered_bytes("s1") <= MAX_BUFFERED_BYTES);
+
+    let pending = live.resume_and_take("s1");
+    assert_eq!(pending.len(), 2);
+    assert_eq!(
+        delivery(&pending[0])["streamId"],
+        boundary.stream_id.as_str()
+    );
+    assert_eq!(
+        delivery(&pending[0])["eventSeq"],
+        "2",
+        "被丢弃的超大更新占掉序号 1；客户端据 afterSeq=0 后的缺口进入 detached"
+    );
+    assert_eq!(delivery(&pending[1])["eventSeq"], "3");
+}
+
 #[test]
 fn absent_stream_sends_payload_unchanged() {
     let live = LiveDelivery::new();
@@ -277,7 +317,7 @@ fn publish_overflow_only_abort_exposes_gap() {
     assert_eq!(delivery(&first)["eventSeq"], "1");
 
     let candidate = live.begin_candidate("s1");
-    // 单条事件自身超过字节上限：入缓冲后被同一上限立即挤出，候选 buffer 为空、dropped=1。
+    // 单条事件自身超过字节上限：不入缓冲，只记缺口（候选 buffer 为空、dropped=1）。
     let huge = "x".repeat(MAX_BUFFERED_BYTES);
     assert!(matches!(
         live.publish("s1", text_payload(&huge)),

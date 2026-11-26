@@ -19,6 +19,7 @@ fn source(name: &str) -> SourceRef {
         source: name.to_string(),
         cols: 10,
         max_rows: 2,
+        cell_px: (10, 20),
     }
 }
 
@@ -169,6 +170,48 @@ fn failed_result_is_cached_and_falls_back() {
     assert_eq!(cache.bytes, 0, "失败条目不占协议缓存字节");
 }
 
+/// m10：瞬态失败（线程 spawn 失败 / 解码 panic）不得永久缓存为 Failed——
+/// 先回 Pending 并唤醒 effect 重试，到上限后才固定降级。
+#[test]
+fn transient_failures_retry_then_cache_failed() {
+    let mut cache = Cache::default();
+    let src = source("a.png");
+    let key = key("a.png", 1, 10, 10, 2, (10, 20));
+    let id = spawned(cache.begin(src.clone(), key.clone()));
+    assert_eq!(
+        cache.complete(&key, id, Err("spawn")),
+        CompleteOutcome::Retrying
+    );
+    assert!(
+        matches!(cache.lookup(src.clone()), Some(ImageState::Pending)),
+        "spawn 失败后条目必须留在 Pending"
+    );
+    assert_eq!(cache.revision, 1, "重试也要唤醒渲染 effect");
+
+    let id = spawned(cache.begin(src.clone(), key.clone()));
+    assert_eq!(
+        cache.complete(&key, id, Err("panic")),
+        CompleteOutcome::Updated
+    );
+    assert!(
+        matches!(cache.lookup(src.clone()), Some(ImageState::Failed("panic"))),
+        "重试上限后固定失败，避免无限起线程"
+    );
+    assert!(
+        matches!(cache.begin(src, key), BeginOutcome::Existing),
+        "Failed 后不再派发"
+    );
+}
+
+/// m9：上传载荷复用 [`MAX_IMAGE_BYTES`] 上限，超限在 base64 解码前快速失败。
+#[test]
+fn oversized_upload_fails_fast_before_decode() {
+    let max_payload_chars = MAX_IMAGE_BYTES.div_ceil(3) as usize * 4;
+    let oversized = "A".repeat(max_payload_chars + 1);
+    assert_eq!(decode_upload(&oversized), Err("too-large"));
+    assert_eq!(decode_upload("!!!!"), Err("base64"), "上限内保持原解码错误");
+}
+
 #[test]
 fn duplicate_requests_share_one_pending_entry() {
     let mut cache = Cache::default();
@@ -232,6 +275,7 @@ fn upload_digest_collision_drops_old_payload_and_epoch() {
     let epoch = cache.upload_epoch;
     cache.retain_upload(id, Arc::from("AAAA"));
     // 同一摘要（人为碰撞）不同载荷：旧值不可信，epoch 递增使旧编码不可达。
+    // 注意这只保证旧编码失效：视图模型只带摘要，旧气泡仍可能显示新载荷。
     cache.retain_upload(id, Arc::from("ZZZZ"));
     assert_eq!(cache.upload(id.digest).as_deref(), Some("ZZZZ"));
     assert_eq!(cache.upload_epoch, epoch + 1, "碰撞必须递增 epoch");
@@ -370,6 +414,92 @@ fn failed_state_is_visible_to_layout() {
         &ImageSource::File("/definitely/missing.png"),
         budget
     ));
+}
+
+/// m1：上传 alias 键含媒体类型——同一摘要按不同 mime 解码是不同编码。
+#[test]
+fn upload_alias_key_includes_media_type() {
+    let budget = Budget::new(10, 2);
+    let png = UploadId::from_payload("AAAA", "image/png");
+    let jpeg = UploadId::from_payload("AAAA", "image/jpeg");
+    assert_ne!(
+        source_ref(&ImageSource::Uploaded(png), 0, budget, (10, 20)),
+        source_ref(&ImageSource::Uploaded(jpeg), 0, budget, (10, 20)),
+        "同一摘要不同媒体类型不能共用 alias"
+    );
+}
+
+/// m5：字体/单元格尺寸变化后 alias 指向新 `cell_px` 的键，旧几何不可再被查到。
+#[test]
+fn cell_px_change_points_alias_at_new_key() {
+    let mut cache = Cache {
+        observed_cell_px: Some((10, 20)),
+        ..Cache::default()
+    };
+    let old_key = key("a.png", 1, 10, 10, 2, (10, 20));
+    let old_src = source("a.png");
+    let id = spawned(cache.begin(old_src.clone(), old_key.clone()));
+    assert_eq!(
+        cache.complete(&old_key, id, Ok(ready_image())),
+        CompleteOutcome::Updated
+    );
+    assert!(matches!(cache.lookup(old_src), Some(ImageState::Ready(_))));
+
+    // 字体变大：新键在途时查表只看到 Pending，不会回落旧几何。
+    let new_src = SourceRef::File {
+        source: "a.png".to_string(),
+        cols: 10,
+        max_rows: 2,
+        cell_px: (20, 40),
+    };
+    let new_key = key("a.png", 1, 10, 10, 2, (20, 40));
+    let id = spawned(cache.begin(new_src.clone(), new_key.clone()));
+    assert!(
+        matches!(cache.lookup(new_src), Some(ImageState::Pending)),
+        "新 cell_px 的键在途时不得返回旧几何"
+    );
+    assert_eq!(
+        cache.complete(&new_key, id, Ok(ready_image())),
+        CompleteOutcome::Updated
+    );
+}
+
+/// m5：`lookup` 取 effect 边界最近观测到的 `cell_px`；同一图片在两种单元格尺寸
+/// 下得到不同几何，变化后不会长期用旧值。
+#[test]
+#[serial_test::serial]
+fn observed_cell_px_change_reencodes_geometry() {
+    let (_dir, source_path) = png_file(200, 100);
+    let budget = Budget::new(40, 6);
+    assert!(request_until_ready(
+        ImageSource::File(&source_path),
+        budget,
+        Duration::from_secs(10)
+    ));
+    let old = lookup(&ImageSource::File(&source_path), budget).expect("first ready");
+    assert_eq!((old.cols, old.rows), (24, 6), "10×20 单元格的铺满几何");
+
+    // 模拟字体放大：effect 边界观测到 20×40，请求换新键。
+    request(
+        ImageSource::File(&source_path),
+        budget,
+        &kitty_caps(),
+        Some((20, 40)),
+    );
+    if let Some(placement) = lookup(&ImageSource::File(&source_path), budget) {
+        assert_ne!(
+            (placement.cols, placement.rows),
+            (24, 6),
+            "不得继续返回旧 cell_px 的几何"
+        );
+    }
+    assert!(wait_ready(
+        ImageSource::File(&source_path),
+        budget,
+        Duration::from_secs(10)
+    ));
+    let new = lookup(&ImageSource::File(&source_path), budget).expect("second ready");
+    assert_eq!((new.cols, new.rows), (20, 5), "20×40 单元格的铺满几何");
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

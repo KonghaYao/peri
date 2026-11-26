@@ -216,6 +216,7 @@ fn test_fold_pass_tool_grouped_across_lifecycle() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "t1".into(),
             output_summary: "ok".into(),
             is_error: false,
@@ -248,6 +249,7 @@ fn test_fold_pass_tool_grouped_across_lifecycle() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "t2".into(),
             output_summary: "exit 1".into(),
             is_error: true,
@@ -430,6 +432,7 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "t1".into(),
             output_summary: "Error: something went wrong".into(),
             is_error: true,
@@ -660,6 +663,7 @@ fn test_fold_pass_group_manual_override_survives_rebuild() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "t1".into(),
             output_summary: "done".into(),
             is_error: false,

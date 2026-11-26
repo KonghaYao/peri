@@ -385,6 +385,45 @@ async fn test_session_update_tool_call_update_carries_standard_image_content() {
     shutdown.cancel();
 }
 
+/// 服务端展示预算省略的图片数（`_meta.peri.toolImagesOmitted`）进入事件；
+/// 旧服务端缺省为 0。
+#[tokio::test]
+async fn test_session_update_tool_call_update_carries_omitted_image_count() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: "s1".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-img-omitted",
+                    "rawOutput": "Image read\n[image: image/png]",
+                    "status": "completed",
+                    "content": [
+                        {"type": "content", "content": {"type": "text", "text": "Image read"}}
+                    ],
+                    "_meta": {"peri": {"toolImagesOmitted": 2}}
+                }
+            }),
+        })
+        .await
+        .expect("omitted image count notification must be delivered");
+
+    let ev = bridge_rx.recv().await.expect("expected one event");
+    match ev.event {
+        AcpEventData::ToolEnded(te) => {
+            assert_eq!(te.tool_id, "tc-img-omitted");
+            assert_eq!(te.images_omitted, 2, "省略计数必须透传到事件");
+            assert!(te.images.is_empty(), "被省略的图片没有载荷");
+        }
+        other => panic!("expected ToolEnded, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 /// 验证 tool_call_update 的 fields 嵌套格式（fallback 兼容路径）：
 /// rawOutput/status 在 fields 子对象内。
 #[tokio::test]

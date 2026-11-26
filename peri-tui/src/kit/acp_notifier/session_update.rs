@@ -293,6 +293,7 @@ pub(super) fn decode_stream_update_with(
                     output_summary,
                     is_error,
                     images: tool_update_images(update),
+                    images_omitted: tool_update_images_omitted(update),
                     agent_id,
                 };
                 Some(AcpEventData::ToolEnded(tool_ended))
@@ -366,6 +367,20 @@ pub(super) fn decode_stream_update_with(
         _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)
     };
     StreamUpdate { event, token_count }
+}
+
+/// 提取 `_meta.peri.toolImagesOmitted`：服务端展示预算省略的图片数。
+///
+/// 超限图片不在 `content` 里，只有这个计数；缺省（旧服务端/无省略）按 0 处理。
+fn tool_update_images_omitted(update: &serde_json::Value) -> u32 {
+    update
+        .get("_meta")
+        .or_else(|| update.get("meta"))
+        .or_else(|| update.get("fields").and_then(|f| f.get("_meta")))
+        .and_then(|meta| meta.get("peri"))
+        .and_then(|peri| peri.get(peri_acp_types::tools::TOOL_IMAGES_OMITTED_META_KEY))
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// 提取 `ToolCallUpdateFields.content` 中的标准 image 块（MCP/ACP 透传）。

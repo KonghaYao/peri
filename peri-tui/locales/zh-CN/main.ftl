@@ -852,6 +852,9 @@ attachment-image-name = 图片 { $index }
 user-attachment-image-meta = [图片] { $name } · { $size }
 # 超出展示预算的工具结果图片：$index 从 1 起，$mime 为媒体类型。
 tool-image-meta = [图片 { $index }] { $mime }
+# 服务端为控制展示体积而未下发的工具结果图片：$count 为省略张数，
+# 文本占位 `[image: mime]` 仍保留在工具输出里。
+tool-image-omitted = [图片过大未展示：{ $count } 张]
 
 # ---- 图片预览浮层（image-p0-p1-spec §7 T7）----
 # 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、

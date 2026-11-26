@@ -213,11 +213,12 @@ impl CurrentTurn {
         output: String,
         is_error: bool,
         images: Vec<crate::kit::image_view::UploadId>,
+        images_omitted: u32,
     ) -> bool {
         let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) else {
             return false;
         };
-        if !t.finish(output, is_error, images) {
+        if !t.finish(output, is_error, images, images_omitted) {
             return false;
         }
         self.invalidate_cache();

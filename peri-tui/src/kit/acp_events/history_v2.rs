@@ -778,6 +778,7 @@ mod tests {
             user_modified: false,
             tool_calls_count: 0,
             images: Vec::new(),
+            images_omitted: 0,
             content_hash: 0,
         })
     }

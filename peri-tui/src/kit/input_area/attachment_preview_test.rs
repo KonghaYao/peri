@@ -265,6 +265,54 @@ fn unsupported_protocol_keeps_text_only() {
     assert!(!buffer_has_protocol_marker(&buf), "不得写入任何图片协议");
 }
 
+/// M2 回归：并发解码槽位满时预览请求被 Deferred；槽位释放（bump revision）后
+/// effect 必须重试并最终 Ready。
+///
+/// 关键断言在**同一次** `render_frames(frames = 2)` 内：持久组件树的 effect 只在
+/// deps 变化时重跑，只有 deps 含 `image_view::revision()` 才会在第二帧重试——
+/// 否则 `lookup` 无条目（Request 从未登记），预览会一直停在文本降级。
+#[test]
+#[serial]
+fn deferred_preview_retries_after_slot_release() {
+    reset_globals();
+    let _caps = CapsGuard::kitty();
+    push_attachment("image/png", png_base64(64, 64));
+    let budget = preview_budget(preview_cols(80));
+    let source = ImageSource::Uploaded(
+        target(&PENDING_ATTACHMENTS.state().read())
+            .expect("图片附件")
+            .upload_id(),
+    );
+
+    // 第一帧请求被暂缓，并在同一帧内模拟槽位释放（bump revision）。
+    crate::kit::image_view::defer_once_and_signal_release_for_test();
+    let buf = render(25, 2);
+    assert!(
+        crate::kit::image_view::has_pending(source, budget),
+        "revision 变化必须让 effect 在下一帧重试请求：只有第二帧重新 request，才会登记 Pending 条目"
+    );
+    assert_eq!(
+        composer_top(&buf),
+        PREVIEW_ROWS,
+        "重试仍在编码中：保持 Pending 预留高度"
+    );
+
+    // 最终 Ready，并画出预览。
+    assert!(
+        crate::kit::image_view::wait_ready(source, budget, Duration::from_secs(10)),
+        "重试后的编码应最终 Ready"
+    );
+    let preview = Rect::new(0, 0, 80, PREVIEW_ROWS);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = render(25, 1);
+    while !has_protocol_marker(&buf, preview) {
+        assert!(Instant::now() < deadline, "Ready 后预览应出现");
+        std::thread::sleep(Duration::from_millis(10));
+        buf = render(25, 1);
+    }
+    crate::kit::image_view::release_all_uploads();
+}
+
 /// 单行可见文本：按字符显示宽度推进，跳过双宽字符的续接 cell（否则 CJK 会被
 /// 拆成「排 队 一」）。
 fn buffer_text(buf: &Buffer, y: u16) -> String {

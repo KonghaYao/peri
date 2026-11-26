@@ -68,10 +68,18 @@ impl LiveStream {
     }
 
     /// 缓冲一条更新；超过条数或字节上限时丢最旧并记入缺口。
+    ///
+    /// 单条更新本身就超过字节上限时**只丢这一条**：把它入队再按字节上限处理会从
+    /// 队首连环弹出，把暂停期已经缓冲的合法更新整批清空——一条超大事件不该连带
+    /// 丢掉其它事件。缺口统一记入 `dropped`，客户端仍能从序号跳变进入 detached。
     fn buffer(&mut self, payload: Value) -> PublishOutcome {
         let bytes = serde_json::to_vec(&payload)
             .map(|bytes| bytes.len())
             .unwrap_or_default();
+        if bytes > MAX_BUFFERED_BYTES {
+            self.dropped = self.dropped.saturating_add(1);
+            return PublishOutcome::Overflow;
+        }
         self.buffer.push_back(BufferedUpdate { payload, bytes });
         self.buffered_bytes = self.buffered_bytes.saturating_add(bytes);
         let mut overflowed = false;

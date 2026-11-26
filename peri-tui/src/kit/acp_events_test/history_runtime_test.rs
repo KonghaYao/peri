@@ -138,6 +138,7 @@ fn live_tool_still_runs_after_history_replay() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "live-tool".into(),
             output_summary: "live result".into(),
             is_error: false,

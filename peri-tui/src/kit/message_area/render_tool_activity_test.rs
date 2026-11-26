@@ -481,6 +481,7 @@ fn skill_card_hides_raw_skill_output() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "skill-1".into(),
         tool_name: "Skill".into(),
         input_summary: "skill: using-superpowers".into(),
@@ -515,6 +516,7 @@ fn todo_card_renders_progress_and_changes_without_raw_output() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "todo-1".into(),
         tool_name: "TodoWrite".into(),
         input_summary: "todos: 2".into(),
@@ -560,6 +562,7 @@ fn todo_card_collapsed_hides_change_details() {
     crate::i18n::init(Some("en"));
     let card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "todo-collapsed".into(),
         tool_name: "TodoWrite".into(),
         input_summary: "todos: 1".into(),
@@ -598,6 +601,7 @@ fn semantic_cards_respect_narrow_widths() {
         let grid = GridSpec::grid_for(width);
         let card = TuiToolCard {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: format!("todo-{width}"),
             tool_name: "TodoWrite".into(),
             input_summary: String::new(),
@@ -993,6 +997,7 @@ fn tool_card_with_images(
         fold,
         user_modified: false,
         images,
+        images_omitted: 0,
         content_hash: 0,
         tool_calls_count: 0,
     }
@@ -1072,6 +1077,114 @@ fn test_tool_card_images_beyond_budget_fall_back_to_meta_rows() {
     assert!(
         text.contains("[Image 3] image/png"),
         "超出预算的图片降级为 meta 行：{text:?}"
+    );
+    crate::kit::image_view::release_all_uploads();
+}
+
+/// M1：服务端展示预算省略的图片没有载荷，只有计数——卡片必须给出明确 meta 行，
+/// 不能静默少一张图。
+#[test]
+#[serial_test::serial]
+fn test_tool_card_renders_omitted_images_meta_row() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let mut card = tool_card_with_images(Vec::new(), FoldState::Collapsed);
+    card.images_omitted = 2;
+    card.recompute_hash();
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("Image not shown: 2"),
+        "省略图片必须有明确 meta 行：{text:?}"
+    );
+}
+
+/// m2：`is_error` 的工具结果同样展示图片——错误卡片只看错误文本会漏掉结果图。
+#[test]
+#[serial_test::serial]
+fn test_tool_card_error_still_renders_result_image() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let id = upload_png(64, 64);
+    let grid = GridSpec::grid_for(80);
+    let cols = u16::try_from(grid.process_content_width()).expect("width fits u16");
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::Uploaded(id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+        std::time::Duration::from_secs(5),
+    ));
+    let mut card = tool_card_with_images(vec![id], FoldState::Collapsed);
+    card.is_error = true;
+    card.recompute_hash();
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (_, _, _, image_lines) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    assert_eq!(image_lines.len(), 1, "错误卡片也要产出内联图片放置");
+    crate::kit::image_view::release_all_uploads();
+}
+
+/// m3：Pending 不占行；编码失败与载荷缺失降级 meta 行。
+#[test]
+#[serial_test::serial]
+fn test_tool_card_pending_skips_but_failed_and_missing_show_meta() {
+    crate::i18n::init(Some("en"));
+    crate::kit::image_view::release_all_uploads();
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+
+    // Pending：载荷在仓库、尚未请求 → 不占行，也不出 meta 行。
+    let pending = upload_png(64, 64);
+    let card = tool_card_with_images(vec![pending], FoldState::Collapsed);
+    let (lines, ..) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    let text = super::all_text(&lines);
+    assert!(
+        !text.contains("[Image 1]"),
+        "Pending 不插入会跳变的占位/meta 行：{text:?}"
+    );
+
+    // Failed：载荷不是图片 → 解码确定性失败 → meta 行。
+    let payload = std::sync::Arc::<str>::from("not-an-image");
+    let failed_id = crate::kit::image_view::UploadId::from_payload(&payload, "image/png");
+    crate::kit::image_view::retain_upload(failed_id, std::sync::Arc::clone(&payload));
+    let cols = u16::try_from(grid.process_content_width()).expect("width fits u16");
+    crate::kit::image_view::request(
+        crate::kit::image_view::ImageSource::Uploaded(failed_id),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+        &crate::kit::terminal_caps::TerminalCaps {
+            graphics: crate::kit::terminal_caps::GraphicsProtocol::Kitty,
+            ..crate::kit::terminal_caps::TerminalCaps::default()
+        },
+        Some((10, 20)),
+    );
+    assert!(
+        !crate::kit::image_view::wait_ready(
+            crate::kit::image_view::ImageSource::Uploaded(failed_id),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::TOOL_IMAGE_ROWS),
+            std::time::Duration::from_secs(5),
+        ),
+        "坏载荷应落入 Failed"
+    );
+    let card = tool_card_with_images(vec![failed_id], FoldState::Collapsed);
+    let (lines, ..) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("[Image 1] image/png"),
+        "编码失败必须给出 meta 行：{text:?}"
+    );
+
+    // 无载荷：摘要未登记 → 永远不会就绪 → meta 行。
+    let missing = crate::kit::image_view::UploadId::from_payload("AAAA", "image/png");
+    let card = tool_card_with_images(vec![missing], FoldState::Collapsed);
+    let (lines, ..) =
+        render::vm_to_lines_cached(&TuiRenderUnit::TuiToolCard(card), &grid, &mut cache, false);
+    let text = super::all_text(&lines);
+    assert!(
+        text.contains("[Image 1] image/png"),
+        "载荷缺失必须给出 meta 行：{text:?}"
     );
     crate::kit::image_view::release_all_uploads();
 }

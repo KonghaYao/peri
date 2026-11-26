@@ -24,12 +24,15 @@ use parking_lot::Mutex;
 use crate::kit::atoms::RENDER_HEARTBEAT;
 use crate::kit::image_preview::{InlineImage, InlineImageEncoder};
 use crate::kit::image_safety::{
-    ImageSafetyError, MAX_CACHE_BYTES, MAX_IMAGE_SIDE, MAX_TOTAL_PIXELS, read_validated_image,
+    ImageSafetyError, MAX_CACHE_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_TOTAL_PIXELS,
+    read_validated_image,
 };
 use crate::kit::terminal_caps::TerminalCaps;
 
 use super::sizing::{self, Budget, Fill};
-use super::source::{ImageSource, SourceRef, UploadId, file_version, resolve_local_path};
+use super::source::{
+    ImageSource, SourceRef, UploadId, UploadMedia, file_version, resolve_local_path,
+};
 
 /// 同时解码的后台线程上限；超出的请求留待下一次 effect 重试。
 const MAX_CONCURRENT: usize = 4;
@@ -40,7 +43,21 @@ const MAX_CACHE_ENTRIES: usize = 512;
 /// 别名上限（不同写法指向同一文件版本）。
 const MAX_SOURCE_ALIASES: usize = 1024;
 
-/// 缓存与上传仓库共用的字节预算。
+/// 瞬态失败（线程 spawn 失败 / 解码 panic）的自动重试次数上限。
+///
+/// 这类失败不改变来源内容，下一次请求有机会成功；但无限重试会在每次 revision
+/// 唤醒时反复起线程，所以到上限后固定降级为 `Failed`（文本/meta 兜底）。
+const MAX_TRANSIENT_RETRIES: u8 = 1;
+
+/// 失败原因是否可能由重试恢复（spawn 资源不足、后台线程 panic）。
+fn is_transient_failure(reason: &'static str) -> bool {
+    matches!(reason, "spawn" | "panic")
+}
+
+/// 协议缓存与上传仓库**各自**的字节预算（两套独立账本）。
+///
+/// 两者都取 [`MAX_CACHE_BYTES`]（64 MiB），但互不抵扣：协议缓存驻留编码结果，
+/// 上传仓库驻留 base64 载荷。同时打满时进程峰值为 128 MiB，不是 64 MiB。
 const BYTE_BUDGET: usize = MAX_CACHE_BYTES as usize;
 
 /// 渲染期可用的图片：协议句柄 + 真实占用单元格 + 水平居中偏移。
@@ -95,7 +112,13 @@ enum SourceId {
     },
     Uploaded {
         digest: u64,
-        /// 摘要碰撞时递增，旧编码结果随之失效。
+        /// 媒体类型是上传身份的一部分：同一摘要按不同 mime 解码是不同编码。
+        media: UploadMedia,
+        /// 会话内摘要碰撞（不同载荷、同一 FNV 摘要）时递增，让旧编码结果不可达。
+        ///
+        /// 它**不保证不串图**：视图模型只携带摘要 + mime，碰撞后旧气泡与新气泡
+        /// 指向同一仓库槽位，旧气泡可能显示新载荷；epoch 只保证不会继续画出
+        /// 旧载荷编码出来的尺寸/像素。
         epoch: u64,
     },
 }
@@ -109,6 +132,19 @@ struct Entry {
     state: ImageState,
     last_used: u64,
     bytes: usize,
+    /// 已消耗的瞬态失败重试次数（成功或确定性失败后不再使用）。
+    transient_retries: u8,
+}
+
+impl Entry {
+    fn pending(last_used: u64) -> Self {
+        Self {
+            state: ImageState::Pending,
+            last_used,
+            bytes: 0,
+            transient_retries: 0,
+        }
+    }
 }
 
 struct Upload {
@@ -132,6 +168,8 @@ enum BeginOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompleteOutcome {
     Updated,
+    /// 瞬态失败：槽位已释放，条目留在 Pending 等待下一次 effect 重试。
+    Retrying,
     /// 槽位已释放，但结果被丢弃（来源已指向新版本）。
     Released,
     /// 非当前请求（已被同键新请求取代），无槽位变化。
@@ -159,6 +197,17 @@ struct Cache {
     uploads: HashMap<u64, Upload>,
     upload_bytes: usize,
     upload_epoch: u64,
+    /// effect 边界最近一次观测到的单元格像素尺寸；render 查表用它构造来源键，
+    /// 不在每帧做 ioctl（TUI-RENDER-001）。`None` 表示尚未观测，一律未命中。
+    observed_cell_px: Option<(u16, u16)>,
+    /// 单测钩子：让接下来 N 次 `begin` 返回 `Deferred`（模拟并发槽位已满）。
+    /// 不占用真实 inflight，避免污染其它并发图片测试。
+    #[cfg(test)]
+    defer_requests: usize,
+    /// 单测钩子：暂缓发生后立即 bump revision（模拟槽位在同一帧内释放），
+    /// 让持久组件树的下一帧能观察到 deps 变化并重试。
+    #[cfg(test)]
+    signal_release_after_defer: bool,
 }
 
 impl Cache {
@@ -180,7 +229,25 @@ impl Cache {
     fn begin(&mut self, source: SourceRef, key: CacheKey) -> BeginOutcome {
         self.clock = self.clock.wrapping_add(1);
         let now = self.clock;
-        if !self.entries.contains_key(&key) && self.inflight.len() >= MAX_CONCURRENT {
+        #[cfg(test)]
+        if self.defer_requests > 0 {
+            self.defer_requests -= 1;
+            self.aliases.remove(&source);
+            if self.signal_release_after_defer {
+                self.signal_release_after_defer = false;
+                REVISION.fetch_add(1, Ordering::SeqCst);
+                RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+            }
+            return BeginOutcome::Deferred;
+        }
+        // 完成态条目（Ready/Failed）只更新别名与 LRU；Pending 条目可能来自瞬态
+        // 失败（无在途请求），需要允许重新派发，否则一次 spawn 失败会永久降级。
+        let finished = self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| !matches!(entry.state, ImageState::Pending));
+        let in_flight = self.inflight.contains_key(&key);
+        if !finished && !in_flight && self.inflight.len() >= MAX_CONCURRENT {
             // A stale version must stop drawing even when its replacement cannot start yet.
             self.aliases.remove(&source);
             return BeginOutcome::Deferred;
@@ -202,20 +269,20 @@ impl Cache {
                 self.aliases.remove(&oldest);
             }
         }
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.last_used = now;
+        if finished || in_flight {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.last_used = now;
+            }
             return BeginOutcome::Existing;
+        }
+        match self.entries.get_mut(&key) {
+            Some(entry) => entry.last_used = now,
+            None => {
+                self.entries.insert(key.clone(), Entry::pending(now));
+            }
         }
         self.next_request = self.next_request.wrapping_add(1);
         let id = self.next_request;
-        self.entries.insert(
-            key.clone(),
-            Entry {
-                state: ImageState::Pending,
-                last_used: now,
-                bytes: 0,
-            },
-        );
         self.inflight.insert(key, id);
         self.evict_to_budget(BYTE_BUDGET);
         BeginOutcome::Spawn(id)
@@ -243,10 +310,19 @@ impl Cache {
             return CompleteOutcome::Released;
         };
         self.bytes = self.bytes.saturating_sub(entry.bytes);
+        // 瞬态失败（spawn 失败 / 解码 panic）先回 Pending，让 effect 在下一次
+        // revision 唤醒时重试；到重试上限后才固定为 Failed，避免无限起线程。
+        let retrying = matches!(&result, Err(reason) if is_transient_failure(reason))
+            && entry.transient_retries < MAX_TRANSIENT_RETRIES;
         let (state, bytes) = match result {
             Ok(image) => {
+                entry.transient_retries = 0;
                 let bytes = image.retained_bytes();
                 (ImageState::Ready(image), bytes)
+            }
+            Err(_) if retrying => {
+                entry.transient_retries = entry.transient_retries.saturating_add(1);
+                (ImageState::Pending, 0)
             }
             Err(reason) => (ImageState::Failed(reason), 0),
         };
@@ -257,7 +333,11 @@ impl Cache {
         self.bytes = self.bytes.saturating_add(bytes);
         self.revision = self.revision.wrapping_add(1);
         self.evict_to_budget(BYTE_BUDGET);
-        CompleteOutcome::Updated
+        if retrying {
+            CompleteOutcome::Retrying
+        } else {
+            CompleteOutcome::Updated
+        }
     }
 
     fn evict_to_budget(&mut self, budget: usize) {
@@ -290,7 +370,11 @@ impl Cache {
     }
 
     /// 登记上传载荷。同摘要不同载荷视为碰撞：丢弃旧值并递增 epoch，让旧编码
-    /// 结果不可达（`SourceRef::Uploaded` 含 epoch），避免串图。
+    /// 结果不可达（`SourceRef::Uploaded` 含 epoch）。
+    ///
+    /// 注意 epoch 的边界：它只让**旧编码**失效，不保证不会串图——视图模型只带
+    /// 摘要 + mime，碰撞后仍指向同一仓库槽位，旧气泡可能改为显示新载荷；这是
+    /// 64 位 FNV 进程内身份的成本，不是可依赖的正确性边界。
     fn retain_upload(&mut self, id: UploadId, payload: Arc<str>) {
         self.clock = self.clock.wrapping_add(1);
         let now = self.clock;
@@ -372,18 +456,26 @@ pub(crate) fn revision() -> u64 {
     REVISION.load(Ordering::SeqCst)
 }
 
-fn source_ref(source: &ImageSource<'_>, epoch: u64, budget: Budget) -> SourceRef {
+fn source_ref(
+    source: &ImageSource<'_>,
+    epoch: u64,
+    budget: Budget,
+    cell_px: (u16, u16),
+) -> SourceRef {
     match source {
         ImageSource::File(raw) => SourceRef::File {
             source: raw.trim().to_string(),
             cols: budget.cols,
             max_rows: budget.max_rows,
+            cell_px,
         },
         ImageSource::Uploaded(id) => SourceRef::Uploaded {
             digest: id.digest,
+            media: id.media,
             epoch,
             cols: budget.cols,
             max_rows: budget.max_rows,
+            cell_px,
         },
     }
 }
@@ -396,8 +488,11 @@ pub(crate) fn lookup(source: &ImageSource<'_>, budget: Budget) -> Option<Placeme
         return None;
     }
     let mut guard = cache().lock();
+    let Some(cell_px) = guard.observed_cell_px else {
+        return None;
+    };
     let epoch = guard.upload_epoch;
-    let source = source_ref(source, epoch, budget);
+    let source = source_ref(source, epoch, budget, cell_px);
     let state = guard.lookup(source)?;
     match state {
         ImageState::Ready(image) => Some(Placement {
@@ -410,6 +505,15 @@ pub(crate) fn lookup(source: &ImageSource<'_>, budget: Budget) -> Option<Placeme
     }
 }
 
+/// 上传载荷是否仍在仓库里（render 只读内存状态，无 IO）。
+///
+/// 载荷缺失（会话边界清理 / LRU 淘汰 / 摘要未登记）时图片永远不会就绪，
+/// 调用方应显示降级 meta 行而不是把它当作「编码中」无限等待。
+#[must_use]
+pub(crate) fn upload_available(id: UploadId) -> bool {
+    cache().lock().uploads.contains_key(&id.digest)
+}
+
 /// 编码是否已失败：失败不预留高度，避免永久空白条。
 #[must_use]
 pub(crate) fn failed(source: &ImageSource<'_>, budget: Budget) -> bool {
@@ -417,8 +521,11 @@ pub(crate) fn failed(source: &ImageSource<'_>, budget: Budget) -> bool {
         return false;
     }
     let mut guard = cache().lock();
+    let Some(cell_px) = guard.observed_cell_px else {
+        return false;
+    };
     let epoch = guard.upload_epoch;
-    let source = source_ref(source, epoch, budget);
+    let source = source_ref(source, epoch, budget, cell_px);
     matches!(guard.lookup(source), Some(ImageState::Failed(_)))
 }
 
@@ -442,6 +549,9 @@ pub(crate) fn request(
         .unwrap_or_else(|| encoder.font_size());
     let (source_ref, source_id, upload, path) = {
         let mut guard = cache().lock();
+        // 这里是 effect 边界：记下当帧单元格尺寸，render 查表据此构造键，
+        // 字体/缩放变化后不会再命中旧 cell_px 的编码结果。
+        guard.observed_cell_px = Some(cell_px);
         match source {
             ImageSource::File(raw) => {
                 let Some(path) = resolve_local_path(raw) else {
@@ -452,6 +562,7 @@ pub(crate) fn request(
                     source: raw.trim().to_string(),
                     cols: budget.cols,
                     max_rows: budget.max_rows,
+                    cell_px,
                 };
                 let id = SourceId::File {
                     path: path.clone(),
@@ -467,14 +578,17 @@ pub(crate) fn request(
                 };
                 let source_ref = SourceRef::Uploaded {
                     digest: id.digest,
+                    media: id.media,
                     epoch,
                     cols: budget.cols,
                     max_rows: budget.max_rows,
+                    cell_px,
                 };
                 (
                     source_ref,
                     SourceId::Uploaded {
                         digest: id.digest,
+                        media: id.media,
                         epoch,
                     },
                     Some(payload),
@@ -572,9 +686,18 @@ fn encode(
 
 fn decode_upload(payload: &str) -> Result<DynamicImage, &'static str> {
     use base64::Engine as _;
+    // 先从 base64 字符数快速筛掉超限载荷（避免为 20 MiB+ 的图片分配解码缓冲），
+    // 解码后再按真实字节数复核：与文件路径共用 [`MAX_IMAGE_BYTES`] 上限。
+    let max_payload_chars = MAX_IMAGE_BYTES.div_ceil(3) as usize * 4;
+    if payload.len() > max_payload_chars {
+        return Err("too-large");
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(payload)
         .map_err(|_| "base64")?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("too-large");
+    }
     decode_image(bytes)
 }
 
@@ -627,8 +750,11 @@ pub(crate) fn wait_ready(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let mut guard = cache().lock();
+        let Some(cell_px) = guard.observed_cell_px else {
+            return false;
+        };
         let epoch = guard.upload_epoch;
-        let key = source_ref(&source, epoch, budget);
+        let key = source_ref(&source, epoch, budget, cell_px);
         match guard.lookup(key) {
             Some(ImageState::Ready(_)) => return true,
             Some(ImageState::Failed(_)) => return false,
@@ -640,6 +766,29 @@ pub(crate) fn wait_ready(
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// 单测钩子：该来源在当前预算键上是否登记为 Pending（后台编码在途）。
+#[cfg(test)]
+pub(crate) fn has_pending(source: ImageSource<'_>, budget: Budget) -> bool {
+    let mut guard = cache().lock();
+    let Some(cell_px) = guard.observed_cell_px else {
+        return false;
+    };
+    let epoch = guard.upload_epoch;
+    let source = source_ref(&source, epoch, budget, cell_px);
+    matches!(guard.lookup(source), Some(ImageState::Pending))
+}
+
+/// 单测钩子：下一次请求 `Deferred` 后立即 bump revision（模拟槽位在同一帧内释放）。
+///
+/// 持久组件树（同一次 `render_frames(frames > 1)`）的下一帧据此观察 deps 变化，
+/// 只有 effect 依赖 `revision()` 时才会重试——用于锁定该依赖。
+#[cfg(test)]
+pub(crate) fn defer_once_and_signal_release_for_test() {
+    let mut guard = cache().lock();
+    guard.defer_requests = 1;
+    guard.signal_release_after_defer = true;
 }
 
 /// 单测请求并等待就绪：并发已满被暂缓时重试请求。

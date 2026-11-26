@@ -19,11 +19,14 @@ pub(crate) mod source;
 
 pub(crate) use cache::{
     decode_image, failed, lookup, release_all_uploads, request, retain_upload, revision,
+    upload_available,
 };
 pub(crate) use sizing::{Budget, Fill};
 
 #[cfg(test)]
-pub(crate) use cache::request_until_ready;
+pub(crate) use cache::{
+    defer_once_and_signal_release_for_test, has_pending, request_until_ready, wait_ready,
+};
 pub(crate) use source::{ImageSource, UploadId, UploadMedia, digest_of};
 
 #[cfg(test)]

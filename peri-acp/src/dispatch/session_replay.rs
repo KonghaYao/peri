@@ -590,7 +590,12 @@ pub fn project_message_updates(
                 &result_text,
                 *is_error,
                 subagent_failure.as_ref(),
-                // 历史 replay 只持久化文本：没有可回放的图片块。
+                // 图片回放契约（本轮明确不做）：工具结果图片与用户上传图片都是
+                // 「会话内可见、回放只投影文本」——canonical 工具消息里的 image 块
+                // 与上传附件都不回放。原因是事件体积与首屏成本：单条工具结果最多
+                // 携带 15 MiB 图片，回放会把这些字节再发一遍，首屏与实时投递缓冲
+                // （1 MiB）都承受不起；`result_text` 里的 `[image: mime]` 占位
+                // 与上传附件的 `[Image #n]` 文本仍在，回放不丢语义。
                 &[],
             );
             // 历史 rawOutput 保持字符串；live adapter 保留 JSON 解析兼容行为。

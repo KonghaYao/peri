@@ -11,6 +11,7 @@ fn test_tool_hash_writer_preserves_format_hash_contract() {
         for duration in [None, Some(0), Some(999), Some(1000), Some(12345)] {
             let mut card = TuiToolCard {
                 images: Vec::new(),
+                images_omitted: 0,
                 tool_id: "tool|中文".into(),
                 tool_name: "Skill".into(),
                 input_summary: "输入😀|\n".repeat(128),

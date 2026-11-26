@@ -19,7 +19,7 @@ fn prefix_archive_rebases_remaining_offsets_and_keeps_trailing() {
     let mut turn = CurrentTurn::new();
     turn.append_text("hello", Some("m1"));
     turn.start_tool(tool("t1", "Read"));
-    turn.end_tool("t1", "ok".into(), false, Vec::new());
+    turn.end_tool("t1", "ok".into(), false, Vec::new(), 0);
     turn.append_text(" world", Some("m2"));
     // 运行中的工具阻断切点：其前的文本/工具都稳定。
     turn.start_tool(tool("t2", "Bash"));
@@ -34,7 +34,7 @@ fn prefix_archive_rebases_remaining_offsets_and_keeps_trailing() {
     assert_eq!(turn.view_models().len(), 1, "只剩运行中工具卡");
 
     // 阻断工具结束后，剩余正文归档；未 flush 的 trailing 仍留在容器。
-    turn.end_tool("t2", "done".into(), false, Vec::new());
+    turn.end_tool("t2", "done".into(), false, Vec::new(), 0);
     turn.append_text("!", Some("m3"));
     let prefix = turn.take_archivable_prefix();
     assert_eq!(prefix.len(), 1);
@@ -62,7 +62,7 @@ fn running_tool_blocks_prefix_at_its_segment() {
         "同一运行中工具不得被重复归档"
     );
 
-    turn.end_tool("t1", "ok".into(), false, Vec::new());
+    turn.end_tool("t1", "ok".into(), false, Vec::new(), 0);
     let prefix = turn.take_archivable_prefix();
     assert_eq!(prefix.len(), 1);
     assert!(turn.tool_cards.is_empty());
@@ -74,11 +74,11 @@ fn completed_prefix_archives_while_running_subagent_blocks() {
     let mut turn = CurrentTurn::new();
     turn.append_text("before", Some("m1"));
     turn.start_tool(tool("a1", "Agent"));
-    turn.end_tool("a1", "done".into(), false, Vec::new());
+    turn.end_tool("a1", "done".into(), false, Vec::new(), 0);
     turn.start_subagent("done".into(), "done".into(), Some("a1".into()));
     turn.stop_subagent("done", false, "");
     turn.start_tool(tool("a2", "Agent"));
-    turn.end_tool("a2", "done".into(), false, Vec::new());
+    turn.end_tool("a2", "done".into(), false, Vec::new(), 0);
     turn.start_subagent("running".into(), "running".into(), Some("a2".into()));
 
     let prefix = turn.take_archivable_prefix();
@@ -116,7 +116,7 @@ fn pending_subagent_group_blocks_cut_until_card_arrives() {
     assert_eq!(turn.segments.len(), 1);
 
     turn.start_tool(tool("late-card", "Agent"));
-    turn.end_tool("late-card", "done".into(), false, Vec::new());
+    turn.end_tool("late-card", "done".into(), false, Vec::new(), 0);
     let prefix = turn.take_archivable_prefix();
     assert_eq!(prefix.len(), 2);
     assert!(matches!(
@@ -135,12 +135,12 @@ fn pending_subagent_group_blocks_cut_until_card_arrives() {
 fn archived_tool_ignores_late_end_event() {
     let mut turn = CurrentTurn::new();
     turn.start_tool(tool("t1", "Read"));
-    turn.end_tool("t1", "ok".into(), false, Vec::new());
+    turn.end_tool("t1", "ok".into(), false, Vec::new(), 0);
     turn.start_tool(tool("t2", "Bash"));
 
     assert_eq!(turn.take_archivable_prefix().len(), 1);
     assert!(
-        !turn.end_tool("t1", "late".into(), false, Vec::new()),
+        !turn.end_tool("t1", "late".into(), false, Vec::new(), 0),
         "已归档工具的迟到结束事件是 no-op"
     );
     assert_eq!(turn.tool_cards.len(), 1, "不得重建已归档卡片");

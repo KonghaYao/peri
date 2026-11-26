@@ -83,23 +83,30 @@ pub fn digest_of(data: &str) -> u64 {
     hash
 }
 
-/// 渲染/请求两侧共用的 alias 键：来源文本 + 预算，不含文件版本与单元格像素
-/// （版本/字体变化由 `CacheKey` 表达，alias 指向当前版本）。
+/// 渲染/请求两侧共用的 alias 键：来源身份 + 预算 + 单元格像素。
 ///
-/// 预算必须进键：同一图片在转录区（112×8）、用户气泡（112×6）、工具卡
-/// （过程区×8）各有不同目标格数，混用会拿到错误的编码尺寸。
+/// - 预算必须进键：同一图片在转录区（112×8）、用户气泡（112×6）、工具卡
+///   （过程区×8）各有不同目标格数，混用会拿到错误的编码尺寸；
+/// - 单元格像素必须进键：字体/缩放变化后同一 `(cols, rows)` 必须重新编码，
+///   render 查表也不能命中旧 `cell_px` 的几何；
+/// - 上传来源带摘要 + 媒体类型 + epoch：媒体类型是身份的一部分（同一字节流
+///   按不同 mime 解码时编码参数不同）；文件版本（mtime/len）由 `CacheKey`
+///   表达，alias 指向当前版本。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SourceRef {
     File {
         source: String,
         cols: u16,
         max_rows: u16,
+        cell_px: (u16, u16),
     },
     Uploaded {
         digest: u64,
+        media: UploadMedia,
         epoch: u64,
         cols: u16,
         max_rows: u16,
+        cell_px: (u16, u16),
     },
 }
 

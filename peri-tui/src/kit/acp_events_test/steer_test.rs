@@ -236,6 +236,7 @@ fn p0_delivered_prompt_preserves_running_tool_result() {
         &mut state,
         &AcpEventData::ToolEnded(TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-1".into(),
             output_summary: "file contents".into(),
             is_error: false,

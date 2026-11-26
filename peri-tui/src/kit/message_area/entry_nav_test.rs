@@ -96,6 +96,7 @@ fn test_fold_key_of_maps_vm_identities() {
     // tool / subagent 按 tool_id / agent_id 键控
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tool-1".into(),
         tool_name: "Bash".into(),
         input_summary: String::new(),
@@ -273,6 +274,7 @@ fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
 
     let mut tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t1".into(),
         tool_name: "Read".into(),
         input_summary: String::new(),
@@ -335,6 +337,7 @@ fn test_tool_expand_claims_deferred_history_result_refetch() {
     );
     let card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t-big".into(),
         tool_name: "Bash".into(),
         input_summary: String::new(),
@@ -391,6 +394,7 @@ fn test_group_expand_claims_deferred_history_result_refetch() {
     );
     let mut card = TuiToolCard {
         images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t-big".into(),
         tool_name: "Bash".into(),
         input_summary: String::new(),

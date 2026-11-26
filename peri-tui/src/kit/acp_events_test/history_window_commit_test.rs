@@ -518,6 +518,7 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-cancelled".into(),
             output_summary: "late tool output".into(),
             is_error: false,
@@ -907,6 +908,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-first".into(),
             output_summary: "late".into(),
             is_error: false,
@@ -917,6 +919,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-second".into(),
             output_summary: "ok".into(),
             is_error: false,

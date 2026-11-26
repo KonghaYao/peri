@@ -129,6 +129,10 @@ pub(super) fn use_preview(hooks: &mut Hooks<'_, '_>, inputs: PreviewInputs<'_>) 
     let height = layout_height(inputs.budget, inputs.reserved, rows);
     let caps = inputs.caps;
     let request_source = source;
+    // revision 必须在 deps 里：`image_view::request` 可能因并发解码槽位已满返回
+    // Deferred（不登记 Pending）；槽位释放在完成回调里 bump revision——effect
+    // 不跟随 revision 重跑，预览就会一直停在文本降级（直到别的输入变化）。
+    let revision = image_view::revision();
     hooks.use_effect(
         move || {
             if !protocol {
@@ -140,7 +144,7 @@ pub(super) fn use_preview(hooks: &mut Hooks<'_, '_>, inputs: PreviewInputs<'_>) 
                 image_view::request(ImageSource::Uploaded(id), budget, &caps, cell_px);
             }
         },
-        (request_source, cols, protocol, cell_px),
+        (request_source, cols, protocol, cell_px, revision),
     );
     PreviewPlan { height, source }
 }
