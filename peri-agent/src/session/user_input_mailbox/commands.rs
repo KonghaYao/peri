@@ -81,8 +81,9 @@ impl UserInputMailbox {
         self.enqueue_with_policy(request, false).await
     }
 
-    /// Keep a TUI draft available for withdrawal or explicit dispatch until
-    /// the current attempt reaches its next post-tool Receive.
+    /// Enter submissions use this policy and are immediately followed by an
+    /// explicit dispatch; records stay withdrawable and boundary-selectable
+    /// until the current attempt reaches its next post-tool Receive.
     pub async fn enqueue_at_tool_boundary(
         &self,
         request: &EnqueueUserInputRequest,

@@ -66,7 +66,7 @@ pub(crate) fn spawn_steer_consumer(
         let mut refresh_tasks = tokio::task::JoinSet::new();
         let mut retry_tick = peri_time::interval(RECONCILE_INTERVAL);
         retry_tick.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
-        loop {
+        'commands: loop {
             let mut command = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 result = refresh_tasks.join_next(), if !refresh_tasks.is_empty() => {
@@ -103,44 +103,56 @@ pub(crate) fn spawn_steer_consumer(
                 }
                 continue;
             }
-            let result = tokio::select! {
-                _ = shutdown.cancelled() => break,
-                result = execute(&client, &mut command, &cwd) => result,
-            };
-            match result {
-                Ok(AdmitOutcome::Submitted) => {}
-                Ok(AdmitOutcome::AlreadySettled) => {
-                    // 命令已被致命失败或会话边界结算：不重发、不提示成功，
-                    // 完整输入仍保留在 recovered/unsettled 中。
-                    tracing::debug!(command_id = %command.command_id, "user input command already settled");
-                }
-                Err(failure) => {
-                    let SteerFailure { error, stage } = failure;
-                    let rejected = reject_command(&mut command, &error);
-                    if let Some(snapshot) = error
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.get("snapshot"))
-                        .and_then(|value| serde_json::from_value(value.clone()).ok())
-                    {
-                        STEERS
-                            .state()
-                            .write()
-                            .accept_snapshot(snapshot, command.epoch, false);
+            let mut next = Some(command);
+            while let Some(mut command) = next.take() {
+                let result = tokio::select! {
+                    _ = shutdown.cancelled() => break 'commands,
+                    result = execute(&client, &mut command, &cwd) => result,
+                };
+                next = match result {
+                    Ok(AdmitOutcome::Submitted) => {
+                        // 主提交（Enter/点击发送）立即跟进发送选择，不等下一次
+                        // 工具边界；服务端按 loop 阶段决定打断模型还是只放行 MQ。
+                        STEERS.state().write().begin_auto_dispatch(&command)
                     }
-                    tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
-                    if !matches!(command.kind, SteerCommandKind::Refresh)
-                        && warned.insert(command.command_id.clone())
-                    {
-                        atoms::NOTIFICATION.set(Some(atoms::Notification {
-                            message: failure_notice(stage, rejected, &error),
-                            until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
-                        }));
+                    Ok(AdmitOutcome::AlreadySettled) => {
+                        // 命令已被致命失败或会话边界结算：不重发、不提示成功，
+                        // 完整输入仍保留在 recovered/unsettled 中。
+                        tracing::debug!(command_id = %command.command_id, "user input command already settled");
+                        None
                     }
-                    if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
-                        retries.push_back(command);
+                    Err(failure) => {
+                        let SteerFailure { error, stage } = failure;
+                        let rejected = reject_command(&mut command, &error);
+                        if let Some(snapshot) = error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("snapshot"))
+                            .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        {
+                            STEERS
+                                .state()
+                                .write()
+                                .accept_snapshot(snapshot, command.epoch, false);
+                        }
+                        tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
+                        // 自动发送选择失败时入队已经成功、输入仍在待发送区，
+                        // 不能提示“输入未被接收”；用户可继续用 ↑ 重试。
+                        if !matches!(command.kind, SteerCommandKind::Refresh)
+                            && !command.auto_dispatch
+                            && warned.insert(command.command_id.clone())
+                        {
+                            atoms::NOTIFICATION.set(Some(atoms::Notification {
+                                message: failure_notice(stage, rejected, &error),
+                                until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
+                            }));
+                        }
+                        if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
+                            retries.push_back(command);
+                        }
+                        None
                     }
-                }
+                };
             }
         }
     })
@@ -178,6 +190,7 @@ fn refresh_command() -> Option<SteerCommand> {
         epoch: atoms::BRIDGE_RESET_COUNTER.get(),
         command_id: uuid::Uuid::now_v7().to_string(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Refresh,
     })
 }

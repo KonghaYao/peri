@@ -349,6 +349,7 @@ fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
         epoch,
         command_id: "submit".into(),
         generation: Some("g".into()),
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: "accepted".into(),
             content: MessageContent::text("新的输入"),

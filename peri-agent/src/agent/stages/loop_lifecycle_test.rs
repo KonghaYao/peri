@@ -239,30 +239,50 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
 /// 同一 attempt 内摄取，工具结果在前、steer 输入按 MQ 顺序在后。
 #[tokio::test]
 async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration() {
-    assert_tool_boundary_steer(0, false, false).await;
+    assert_tool_boundary_steer(0, false, SteerMode::Queued).await;
 }
 
 #[tokio::test]
 async fn test_tool_boundary_steer_behind_two_pages_reaches_next_model_request() {
-    assert_tool_boundary_steer(130, false, false).await;
+    assert_tool_boundary_steer(130, false, SteerMode::Queued).await;
 }
 
 #[tokio::test]
 async fn test_tool_boundary_steer_during_request_preparation_reaches_next_model_request() {
-    assert_tool_boundary_steer(0, true, false).await;
+    assert_tool_boundary_steer(0, true, SteerMode::Queued).await;
 }
 
 #[tokio::test]
-async fn test_enter_during_tool_batch_reaches_next_model_request_without_dispatch() {
-    assert_tool_boundary_steer(130, false, true).await;
+async fn test_boundary_queued_steer_during_tool_batch_reaches_next_model_request() {
+    assert_tool_boundary_steer(130, false, SteerMode::Boundary).await;
 }
 
 #[tokio::test]
-async fn test_enter_during_request_preparation_reaches_next_model_request_without_dispatch() {
-    assert_tool_boundary_steer(0, true, true).await;
+async fn test_boundary_queued_steer_during_request_preparation_reaches_next_model_request() {
+    assert_tool_boundary_steer(0, true, SteerMode::Boundary).await;
 }
 
-async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: bool, enter: bool) {
+/// Enter 的发送选择在工具批次中只放行 MQ：不取消整批工具，下一次 Receive 摄取。
+#[tokio::test]
+async fn test_enter_dispatch_during_tool_batch_does_not_cancel_the_batch() {
+    assert_tool_boundary_steer(0, false, SteerMode::Enter).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SteerMode {
+    /// 普通入队后显式发送。
+    Queued,
+    /// 仅按 toolBoundary 入队，等待工具边界自动抽取。
+    Boundary,
+    /// Enter：按 toolBoundary 入队并立即发送。
+    Enter,
+}
+
+async fn assert_tool_boundary_steer(
+    backlog: usize,
+    dispatch_in_preparation: bool,
+    mode: SteerMode,
+) {
     use crate::agent::react::{Reasoning, ToolCall};
     use crate::middleware::{capabilities::BeforeModelState, Middleware, MiddlewareChain};
     use crate::session::tool_catalog::SessionToolCatalog;
@@ -443,8 +463,8 @@ async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: boo
             original_draft: text.into(),
             plugin_selections: Vec::new(),
         };
-        let soft_submit = enter && text != "idle-only";
-        let receipt = if soft_submit {
+        let boundary_submit = mode != SteerMode::Queued && text != "idle-only";
+        let receipt = if boundary_submit {
             mailbox.enqueue_at_tool_boundary(&request).await
         } else {
             mailbox.enqueue(&request).await
@@ -455,7 +475,7 @@ async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: boo
             input_ids.push(input_id);
         }
     }
-    if !enter {
+    if mode != SteerMode::Boundary {
         mailbox
             .dispatch(&DispatchUserInputsRequest {
                 session_id: "session".into(),

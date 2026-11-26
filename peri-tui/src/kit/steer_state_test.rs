@@ -52,6 +52,7 @@ pub(super) fn make_command(kind: SteerCommandKind) -> SteerCommand {
         epoch: 1,
         command_id: "c".to_owned(),
         generation: Some("g".to_owned()),
+        auto_dispatch: false,
         kind,
     }
 }
@@ -70,6 +71,52 @@ pub(super) fn make_idle_state() -> SteerState {
     snapshot.items.clear();
     state.accept_snapshot(snapshot, 1, true);
     state
+}
+
+#[test]
+fn test_auto_dispatch_follows_settled_enqueue_once() {
+    let mut state = make_state();
+    let enqueue = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(enqueue.clone());
+    assert!(
+        state.begin_auto_dispatch(&enqueue).is_none(),
+        "入队回执落定前不得自动发送"
+    );
+    state.settle(
+        &enqueue,
+        UserInputQueueReceipt {
+            snapshot: make_snapshot(2),
+            results: Vec::new(),
+            taken_back: None,
+        },
+    );
+    let dispatch = state
+        .begin_auto_dispatch(&enqueue)
+        .expect("受理后的主提交必须立即生成发送选择");
+    assert_eq!(dispatch.session_id, "s");
+    assert_eq!(dispatch.epoch, 1);
+    assert_eq!(
+        dispatch.generation.as_deref(),
+        Some("g"),
+        "沿用入队 generation"
+    );
+    assert!(dispatch.auto_dispatch);
+    assert!(matches!(
+        &dispatch.kind,
+        SteerCommandKind::Dispatch(ids) if ids == &["a".to_owned()]
+    ));
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Publishing);
+    assert!(
+        state.begin_auto_dispatch(&enqueue).is_none(),
+        "同一 input_id 只自动发送一次"
+    );
+
+    let mut stale_epoch = enqueue.clone();
+    stale_epoch.epoch = 2;
+    assert!(
+        state.begin_auto_dispatch(&stale_epoch).is_none(),
+        "会话 epoch 变化后不得补发旧输入"
+    );
 }
 
 #[test]

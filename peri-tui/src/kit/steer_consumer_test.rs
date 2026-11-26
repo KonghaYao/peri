@@ -93,6 +93,7 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             epoch: 7,
             command_id: "refresh".into(),
             generation: None,
+            auto_dispatch: false,
             kind: SteerCommandKind::Refresh,
         })
         .expect("slow refresh does not queue new enqueue: fixture channel must deliver its expected message");
@@ -145,6 +146,282 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
     client.close();
 }
 
+/// [回归] 主提交（Enter）受理后立即发送，不再等下一个工具边界；同一
+/// `input_id` 的重复回执/乱序快照不得产生第二次发送选择。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_enqueue_receipt_dispatches_same_input_immediately_once() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: None,
+            items: vec![],
+            terminal_items: vec![],
+        },
+        7,
+        true,
+    );
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let draft = "立即发送";
+    let command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "enqueue-immediate".into(),
+        generation: None,
+        auto_dispatch: false,
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: input_id.clone(),
+            original_draft: draft.into(),
+            content: MessageContent::text(draft),
+            plugin_selections: Vec::new(),
+        }),
+    };
+    projection.begin(command.clone());
+    STEERS.set(projection);
+    let snapshot = |revision: u64, state: &str| {
+        serde_json::json!({
+            "sessionId":"s","generation":"g","revision":revision,
+            "items":[{
+                "inputId":input_id,"originalDraft":draft,
+                "content":MessageContent::text(draft),"state":state
+            }]
+        })
+    };
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, notifications, _) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s", false);
+    client.spawn_pump(notifications);
+    let (tx, shutdown, consumer) = start_consumer(&client);
+
+    tx.send(command)
+        .expect("enqueue fixture channel must deliver");
+    let (enqueue_id, enqueue_params) = expect_rpc(&server_transport, "session/input/enqueue").await;
+    assert_eq!(enqueue_params["inputId"], serde_json::json!(input_id));
+    assert_eq!(enqueue_params["generation"], "g");
+    server_transport
+        .send_response(
+            enqueue_id,
+            Ok(serde_json::json!({
+                "snapshot": snapshot(2, "queued"),
+                "results":[{"inputId":input_id,"state":"queued"}]
+            })),
+        )
+        .await
+        .expect("enqueue response fixture must be delivered");
+
+    let (dispatch_id, dispatch_params) =
+        expect_rpc(&server_transport, "session/input/dispatch").await;
+    assert_eq!(
+        dispatch_params["sessionId"], "s",
+        "发送选择必须绑定同一会话"
+    );
+    assert_eq!(
+        dispatch_params["generation"], "g",
+        "发送选择必须绑定同一实例"
+    );
+    assert_eq!(
+        dispatch_params["inputIds"],
+        serde_json::json!([input_id.clone()]),
+        "只发送刚受理的输入"
+    );
+    assert_ne!(
+        dispatch_params["commandId"], "enqueue-immediate",
+        "发送选择必须使用独立命令身份"
+    );
+    let dispatch_command_id = dispatch_params["commandId"]
+        .as_str()
+        .expect("dispatch command id")
+        .to_owned();
+    // 迟到的旧快照：发送回执不推进投影，也不得触发再次发送。
+    server_transport
+        .send_response(
+            dispatch_id,
+            Ok(serde_json::json!({
+                "snapshot": snapshot(1, "queued"),
+                "results":[{"inputId":input_id,"state":"queued"}]
+            })),
+        )
+        .await
+        .expect("dispatch response fixture must be delivered");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while STEERS
+            .state()
+            .read()
+            .pending_command("s", &dispatch_command_id)
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("发送选择回执必须结算");
+
+    let duplicate = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "enqueue-replay".into(),
+        generation: Some("g".into()),
+        auto_dispatch: false,
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: input_id.clone(),
+            original_draft: draft.into(),
+            content: MessageContent::text(draft),
+            plugin_selections: Vec::new(),
+        }),
+    };
+    STEERS.state().write().begin(duplicate.clone());
+    tx.send(duplicate)
+        .expect("replay fixture channel must deliver");
+    let (replay_id, replay_params) = expect_rpc(&server_transport, "session/input/enqueue").await;
+    assert_eq!(replay_params["inputId"], serde_json::json!(input_id));
+    server_transport
+        .send_response(
+            replay_id,
+            Ok(serde_json::json!({
+                "snapshot": snapshot(4, "dispatching"),
+                "results":[{"inputId":input_id,"state":"dispatching"}]
+            })),
+        )
+        .await
+        .expect("replay response fixture must be delivered");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), server_transport.recv())
+            .await
+            .is_err(),
+        "同一 input_id 不得自动发送第二次"
+    );
+
+    shutdown.cancel();
+    consumer.await.expect("consumer must stop");
+    client.close();
+}
+
+/// 自动发送选择失败不能回退成第二次入队，也不得误报输入未被接收。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_auto_dispatch_failure_never_re_enqueues_or_reports_rejection() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    let previous_notice = notice_text();
+    atoms::NOTIFICATION.set(None);
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: None,
+            items: vec![],
+            terminal_items: vec![],
+        },
+        7,
+        true,
+    );
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let draft = "发送选择失败";
+    let command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "enqueue-failure".into(),
+        generation: Some("g".into()),
+        auto_dispatch: false,
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: input_id.clone(),
+            original_draft: draft.into(),
+            content: MessageContent::text(draft),
+            plugin_selections: Vec::new(),
+        }),
+    };
+    projection.begin(command.clone());
+    STEERS.set(projection);
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, notifications, _) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s", false);
+    client.spawn_pump(notifications);
+    let (tx, shutdown, consumer) = start_consumer(&client);
+
+    tx.send(command)
+        .expect("enqueue fixture channel must deliver");
+    let (enqueue_id, _) = expect_rpc(&server_transport, "session/input/enqueue").await;
+    server_transport
+        .send_response(
+            enqueue_id,
+            Ok(serde_json::json!({
+                "snapshot":{"sessionId":"s","generation":"g","revision":2,"items":[{
+                    "inputId":input_id,"originalDraft":draft,
+                    "content":MessageContent::text(draft),"state":"queued"
+                }]},
+                "results":[{"inputId":input_id,"state":"queued"}]
+            })),
+        )
+        .await
+        .expect("enqueue response fixture must be delivered");
+    let (dispatch_id, dispatch_params) =
+        expect_rpc(&server_transport, "session/input/dispatch").await;
+    let dispatch_command_id = dispatch_params["commandId"]
+        .as_str()
+        .expect("dispatch command id")
+        .to_owned();
+    server_transport
+        .send_response(dispatch_id, Err(AcpError::new(-32603, "lost receipt")))
+        .await
+        .expect("dispatch failure fixture must be delivered");
+
+    // 未知回执按同一命令身份重试；绝不能退化为第二次入队或提示输入未被接收。
+    if let Ok(Some(IncomingMessage::Request { id, method, params })) =
+        tokio::time::timeout(Duration::from_millis(200), server_transport.recv()).await
+    {
+        assert_ne!(method, "session/input/enqueue", "失败不得回退成重新入队");
+        assert_eq!(method, "session/input/dispatch");
+        assert_eq!(params["commandId"], dispatch_command_id.as_str());
+        server_transport
+            .send_response(
+                id,
+                Ok(serde_json::json!({
+                    "snapshot":{"sessionId":"s","generation":"g","revision":3,"items":[{
+                        "inputId":input_id,"originalDraft":draft,
+                        "content":MessageContent::text(draft),"state":"queued"
+                    }]},
+                    "results":[{"inputId":input_id,"state":"queued"}]
+                })),
+            )
+            .await
+            .expect("dispatch retry response fixture must be delivered");
+    }
+    assert!(
+        notice_text().is_none(),
+        "入队已成功，自动发送失败不得提示输入未被接收"
+    );
+    let rows = STEERS.state().read().rows("s");
+    assert!(
+        rows.iter().any(|row| row.id == input_id),
+        "输入必须继续留在待发送区"
+    );
+
+    atoms::NOTIFICATION.set(None);
+    restore_notice(previous_notice);
+    shutdown.cancel();
+    consumer.await.expect("consumer must stop");
+    client.close();
+}
+
 pub(super) struct RestoreProjection {
     pub(super) steers: SteerState,
     pub(super) session: String,
@@ -188,6 +465,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
         epoch: 7,
         command_id: "stable-command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: uuid::Uuid::now_v7().to_string(),
             original_draft: "  中文\n@image /tmp/a.png\n".into(),
@@ -322,6 +600,7 @@ async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_
         epoch: 7,
         command_id: "a-command".into(),
         generation: Some("g".into()),
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: "a".into(),
             original_draft: "正在执行的 A".into(),
@@ -343,6 +622,7 @@ async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_
         epoch: 7,
         command_id: "b-command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(b_input.clone()),
     };
     projection.begin(a_command);
@@ -405,6 +685,7 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
         epoch: 3,
         command_id: "first-command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: uuid::Uuid::now_v7().to_string(),
             original_draft: raw.into(),
@@ -599,6 +880,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
         epoch: 7,
         command_id: "uncertain-command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: input_id.clone(),
             original_draft: "原回执尚未核实".into(),
@@ -744,6 +1026,7 @@ pub(super) fn first_input_command(
         epoch,
         command_id: command_id.into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: input_id.into(),
             original_draft: draft.into(),
@@ -896,13 +1179,15 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
         "慢准备成功不得留下失败提示：{:?}",
         notice_text()
     );
+    // 受理后 consumer 会立即提交发送选择；这里只断言入队回执已结算，
+    // 发送选择可能仍在途（Publishing），不能把中间态当作入队未确认。
     let rows = STEERS.state().read().rows("slow");
     assert_eq!(rows.len(), 1, "受理后应恰好一条队列项");
     assert_eq!(rows[0].id, input_id, "入队身份必须原样保留");
-    assert_eq!(
+    assert_ne!(
         rows[0].state,
-        crate::kit::steer_queue::SteerItemState::Queued,
-        "回执确认后才开放动作"
+        crate::kit::steer_queue::SteerItemState::Submitting,
+        "回执确认后不得继续显示提交中"
     );
     assert!(
         STEERS

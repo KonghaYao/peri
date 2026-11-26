@@ -239,6 +239,7 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
             epoch,
             command_id: "failing-command".into(),
             generation: Some("g".into()),
+            auto_dispatch: false,
             kind: SteerCommandKind::Enqueue(UserInput {
                 input_id: "f".into(),
                 content: MessageContent::text("F"),

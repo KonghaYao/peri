@@ -109,8 +109,8 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
 }
 
 #[tokio::test]
-async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
-    let (mailbox, inbox) = make_mailbox();
+async fn test_enter_dispatch_during_model_request_cancels_and_stop_wins_replay() {
+    let (mailbox, _inbox) = make_mailbox();
     let cancel = CancellationToken::new();
     mailbox
         .attach_external_attempt(cancel.clone(), false)
@@ -123,13 +123,29 @@ async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
         .await
         .expect("submit");
     assert_eq!(receipt.results[0].state, UserInputState::Queued);
-    assert!(!cancel.is_cancelled());
-    assert!(inbox.queue().selected_input_ids().is_empty());
-    mailbox
-        .enqueue_at_tool_boundary(&input)
-        .await
-        .expect("same command");
+    assert!(!cancel.is_cancelled(), "入队本身只保存待发，不打断模型请求");
+    let dispatch = DispatchUserInputsRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: "enter-dispatch".into(),
+        input_ids: vec![input.input_id.clone()],
+    };
+    let dispatched = mailbox.dispatch(&dispatch).await.expect("dispatch");
+    assert_eq!(dispatched.results[0].state, UserInputState::Dispatching);
+    assert!(
+        cancel.is_cancelled(),
+        "流式期间 Enter 的立即发送必须打断当前模型请求"
+    );
     assert_eq!(mailbox.pending_steer_ids(&[]).len(), 1);
+    let replay = mailbox.dispatch(&dispatch).await.expect("same command");
+    assert_eq!(
+        (replay.results[0].input_id.as_str(), replay.results[0].state),
+        (
+            dispatched.results[0].input_id.as_str(),
+            dispatched.results[0].state
+        ),
+        "同一发送命令重放不得产生第二次发送"
+    );
     drop(model_request);
     mailbox.stop().await;
     mailbox
