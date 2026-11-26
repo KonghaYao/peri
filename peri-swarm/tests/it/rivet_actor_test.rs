@@ -305,6 +305,7 @@ async fn collect_until_terminal(
         let Ok(event) = received else { break };
         match event {
             StreamEvent::Item(item) => items.push(item),
+            StreamEvent::Delta(_) => {}
             StreamEvent::Turn(turn) => {
                 let terminal =
                     matches!(turn, TurnEvent::Completed { .. } | TurnEvent::Failed { .. });
@@ -705,7 +706,10 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
                         return items;
                     }
                 }
-                StreamEvent::Turn(_) | StreamEvent::Gap { .. } | StreamEvent::Official(_) => {}
+                StreamEvent::Turn(_)
+                | StreamEvent::Gap { .. }
+                | StreamEvent::Official(_)
+                | StreamEvent::Delta(_) => {}
             }
         }
         items

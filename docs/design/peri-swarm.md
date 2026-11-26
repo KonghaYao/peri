@@ -169,8 +169,11 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 
 ### 4.2 SSE 与 items
 
-- 每个 item 持久化为一行，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
-  不存在也不影响执行。
+- 每个 item **至多持久化为一行**，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
+  不存在也不影响执行。assistant 文本流与推理流在实时段按 chunk 广播（`delta` 帧，无
+  `seq`、不落库），turn 终止时把整条流写成一条 `complete:true` 合并行；`tool_call`、
+  `tool_result`、`approval`、user/receipt 每帧一行。历史数据仍可能是「每 chunk 一行 +
+  complete 行」的多行 item（§4.2.2），新写入不再产生该形状。
 - 用户输入在 `swarm_inputs` 受理（`disposition=inserted`）后写成一条单帧
   `message` item：`payload={role:"user",text,inputId}`，`id`/`itemId` 为
   `itim_input_<inputId>`，没有 `delta`/`complete` 字段。host 的
@@ -179,12 +182,20 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   既有语义重跑该轮，`creating` 行的恢复不重放输入，见 §4.4）。
   官方 `events` 信封同样只落这一条 user message item（多段 `input_text` 按顺序
   以换行拼接成一个 `text`）。
-  assistant 帧仍按 `payload.messageId` 聚合。
+  assistant 实时帧仍按 `payload.messageId` 聚合；turn 终止时同一
+  `(agentId, messageId, kind)` 只写一条
+  `payload={role:"assistant",text,complete:true,phase,outputIndex}` 合并行。流键含
+  `kind`，所以 answer 与 reasoning 共享 `messageId` 时是两条 item（各自稳定
+  `itemId`），不是一条。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
-  游标，不能用 `id` 去重 delta 帧。
-- SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn`、官方 `agent.session.*` 与 `gap`
-  不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是
-  `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn` 帧保持不变。
+  游标。新写入的数据每个 `itemId` 只有一条 `complete` 行，回放不会重复；历史多行
+  item 在回放中仍按 `seq` 逐行发出 `item` 帧，客户端需按 `itemId` 自行折叠
+  （§4.2.2）。实时 delta 帧与合并行同 `itemId`，但 delta 帧没有 `seq`，不能作为
+  游标，也不参与 `id` 去重。
+- SSE 帧只有**持久化 item** 带 `id`（等于 `seq`）；实时 `delta`、`turn`、官方
+  `agent.session.*` 与 `gap` 不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发
+  `started`，终止帧是 `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn`
+  帧保持不变。
 - 订阅游标接受 `Last-Event-ID` 头、`?afterSeq=` 或 `?after=`（三者等价，同时给出
   必须一致，否则 `400 conflicting_cursor`）。查询还接受官方
   `include_obfuscation`（`true`/`false`）：网关不生成混淆填充，值被接受并忽略，
@@ -196,8 +207,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   create 会在行尚不存在时得到已关闭的订阅。
 - 带游标时先补 `seq > after` 的 backlog，再转实时广播。心跳间隔由
   `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳 payload 的 `lastItemSeq` 是该会话当前
-  `MAX(seq)`（与 item 写入方共享），只表示进度，不能代替已投递 item 的 `seq`
-  作为恢复游标。
+  `MAX(seq)`（与 item 写入方共享），只由持久化 item 推进——长 turn 期间若只产生实时
+  delta，它可能整轮不变。它只表示进度，不能代替已投递 item 的 `seq` 作为恢复游标。
 - 回放（backlog）与实时同序：先发该行的 `item` 帧，紧接由同一行推导的官方帧
   （§4.2.1）；上一 turn 的终态先于下一 turn 的 `turn.created`。因此重连看到的官方
   序列与实时一致；`turn` 控制帧仍只出现在实时段。客户端的回放终止条件是目标
@@ -215,9 +226,22 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   把新输入挂到原 turn，回放却会把它当作新 turn（多一个 `turn.created`）。行里
   没有 turn 终态标记，无法消除；游标落在 steer 之前且该 turn 尚无完成帧的常见
   情况已由 lookback 修复。
+- turn 内未 flush 的 assistant/thought 流在 turn 终止时一次写入状态库；进程在
+  turn 执行中崩溃会丢失该 turn 尚未 flush 的文本（已落库的 user/tool/approval 行不受
+  影响），恢复只按行重放，不逐 chunk 重播增量。完成组按存储批次提交：失败批次不广播，
+  已提交批次先广播；任何未持久化的完成组都会让非取消 turn 以 `turn.failed` 收尾
+  （不静默成功）。取消 turn 的完成行落库失败只记录日志，终态仍是
+  `turn.completed(status="cancelled")`，会话回到 `idle`。合并 payload 超过
+  `MAX_PAYLOAD_BYTES`（1 MiB）时按 `{_truncated:true, originalBytes}` 存储并置
+  `truncated:true`，`seq`/`itemId` 不变；实时 delta 不受该截断影响。
+- 恢复期写入的 root 文本没有 gateway turn：合并行带 `payload.recovered=true`，且不含
+  `phase`/`outputIndex`。回放把它当自定义 item——只发 `item` 帧，不产生任何
+  `turn.item.*`/`content_part.*`，也不归属前后任何已结束 turn；实时侧同样不发官方帧。
 - 慢订阅者：广播容量耗尽（Lagged）时发一帧 `gap` 后关闭该订阅。丢失的事件可能
   包含终态，官方 SDK 因而以 EOF 识别中断；原生客户端用最后一个已渲染 item 的
-  `seq` 重连恢复。流式 create 的首轮走同一通道：订阅先于首轮建立，容量内的首轮
+  `seq` 重连恢复。`gap.toSeq` 是**被丢弃持久化行的 `seq` 上界**（按本流最后已投递
+  item 加上丢弃帧数推算），可能高于会话当前游标：不落库的 delta 不占 `seq`，因此
+  不能按差值推算丢弃行数。流式 create 的首轮走同一通道：订阅先于首轮建立，容量内的首轮
   事件实时送达；首轮突发或客户端读取过慢超过容量时同样 `gap` + EOF，不静默丢弃
   （§4.3）。
 - MCP 审批使用同一 item 游标：`kind=approval` 的行记录 `state=pending|settled`、
@@ -259,19 +283,22 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 - items 按 **item 分组**分页（§4.2.2）：`limit` 同时是 item 数上限与整页聚合行预算，
   `has_more` 按 item 计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅
   `has_more=true` 时给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个
-  item 的最后一行（最大 `seq`）。`data` 通常比 `items` 短，两者数量允许不同；既有
-  delta 消费者继续读 `items`。`after` 接受十进制 `seq`（与 `afterSeq` 同义），也
+  item 的最后一行（最大 `seq`）。新数据每 item 一行，`items` 与 `data` 一一对应；
+  历史多行 item 仍可能让 `data` 比 `items` 短，两者数量允许不同。逐 chunk delta
+  消费者只在历史数据上还能从 `items` 读到增量，实时增量走 SSE。`after` 接受十进制
+  `seq`（与 `afterSeq` 同义），也
   接受官方 `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、
   降序取 `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致
-  返回 `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
+  返回 `400 conflicting_cursor`。item 是事件级帧（user message、assistant 合并行、
   tool_call、tool_update、tool_result、approval），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
 
 #### 4.2.2 item 级分页
 
-同一条 assistant 消息的 delta 与 `complete` 共享 `itemId`、`seq` 各不相同，所以
-`after=<itemId>` 不能按行理解：
+**多行 item 是历史数据形状**：早期数据把每个 assistant delta 写成一行，`delta` 与
+`complete` 共享 `itemId`、`seq` 各不相同；新写入每 item 至多一行，`items` 与 `data`
+通常重合。以下多行规则只为历史数据保留，`after=<itemId>` 不能按行理解：
 
 - item 归属按该 item 的最大 `seq` 判定，分页单位是 item；升序页是
   `MAX(seq) > after` 的前若干个 item，降序页是 `MAX(seq) < after` 的前若干个
@@ -320,6 +347,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | `agent.session.idle` | **紧接** `turn.completed` 之后 | 会话行快照 | `evt_<turnId>_idle` |
 | `agent.session.failed` | **紧接** `error` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
 
+- `item.added`/`content_part.*`/`item.done` 仍由 `complete:true` 行推导，与写入粒度
+  无关；实时 delta 帧不产生官方 item 帧。多行 item 是历史数据形状（§4.2.2），
+  新数据同一 item 只有这一条完成行。
 - `turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`。它由已持久化的 user
   item 派生，不用 ACP `messageId`，不含时钟或随机源；重连后由同一行重算，值不变。
 - `event_id` 只由 `turnId`、`sessionId` 或持久化 item `seq` 派生，因此实时投递与
@@ -334,9 +364,11 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   `output_text`），`content_index` 恒为 `0`。
 - 同一模型调用的 reasoning 与 answer 共享 `messageId`。流键是
   `(agentId, messageId, kind)`，`Message` 与 `Thought` 分开累积、各自拥有稳定
-  `itemId`，各自持久化 delta 与完成行；reasoning 先到不会把 answer 并进 Thought。
+  `itemId`；delta 只走实时，turn 终止时各自写一条合并行，reasoning 先到不会把 answer
+  并进 Thought。
 - assistant `phase`/`outputIndex` **只对 root 的 `Message` 完成行计算**：同一 turn 内
-  按**首块持久化 `seq`** 排序，最后一条 root Message 是 `final_answer`，其余是
+  按**首次到达顺序**（首次打开该流时的 `MessageStream.order`）排序，最后一条 root
+  Message 是 `final_answer`，其余是
   `commentary`。`finish_turn` 把 `phase` 和 `outputIndex` 写进该完成 item 的 payload；
   实时帧与回放都只读 payload，不维护第二套推导。`output_index` 是 turn 内 root
   assistant 输出消息序号（从 0 开始），user item、`Thought` 与 child 行不参与。
@@ -732,11 +764,13 @@ Bun：
     202 推断已执行。无 owner/lease/fencing 时不得让多个宿主同时服务同一 logicalId；
     即使部署支持节点放置，也未证明旧宿主已停止。
 
-## 9. 已批准目标：事件日志粒度与回放置位（未实施）
+## 9. 已批准目标：事件日志粒度与回放置位（已实施）
 
-> 状态：2026-11-26 裁决，**未实施**。落地进度、验收矩阵与证据边界见
-> [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md)。
-> 本节只写目标契约；现行行为仍由 §4.2 与代码描述。
+> 状态：2026-11-26 裁决，**已实施**（同日）。验收矩阵与证据边界见
+> [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md)；
+> 实现位于 `peri-swarm/src/actor/reader.rs` 的 staged flush，ILOG-1..7 用例见
+> `peri-swarm/src/actor/reader_test.rs`、`service_test.rs`（ILOG-4 的审批折叠与合并行
+> 交错回放用例）与 `peri-swarm/tests/it/`。§4.2 已按本节契约改写。
 
 1. **持久化粒度按 item 折叠**：同一 assistant 文本流或推理流的 chunk 合并为一条 item 行，
    turn 终止再写终态标记；不再为每个 chunk 分配 `seq`。`tool_call`、`tool_result`、
@@ -751,5 +785,6 @@ Bun：
 5. **兼容与回退**：无 schema 变更；历史 chunk 行与新 item 行按 `seq` 单调共存，
    回放不重写数据；回退只需恢复原写入路径。
 6. **已知代价**：回放不再逐 chunk 重播增量文本；实时流式不受影响。
-7. **取代关系**：实施完成后，§4.2 中「不能用 `id` 去重 delta 帧」等描述逐 chunk 行
-   的表述由本节第 1 条取代。
+7. **取代关系**：本节第 1 条已取代 §4.2 中逐 chunk 行的表述（“不能用 `id` 去重
+   delta 帧”等）；§4.2 现在描述合并行与实时 delta 的现行契约，历史多行数据只在
+   §4.2.2 保留说明。

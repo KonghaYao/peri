@@ -5,7 +5,8 @@
 //! This module is the single definition of the hop's wire format: one encoder
 //! used by the actor, one incremental parser used by the gateway.
 //!
-//! Only `item` frames carry an SSE `id` (the persisted `seq`); `turn`, the
+//! Only `item` frames carry an SSE `id` (the persisted `seq`); a live `item`
+//! frame is a delta without `seq` and therefore without `id`, and `turn`, the
 //! official `agent.session.*` frames and `gap` are not persisted, matching the
 //! public contract (`design §2.5`). Official frames travel under their own
 //! event name (`event_type()`), so the gateway hop preserves them verbatim.
@@ -16,7 +17,7 @@
 
 use serde_json::{json, Value};
 
-use crate::domain::{ItemView, OfficialEvent, StreamEvent, TurnEvent};
+use crate::domain::{ItemDelta, ItemView, OfficialEvent, StreamEvent, TurnEvent};
 
 pub const EVENT_ITEM: &str = "item";
 pub const EVENT_TURN: &str = "turn";
@@ -38,12 +39,26 @@ pub struct Frame {
 impl Frame {
     /// Decode a frame into the domain event the gateway forwards. Unknown
     /// events (for example heartbeats) are ignored.
+    ///
+    /// The `item` event carries two shapes on the same name: a persisted
+    /// [`ItemView`] (it has `seq` and an SSE `id`) and a live [`ItemDelta`] (no
+    /// `seq`). The payload is parsed once and dispatched on the presence of
+    /// `seq`, not by a failed deserialize.
     #[must_use]
     pub fn into_stream_event(self) -> Option<StreamEvent> {
         match self.event.as_str() {
-            EVENT_ITEM => serde_json::from_str::<ItemView>(&self.data)
-                .ok()
-                .map(StreamEvent::Item),
+            EVENT_ITEM => {
+                let value: Value = serde_json::from_str(&self.data).ok()?;
+                if value.get("seq").is_some() {
+                    serde_json::from_value::<ItemView>(value)
+                        .ok()
+                        .map(StreamEvent::Item)
+                } else {
+                    serde_json::from_value::<ItemDelta>(value)
+                        .ok()
+                        .map(StreamEvent::Delta)
+                }
+            }
             EVENT_TURN => serde_json::from_str::<TurnEvent>(&self.data)
                 .ok()
                 .map(StreamEvent::Turn),
@@ -88,6 +103,11 @@ impl FrameWriter {
                     Some(item.seq),
                     &serde_json::to_string(item).ok()?,
                 ))
+            }
+            // Not persisted, so it cannot carry an SSE `id` or move `last_seq`:
+            // the cursor only advances on durable rows.
+            StreamEvent::Delta(delta) => {
+                Some(frame(EVENT_ITEM, None, &serde_json::to_string(delta).ok()?))
             }
             StreamEvent::Turn(turn) => {
                 Some(frame(EVENT_TURN, None, &serde_json::to_string(turn).ok()?))
@@ -222,6 +242,22 @@ mod tests {
         }
     }
 
+    fn delta(item_id: &str, text: &str) -> ItemDelta {
+        ItemDelta {
+            id: item_id.to_owned(),
+            item_id: item_id.to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload: json!({
+                "role": "assistant",
+                "messageId": "msg-1",
+                "text": text,
+                "delta": true,
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn encoder_and_parser_round_trip_every_event() {
         let mut writer = FrameWriter::new(0);
@@ -296,6 +332,42 @@ mod tests {
         let frame = parser.push(encoded.as_bytes()).pop().expect("frame");
         assert_eq!(frame.event, "error");
         assert_eq!(frame.into_stream_event(), Some(event));
+    }
+
+    /// A live delta frame shares the `item` event name but carries no `seq`, so
+    /// it must travel without an SSE `id` and must not move the cursor: the
+    /// surrounding persisted items keep their ids and order.
+    #[test]
+    fn delta_frames_cross_the_hop_without_an_id_and_do_not_move_the_cursor() {
+        let mut writer = FrameWriter::new(0);
+        let first = writer.render(&StreamEvent::Item(item(1))).expect("item 1");
+        let live = writer
+            .render(&StreamEvent::Delta(delta("itim_2", "hel")))
+            .expect("delta");
+        let second = writer.render(&StreamEvent::Item(item(2))).expect("item 2");
+
+        assert!(first.contains("\nid: 1\n"), "{first}");
+        assert!(
+            !live.contains("\nid: "),
+            "a delta is not persisted, so it cannot be a resume cursor: {live}"
+        );
+        assert!(second.contains("\nid: 2\n"), "{second}");
+
+        let mut parser = FrameParser::new();
+        let frames = parser.push(format!("{first}{live}{second}").as_bytes());
+        let events: Vec<_> = frames
+            .into_iter()
+            .filter_map(Frame::into_stream_event)
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Item(item(1)),
+                StreamEvent::Delta(delta("itim_2", "hel")),
+                StreamEvent::Item(item(2)),
+            ],
+            "no item is dropped or reordered around a delta frame"
+        );
     }
 
     #[test]

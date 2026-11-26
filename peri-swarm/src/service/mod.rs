@@ -416,17 +416,37 @@ enum RowFrame {
         phase: String,
         output_index: u32,
     },
-    /// Delta or non-message row: the custom `item` frame only.
+    /// Non-message row (or a historical per-delta row): the custom `item`
+    /// frame only.
     Nothing,
 }
 
 /// Classify one persisted row and advance the open-turn state.
+///
+/// Replay reads rows exactly as stored (`design §9.4`). New data holds one row
+/// per item — an assistant/thought stream is a single `complete:true` row — so
+/// classifying it yields each official frame once. Historical rows written
+/// before item granularity add per-delta rows for the same `item_id`; they
+/// classify as [`RowFrame::Nothing`] and only their final `complete:true` row
+/// produces the official item. Both shapes therefore replay the same frames.
+/// Recovered root output: a merged row written after recovery without a gateway
+/// turn (`payload.recovered = true`, `design §4.2`).
+///
+/// It is a custom item only. Replay must not open a turn for it, attach it to
+/// the turn that happened to precede it, or count it as that turn's output.
+fn is_recovered_row(item: &crate::domain::ItemView) -> bool {
+    item.payload.get("recovered") == Some(&json!(true))
+}
+
 fn classify_row(
     item: &crate::domain::ItemView,
     turns: &mut Vec<ReplayTurn>,
     current: &mut Option<usize>,
     persisted: &BTreeMap<String, crate::store::SwarmTurnRow>,
 ) -> RowFrame {
+    if is_recovered_row(item) {
+        return RowFrame::Nothing;
+    }
     if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
         // Thought chunks share the answer's `messageId`; child agents own their
         // own source. Both stay on the custom `item` surface and must not open
@@ -1011,6 +1031,11 @@ pub(crate) async fn settle_orphan_approvals(
 
 /// Decide whether the window continues a turn from before the cursor.
 ///
+/// The lookback only reads user items and root `complete:true` rows, the two
+/// rows that open and close an official turn; live deltas were never part of it
+/// and historical per-delta rows are skipped, so one-row-per-item data keeps
+/// the same decision.
+///
 /// A window whose first turn-relevant row is a user item starts a new turn only
 /// when the previous turn already produced output under the same boundary rule
 /// [`classify_row`] applies (`!previous.open()`); otherwise that user item is a
@@ -1035,7 +1060,10 @@ fn seed_for(
 /// Role of the first root row that participates in turn classification.
 fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str> {
     for item in items {
-        if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
+        if item.kind != crate::domain::ItemKind::Message
+            || !item.source.is_root()
+            || is_recovered_row(item)
+        {
             continue;
         }
         match item.payload.get("role").and_then(|role| role.as_str()) {
@@ -1056,7 +1084,8 @@ fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str
 /// final frame separates it from the next older user item. Scanning stops as
 /// soon as the opener is confirmed, so a normal session reads only the tail of
 /// the previous turn; a session whose turns never produced output reads back to
-/// its first user item.
+/// its first user item. Only those two row shapes matter here, so neither the
+/// number of historical delta rows nor the merged one-row item changes it.
 async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,
@@ -1079,8 +1108,12 @@ async fn turn_at_cursor(
         for row in page {
             let view = row.to_view();
             // Child and thought rows are not root turn boundaries; only root
-            // messages may open, close, or steer a turn.
-            if view.kind != crate::domain::ItemKind::Message || !view.source.is_root() {
+            // messages may open, close, or steer a turn. Recovered root output
+            // has no turn at all and must not close or extend the one before it.
+            if view.kind != crate::domain::ItemKind::Message
+                || !view.source.is_root()
+                || is_recovered_row(&view)
+            {
                 continue;
             }
             match view.payload.get("role").and_then(|role| role.as_str()) {

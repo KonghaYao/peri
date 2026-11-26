@@ -132,7 +132,9 @@ const CREATE_TABLE_SQL: [&str; 5] = [
     )",
 ];
 
-/// Plain index: `item_id` repeats across delta/complete rows of one turn.
+/// Plain index: `item_id` may repeat across an item's historical delta/complete
+/// rows (new data writes one row per item), and several rows may share an id
+/// only for pre-granularity history.
 const CREATE_INDEX_SQL: [&str; 2] = [
     "CREATE INDEX IF NOT EXISTS swarm_items_by_id ON swarm_items (logical_id, item_id)",
     "CREATE INDEX IF NOT EXISTS swarm_turns_by_created ON swarm_turns (logical_id, created_at, turn_id)",

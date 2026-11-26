@@ -46,9 +46,10 @@
 //! | `truncated` | `truncated` | `BOOLEAN` |
 //! | `seq` / `last_item_seq` | `seq` / `last_item_seq` | `BIGINT` (i64 range) |
 //!
-//! `item_id` is deliberately **not** unique: the reader reuses one stable id for
-//! a delta row and its later complete row (S6b3). `(logical_id, seq)` is the
-//! primary key and `swarm_items_by_id` is a plain index.
+//! `item_id` is deliberately **not** unique: history written before item
+//! granularity has one row per delta plus a later `complete:true` row for the
+//! same id (`design §9.5`). `(logical_id, seq)` is the primary key and
+//! `swarm_items_by_id` is a plain index.
 
 mod budget;
 mod codec;
