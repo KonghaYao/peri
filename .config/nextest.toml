@@ -58,7 +58,9 @@ serial-process-state = { max-threads = 1 }
 # middlewares 放进同一个进程池后，这些用例会同时拉起子进程和本地监听器。它们各自
 # 用 127.0.0.1:0 与临时 HOME 隔离，不共享固定端口，但并发回收进程树（尤其 Windows）
 # 与竞争文件句柄会让失败原因不可区分；串起来后失败只指向用例本身。
-# 规模：peri-process 的 4 个 PTY 用例、peri-swarm 里绑定真实监听器的 5 个集成目标。
+# 规模：peri-process 的 4 个 PTY 用例、peri-swarm 里绑定真实监听器的集成测试
+# （`actor_runtime_test` / `mcp_injection_test` / `openai_hosted_test` /
+# `rivet_actor_test` / `state_store_test` / `state_store_failure_test`）。
 # 其余 peri-swarm 单元测试仍在池内并行。
 # peri-swarm 的集成测试已并入单二进制 `it`，因此按测试名（`<module>::`）而不是
 # binary 名定位，保持隔离集合不变。
@@ -73,7 +75,7 @@ filter = 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp
 test-group = 'serial-process-state'
 
 [[profile.default.overrides]]
-filter = '(package(=peri-process) | (package(=peri-swarm) & test(/^(actor_runtime_test|loom_store_test|mcp_injection_test|openai_hosted_test|rivet_actor_test)::/)))'
+filter = '(package(=peri-process) | (package(=peri-swarm) & test(/^(actor_runtime_test|mcp_injection_test|openai_hosted_test|rivet_actor_test|state_store_failure_test|state_store_test)::/)))'
 test-group = 'process-isolation'
 
 # CI 专用 profile：继承 [profile.default] 的 default-filter、overrides 与 test-groups，

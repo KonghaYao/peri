@@ -344,3 +344,73 @@ fn rivet_endpoint_keeps_the_plaintext_and_shape_rules() {
         assert!(error.to_string().contains(expected), "{value}: {error}");
     }
 }
+
+// ── PostgreSQL DSN identity ────────────────────────────────────────────────
+
+#[test]
+fn a_postgres_locator_renders_only_its_target() {
+    let locator = PostgresLocator::parse(
+        "postgresql://alice:secret@db.internal:55432/swarm_state?sslmode=require",
+        STORE_LOCATOR_ENV,
+    )
+    .expect("DSN");
+    assert_eq!(locator.target(), "postgres://db.internal:55432/swarm_state");
+    assert!(!locator.target().contains("secret"), "{}", locator.target());
+    assert!(!format!("{locator:?}").contains("secret"));
+    // The default port is spelled out so two spellings of one target compare
+    // and log identically.
+    let default_port = PostgresLocator::parse(
+        "postgres://alice@db.internal/swarm_state",
+        STORE_LOCATOR_ENV,
+    )
+    .expect("DSN");
+    assert_eq!(
+        default_port.target(),
+        "postgres://db.internal:5432/swarm_state"
+    );
+}
+
+#[test]
+fn the_same_database_is_decided_by_host_port_and_path() {
+    let base = PostgresLocator::parse(
+        "postgresql://alice:secret@127.0.0.1:5432/session",
+        STORE_LOCATOR_ENV,
+    )
+    .expect("DSN");
+    for same in [
+        "postgres://bob:other@127.0.0.1:5432/session",
+        "postgresql://127.0.0.1/session",
+        "postgresql://127.0.0.1:5432/session?options=-c%20search_path%3Dswarm",
+    ] {
+        let other = PostgresLocator::parse(same, STORE_LOCATOR_ENV).expect("DSN");
+        assert!(base.same_database(&other), "{same} is the same database");
+    }
+    for distinct in [
+        "postgresql://127.0.0.1:5432/swarm_state",
+        "postgresql://127.0.0.1:5433/session",
+        "postgresql://db.internal:5432/session",
+    ] {
+        let other = PostgresLocator::parse(distinct, STORE_LOCATOR_ENV).expect("DSN");
+        assert!(
+            !base.same_database(&other),
+            "{distinct} is a different database"
+        );
+    }
+}
+
+#[test]
+fn a_postgres_locator_rejects_non_dsn_shapes() {
+    for value in [
+        "http://127.0.0.1:9497/db/swarm/main/",
+        "libsql://example.test/db",
+        "/tmp/swarm.db",
+        "postgres:///no-host",
+        "postgres://127.0.0.1:5432/session#frag",
+    ] {
+        let error = PostgresLocator::parse(value, STORE_LOCATOR_ENV).expect_err(value);
+        assert!(
+            error.to_string().contains(STORE_LOCATOR_ENV),
+            "{value}: {error}"
+        );
+    }
+}

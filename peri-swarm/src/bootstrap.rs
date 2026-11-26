@@ -1,15 +1,16 @@
 //! Process entry for the Swarm gateway (S6b/S6c1a).
 //!
-//! One process owns **two** Loom databases:
+//! One process owns **two** PostgreSQL databases:
 //!
 //! 1. the **remote Peri session store** (`design §4.1`): opened once with the
-//!    deployment's locator and a virtual workspace identity. Opening also runs
-//!    the Peri schema check/upgrade (`design §4.2`); an unknown or newer store
+//!    deployment's DSN and a virtual workspace identity. Opening also runs the
+//!    Peri schema check/upgrade (`design §4.2`); an unknown or newer store
 //!    fails closed. There is no local SQLite fallback on this entry.
 //! 2. the **Swarm state store** (S6c1a): `PERI_SWARM_STATE_STORE` is a separate
-//!    logical database opened by [`SwarmStateStore`] with its own `swarm_meta`
-//!    schema version. Both locators are required and must differ; a failure to
-//!    open either one stops the process instead of reusing the other.
+//!    PostgreSQL database opened by [`SwarmStateStore`] with its own
+//!    `swarm_meta` schema version. Both DSNs are required and must name
+//!    different databases (the same instance is fine); a failure to open either
+//!    one stops the process instead of reusing the other.
 //!
 //! The installed [`StaticDeployment`] carries the Swarm state store, so the
 //! gateway and every actor read and write Swarm facts there. Actor children
@@ -21,7 +22,7 @@
 //!    [`CancellationToken`]; either failing stops the process with a
 //!    diagnosable error.
 //!
-//! This stage does not require a contactable Loom or a real model: the entry
+//! This stage does not require a contactable database or a real model: the entry
 //! must fail visibly when either remote configuration is missing, and every
 //! actor child opens its own remote session store from the same deployment.
 //!
@@ -33,9 +34,8 @@
 //! | `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` | opt-in switch for a non-loopback bind, default off |
 //! | `PERI_SWARM_API_KEY` | deployment bearer key (required) |
 //! | `PERI_SWARM_SESSION_STORE` | Peri session store PostgreSQL DSN (required) |
-//! | `PERI_SWARM_STATE_STORE` | Swarm state store locator `http(s)://…` (required, distinct) |
+//! | `PERI_SWARM_STATE_STORE` | Swarm state store PostgreSQL DSN (required, different database) |
 //! | `PERI_SWARM_STORE_ENGINE` | remote engine name, default `postgres` |
-//! | `PERI_SWARM_STORE_TOKEN_ENV` | **name** of the variable holding the Swarm state store token |
 //! | `PERI_SWARM_MACHINE_ID` | stable machine UUID (required) |
 //! | `PERI_SWARM_WORKSPACE_ROOT` | absolute, normalized virtual workspace root |
 //! | `PERI_SWARM_MODEL` | optional deployment model |
@@ -85,15 +85,14 @@ use crate::store::{SwarmStateStore, SwarmStateStoreConfig, SwarmStore};
 
 /// PostgreSQL DSN for the Peri session store.
 pub const SESSION_STORE_ENV: &str = "PERI_SWARM_SESSION_STORE";
-/// Remote Loom locator for the **Swarm state** database (S6c1a).
+/// PostgreSQL DSN for the **Swarm state** database (S6c1a).
 ///
-/// A separate logical database: it must not be the session-store locator, so a
-/// Swarm schema change can never touch Peri's session schema.
+/// A dedicated database: it must not name the session store's database, so a
+/// Swarm schema change can never touch Peri's session schema. The same
+/// PostgreSQL instance is supported.
 pub const STATE_STORE_ENV: &str = "PERI_SWARM_STATE_STORE";
 /// Remote engine name; only needed when the locator cannot decide it.
 pub const STORE_ENGINE_ENV: &str = "PERI_SWARM_STORE_ENGINE";
-/// **Name** of the environment variable that holds the store credential.
-pub const STORE_TOKEN_ENV: &str = "PERI_SWARM_STORE_TOKEN_ENV";
 /// Stable machine UUID persisted for the virtual workspace identity.
 pub const MACHINE_ID_ENV: &str = "PERI_SWARM_MACHINE_ID";
 /// Optional trusted settings document handed to every child host.
@@ -249,7 +248,7 @@ pub enum BootstrapError {
     Config(#[from] ConfigError),
     #[error("invalid remote workspace environment: {0}")]
     Environment(String),
-    /// The external engine is unreachable. Raised before either Loom database is
+    /// The external engine is unreachable. Raised before either database is
     /// opened, so a failed start leaves no half-initialized process behind.
     #[error("external Rivet engine at {endpoint} is not reachable: {reason}")]
     RivetUnreachable { endpoint: String, reason: String },
@@ -283,9 +282,8 @@ pub struct BootstrapConfig {
     pub bind_addr: SocketAddr,
     pub api_key: DeploymentApiKey,
     pub session_store_locator: PostgresLocator,
-    pub state_store_locator: Url,
+    pub state_store_locator: PostgresLocator,
     pub store_engine: String,
-    pub store_token_env: String,
     /// Engine endpoint and deployment identity (M1). Holds the token variable
     /// name, never the token value.
     pub rivet: RivetConfig,
@@ -325,14 +323,18 @@ impl BootstrapConfig {
             lookup(SESSION_STORE_ENV).ok_or(ConfigError::MissingEnv(SESSION_STORE_ENV))?;
         let session_store_locator = PostgresLocator::parse(&locator_raw, SESSION_STORE_ENV)?;
 
-        // The Swarm facts have their own database (S6c1a). Both locators are
+        // The Swarm facts have their own database (S6c1a). Both DSNs are
         // required: a missing state store is a startup error, and pointing both
         // at one database would put the Swarm schema back into the session
-        // store, which is exactly what the split avoids.
+        // store, which is exactly what the split avoids. The same PostgreSQL
+        // instance is fine; only the database must differ.
         let state_locator_raw =
             lookup(STATE_STORE_ENV).ok_or(ConfigError::MissingEnv(STATE_STORE_ENV))?;
-        let state_store_locator =
-            validate_state_store_locator(&state_locator_raw, STATE_STORE_ENV)?;
+        let state_store_locator = validate_state_store_locator(
+            &state_locator_raw,
+            STATE_STORE_ENV,
+            &session_store_locator,
+        )?;
         let store_engine = optional_non_empty(lookup(STORE_ENGINE_ENV), STORE_ENGINE_ENV)?
             .unwrap_or_else(|| DEFAULT_STORE_ENGINE.to_owned());
         if !matches!(store_engine.as_str(), "postgres" | "postgresql") {
@@ -342,33 +344,7 @@ impl BootstrapConfig {
             });
         }
 
-        // The token is a source, never a value: validate the name, then require
-        // the named variable to be present and non-empty without keeping it.
-        let store_token_env =
-            lookup(STORE_TOKEN_ENV).ok_or(ConfigError::MissingEnv(STORE_TOKEN_ENV))?;
-        if !is_env_var_name(&store_token_env) {
-            return Err(ConfigError::Invalid {
-                variable: STORE_TOKEN_ENV,
-                reason: "expected an environment variable name, not a value".to_owned(),
-            });
-        }
-        match lookup(&store_token_env) {
-            Some(value) if !value.trim().is_empty() => {}
-            Some(_) => {
-                return Err(ConfigError::Invalid {
-                    variable: STORE_TOKEN_ENV,
-                    reason: format!("{store_token_env} is set but empty"),
-                });
-            }
-            None => {
-                return Err(ConfigError::Invalid {
-                    variable: STORE_TOKEN_ENV,
-                    reason: format!("{store_token_env} is not set"),
-                });
-            }
-        }
-
-        let rivet = rivet_config(&lookup, &store_token_env)?;
+        let rivet = rivet_config(&lookup)?;
 
         let machine_id_raw =
             lookup(MACHINE_ID_ENV).ok_or(ConfigError::MissingEnv(MACHINE_ID_ENV))?;
@@ -462,7 +438,6 @@ impl BootstrapConfig {
             session_store_locator,
             state_store_locator,
             store_engine,
-            store_token_env,
             rivet,
             machine_id,
             workspace_root,
@@ -485,7 +460,6 @@ impl BootstrapConfig {
     fn state_store_config(&self) -> SwarmStateStoreConfig {
         SwarmStateStoreConfig {
             locator: self.state_store_locator.clone(),
-            credential_env: self.store_token_env.clone(),
         }
     }
 
@@ -533,10 +507,9 @@ impl BootstrapConfig {
 ///
 /// - a non-loopback endpoint must use `never` (this process cannot spawn a
 ///   local engine for a remote address) and must name its token variable;
-/// - the token variable must be a variable name, must not be the Loom
-///   credential variable, and must hold a non-empty value;
+/// - the token variable must be a variable name and hold a non-empty value;
 /// - the loopback default reuses the local engine's fixed development token.
-fn rivet_config<F>(lookup: &F, store_token_env: &str) -> Result<RivetConfig, ConfigError>
+fn rivet_config<F>(lookup: &F) -> Result<RivetConfig, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -565,15 +538,6 @@ where
                 return Err(ConfigError::Invalid {
                     variable: RIVET_TOKEN_ENV,
                     reason: "expected an environment variable name, not a value".to_owned(),
-                });
-            }
-            if name == store_token_env {
-                return Err(ConfigError::Invalid {
-                    variable: RIVET_TOKEN_ENV,
-                    reason: format!(
-                        "must not name the store credential variable {STORE_TOKEN_ENV}; the \
-                         engine must never receive the Loom credential"
-                    ),
                 });
             }
             match lookup(&name) {
@@ -639,8 +603,8 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         );
     }
 
-    // Resolve the engine token once, before any Loom connection exists. Only the
-    // endpoint/namespace/pool/spawn are ever logged; the token is not.
+    // Resolve the engine token once, before any database connection exists. Only
+    // the endpoint/namespace/pool/spawn are ever logged; the token is not.
     let rivet_token = config
         .rivet
         .resolve_token(|name| std::env::var(name).ok())?;
@@ -677,9 +641,10 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
 
     // S6c1a: the Swarm facts live in their own database. Failing to open it
     // closes the session store that was already opened and stops the process;
-    // it never reuses the session store's connection.
+    // it never reuses the session store's connection. Only the DSN target is
+    // logged, never the DSN itself.
     tracing::info!(
-        state_store = %config.state_store_locator,
+        state_store = %config.state_store_locator.target(),
         "opening the independent swarm state store"
     );
     let state_store = match SwarmStateStore::open(&config.state_store_config()).await {
@@ -833,7 +798,7 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
 ///
 /// It only proves that a listener exists at the configured address; the real
 /// handshake still happens in the registry task and reports its own failure.
-/// The probe runs before either Loom database is opened so an unreachable
+/// The probe runs before either database is opened so an unreachable
 /// engine stops the process without a half-initialized deployment.
 async fn preflight_external_engine(rivet: &RivetConfig) -> Result<(), BootstrapError> {
     if rivet.engine_spawn.is_local() {

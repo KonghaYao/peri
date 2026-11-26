@@ -1,8 +1,8 @@
 //! Remote/local dispatch for a child's session store (S6b).
 //!
-//! The remote branch needs a live Loom (verified in S6b2); these tests only pin
-//! the refusal to degrade: a half-configured remote identity must not fall back
-//! to the local SQLite file.
+//! The remote branch needs a live PostgreSQL server (verified in S6b2); these
+//! tests only pin the refusal to degrade: a half-configured remote identity must
+//! not fall back to the local SQLite file.
 
 use std::path::PathBuf;
 

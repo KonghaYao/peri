@@ -144,7 +144,7 @@ pub fn local_session_store(path: Option<PathBuf>) -> SessionStoreDeployment {
 ///
 /// - no remote identity ⇒ the existing local `Resources::open_deployment`
 ///   (S4/S5 default, unchanged);
-/// - `machine_id` **and** `workspace_root` ⇒ the remote Loom store with a
+/// - `machine_id` **and** `workspace_root` ⇒ the remote PostgreSQL store with a
 ///   virtual workspace identity (`design §4.1`);
 /// - exactly one of the two ⇒ an explicit error. Falling back to the local
 ///   SQLite file here would write Swarm facts to a second database.

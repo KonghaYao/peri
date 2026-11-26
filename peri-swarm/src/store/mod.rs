@@ -1,6 +1,6 @@
 //! Persistence port for Swarm-owned facts (`design §4.3`–§4.5).
 //!
-//! Swarm facts live in their **own** Loom database (`design §4.1`): after
+//! Swarm facts live in their **own** PostgreSQL database (`design §4.1`): after
 //! [`SwarmStateStore`] was added in S6c1a, bootstrap opens
 //! `PERI_SWARM_STATE_STORE` directly, owns its DDL and records
 //! `swarm_meta.version`. The Peri session schema never carries `swarm_*`
@@ -11,14 +11,14 @@
 //! session connection. There is one production implementation now.
 
 mod memory;
-mod turso;
+mod postgres;
 
 use async_trait::async_trait;
 pub use memory::MemorySwarmStore;
-use serde_json::Value;
-pub use turso::{
+pub use postgres::{
     SwarmStateError, SwarmStateStore, SwarmStateStoreConfig, SWARM_STATE_SCHEMA_VERSION,
 };
+use serde_json::Value;
 
 use crate::domain::{
     EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, ItemView, McpToolSpec,
@@ -176,8 +176,8 @@ impl SwarmItemRow {
 /// items, in either order). The helper keeps items in page order until either
 /// the item cap (`limit`) or the aggregate **row budget** (`limit` rows) is
 /// reached, derives `data` from each kept item's greatest `seq`, and returns the
-/// raw rows of exactly those items. Both stores call it, so memory and Loom
-/// pages cannot disagree on the boundary rule.
+/// raw rows of exactly those items. Both stores call it, so memory and
+/// PostgreSQL pages cannot disagree on the boundary rule.
 ///
 /// A page's own item rows are what `/items` returns, so a page of `limit` long
 /// messages would otherwise serialize thousands of rows twice (`items` and

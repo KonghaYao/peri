@@ -821,8 +821,8 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
 ///
 /// - `install_deployment` is **process-level**, so both registries share this
 ///   process's store and actor configuration. That is equivalent to "both
-///   replicas read the same Loom databases"; it is **not** "two hosts", and it
-///   says nothing about a multi-node engine or TLS.
+///   replicas read the same PostgreSQL databases"; it is **not** "two hosts",
+///   and it says nothing about a multi-node engine or TLS.
 /// - because the deployment is process-wide, run this test alone in its own
 ///   process: `--test it --ignored --exact rivet_actor_test::<this name>`.
 #[ignore = "requires a local Rivet engine; run alone with --ignored --exact"]

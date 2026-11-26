@@ -13,8 +13,8 @@ Peri Swarm 是服务端部署的实现主线，不是生产就绪声明：Rivet 
 
 本地部署把一条 HTTP 调用链固定下来：客户端 → `peri-swarm`（axum 网关 + Rivet
 actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使用 Bun 托管的
-沙箱；Peri 使用 PostgreSQL 会话库，Swarm 使用自己的 Loom 状态库。客户端断连不终止执行，重连可按
-序号续读。Rust 宿主退出后的恢复由新输入触发，详见 §7。
+沙箱；Peri 使用 PostgreSQL 会话库，Swarm 使用自己独立的 PostgreSQL 状态库。客户端断连
+不终止执行，重连可按序号续读。Rust 宿主退出后的恢复由新输入触发，详见 §7。
 
 非目标：
 
@@ -32,23 +32,32 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 `src/gateway`、`src/sandbox`），运行说明见 [peri-swarm README](../../peri-swarm/README.md)，
 沙箱实现见 [Sandbox 设计](../../npm-packages/peri-sandbox/peri-sandbox-design.md)。
 
-## 2. PostgreSQL 会话库与 Loom 状态库
+## 2. PostgreSQL 会话库与 PostgreSQL 状态库
 
-一个 `peri-swarm` 进程同时拥有独立的 PostgreSQL 会话库和 Loom 状态库；没有本地 SQLite 回退。
+一个 `peri-swarm` 进程同时拥有两个 PostgreSQL 数据库：Peri 会话库与独立的 Swarm 状态库
+（同一实例、不同数据库即可）。没有本地 SQLite 回退，也没有第二种存储引擎。
 
 | 库 | 所有者 | 版本 | 内容 |
 | --- | --- | --- | --- |
 | Peri 会话库 | Peri 会话存储（`SessionStoreDeployment`） | `peri_store_meta.schema_version=1`，contract `peri.session.postgres/v1` | 线程、消息、MQ、workspace 登记等 Peri 事实；不得出现 `swarm_*` 对象 |
-| Swarm 状态库 | `peri-swarm`（`store::SwarmStateStore`） | `swarm_meta.version=1` | `swarm_sessions`、`swarm_items`、`swarm_inputs`、`swarm_bindings`、`swarm_turns` 与索引 |
+| Swarm 状态库 | `peri-swarm`（`store::postgres::SwarmStateStore`） | `swarm_meta.version=1`，engine `postgres`，contract `peri.swarm.postgres/v1` | `swarm_sessions`、`swarm_items`、`swarm_inputs`、`swarm_bindings`、`swarm_turns` 与索引 |
 
-- 两个 locator 都是必填且必须不同；同一数据库、缺失 locator 或任一库打不开都会让
-  进程启动失败，不复用另一库、不降级。
+- 两个 DSN 都是必填且必须指向不同数据库（比较 host/port/database，忽略凭据与 query）；
+  同一数据库、缺失 DSN 或任一库打不开都会让进程启动失败，不复用另一库、不降级。
 - Peri 会话库在打开时检查 PostgreSQL schema，首次写打开在事务内初始化；未知或更高版本 fail closed。
-- Swarm 状态库自带 DDL 与版本判定：已存在 `swarm_*` 表但没有 `swarm_meta` 时拒绝
-  接管，未知版本直接中止。版本内新增的列是加法式迁移：`PRAGMA table_info` 判断缺列后
-  执行 `ALTER TABLE ... ADD COLUMN`，新库由 `CREATE TABLE` 一次建好；版本号不因加列
-  改变，重复打开不会再次执行 `ALTER`。`swarm_turns` 同样由幂等的
-  `CREATE TABLE IF NOT EXISTS` 补齐。
+- Swarm 状态库自带 DDL 与版本判定，初始化在一个 `pg_advisory_xact_lock` 事务里完成：
+  - 完全空的 schema：建 6 张表 + 2 个索引并写入 `swarm_meta` 身份行；
+  - 有 `swarm_meta`：校验 engine/contract/version，身份行不重写；只重建派生对象（索引），
+    缺权威表或列一律 fail closed（重建空表会丢 items、幂等收据、turn 与绑定），列形状用
+    `information_schema` 复核；
+  - 非空但无 `swarm_meta`：拒绝接管；命中 `peri_store_meta` 时给出「这是 Peri 会话库」
+    的专门文案；
+  - 版本更高或未知：`SchemaVersion{found,expected}` fail closed。
+- 跨引擎（Loom→PostgreSQL）不做自动迁移，也不保留 Loom/Hrana 运行时依赖：割接时停写、
+  取旧库只读 SQLite 快照，用一次性离线脚本
+  [`peri-swarm/scripts/import_loom_state.py`](../../peri-swarm/scripts/import_loom_state.py)
+  导入空的专用库并对账；网关本身只认 PostgreSQL。步骤与限制见
+  [peri-swarm README](../../peri-swarm/README.md#升级与回退状态库)。
 - 工作区归属仍由 Peri 的远端工作区实现（`RemoteWorkspaceEnvironment`）决定：`cwd`
   必须落在虚拟根内，workspace 登记与准入语义不在 `peri-swarm` 复制一份；相关边界见
   [存储 v2](storage-v2-machine-workspace-session.md)。`peri-swarm` 不新增通用 SQL
@@ -68,7 +77,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 
 绑定关系以 Swarm 状态库的 `swarm_bindings` 为权威，Bun 侧 `bindings.json` 是派生
 缓存：只含 `sandboxId`、`workspacePath`、`lastRunId` 与使用时间，绝不保存 token。
-恢复时先读 Loom 绑定，缺失即失败，不静默新建环境；`sandboxId` 或 `workspacePath`
+恢复时先读状态库绑定，缺失即失败，不静默新建环境；`sandboxId` 或 `workspacePath`
 发生变化按 `sandbox_binding_changed` 拒绝。
 
 `logicalId` 与 `rootSessionId` 是两层身份：前者属于调用方并决定 actor 路由，后者
@@ -149,7 +158,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
   两者都不会被降级成 no-op。
 - `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、
-  `swarm_turns` 上清除该会话的行。共享环境的绑定转交给仍引用它的会话，最后一个引用删除后才移除绑定。Turso 在同一个写事务中完成，内存实现使用同一把锁。事务提交后网关停止 ACP host、移除进程内 channel，Rivet
+  `swarm_turns` 上清除该会话的行。共享环境的绑定转交给仍引用它的会话，最后一个引用删除后才移除绑定。PostgreSQL 实现先按会话的 hosted 环境对 binding 行取 `FOR UPDATE`（同一环境的并发删除因此串行），再把六条语句放在同一个写事务中，并清理指向已删除会话的悬挂 binding；内存实现使用同一把锁。事务提交后网关停止 ACP host、移除进程内 channel，Rivet
   actor 随后销毁，因此用同一 `logicalId` 重新 create 会得到新 `rootSessionId`、
   空 items 与空 turns。删除失败不返回成功，行仍可重试。
 - 官方 `sessions.turns.list` 按 `(created_at, turn_id)` 稳定全序分页；`after` 是
@@ -268,7 +277,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   `MAX(seq) > after` 的前若干个 item，降序页是 `MAX(seq) < after` 的前若干个
   item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、`data` 返回 1 行——
   这正是「先取 `limit` 行再去重」会产生空页的场景。
-- 分组在存储层完成：Turso 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
+- 分组在存储层完成：PostgreSQL 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
   再按 `item_id` join 回全部行；内存 fake 用同一 `grouped_item_page` 规则，两者
   不会给出不同的页边界。
 - **行预算**：`limit` 既是 item 数上限，也是整页聚合行预算。按 item 顺序累加原始
@@ -592,19 +601,20 @@ meta、不做 legacy 资源模板/技能投影、不扫描 `shell_task_list`、g
   crate，未注入补丁配置的 cargo 在解析阶段就失败（`cargo metadata --locked` 可复现）。
 - 网关环境变量以 [peri-swarm README](../../peri-swarm/README.md) 为操作事实源：必填
   `PERI_SWARM_API_KEY`、`PERI_SWARM_SESSION_STORE`、`PERI_SWARM_STATE_STORE`、
-  `PERI_SWARM_STORE_TOKEN_ENV`（变量名，不是值）、`PERI_SWARM_MACHINE_ID`、
-  `PERI_SWARM_WORKSPACE_ROOT`；Bun 桥 `PERI_SWARM_BUN_URL`（或
+  `PERI_SWARM_MACHINE_ID`、`PERI_SWARM_WORKSPACE_ROOT`；Bun 桥 `PERI_SWARM_BUN_URL`（或
   `PERI_SWARM_BUN_BASE_URL`）与 `PERI_SWARM_BUN_TOKEN` 可选，未配置时
   `environment.type=openai_hosted` 在创建时显式失败，`none` 不受影响。
 
-Loom：
+PostgreSQL：
 
-- 本地开发用 Loom 的 loopback HTTP 模式（`PERI_HRANA_EXPERIMENTAL=1`）；Rust 存储
-  SDK 自建 `reqwest::Client`，无法注入 fixture CA 或关闭校验，因此不支持 Loom TLS。
-- Peri 会话库由部署提供 PostgreSQL 连接串；Swarm 状态库
-  （`local_default/swarm/main`）由 `peri-swarm/scripts/provision_state_db.py` 通过平台
-  管理 API 创建，并对同 `request_id` 幂等。不同 `request_id` 指向已存在身份会显式
-  失败，不静默复用。
+- 两个库都由部署提供 PostgreSQL 连接串：会话库交给 Peri 会话存储，状态库交给
+  `store::postgres::SwarmStateStore`。DSN 可带 TLS 参数（SQLx rustls），日志与错误只
+  渲染 `postgres://host:port/db`，不含凭据。
+- 状态库首次启动自动建表；`swarm_meta` 记录 engine `postgres` 与 contract
+  `peri.swarm.postgres/v1`，因此把 Loom/SQLite 文件或会话库误指过来都会显式失败。
+- 从 Loom 割接不做自动迁移，网关不读取旧库文件；需要保留旧状态库内容时停写后取只读
+  SQLite 快照，按 README 的离线导入工具（`import_loom_state.py`）写入空的专用库并
+  对账。导入只在离线阶段发生，运行时不引入 Loom/Turso 依赖。
 
 Rivet：
 
@@ -651,12 +661,12 @@ Bun：
 
 ## 7. 恢复边界
 
-允许的故障域是「只杀 Rust 宿主」：Loom、Bun、SRT、模型与 Rivet engine 保留。
+允许的故障域是「只杀 Rust 宿主」：两个 PostgreSQL 库、Bun、SRT、模型与 Rivet engine 保留。
 
 - 新进程启动时，actor 的 `on_start` 只恢复只读视图（会话行与 `MAX(seq)`）；`GET`
   读取不装载 host、不触达 Bun。
 - 空闲会话在下一次交互时用持久的 `rootSessionId`、`cwd` 与 MCP 配置执行 `session/load`。
-  工作区先从 Loom 读取绑定，再由 Bun 懒预留。丢失绑定或目录身份改变时向调用方报告错误。
+  工作区先从状态库读取绑定，再由 Bun 懒预留。丢失绑定或目录身份改变时向调用方报告错误。
 - 宿主丢失时，历史查询可以看到上一次持久化的开放 turn。新的用户输入按幂等键去重后才触发恢复。
   网关先核对 Peri 持久工作状态，再调用 ACP `session/resume`。上次同步工具的结果若无法确认，
   旧 Swarm turn 记录为中断失败，保留历史，不重发原提示或工具调用。
@@ -687,7 +697,7 @@ Bun：
 
 1. **沙箱任务与进程边界**：Bun 在同一次服务运行内跟踪 MCP 后台任务，终态后重新计算空闲时间。
    自动回收保留懒预留，下一次工具调用可唤醒原环境。Bun 自身重启后的任务身份与进程重建另行验收。
-2. **跨故障域恢复**：这里覆盖仅有 Rust 宿主退出的情形。Bun、Loom 与宿主同时失效以及滚动部署仍需独立验证。
+2. **跨故障域恢复**：这里覆盖仅有 Rust 宿主退出的情形。Bun、PostgreSQL 与宿主同时失效以及滚动部署仍需独立验证。
 3. **真实部署模型任务**：模型侧全部为确定性 stub；真实供应商的 tool call、长任务
    与多轮副作用未验收。
 4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
@@ -695,8 +705,8 @@ Bun：
 5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；非 loopback 绑定（含
    `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关，启动时输出 WARN；
    Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。Rivet endpoint
-   只接受私网/环回字面地址或由部署保证指向私网/环回的域名，且只支持明文 HTTP；Loom
-   侧只能用 loopback HTTP。生产 TLS 与证书轮换未实现。
+   只接受私网/环回字面地址或由部署保证指向私网/环回的域名，且只支持明文 HTTP；两个
+   PostgreSQL 库按 DSN 的 TLS 参数连接，未在真实 CA 环境验收。生产 TLS 与证书轮换未实现。
 6. **Linux SRT**：本地 Linux 验收覆盖 Bun 空闲回收，并以 Bubblewrap 启动原生 Peri MCP
    执行工作区命令。当前执行机禁止 SRT 的 Unix socket，且无法使用 systemd 用户总线；
    生产 `systemd-run` 与 SRT 组合仍待验证。
@@ -713,9 +723,11 @@ Bun：
     权限凭据。
 13. **engine 重启后的客户端重连**：运行中停/启 engine 时进程是退出、请求 502 还是
     自动重连，未验证。
-14. **官方会话资源面**：既有库升级与双副本并发迁移、真实 Loom 的 metadata 过滤、
-    删除事务中断、SDK 完整资源面仍需独立验收；已覆盖范围见
+14. **官方会话资源面**：既有库升级与双副本并发迁移、PostgreSQL 状态库的 metadata 过滤
+    （已有真实 PG 契约测试）、删除事务中断、SDK 完整资源面仍需独立验收；已覆盖范围见
     [官方 SDK 探针](../verification/peri-swarm-session-resources-2026-11-21.md#5-真实官方-sdk-探针)。
-15. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
+15. **超时分相**：写入前的有界阶段超时即回滚（可安全重试）；`COMMIT` 已发出但无回包时
+    结果未知（可能已提交），调用方按 key/seq 重读对账，不盲目重放。
+16. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
     202 推断已执行。无 owner/lease/fencing 时不得让多个宿主同时服务同一 logicalId；
     即使部署支持节点放置，也未证明旧宿主已停止。
