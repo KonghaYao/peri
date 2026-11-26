@@ -259,6 +259,7 @@ async fn request_timeout_stops_server_shell() {
         ),
         Some(Duration::from_secs(1)),
         None,
+        None,
     )
     .await;
     assert!(matches!(result, Err(ServiceError::Timeout { .. })));

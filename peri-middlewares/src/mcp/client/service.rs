@@ -10,11 +10,7 @@ use rmcp::model::CancelledNotificationParam;
 use rmcp::model::ClientCapabilities;
 #[allow(deprecated)]
 use rmcp::model::CustomNotification;
-use rmcp::model::ElicitRequestParams;
-use rmcp::model::ElicitResult;
-use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationCapability;
-use rmcp::model::ErrorData as McpError;
 use rmcp::model::FormElicitationCapability;
 #[allow(deprecated)]
 use rmcp::model::Implementation;
@@ -37,7 +33,6 @@ use rmcp::service::NotificationContext;
 use rmcp::service::Peer;
 #[allow(deprecated)]
 use rmcp::service::QuitReason;
-use rmcp::service::RequestContext;
 #[allow(deprecated)]
 use rmcp::service::RoleClient;
 #[allow(deprecated)]
@@ -45,9 +40,6 @@ use rmcp::service::RunningService;
 #[allow(deprecated)]
 use rmcp::ClientHandler;
 
-use super::elicitation::{
-    ask_elicitation, unavailable_decline, ElicitationRouter, RouteResolution,
-};
 use super::NotificationTap;
 
 /// Shared with the session pool until the original protocol worker has joined.
@@ -111,110 +103,17 @@ impl Drop for McpServiceOwner {
 pub(crate) struct PeriClientHandler {
     info: InitializeRequestParams,
     tap: Option<Arc<NotificationTap>>,
-    /// 生产连接注入；测试 / OAuth 探针为 `None`（反向 elicitation 恒 decline）。
-    elicitation: Option<Arc<ElicitationRouter>>,
 }
 
 impl PeriClientHandler {
     pub(crate) fn new(info: InitializeRequestParams, tap: Option<Arc<NotificationTap>>) -> Self {
-        Self {
-            info,
-            tap,
-            elicitation: None,
-        }
-    }
-
-    pub(crate) fn with_elicitation_router(mut self, router: Arc<ElicitationRouter>) -> Self {
-        self.elicitation = Some(router);
-        self
+        Self { info, tap }
     }
 }
 
 impl ClientHandler for PeriClientHandler {
     fn get_info(&self) -> InitializeRequestParams {
         self.info.clone()
-    }
-
-    /// 反向 elicitation：按连接内唯一 active call 路由到发起会话。
-    ///
-    /// 无 router / 无 active call / 同一连接多个 active call 一律 fail-closed
-    /// `decline`，并在 `_meta` 说明「无人可答」，不猜测归属。
-    async fn create_elicitation(
-        &self,
-        request: ElicitRequestParams,
-        context: RequestContext<RoleClient>,
-    ) -> Result<ElicitResult, McpError> {
-        {
-            let Some(router) = self.elicitation.as_ref() else {
-                return Ok(unavailable_decline(
-                    peri_acp_types::interaction::UnansweredCause::OwnerUnmatched,
-                ));
-            };
-            let route = match router.resolve() {
-                RouteResolution::Unique(call) => call,
-                RouteResolution::NoActiveCall => {
-                    tracing::debug!(
-                        server = router.server(),
-                        "MCP elicitation declined: no active tool call on this connection"
-                    );
-                    return Ok(unavailable_decline(
-                        peri_acp_types::interaction::UnansweredCause::OwnerUnmatched,
-                    ));
-                }
-                RouteResolution::Ambiguous { active } => {
-                    tracing::warn!(
-                        server = router.server(),
-                        active,
-                        "MCP elicitation declined: concurrent active calls make ownership ambiguous"
-                    );
-                    return Ok(unavailable_decline(
-                        peri_acp_types::interaction::UnansweredCause::OwnerUnmatched,
-                    ));
-                }
-            };
-            let cancellation = route.cancellation.clone();
-            let _asking = router.begin_asking();
-            let answer = tokio::select! {
-                answer = ask_elicitation(
-                    &*route.broker,
-                    route.owner.clone(),
-                    router.server(),
-                    &route.tool,
-                    &request,
-                    &cancellation,
-                ) => answer,
-                // Server 取消 / 连接关闭：立即以 cancel 回包，不占用交互门。
-                _ = context.ct.cancelled() => {
-                    tracing::debug!(
-                        server = router.server(),
-                        "MCP elicitation cancelled by the server connection"
-                    );
-                    return Ok(ElicitResult::new(ElicitationAction::Cancel));
-                }
-            };
-            match answer {
-                Ok(mapped) => {
-                    if let ElicitRequestParams::UrlElicitationParams { elicitation_id, .. } =
-                        &request
-                    {
-                        router.note_url_route(elicitation_id, &route.session_id);
-                    }
-                    Ok(mapped.into_result())
-                }
-                Err(failure) => {
-                    tracing::warn!(
-                        server = router.server(),
-                        tool = %route.tool,
-                        detail = %failure.detail,
-                        "MCP elicitation channel failed"
-                    );
-                    Err(McpError::internal_error(
-                        "elicitation channel failed",
-                        Some(serde_json::json!({ "detail": failure.detail })),
-                    ))
-                }
-            }
-        }
     }
 
     fn on_cancelled(
@@ -269,40 +168,13 @@ impl ClientHandler for PeriClientHandler {
         std::future::ready(())
     }
 
+    /// 非订阅通知统一交给 tap；2026-07-28 的 elicitation 不再有独立的
+    /// server → client 完成通知通道。
     fn on_custom_notification(
         &self,
         notification: CustomNotification,
         _context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
-        // 2025-11-25 `notifications/elicitation/complete`（server → client）：
-        // rmcp 3.9 无 typed API，这里按规范解析并记录；未知 id 按规范忽略。
-        if notification.method == "notifications/elicitation/complete" {
-            let elicitation_id = notification
-                .params
-                .as_ref()
-                .and_then(|params| params.get("elicitationId"))
-                .and_then(serde_json::Value::as_str);
-            match (self.elicitation.as_ref(), elicitation_id) {
-                (Some(router), Some(elicitation_id)) => match router.complete_url(elicitation_id) {
-                    Some(session_id) => tracing::info!(
-                        server = router.server(),
-                        elicitation_id,
-                        session_id,
-                        "MCP URL elicitation completed"
-                    ),
-                    None => tracing::debug!(
-                        server = router.server(),
-                        elicitation_id,
-                        "ignoring completion for unknown or already-completed elicitation"
-                    ),
-                },
-                _ => tracing::debug!(
-                    method = %notification.method,
-                    "MCP URL elicitation completion ignored: no elicitation router"
-                ),
-            }
-            return std::future::ready(());
-        }
         match &self.tap {
             Some(tap) => tap.on_custom_notification(notification),
             None => tracing::debug!(
@@ -446,9 +318,11 @@ impl McpServiceWrapper {
 
 pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
 
-pub(crate) fn mcpp_client_info_for_profile(
+/// 连接初始化能力：EL 只在 2026-07-28 的**单次请求**边界按需声明，
+/// 旧 initialize 包不得携带 elicitation（也不得对不支持的版本虚报）。
+fn base_client_capabilities(
     profile: &crate::mcp::apps::McpCapabilityProfile,
-) -> InitializeRequestParams {
+) -> ClientCapabilities {
     let mut extensions = std::collections::BTreeMap::from([(
         SERVER_CACHE_VERSION_EXTENSION.to_string(),
         serde_json::Map::new(),
@@ -459,13 +333,32 @@ pub(crate) fn mcpp_client_info_for_profile(
     extensions.insert(TASKS_EXTENSION_ID.to_string(), serde_json::Map::new());
     let mut capabilities = ClientCapabilities::default();
     capabilities.extensions = Some(extensions);
-    // Form + URL 均声明：不支持 `schemaValidation`，不得虚报。
+    capabilities
+}
+
+pub(crate) fn mcpp_client_info_for_profile(
+    profile: &crate::mcp::apps::McpCapabilityProfile,
+) -> InitializeRequestParams {
+    InitializeRequestParams::new(
+        base_client_capabilities(profile),
+        Implementation::from_build_env(),
+    )
+}
+
+/// 2026-07-28 `tools/call` 的单次请求能力声明。
+///
+/// 只有本次调用存在可用交互入口时才声明 Form + URL；不支持
+/// `schemaValidation`，不得虚报。未注入时调用方不覆盖共享 `_meta`。
+pub(crate) fn client_capabilities_for_call(
+    profile: &crate::mcp::apps::McpCapabilityProfile,
+) -> ClientCapabilities {
+    let mut capabilities = base_client_capabilities(profile);
     capabilities.elicitation = Some(
         ElicitationCapability::new()
             .with_form(FormElicitationCapability::new())
             .with_url(UrlElicitationCapability::new()),
     );
-    InitializeRequestParams::new(capabilities, Implementation::from_build_env())
+    capabilities
 }
 
 pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {

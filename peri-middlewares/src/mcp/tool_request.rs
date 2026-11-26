@@ -4,11 +4,14 @@ use rmcp::model::CallToolRequest;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResponse;
 use rmcp::model::CancelledNotificationParam;
+use rmcp::model::ClientCapabilities;
 use rmcp::model::ClientRequest;
 use rmcp::model::ErrorData as McpError;
 use rmcp::model::InputRequest;
 use rmcp::model::InputResponses;
+use rmcp::model::ProtocolVersion;
 use rmcp::model::RequestId;
+use rmcp::model::RequestMetaObject;
 use rmcp::model::ServerResult;
 use rmcp::model::DEFAULT_MRTR_MAX_ROUNDS;
 use rmcp::service::Peer;
@@ -17,7 +20,7 @@ use rmcp::service::RoleClient;
 use rmcp::ServiceError;
 use std::time::Duration;
 
-use super::client::ElicitationLease;
+use super::client::InteractionRoute;
 
 const CANCEL_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -62,7 +65,8 @@ pub(super) async fn call_tool(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
     timeout: Option<Duration>,
-    elicitation: Option<&ElicitationLease>,
+    interaction: Option<&InteractionRoute>,
+    request_capabilities: Option<&ClientCapabilities>,
 ) -> Result<CallToolResponse, ServiceError> {
     // 每轮尝试独立 deadline；跨轮只保留 inputResponses 与 server 的 requestState。
     let mut input_responses: Option<InputResponses> = None;
@@ -72,7 +76,13 @@ pub(super) async fn call_tool(
         let mut attempt = params.clone();
         attempt.input_responses = input_responses.clone();
         attempt.request_state = request_state.clone();
-        let result = call_tool_once(peer, attempt, timeout, elicitation).await?;
+        let result = call_tool_once(
+            peer,
+            attempt,
+            request_options(peer, request_capabilities),
+            timeout,
+        )
+        .await?;
         match result {
             ServerResult::InputRequiredResult(required) => {
                 if round == DEFAULT_MRTR_MAX_ROUNDS {
@@ -81,7 +91,7 @@ pub(super) async fn call_tool(
                     });
                 }
                 let requests = required.input_requests.unwrap_or_default();
-                let Some(lease) = elicitation else {
+                let Some(interaction) = interaction else {
                     // 没有交互入口时不能伪造 inputResponses：显式失败，由工具层转述。
                     return Err(ServiceError::McpError(McpError::invalid_params(
                         "server requires elicitation input but this call has no interaction route",
@@ -92,12 +102,19 @@ pub(super) async fn call_tool(
                 for (key, request) in requests {
                     match request {
                         InputRequest::Elicitation(request) => {
-                            let mapped = lease.ask(&request.params).await.map_err(|failure| {
-                                ServiceError::McpError(McpError::internal_error(
-                                    "MCP elicitation channel failed",
-                                    Some(serde_json::json!({ "detail": failure.detail })),
-                                ))
-                            })?;
+                            let mapped =
+                                interaction.ask(&request.params).await.map_err(|failure| {
+                                    ServiceError::McpError(McpError::internal_error(
+                                        "MCP elicitation channel failed",
+                                        Some(serde_json::json!({ "detail": failure.detail })),
+                                    ))
+                                })?;
+                            // 工具调用整体取消：立即停止续调，不再发送下一轮 tools/call。
+                            if interaction.cancellation.is_cancelled() {
+                                return Err(ServiceError::Cancelled {
+                                    reason: Some("tool invocation cancelled".to_string()),
+                                });
+                            }
                             let value =
                                 serde_json::to_value(mapped.into_result()).map_err(|error| {
                                     ServiceError::McpError(McpError::internal_error(
@@ -117,7 +134,7 @@ pub(super) async fn call_tool(
                     }
                 }
                 input_responses = Some(responses);
-                // requestState 逐字回传（不解释、不修改、不推测内容）。
+                // requestState 逐字回传；该轮省略时下一轮也随之省略。
                 request_state = required.request_state;
             }
             ServerResult::CallToolResult(result) => {
@@ -134,77 +151,60 @@ pub(super) async fn call_tool(
     })
 }
 
-/// 单轮 `tools/call`：发送 + 响应等待（用户作答期间续期）。
+/// 2026-07-28 的单次请求能力覆盖：只有本次调用确有交互入口时才携带 EL。
+///
+/// 更早协商版本不写 `_meta`，旧 initialize 包也不声明 EL。
+fn request_options(
+    peer: &Peer<RoleClient>,
+    capabilities: Option<&ClientCapabilities>,
+) -> PeerRequestOptions {
+    let Some(capabilities) = capabilities else {
+        return PeerRequestOptions::no_options();
+    };
+    let negotiated = peer.peer_info().map(|info| info.protocol_version.clone());
+    if negotiated.is_none_or(|version| version < ProtocolVersion::V_2026_07_28) {
+        return PeerRequestOptions::no_options();
+    }
+    let mut meta = RequestMetaObject::new();
+    meta.set_client_capabilities(capabilities.clone());
+    PeerRequestOptions::no_options().with_meta(meta)
+}
+
+/// 单轮 `tools/call`：发送 + 响应等待。传输超时只覆盖本轮发送与响应，
+/// 用户作答发生在 `InputRequiredResult` 之后，由交互 broker 自己的超时约束。
 async fn call_tool_once(
     peer: &Peer<RoleClient>,
     params: CallToolRequestParams,
+    options: PeerRequestOptions,
     timeout: Option<Duration>,
-    elicitation: Option<&ElicitationLease>,
 ) -> Result<ServerResult, ServiceError> {
-    // 每轮尝试独立 deadline：发送与响应各自有界，等待用户的时间不吞掉
-    // 工具本身的传输预算。
-    let send_deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
     let send = peer.send_request_with_option(
         ClientRequest::CallToolRequest(CallToolRequest::new(params)),
-        PeerRequestOptions::no_options(),
+        options,
     );
-    let mut handle =
-        match send_deadline {
-            Some(deadline) => peri_time::timeout_at(deadline, send).await.map_err(|_| {
-                ServiceError::Timeout {
-                    timeout: timeout.expect("deadline has a duration"),
-                }
-            })??,
-            None => send.await?,
-        };
+    let mut handle = match timeout {
+        Some(duration) => peri_time::timeout(duration, send)
+            .await
+            .map_err(|_| ServiceError::Timeout { timeout: duration })??,
+        None => send.await?,
+    };
     let mut pending = PendingRequest {
         peer: peer.clone(),
         id: Some(handle.id.clone()),
     };
 
-    // 用户在 elicitation 中思考时续期：deadline 到点仍在提问 → 重置；提问结束
-    // （作答 / 取消）→ 立即给 server 一个新的完整窗口。
-    let mut deadline = timeout.map(|duration| peri_time::monotonic_now() + duration);
-    let mut activity_rx = elicitation.map(ElicitationLease::activity_receiver);
-    let mut settled = None;
-    let result = loop {
-        let until = deadline;
-        let inactivity = async {
-            match &mut activity_rx {
-                Some(rx) => {
-                    let _ = rx.changed().await;
-                }
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::select! {
-            result = &mut handle.rx => {
-                let response = result.map_err(|_| ServiceError::TransportClosed)??;
-                settled = Some(response);
-            }
-            _ = async {
-                match until {
-                    Some(until) => peri_time::sleep_until(until).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => {
-                let duration = timeout.expect("deadline has a duration");
-                if elicitation.is_some_and(ElicitationLease::is_asking) {
-                    deadline = Some(peri_time::monotonic_now() + duration);
-                    continue;
-                }
+    let result = match timeout {
+        Some(duration) => match peri_time::timeout(duration, &mut handle.rx).await {
+            Ok(response) => response.map_err(|_| ServiceError::TransportClosed)??,
+            Err(_) => {
                 pending.cancel().await;
                 return Err(ServiceError::Timeout { timeout: duration });
             }
-            _ = inactivity => {
-                if let Some(duration) = timeout {
-                    deadline = Some(peri_time::monotonic_now() + duration);
-                }
-            }
-        }
-        if let Some(response) = settled.take() {
-            break response;
-        }
+        },
+        None => handle
+            .rx
+            .await
+            .map_err(|_| ServiceError::TransportClosed)??,
     };
     pending.id.take();
     Ok(result)

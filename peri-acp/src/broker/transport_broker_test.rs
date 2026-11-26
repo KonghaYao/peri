@@ -1192,7 +1192,7 @@ async fn mcp_form_projects_schema_and_origin_marker() {
 }
 
 #[tokio::test]
-async fn mcp_url_projects_consent_card_and_preserves_id() {
+async fn mcp_url_elicitation_projects_consent_card_and_generates_a_local_id() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let broker = AcpTransportBroker::new(
         Arc::new(MockTransport {
@@ -1202,34 +1202,46 @@ async fn mcp_url_projects_consent_card_and_preserves_id() {
         SessionId::new("s1"),
         interaction_gate(),
     );
-    let response = broker
-        .request(
-            owner(),
-            InteractionContext::Elicitation {
-                request: peri_acp_types::interaction::ElicitationRequest::Url {
-                    server: "oauth".into(),
-                    tool: "connect".into(),
-                    message: "Authorize in browser".into(),
-                    url: "https://example.com/connect".into(),
-                    elicitation_id: "e-1".into(),
+    for _ in 0..2 {
+        let response = broker
+            .request(
+                owner(),
+                InteractionContext::Elicitation {
+                    request: peri_acp_types::interaction::ElicitationRequest::Url {
+                        server: "oauth".into(),
+                        tool: "connect".into(),
+                        message: "Authorize in browser".into(),
+                        url: "https://example.com/connect".into(),
+                    },
                 },
-            },
-        )
-        .await;
-    assert!(matches!(
-        response,
-        InteractionResponse::Elicitation(
-            peri_acp_types::interaction::ElicitationDecision::Accept { .. }
-        )
-    ));
+            )
+            .await;
+        assert!(matches!(
+            response,
+            InteractionResponse::Elicitation(
+                peri_acp_types::interaction::ElicitationDecision::Accept { .. }
+            )
+        ));
+    }
     let calls = calls.lock().unwrap();
-    let params = &calls[0].1;
-    assert_eq!(params["mode"], "url");
-    assert_eq!(params["elicitationId"], "e-1");
-    assert_eq!(params["url"], "https://example.com/connect");
+    let first = &calls[0].1;
+    let second = &calls[1].1;
+    assert_eq!(first["mode"], "url");
+    assert_eq!(first["url"], "https://example.com/connect");
     assert_eq!(
-        params["_meta"]["io.peri/mcpElicitation"],
+        first["_meta"]["io.peri/mcpElicitation"],
         json!({ "server": "oauth", "tool": "connect" })
+    );
+    let first_id = first["elicitationId"]
+        .as_str()
+        .expect("ACP url elicitation carries a local id");
+    let second_id = second["elicitationId"]
+        .as_str()
+        .expect("ACP url elicitation carries a local id");
+    assert!(!first_id.is_empty());
+    assert_ne!(
+        first_id, second_id,
+        "each displayed elicitation id must be unique within the ACP connection"
     );
 }
 

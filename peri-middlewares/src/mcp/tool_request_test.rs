@@ -1,6 +1,7 @@
-//! MRTR（2026-07-28）`tools/call` 轮次与 elicitation 输入回归。
+//! MRTR（2026-07-28）`tools/call` 轮次、能力声明与 elicitation 输入回归。
 #![allow(deprecated)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +12,9 @@ use peri_acp_types::interaction::{
     UserInteractionBroker,
 };
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ElicitRequest,
-    ElicitRequestParams, ElicitationSchema, InputRequest, InputRequests, InputRequiredResult,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ContentBlock,
+    ElicitRequest, ElicitRequestParams, ElicitationSchema, InitializeRequestParams,
+    InitializeResult, InputRequest, InputRequests, InputRequiredResult, ProtocolVersion,
     ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -20,7 +22,8 @@ use rmcp::ServerHandler;
 use tokio_util::sync::CancellationToken;
 
 use super::call_tool;
-use crate::mcp::client::elicitation::ElicitationRouter;
+use crate::mcp::apps::McpCapabilityProfile;
+use crate::mcp::client::{client_capabilities_for_call, InteractionRoute};
 
 struct AcceptBroker {
     content: serde_json::Value,
@@ -40,6 +43,37 @@ impl UserInteractionBroker for AcceptBroker {
     }
 }
 
+struct RecordingBroker {
+    decisions: Mutex<Vec<ElicitationDecision>>,
+    seen: Mutex<Vec<InteractionContext>>,
+}
+
+impl RecordingBroker {
+    fn new(decisions: Vec<ElicitationDecision>) -> Arc<Self> {
+        Arc::new(Self {
+            decisions: Mutex::new(decisions),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl UserInteractionBroker for RecordingBroker {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
+        self.seen.lock().push(ctx);
+        let decision = {
+            let mut decisions = self.decisions.lock();
+            assert!(!decisions.is_empty(), "unexpected extra elicitation");
+            decisions.remove(0)
+        };
+        InteractionResponse::Elicitation(decision)
+    }
+}
+
 fn owner() -> TrustedInteractionOwner {
     TrustedInteractionOwner::host("peri/test", 1)
 }
@@ -52,7 +86,7 @@ fn elicitation_schema() -> ElicitationSchema {
         .expect("schema")
 }
 
-fn input_required(state: &str) -> CallToolResponse {
+fn form_input_required(state: Option<&str>) -> CallToolResponse {
     let mut requests = InputRequests::new();
     requests.insert(
         "approval".to_string(),
@@ -66,20 +100,56 @@ fn input_required(state: &str) -> CallToolResponse {
     );
     CallToolResponse::InputRequired(InputRequiredResult::new(
         Some(requests),
-        Some(state.to_string()),
+        state.map(str::to_string),
     ))
+}
+
+/// 0728 URL：MCP 自身不再提供 `elicitationId`（rmcp 用空串表示）。
+fn url_input_required(state: Option<&str>) -> CallToolResponse {
+    let mut requests = InputRequests::new();
+    requests.insert(
+        "authorize".to_string(),
+        InputRequest::Elicitation(ElicitRequest::new(
+            ElicitRequestParams::UrlElicitationParams {
+                meta: None,
+                message: "Authorize in browser".to_string(),
+                url: "https://example.com/connect".to_string(),
+                elicitation_id: String::new(),
+            },
+        )),
+    );
+    CallToolResponse::InputRequired(InputRequiredResult::new(
+        Some(requests),
+        state.map(str::to_string),
+    ))
+}
+
+fn fixed_result() -> CallToolResponse {
+    CallToolResponse::Complete(CallToolResult::success(vec![ContentBlock::text(
+        "receipt-001",
+    )]))
 }
 
 struct RoundHandler {
     calls: Arc<Mutex<Vec<CallToolRequestParams>>>,
+    metas: Arc<Mutex<Vec<serde_json::Value>>>,
+    parallel_rounds: Arc<Mutex<HashMap<String, usize>>>,
     mode: Mode,
+    declared_on_initialize: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 #[derive(Clone, Copy)]
 enum Mode {
+    Plain,
     TwoRounds,
+    CancelRound,
     AlwaysInputRequired,
     Sampling,
+    UrlTwoRounds,
+    UrlTwice,
+    StateOmitted,
+    Parallel,
+    Slow,
 }
 
 impl ServerHandler for RoundHandler {
@@ -87,6 +157,18 @@ impl ServerHandler for RoundHandler {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
             rmcp::model::Implementation::new("peri-mrtr-fixture", "tool_request_test"),
         )
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, rmcp::ErrorData> {
+        self.declared_on_initialize
+            .lock()
+            .push(serde_json::to_value(&request.capabilities).unwrap_or_default());
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 
     async fn list_tools(
@@ -113,20 +195,60 @@ impl ServerHandler for RoundHandler {
             calls.push(request.clone());
             calls.len()
         };
-        // 0728 逐请求 `_meta` 由 rmcp 从 handler info 自动注入：能力必须在 wire 上可见。
+        self.metas
+            .lock()
+            .push(serde_json::to_value(&context.meta).unwrap_or_default());
+        // 0728 单次请求 `_meta`：需要提问的调用必须在线上声明 Form + URL。
         let capabilities = context.meta.client_capabilities();
         let has_elicitation = capabilities
             .as_ref()
             .and_then(|caps| caps.elicitation.as_ref())
             .is_some_and(|elicitation| elicitation.form.is_some() && elicitation.url.is_some());
-        if !has_elicitation {
+        if !has_elicitation && !matches!(self.mode, Mode::Plain) {
             return Err(rmcp::ErrorData::internal_error(
                 format!("missing elicitation meta; meta={:?}", context.meta),
                 None,
             ));
         }
         match self.mode {
-            Mode::TwoRounds if round == 1 => Ok(input_required("opaque-1")),
+            Mode::Plain => Ok(fixed_result()),
+            Mode::Slow => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(fixed_result())
+            }
+            Mode::Parallel => {
+                let tag = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("action"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let round = {
+                    let mut rounds = self.parallel_rounds.lock();
+                    let entry = rounds.entry(tag.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                if round == 1 {
+                    return Ok(form_input_required(Some(&format!("state-{tag}"))));
+                }
+                let responses = request
+                    .input_responses
+                    .expect("parallel retry carries inputResponses");
+                assert_eq!(
+                    responses["approval"]["action"], "accept",
+                    "parallel call {tag} must receive its own accept"
+                );
+                assert_eq!(
+                    responses["approval"]["content"]["note"], tag,
+                    "parallel call {tag} must receive its own answer"
+                );
+                Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+                    ContentBlock::text(format!("result-{tag}")),
+                ])))
+            }
+            Mode::TwoRounds if round == 1 => Ok(form_input_required(Some("opaque-1"))),
             Mode::TwoRounds => {
                 let responses = request
                     .input_responses
@@ -139,11 +261,53 @@ impl ServerHandler for RoundHandler {
                     })
                 );
                 assert_eq!(request.request_state.as_deref(), Some("opaque-1"));
-                Ok(CallToolResponse::Complete(CallToolResult::success(vec![
-                    ContentBlock::text("done"),
-                ])))
+                Ok(fixed_result())
             }
-            Mode::AlwaysInputRequired => Ok(input_required("opaque-repeat")),
+            Mode::CancelRound if round == 1 => Ok(form_input_required(Some("cancel-1"))),
+            Mode::CancelRound => {
+                let responses = request
+                    .input_responses
+                    .expect("cancel round carries inputResponses");
+                assert_eq!(
+                    responses["approval"],
+                    serde_json::json!({ "action": "cancel" })
+                );
+                assert_eq!(request.request_state.as_deref(), Some("cancel-1"));
+                Ok(fixed_result())
+            }
+            Mode::UrlTwoRounds if round == 1 => Ok(url_input_required(Some("url-1"))),
+            Mode::UrlTwoRounds => {
+                let responses = request
+                    .input_responses
+                    .expect("url round 2 carries inputResponses");
+                assert_eq!(
+                    responses["authorize"],
+                    serde_json::json!({ "action": "accept" })
+                );
+                assert_eq!(request.request_state.as_deref(), Some("url-1"));
+                Ok(fixed_result())
+            }
+            Mode::UrlTwice if round < 3 => Ok(url_input_required(Some("url-repeat"))),
+            Mode::UrlTwice => {
+                let responses = request
+                    .input_responses
+                    .expect("url round 3 carries inputResponses");
+                assert_eq!(
+                    responses["authorize"],
+                    serde_json::json!({ "action": "accept" })
+                );
+                Ok(fixed_result())
+            }
+            Mode::StateOmitted if round == 1 => Ok(form_input_required(None)),
+            Mode::StateOmitted => {
+                assert!(
+                    request.request_state.is_none(),
+                    "a round that omitted requestState must stay omitted"
+                );
+                assert!(request.input_responses.is_some());
+                Ok(fixed_result())
+            }
+            Mode::AlwaysInputRequired => Ok(form_input_required(Some("opaque-repeat"))),
             Mode::Sampling => {
                 let mut requests = InputRequests::new();
                 requests.insert(
@@ -164,17 +328,25 @@ impl ServerHandler for RoundHandler {
 type Fixture = (
     rmcp::service::Peer<rmcp::service::RoleClient>,
     Arc<Mutex<Vec<CallToolRequestParams>>>,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    Arc<Mutex<Vec<serde_json::Value>>>,
     crate::mcp::client::McpServiceWrapper,
     crate::mcp::builtin::runtime::BuiltinServerTask,
 );
 
 async fn fixture(mode: Mode) -> Fixture {
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let metas = Arc::new(Mutex::new(Vec::new()));
+    let parallel_rounds = Arc::new(Mutex::new(HashMap::new()));
+    let declared_on_initialize = Arc::new(Mutex::new(Vec::new()));
     let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_handler(
         "mrtr-fixture",
         RoundHandler {
             calls: Arc::clone(&calls),
+            metas: Arc::clone(&metas),
+            parallel_rounds: Arc::clone(&parallel_rounds),
             mode,
+            declared_on_initialize: Arc::clone(&declared_on_initialize),
         },
     );
     let crate::mcp::builtin::runtime::BuiltinTransport {
@@ -182,14 +354,21 @@ async fn fixture(mode: Mode) -> Fixture {
     } = transport;
     let service = crate::mcp::client::serve_client_auto(
         io,
-        &crate::mcp::apps::McpCapabilityProfile::disabled(),
+        &McpCapabilityProfile::disabled(),
         Duration::from_secs(5),
     )
     .await
     .expect("handshake timeout")
     .expect("handshake");
     let peer = service.peer().clone();
-    (peer, calls, service, server_task)
+    (
+        peer,
+        calls,
+        metas,
+        declared_on_initialize,
+        service,
+        server_task,
+    )
 }
 
 async fn close(
@@ -204,37 +383,58 @@ async fn close(
         .await;
 }
 
+fn route(
+    tool: &str,
+    broker: Arc<dyn UserInteractionBroker>,
+    cancellation: CancellationToken,
+) -> InteractionRoute {
+    InteractionRoute {
+        server: "mrtr-fixture".to_string(),
+        tool: tool.to_string(),
+        owner: owner(),
+        broker,
+        cancellation,
+    }
+}
+
+fn call_capabilities() -> ClientCapabilities {
+    client_capabilities_for_call(&McpCapabilityProfile::disabled())
+}
+
 #[test]
-fn client_info_declares_form_and_url_elicitation() {
-    let info = crate::mcp::client::mcpp_client_info_for_profile(
-        &crate::mcp::apps::McpCapabilityProfile::disabled(),
-    );
+fn initialize_capabilities_do_not_declare_elicitation() {
+    let info = crate::mcp::client::mcpp_client_info_for_profile(&McpCapabilityProfile::disabled());
     let value = serde_json::to_value(&info).expect("initialize info serializes");
+    assert!(
+        value["capabilities"].get("elicitation").is_none(),
+        "旧 initialize 包不得声明 EL: {value}"
+    );
+}
+
+#[test]
+fn call_capabilities_declare_form_and_url() {
+    let value = serde_json::to_value(call_capabilities()).expect("capabilities serialize");
     assert_eq!(
-        value["capabilities"]["elicitation"],
+        value["elicitation"],
         serde_json::json!({ "form": {}, "url": {} })
     );
 }
 
 #[tokio::test]
 async fn two_rounds_echo_opaque_state_and_send_keyed_responses() {
-    let (peer, calls, service, server_task) = fixture(Mode::TwoRounds).await;
-    let router = ElicitationRouter::new("mrtr-fixture", 1);
-    let lease = router.register(
-        "s1",
-        "multi_round",
-        owner(),
-        Arc::new(AcceptBroker {
-            content: serde_json::json!({ "approve": true, "note": "ok" }),
-        }),
-        CancellationToken::new(),
-    );
+    let (peer, calls, metas, _declared, service, server_task) = fixture(Mode::TwoRounds).await;
+    let broker = Arc::new(AcceptBroker {
+        content: serde_json::json!({ "approve": true, "note": "ok" }),
+    });
+    let route = route("multi_round", broker, CancellationToken::new());
+    let capabilities = call_capabilities();
 
     let result = call_tool(
         &peer,
         CallToolRequestParams::new("multi_round"),
         Some(Duration::from_secs(5)),
-        Some(&lease),
+        Some(&route),
+        Some(&capabilities),
     )
     .await
     .expect("two MRTR rounds");
@@ -243,81 +443,253 @@ async fn two_rounds_echo_opaque_state_and_send_keyed_responses() {
     };
     assert_eq!(result.content.len(), 1);
 
-    let (rounds, round1_responses, round1_state, approval_action) = {
+    {
         let calls = calls.lock();
-        (
-            calls.len(),
-            calls[0].input_responses.clone(),
-            calls[0].request_state.clone(),
-            calls[1].input_responses.as_ref().unwrap()["approval"]["action"].clone(),
-        )
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].input_responses, None);
+        assert_eq!(calls[0].request_state, None);
+        assert_eq!(calls[1].request_state.as_deref(), Some("opaque-1"));
+        let metas = metas.lock();
+        assert_eq!(
+            metas[0]["io.modelcontextprotocol/clientCapabilities"]["elicitation"],
+            serde_json::json!({ "form": {}, "url": {} }),
+            "wire _meta must declare form + url when an interaction route exists"
+        );
+    }
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn plain_tool_without_an_interaction_route_still_works() {
+    let (peer, calls, metas, _declared, service, server_task) = fixture(Mode::Plain).await;
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        None,
+        None,
+    )
+    .await
+    .expect("plain tool call without an answerer");
+    assert!(matches!(result, CallToolResponse::Complete(_)));
+    assert_eq!(calls.lock().len(), 1);
+    {
+        let metas = metas.lock();
+        assert!(
+            metas[0]["io.modelcontextprotocol/clientCapabilities"]
+                .get("elicitation")
+                .is_none(),
+            "no answerer must not declare elicitation"
+        );
+    }
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn explicit_cancel_is_returned_as_cancel_and_the_call_finishes() {
+    let (peer, calls, _metas, _declared, service, server_task) = fixture(Mode::CancelRound).await;
+    let broker = RecordingBroker::new(vec![ElicitationDecision::Cancel]);
+    let route = route("multi_round", broker, CancellationToken::new());
+    let capabilities = call_capabilities();
+
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        Some(&route),
+        Some(&capabilities),
+    )
+    .await
+    .expect("cancel round still receives the final result");
+    assert!(matches!(result, CallToolResponse::Complete(_)));
+    assert_eq!(calls.lock().len(), 2);
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn url_accept_omits_content_and_returns_the_final_result_once() {
+    let (peer, calls, _metas, _declared, service, server_task) = fixture(Mode::UrlTwoRounds).await;
+    let broker = RecordingBroker::new(vec![ElicitationDecision::Accept {
+        content: serde_json::json!({ "must": "be ignored" }),
+    }]);
+    let route = route(
+        "multi_round",
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        CancellationToken::new(),
+    );
+    let capabilities = call_capabilities();
+
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        Some(&route),
+        Some(&capabilities),
+    )
+    .await
+    .expect("URL MRTR round");
+    let CallToolResponse::Complete(result) = result else {
+        panic!("expected final CallToolResult");
     };
-    assert_eq!(rounds, 2);
-    assert!(round1_responses.is_none());
-    assert!(round1_state.is_none());
-    let request_state = calls.lock()[1].request_state.clone();
-    assert_eq!(request_state.as_deref(), Some("opaque-1"));
-    assert_eq!(approval_action, "accept");
+    assert_eq!(
+        result.content[0].as_text().expect("text").text,
+        "receipt-001"
+    );
+    {
+        let seen = broker.seen.lock();
+        assert_eq!(seen.len(), 1);
+        let InteractionContext::Elicitation {
+            request: peri_acp_types::interaction::ElicitationRequest::Url { url, .. },
+        } = &seen[0]
+        else {
+            panic!("expected URL elicitation");
+        };
+        assert_eq!(url, "https://example.com/connect");
+    }
+    assert_eq!(calls.lock().len(), 2);
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn repeated_url_requirements_are_asked_again_instead_of_auto_continuing() {
+    let (peer, calls, _metas, _declared, service, server_task) = fixture(Mode::UrlTwice).await;
+    let broker = RecordingBroker::new(vec![
+        ElicitationDecision::Accept {
+            content: serde_json::Value::Null,
+        },
+        ElicitationDecision::Accept {
+            content: serde_json::Value::Null,
+        },
+    ]);
+    let route = route(
+        "multi_round",
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        CancellationToken::new(),
+    );
+    let capabilities = call_capabilities();
+
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        Some(&route),
+        Some(&capabilities),
+    )
+    .await
+    .expect("URL requirements across three rounds");
+    assert!(matches!(result, CallToolResponse::Complete(_)));
+    assert_eq!(calls.lock().len(), 3);
+    assert_eq!(broker.seen.lock().len(), 2);
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn omitted_request_state_stays_omitted_on_the_next_round() {
+    let (peer, calls, _metas, _declared, service, server_task) = fixture(Mode::StateOmitted).await;
+    let broker = Arc::new(AcceptBroker {
+        content: serde_json::json!({ "approve": true }),
+    });
+    let route = route("multi_round", broker, CancellationToken::new());
+    let capabilities = call_capabilities();
+
+    call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        Some(&route),
+        Some(&capabilities),
+    )
+    .await
+    .expect("state omission round");
+    {
+        let calls = calls.lock();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].request_state.is_none());
+    }
+    close(service, server_task).await;
+}
+
+#[tokio::test]
+async fn cancelling_the_tool_route_stops_continuation() {
+    let (peer, calls, _metas, _declared, service, server_task) = fixture(Mode::TwoRounds).await;
+    let broker = RecordingBroker::new(vec![ElicitationDecision::Accept {
+        content: serde_json::json!({ "approve": true }),
+    }]);
+    let cancellation = CancellationToken::new();
+    let route = route(
+        "multi_round",
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        cancellation.clone(),
+    );
+    let capabilities = call_capabilities();
+    cancellation.cancel();
+
+    let error = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_secs(5)),
+        Some(&route),
+        Some(&capabilities),
+    )
+    .await
+    .expect_err("cancelled tool call must not continue");
+    assert!(
+        matches!(error, rmcp::ServiceError::Cancelled { .. }),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        calls.lock().len(),
+        1,
+        "cancellation must stop before the next tools/call"
+    );
     close(service, server_task).await;
 }
 
 #[tokio::test]
 async fn repeated_input_required_stops_at_round_cap() {
-    let (peer, calls, service, server_task) = fixture(Mode::AlwaysInputRequired).await;
-    let router = ElicitationRouter::new("mrtr-fixture", 1);
-    let lease = router.register(
-        "s1",
-        "multi_round",
-        owner(),
-        Arc::new(AcceptBroker {
-            content: serde_json::json!({ "approve": true }),
-        }),
-        CancellationToken::new(),
-    );
+    let (peer, calls, _metas, _declared, service, server_task) =
+        fixture(Mode::AlwaysInputRequired).await;
+    let broker = Arc::new(AcceptBroker {
+        content: serde_json::json!({ "approve": true }),
+    });
+    let route = route("multi_round", broker, CancellationToken::new());
+    let capabilities = call_capabilities();
+
     let error = call_tool(
         &peer,
         CallToolRequestParams::new("multi_round"),
         Some(Duration::from_secs(5)),
-        Some(&lease),
+        Some(&route),
+        Some(&capabilities),
     )
     .await
     .expect_err("round cap must fail explicitly");
-    assert!(
-        matches!(
-            error,
-            rmcp::ServiceError::InputRequiredRoundsExceeded { max_rounds: 10 }
-        ),
-        "unexpected error: {error:?}"
-    );
-    assert_eq!(
-        calls.lock().len(),
-        rmcp::model::DEFAULT_MRTR_MAX_ROUNDS + 1,
-        "initial attempt + cap retries"
-    );
+    assert!(matches!(
+        error,
+        rmcp::ServiceError::InputRequiredRoundsExceeded { .. }
+    ));
+    assert_eq!(calls.lock().len(), rmcp::model::DEFAULT_MRTR_MAX_ROUNDS + 1);
     close(service, server_task).await;
 }
 
 #[tokio::test]
 async fn sampling_request_fails_explicitly_without_fabricated_answer() {
-    let (peer, _calls, service, server_task) = fixture(Mode::Sampling).await;
-    let router = ElicitationRouter::new("mrtr-fixture", 1);
-    let lease = router.register(
-        "s1",
-        "multi_round",
-        owner(),
-        Arc::new(AcceptBroker {
-            content: serde_json::json!({ "approve": true }),
-        }),
-        CancellationToken::new(),
-    );
+    let (peer, _calls, _metas, _declared, service, server_task) = fixture(Mode::Sampling).await;
+    let broker = Arc::new(AcceptBroker {
+        content: serde_json::Value::Null,
+    });
+    let route = route("multi_round", broker, CancellationToken::new());
+    let capabilities = call_capabilities();
+
     let error = call_tool(
         &peer,
         CallToolRequestParams::new("multi_round"),
         Some(Duration::from_secs(5)),
-        Some(&lease),
+        Some(&route),
+        Some(&capabilities),
     )
     .await
-    .expect_err("sampling must fail");
+    .expect_err("sampling must fail explicitly");
     assert!(
         error.to_string().contains("unsupported input request"),
         "unexpected error: {error}"
@@ -326,13 +698,15 @@ async fn sampling_request_fails_explicitly_without_fabricated_answer() {
 }
 
 #[tokio::test]
-async fn input_required_without_lease_fails_explicitly() {
-    let (peer, _calls, service, server_task) = fixture(Mode::TwoRounds).await;
+async fn input_required_without_route_fails_explicitly() {
+    let (peer, _calls, _metas, _declared, service, server_task) = fixture(Mode::TwoRounds).await;
+    let capabilities = call_capabilities();
     let error = call_tool(
         &peer,
         CallToolRequestParams::new("multi_round"),
         Some(Duration::from_secs(5)),
         None,
+        Some(&capabilities),
     )
     .await
     .expect_err("no interaction route must fail");
@@ -343,397 +717,178 @@ async fn input_required_without_lease_fails_explicitly() {
     close(service, server_task).await;
 }
 
-// ─── 2025-11-25 反向 elicitation（server → client，原 RPC ID 自动配对） ───
-
-struct ReverseHandler {
-    observed: Arc<Mutex<Vec<serde_json::Value>>>,
-    url_mode: bool,
-}
-
-impl ServerHandler for ReverseHandler {
-    fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("peri-reverse-fixture", "tool_request_test"),
+#[tokio::test]
+async fn parallel_calls_with_the_same_input_key_stay_isolated() {
+    let (peer, _calls, _metas, _declared, service, server_task) = fixture(Mode::Parallel).await;
+    let capabilities = call_capabilities();
+    let alpha = RecordingBroker::new(vec![ElicitationDecision::Accept {
+        content: serde_json::json!({ "approve": true, "note": "alpha" }),
+    }]);
+    let beta = RecordingBroker::new(vec![ElicitationDecision::Accept {
+        content: serde_json::json!({ "approve": true, "note": "beta" }),
+    }]);
+    let alpha_route = route(
+        "multi_round",
+        Arc::clone(&alpha) as Arc<dyn UserInteractionBroker>,
+        CancellationToken::new(),
+    );
+    let beta_route = route(
+        "multi_round",
+        Arc::clone(&beta) as Arc<dyn UserInteractionBroker>,
+        CancellationToken::new(),
+    );
+    let alpha_call = async {
+        call_tool(
+            &peer,
+            CallToolRequestParams::new("multi_round").with_arguments(serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("alpha")),
+            ])),
+            Some(Duration::from_secs(5)),
+            Some(&alpha_route),
+            Some(&capabilities),
         )
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult::with_all_items(vec![
-            Tool::new(
-                "reverse",
-                "reverse fixture",
-                Arc::new(serde_json::Map::new()),
-            ),
-        ]))
-    }
-
-    async fn call_tool(
-        &self,
-        _request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, rmcp::ErrorData> {
-        let params = if self.url_mode {
-            ElicitRequestParams::UrlElicitationParams {
-                meta: None,
-                message: "Authorize".to_string(),
-                url: "https://example.com/connect".to_string(),
-                elicitation_id: "e-1".to_string(),
-            }
-        } else {
-            ElicitRequestParams::FormElicitationParams {
-                meta: None,
-                message: "Approve?".to_string(),
-                requested_schema: elicitation_schema(),
-            }
-        };
-        let response = context
-            .peer
-            .send_request(rmcp::model::ServerRequest::ElicitRequest(
-                ElicitRequest::new(params),
-            ))
-            .await
-            .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
-        let rmcp::model::ClientResult::ElicitResult(result) = response else {
-            return Err(rmcp::ErrorData::internal_error(
-                "unexpected client result",
-                None,
-            ));
-        };
-        self.observed
-            .lock()
-            .push(serde_json::to_value(&result).expect("elicit result serializes"));
-        if self.url_mode {
-            context
-                .peer
-                .send_notification(rmcp::model::ServerNotification::CustomNotification(
-                    rmcp::model::CustomNotification::new(
-                        "notifications/elicitation/complete",
-                        Some(serde_json::json!({ "elicitationId": "e-1" })),
-                    ),
-                ))
-                .await
-                .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
-        }
-        Ok(CallToolResponse::Complete(CallToolResult::success(vec![
-            ContentBlock::text("ok"),
-        ])))
-    }
+        .await
+    };
+    let beta_call = async {
+        call_tool(
+            &peer,
+            CallToolRequestParams::new("multi_round").with_arguments(serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("beta")),
+            ])),
+            Some(Duration::from_secs(5)),
+            Some(&beta_route),
+            Some(&capabilities),
+        )
+        .await
+    };
+    let (alpha_result, beta_result) = tokio::join!(alpha_call, beta_call);
+    let alpha_result = alpha_result.expect("alpha call");
+    let beta_result = beta_result.expect("beta call");
+    let CallToolResponse::Complete(alpha_result) = alpha_result else {
+        panic!("alpha must complete");
+    };
+    let CallToolResponse::Complete(beta_result) = beta_result else {
+        panic!("beta must complete");
+    };
+    assert_eq!(
+        alpha_result.content[0].as_text().expect("alpha text").text,
+        "result-alpha"
+    );
+    assert_eq!(
+        beta_result.content[0].as_text().expect("beta text").text,
+        "result-beta"
+    );
+    close(service, server_task).await;
 }
 
-async fn reverse_fixture(
-    url_mode: bool,
-    router: Arc<ElicitationRouter>,
-) -> (
-    rmcp::service::Peer<rmcp::service::RoleClient>,
-    Arc<Mutex<Vec<serde_json::Value>>>,
-    rmcp::service::RunningService<rmcp::service::RoleClient, crate::mcp::client::PeriClientHandler>,
-    crate::mcp::builtin::runtime::BuiltinServerTask,
-) {
-    let observed = Arc::new(Mutex::new(Vec::new()));
+#[tokio::test]
+async fn transport_timeout_is_reported_without_waiting_for_the_user() {
+    let (peer, _calls, _metas, _declared, service, server_task) = fixture(Mode::Slow).await;
+    let capabilities = call_capabilities();
+    let error = call_tool(
+        &peer,
+        CallToolRequestParams::new("multi_round"),
+        Some(Duration::from_millis(50)),
+        None,
+        Some(&capabilities),
+    )
+    .await
+    .expect_err("slow tool must time out");
+    assert!(
+        matches!(error, rmcp::ServiceError::Timeout { .. }),
+        "unexpected error: {error}"
+    );
+    close(service, server_task).await;
+}
+
+/// 旧握手（2025-11-25 initialize）不得声明 EL；普通工具照常成功。
+#[tokio::test]
+async fn legacy_initialize_has_no_elicitation_and_normal_tools_still_work() {
+    struct LegacyHandler {
+        declared: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl ServerHandler for LegacyHandler {
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        async fn initialize(
+            &self,
+            request: InitializeRequestParams,
+            context: RequestContext<RoleServer>,
+        ) -> Result<InitializeResult, rmcp::ErrorData> {
+            self.declared
+                .lock()
+                .push(serde_json::to_value(&request.capabilities).unwrap_or_default());
+            context.peer.set_peer_info(request.clone());
+            self.negotiate_initialize(&request)
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<rmcp::model::PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+            Ok(rmcp::model::ListToolsResult::with_all_items(vec![
+                Tool::new("echo", "legacy fixture", Arc::new(serde_json::Map::new())),
+            ]))
+        }
+
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, rmcp::ErrorData> {
+            Ok(fixed_result())
+        }
+    }
+
+    let declared = Arc::new(Mutex::new(Vec::new()));
     let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_handler(
-        "reverse-fixture",
-        ReverseHandler {
-            observed: Arc::clone(&observed),
-            url_mode,
+        "legacy-fixture",
+        LegacyHandler {
+            declared: Arc::clone(&declared),
         },
     );
     let crate::mcp::builtin::runtime::BuiltinTransport {
-        io, server_task, ..
+        io,
+        mut server_task,
+        ..
     } = transport;
-    let handler = crate::mcp::client::PeriClientHandler::new(
-        crate::mcp::client::mcpp_client_info_for_profile(
-            &crate::mcp::apps::McpCapabilityProfile::disabled(),
-        ),
+    let info = crate::mcp::client::mcpp_client_info_for_profile(&McpCapabilityProfile::disabled())
+        .with_protocol_version(ProtocolVersion::V_2025_11_25);
+    let service =
+        rmcp::service::serve_client(crate::mcp::client::PeriClientHandler::new(info, None), io)
+            .await
+            .expect("legacy handshake");
+    let peer = service.peer().clone();
+
+    let result = call_tool(
+        &peer,
+        CallToolRequestParams::new("echo"),
+        Some(Duration::from_secs(5)),
+        None,
         None,
     )
-    .with_elicitation_router(router);
-    let service = rmcp::service::serve_client(handler, io)
-        .await
-        .expect("reverse fixture handshake");
-    let peer = service.peer().clone();
-    (peer, observed, service, server_task)
-}
-
-#[tokio::test]
-async fn reverse_elicitation_form_accept_uses_same_interaction_entry() {
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(AcceptBroker {
-            content: serde_json::json!({ "approve": false, "note": "later" }),
-        }),
-        CancellationToken::new(),
-    );
-    let result = call_tool(
-        &peer,
-        CallToolRequestParams::new("reverse"),
-        Some(Duration::from_secs(5)),
-        Some(&lease),
-    )
     .await
-    .expect("reverse elicitation");
+    .expect("normal tool call");
     assert!(matches!(result, CallToolResponse::Complete(_)));
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({
-            "action": "accept",
-            "content": { "approve": false, "note": "later" }
-        })]
-    );
-    drop(lease);
-    let _ = service;
-    let _ = server_task;
-}
 
-#[tokio::test]
-async fn reverse_url_accept_omits_content_and_completion_is_recorded() {
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(true, Arc::clone(&router)).await;
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(AcceptBroker {
-            content: serde_json::json!({ "ignored": true }),
-        }),
-        CancellationToken::new(),
-    );
-    let result = call_tool(
-        &peer,
-        CallToolRequestParams::new("reverse"),
-        Some(Duration::from_secs(5)),
-        Some(&lease),
-    )
-    .await
-    .expect("reverse url elicitation");
-    assert!(matches!(result, CallToolResponse::Complete(_)));
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({ "action": "accept" })]
-    );
-    // completion notification 在 call_tool 返回前后到达；给 handler 一个调度窗口。
-    for _ in 0..20 {
-        if router.completed_url_count() == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    {
+        let declared = declared.lock();
+        assert_eq!(declared.len(), 1);
+        assert!(
+            declared[0].get("elicitation").is_none(),
+            "legacy initialize must not declare elicitation: {:?}",
+            declared[0]
+        );
     }
-    assert_eq!(
-        router.completed_url_count(),
-        1,
-        "server→client completion notification must be recorded"
-    );
-    drop(lease);
-    let _ = service;
-    let _ = server_task;
-}
-
-/// 模拟用户思考 150ms 后再作答：工具 20ms deadline 必须因 elicitation 活动续期。
-struct SlowAcceptBroker {
-    delay: Duration,
-}
-
-#[async_trait]
-impl UserInteractionBroker for SlowAcceptBroker {
-    async fn request(
-        &self,
-        _owner: TrustedInteractionOwner,
-        _ctx: InteractionContext,
-    ) -> InteractionResponse {
-        peri_time::sleep(self.delay).await;
-        InteractionResponse::Elicitation(ElicitationDecision::Accept {
-            content: serde_json::json!({ "approve": true }),
-        })
-    }
-}
-
-// 虚拟时钟：20ms 工具 deadline 必须真的先到点，且不依赖真实计时精度——
-// Windows 定时器粒度（约 15ms）会让「20ms 到点 / 150ms 作答」的真实等待翻转。
-#[tokio::test(start_paused = true)]
-async fn elicitation_activity_renews_the_tool_deadline() {
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(SlowAcceptBroker {
-            delay: Duration::from_millis(150),
-        }),
-        CancellationToken::new(),
-    );
-    let result = call_tool(
-        &peer,
-        CallToolRequestParams::new("reverse"),
-        Some(Duration::from_millis(20)),
-        Some(&lease),
-    )
-    .await
-    .expect("user thinking must renew the tool deadline");
-    assert!(matches!(result, CallToolResponse::Complete(_)));
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({
-            "action": "accept",
-            "content": { "approve": true }
-        })]
-    );
-    drop(lease);
-    let _ = service;
-    let _ = server_task;
-}
-
-/// 用户明确拒绝 → 反向 elicitation 回 decline（与 cancel 语义分开）。
-struct DeclineBroker;
-
-#[async_trait]
-impl UserInteractionBroker for DeclineBroker {
-    async fn request(
-        &self,
-        _owner: TrustedInteractionOwner,
-        _ctx: InteractionContext,
-    ) -> InteractionResponse {
-        InteractionResponse::Elicitation(ElicitationDecision::Decline)
-    }
-}
-
-#[tokio::test]
-async fn reverse_elicitation_decline_stays_decline() {
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(DeclineBroker),
-        CancellationToken::new(),
-    );
-    let result = call_tool(
-        &peer,
-        CallToolRequestParams::new("reverse"),
-        Some(Duration::from_secs(1)),
-        Some(&lease),
-    )
-    .await
-    .expect("decline");
-    assert!(matches!(result, CallToolResponse::Complete(_)));
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({ "action": "decline" })]
-    );
-    drop(lease);
-    let _ = service;
-    let _ = server_task;
-}
-
-/// 交互通道超时（用户始终不答）→ 反向 elicitation 必须回 cancel，而不是协议错误。
-struct TimeoutBroker;
-
-#[async_trait]
-impl UserInteractionBroker for TimeoutBroker {
-    async fn request(
-        &self,
-        _owner: TrustedInteractionOwner,
-        _ctx: InteractionContext,
-    ) -> InteractionResponse {
-        InteractionResponse::Failed {
-            failure: peri_acp_types::interaction::InteractionFailure::Timeout,
-        }
-    }
-}
-
-#[tokio::test]
-async fn broker_timeout_returns_cancel_to_the_server() {
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(TimeoutBroker),
-        CancellationToken::new(),
-    );
-    let result = call_tool(
-        &peer,
-        CallToolRequestParams::new("reverse"),
-        Some(Duration::from_secs(1)),
-        Some(&lease),
-    )
-    .await
-    .expect("timeout is a cancellation, not a channel failure");
-    assert!(matches!(result, CallToolResponse::Complete(_)));
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({ "action": "cancel" })]
-    );
-    drop(lease);
-    let _ = service;
-    let _ = server_task;
-}
-
-/// 工具调用结束（lease Drop 取消令牌）时仍在等待的 elicitation 必须以 cancel 结算。
-#[tokio::test]
-async fn cancelling_the_lease_token_ends_an_in_flight_elicitation() {
-    struct HangingBroker;
-    #[async_trait]
-    impl UserInteractionBroker for HangingBroker {
-        async fn request(
-            &self,
-            _owner: TrustedInteractionOwner,
-            _ctx: InteractionContext,
-        ) -> InteractionResponse {
-            std::future::pending().await
-        }
-    }
-
-    let router = ElicitationRouter::new("reverse-fixture", 1);
-    let (peer, observed, service, server_task) = reverse_fixture(false, Arc::clone(&router)).await;
-    let cancel = CancellationToken::new();
-    let lease = router.register(
-        "s1",
-        "reverse",
-        owner(),
-        Arc::new(HangingBroker),
-        cancel.clone(),
-    );
-    let call = tokio::spawn({
-        let peer = peer.clone();
-        async move {
-            call_tool(
-                &peer,
-                CallToolRequestParams::new("reverse"),
-                Some(Duration::from_secs(5)),
-                Some(&lease),
-            )
-            .await
-        }
-    });
-    // 等 server 真正发出 elicitation，再结束工具调用。
-    for _ in 0..50 {
-        if observed.lock().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        } else {
-            break;
-        }
-    }
-    // 让 lease 随调用结束；handler 必须收到 cancel 并回包，server 侧的
-    // `observed` 在 elicitation 返回后才写入，所以这里只断言不挂死。
-    cancel.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(2), call)
-        .await
-        .expect("cancelled elicitation must not hang the tool call")
-        .expect("tool call settles");
-    assert_eq!(
-        observed.lock().as_slice(),
-        &[serde_json::json!({ "action": "cancel" })]
-    );
-    let _ = service;
-    let _ = server_task;
+    let mut service = service;
+    let _ = service
+        .close_with_timeout(crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT)
+        .await;
+    let _ = server_task
+        .converge(crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT)
+        .await;
 }

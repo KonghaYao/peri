@@ -244,7 +244,11 @@ export class InteractionBroker {
             () => ({ action: "decline" }),
             (value) => value.action,
         );
-        if (decision.action === "accept") this.openExternalUrl(mcp.url);
+        if (decision.action === "accept") {
+            this.openExternalUrl(mcp.url);
+            // URL accept 只表达导航同意；MCP 0728 的 URL 回包不携带 content。
+            return { action: "accept" };
+        }
         return decision;
     }
 

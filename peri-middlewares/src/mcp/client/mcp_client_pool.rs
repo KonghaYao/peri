@@ -65,11 +65,6 @@ pub struct McpClientPool {
     pub(super) handle_generations:
         parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
     pub(super) next_handle_generation: std::sync::atomic::AtomicU64,
-    /// 每 server 当前连接代的 elicitation 路由器（重连替换；旧 handler 持旧
-    /// router，迟到请求不会投到新代）。
-    pub(super) elicitation_routers:
-        parking_lot::Mutex<HashMap<String, Arc<super::elicitation::ElicitationRouter>>>,
-    pub(super) next_elicitation_generation: std::sync::atomic::AtomicU64,
     /// 宿主面按实例资源订阅的池内序号（`instance_face`；唯一化同一实例/URI 的多次
     /// 订阅，不承载业务语义）。
     pub(in crate::mcp) next_instance_subscription: std::sync::atomic::AtomicU64,
@@ -292,8 +287,6 @@ impl McpClientPool {
             clients: parking_lot::RwLock::new(HashMap::new()),
             handle_generations: parking_lot::Mutex::new(HashMap::new()),
             next_handle_generation: std::sync::atomic::AtomicU64::new(1),
-            elicitation_routers: parking_lot::Mutex::new(HashMap::new()),
-            next_elicitation_generation: std::sync::atomic::AtomicU64::new(1),
             next_instance_subscription: std::sync::atomic::AtomicU64::new(1),
             services: parking_lot::Mutex::new(HashMap::new()),
             builtin_server_tasks: parking_lot::Mutex::new(HashMap::new()),
@@ -324,36 +317,6 @@ impl McpClientPool {
             workspace_remote_started: std::sync::atomic::AtomicBool::new(false),
             lazy_workspace: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    /// 为一条新连接创建并登记 elicitation 路由器。
-    pub(crate) fn new_elicitation_router(
-        &self,
-        server: &str,
-    ) -> Arc<super::elicitation::ElicitationRouter> {
-        let generation = self
-            .next_elicitation_generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let router = super::elicitation::ElicitationRouter::new(server, generation);
-        self.install_elicitation_router(server, Arc::clone(&router));
-        router
-    }
-
-    pub(crate) fn install_elicitation_router(
-        &self,
-        server: &str,
-        router: Arc<super::elicitation::ElicitationRouter>,
-    ) {
-        self.elicitation_routers
-            .lock()
-            .insert(server.to_string(), router);
-    }
-
-    pub(crate) fn elicitation_router(
-        &self,
-        server: &str,
-    ) -> Option<Arc<super::elicitation::ElicitationRouter>> {
-        self.elicitation_routers.lock().get(server).cloned()
     }
 
     pub fn bind_execution_cwd(&self, cwd: &std::path::Path) -> std::io::Result<&std::path::Path> {

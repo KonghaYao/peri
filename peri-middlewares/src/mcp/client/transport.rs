@@ -47,8 +47,7 @@ where
     let handler = PeriClientHandler::new(
         super::mcpp_client_info_for_profile(&pool.capability_profile),
         Some(Arc::new(NotificationTap::new(pool, server))),
-    )
-    .with_elicitation_router(pool.new_elicitation_router(server));
+    );
     serve_client_auto_with_handler(handler, transport, timeout).await
 }
 

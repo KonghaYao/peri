@@ -1328,6 +1328,7 @@ panel-ask-user-answered-mark =  ✓
 panel-ask-user-url-title = 需要外部授权
 panel-ask-user-url-host = 目标域名
 panel-ask-user-url-opened = 已打开链接
+panel-ask-user-cancel = 取消本次授权
 panel-ask-user-no-options =   (无可用选项)
 panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
 panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel

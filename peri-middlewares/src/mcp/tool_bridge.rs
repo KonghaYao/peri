@@ -54,6 +54,8 @@ pub struct McpToolBridge {
     output_session_id: Option<String>,
     /// 会话级交互 broker（装配面注入）；缺失时 MCP elicitation 恒 fail-closed。
     interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
+    /// 连接装配时的能力 profile：0728 单次请求按需声明 Form/URL。
+    capability_profile: super::apps::McpCapabilityProfile,
 }
 
 impl Debug for McpToolBridge {
@@ -179,7 +181,17 @@ impl McpToolBridge {
             output_pool: None,
             output_session_id: None,
             interaction_broker: None,
+            capability_profile: super::apps::McpCapabilityProfile::disabled(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_capability_profile(
+        mut self,
+        profile: super::apps::McpCapabilityProfile,
+    ) -> Self {
+        self.capability_profile = profile;
+        self
     }
 
     #[must_use]
@@ -193,7 +205,7 @@ impl McpToolBridge {
         self
     }
 
-    /// 注入该会话的交互 broker：MCP 反向 elicitation 与 MRTR 输入都经它征询用户。
+    /// 注入该会话的交互 broker：0728 MRTR 输入经它征询用户。
     #[must_use]
     pub fn with_interaction_broker(
         mut self,
@@ -399,29 +411,28 @@ impl BaseTool for McpToolBridge {
             _ => false,
         };
         let timeout = (!workspace_tool).then_some(TOOL_CALL_TIMEOUT);
-        // 归属只在调用发送前注册：反向 elicitation 到达时必须已有唯一 route。
-        let elicitation_lease = match self.interaction_broker.as_ref() {
-            Some(broker) => match pool.elicitation_router(&self.server_name) {
-                Some(router) => {
-                    crate::interaction_owner::owner_from_tool_context(&ctx).map(|owner| {
-                        router.register(
-                            session_id,
-                            self.tool_name.clone(),
-                            owner,
-                            Arc::clone(broker),
-                            ctx.cancellation.clone(),
-                        )
-                    })
+        // 0728 的输入要求随原 tools/call 返回：归属由本次调用显式携带，
+        // 不再按连接猜测唯一活动调用。
+        let interaction = self.interaction_broker.as_ref().and_then(|broker| {
+            crate::interaction_owner::owner_from_tool_context(&ctx).map(|owner| {
+                super::client::InteractionRoute {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    owner,
+                    broker: Arc::clone(broker),
+                    cancellation: ctx.cancellation.clone(),
                 }
-                None => None,
-            },
-            None => None,
-        };
+            })
+        });
+        let request_capabilities = interaction
+            .as_ref()
+            .map(|_| super::client::client_capabilities_for_call(&self.capability_profile));
         let response = match super::tool_request::call_tool(
             peer,
             request,
             timeout,
-            elicitation_lease.as_ref(),
+            interaction.as_ref(),
+            request_capabilities.as_ref(),
         )
         .await
         {
@@ -823,6 +834,7 @@ fn build_bridges(
             let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
                 .with_server_generation(generation)
                 .with_binding_leases(Arc::clone(&pool.app_binding_leases))
+                .with_capability_profile(pool.capability_profile.clone())
                 .with_output_store(pool, session_id);
             if let Some(broker) = interaction_broker {
                 bridge = bridge.with_interaction_broker(Arc::clone(broker));

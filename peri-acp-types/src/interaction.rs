@@ -108,9 +108,6 @@ pub enum ElicitationRequest {
         tool: String,
         message: String,
         url: String,
-        /// 2025-11-25 有值；2026-07-28 已移除该字段（rmcp 用空串表示）。
-        #[serde(default)]
-        elicitation_id: String,
     },
 }
 

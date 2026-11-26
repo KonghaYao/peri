@@ -67,7 +67,7 @@ use std::sync::Arc;
 
 pub(crate) use cache::cache_scope_allows_persistence;
 pub(crate) use cache::ConnectionResourceCache;
-pub(crate) use elicitation::ElicitationLease;
+pub(crate) use elicitation::InteractionRoute;
 pub(crate) use notification_tap::{
     pending_notification_reminder, NotificationTap, PendingMcpNotification,
 };
@@ -78,8 +78,8 @@ pub(crate) use readiness::{
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
-    mcpp_client_info_for_profile, peer_declares_skills, McpServiceOwner, McpServiceWrapper,
-    PeriClientHandler,
+    client_capabilities_for_call, mcpp_client_info_for_profile, peer_declares_skills,
+    McpServiceOwner, McpServiceWrapper, PeriClientHandler,
 };
 #[cfg(test)]
 pub(crate) use status::status_change_text;

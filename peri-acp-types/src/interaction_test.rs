@@ -329,30 +329,8 @@ fn mcp_elicitation_form_round_trips_without_losing_schema() {
 }
 
 #[test]
-fn mcp_elicitation_url_keeps_2025_11_25_id_and_allows_0728_absence() {
-    let with_id = serde_json::json!({
-        "kind": "Elicitation",
-        "request": {
-            "mode": "url",
-            "server": "oauth",
-            "tool": "connect",
-            "message": "Authorize in browser",
-            "url": "https://example.com/connect",
-            "elicitation_id": "e-1"
-        }
-    });
-    let decoded: InteractionContext =
-        serde_json::from_value(with_id).expect("url elicitation deserializes");
-    let InteractionContext::Elicitation {
-        request: ElicitationRequest::Url { elicitation_id, .. },
-    } = decoded
-    else {
-        panic!("expected url elicitation")
-    };
-    assert_eq!(elicitation_id, "e-1");
-
-    // 2026-07-28 移除了 elicitationId；缺字段必须可解码（空串表示不存在）。
-    let without_id = serde_json::json!({
+fn mcp_elicitation_url_has_no_internal_mcp_id() {
+    let value = serde_json::json!({
         "kind": "Elicitation",
         "request": {
             "mode": "url",
@@ -363,14 +341,36 @@ fn mcp_elicitation_url_keeps_2025_11_25_id_and_allows_0728_absence() {
         }
     });
     let decoded: InteractionContext =
-        serde_json::from_value(without_id).expect("0728 url elicitation deserializes");
+        serde_json::from_value(value.clone()).expect("url elicitation deserializes");
     let InteractionContext::Elicitation {
-        request: ElicitationRequest::Url { elicitation_id, .. },
+        request:
+            ElicitationRequest::Url {
+                server,
+                tool,
+                message,
+                url,
+            },
     } = decoded
     else {
         panic!("expected url elicitation")
     };
-    assert_eq!(elicitation_id, "");
+    assert_eq!(server, "oauth");
+    assert_eq!(tool, "connect");
+    assert_eq!(message, "Authorize in browser");
+    assert_eq!(url, "https://example.com/connect");
+    let encoded = serde_json::to_value(InteractionContext::Elicitation {
+        request: ElicitationRequest::Url {
+            server: "oauth".into(),
+            tool: "connect".into(),
+            message: "Authorize in browser".into(),
+            url: "https://example.com/connect".into(),
+        },
+    })
+    .expect("url elicitation serializes");
+    assert!(
+        encoded["request"].get("elicitation_id").is_none(),
+        "MCP's elicitationId is not part of the internal ACP-facing contract"
+    );
 }
 
 #[test]

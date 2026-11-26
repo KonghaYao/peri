@@ -281,14 +281,10 @@ impl AcpTransportBroker {
                 tool,
                 message,
                 url,
-                elicitation_id,
             } => {
-                let elicitation_id = if elicitation_id.is_empty() {
-                    // 2026-07-28 removed the wire id; ACP still requires a local id.
-                    uuid::Uuid::now_v7().to_string()
-                } else {
-                    elicitation_id
-                };
+                // 0728 的 MCP elicitationId 不进入 Peri 内部；ACP 展示 ID 只在本适配器
+                // 本地生成，确保同一 ACP 连接内唯一。
+                let elicitation_id = uuid::Uuid::now_v7().to_string();
                 (
                     agent_client_protocol_schema::v1::ElicitationMode::Url(
                         ElicitationUrlMode::new(

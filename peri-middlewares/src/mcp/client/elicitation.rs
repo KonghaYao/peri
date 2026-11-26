@@ -1,14 +1,9 @@
-//! 外部 MCP Server 的 elicitation 归属与交互适配（单一权威）。
+//! 外部 MCP Server 的 elicitation 参数映射与交互归属（单一权威）。
 //!
-//! MCP 的反向 `elicitation/create` 不携带 Peri 会话身份，只能落到「当前连接上
-//! 正在执行的工具调用」。本模块维护该连接内 active call → 会话/归属/broker 的
-//! 映射，并把 MCP 协议参数与 [`InteractionContext`] 互转。
-//!
-//! 解析 fail-closed：没有 active call，或同一连接上同时有多个 active call 时，
-//! 一律返回 `decline`，不按时间/工具名猜测归属。
+//! 2026-07-28 起 elicitation 只随原 `tools/call` 的 `inputRequests` 返回，
+//! 不再有独立的 server → client 反向 RPC。归属由发起工具调用的一方在构造
+//! [`InteractionRoute`] 时显式给定，不做按连接猜测。
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use peri_acp_types::interaction::{
@@ -18,267 +13,35 @@ use peri_acp_types::interaction::{
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction, MetaObject};
 use tokio_util::sync::CancellationToken;
 
-/// 反向 elicitation 无可用归属时写入 `ElicitResult._meta` 的键。
+/// 无可用交互入口时写入 `ElicitResult._meta` 的键。
 pub(crate) const ELICITATION_UNAVAILABLE_META_KEY: &str = "io.peri/elicitationUnavailable";
 
-/// 外部 MCP 连接的 elicitation 路由器。
+/// 一次逻辑工具调用的交互归属。
 ///
-/// 每个连接代一个实例：重连产生新 router，旧 lease 随工具调用结束自然失效，
-/// 迟到请求不会被投递到新会话。
-pub(crate) struct ElicitationRouter {
-    server: String,
-    generation: u64,
-    state: parking_lot::Mutex<RouterState>,
-    next_seq: AtomicU64,
-    activity: Arc<ElicitationActivity>,
-}
-
-#[derive(Default)]
-struct RouterState {
-    active: BTreeMap<u64, ActiveCall>,
-    /// URL elicitationId → 发起会话（2025-11-25 完成通知回看用）。
-    url_routes: BTreeMap<String, String>,
-    completed_urls: BTreeMap<String, String>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ActiveCall {
-    pub(crate) session_id: String,
+/// owner / broker / server / tool / 取消令牌都由实际执行 `tools/call` 的一方
+/// 传入；`ask` 不会读取其他调用或连接的状态。
+pub(crate) struct InteractionRoute {
+    pub(crate) server: String,
     pub(crate) tool: String,
     pub(crate) owner: TrustedInteractionOwner,
     pub(crate) broker: Arc<dyn UserInteractionBroker>,
     pub(crate) cancellation: CancellationToken,
 }
 
-/// 反向往返的解析结果；`Ambiguous` 只计数，不暴露内部调用细节。
-pub(crate) enum RouteResolution {
-    Unique(ActiveCall),
-    NoActiveCall,
-    Ambiguous { active: usize },
-}
-
-struct ElicitationActivity {
-    asking: AtomicUsize,
-    changed: tokio::sync::watch::Sender<u64>,
-}
-
-impl Default for ElicitationActivity {
-    fn default() -> Self {
-        Self {
-            asking: AtomicUsize::new(0),
-            changed: tokio::sync::watch::channel(0).0,
-        }
-    }
-}
-
-impl ElicitationActivity {
-    fn enter(&self) {
-        self.asking.fetch_add(1, Ordering::AcqRel);
-        self.changed.send_modify(|version| *version += 1);
-    }
-
-    fn leave(&self) {
-        self.asking.fetch_sub(1, Ordering::AcqRel);
-        self.changed.send_modify(|version| *version += 1);
-    }
-
-    fn is_asking(&self) -> bool {
-        self.asking.load(Ordering::Acquire) > 0
-    }
-
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changed.subscribe()
-    }
-}
-
-impl ElicitationRouter {
-    pub(crate) fn new(server: impl Into<String>, generation: u64) -> Arc<Self> {
-        Arc::new(Self {
-            server: server.into(),
-            generation,
-            state: parking_lot::Mutex::new(RouterState::default()),
-            next_seq: AtomicU64::new(1),
-            activity: Arc::new(ElicitationActivity::default()),
-        })
-    }
-
-    pub(crate) fn server(&self) -> &str {
-        &self.server
-    }
-
-    /// 注册一次 active 工具调用；lease drop 时移除并取消仍在等待的交互。
-    ///
-    /// `parent_cancellation` 是调用方的取消信号；lease 持有其子令牌，Drop 只取消
-    /// 子令牌——否则一次工具结束会连带取消整个 turn 的取消令牌。
-    pub(crate) fn register(
-        self: &Arc<Self>,
-        session_id: impl Into<String>,
-        tool: impl Into<String>,
-        owner: TrustedInteractionOwner,
-        broker: Arc<dyn UserInteractionBroker>,
-        parent_cancellation: CancellationToken,
-    ) -> ElicitationLease {
-        let cancellation = parent_cancellation.child_token();
-        let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
-        tracing::trace!(
-            server = %self.server,
-            generation = self.generation,
-            seq,
-            "registering MCP elicitation route"
-        );
-        self.state.lock().active.insert(
-            seq,
-            ActiveCall {
-                session_id: session_id.into(),
-                tool: tool.into(),
-                owner,
-                broker,
-                cancellation: cancellation.clone(),
-            },
-        );
-        ElicitationLease {
-            router: Arc::clone(self),
-            seq,
-            activity: Arc::clone(&self.activity),
-            activity_rx: std::sync::Mutex::new(self.activity.subscribe()),
-            cancellation,
-        }
-    }
-
-    pub(crate) fn resolve(&self) -> RouteResolution {
-        let state = self.state.lock();
-        match state.active.len() {
-            0 => RouteResolution::NoActiveCall,
-            1 => RouteResolution::Unique(
-                state
-                    .active
-                    .values()
-                    .next()
-                    .expect("length checked")
-                    .clone(),
-            ),
-            active => RouteResolution::Ambiguous { active },
-        }
-    }
-
-    /// 记录 URL elicitation 与发起会话的关联（完成通知回看用）。
-    pub(crate) fn note_url_route(&self, elicitation_id: &str, session_id: &str) {
-        if elicitation_id.is_empty() {
-            return;
-        }
-        self.state
-            .lock()
-            .url_routes
-            .insert(elicitation_id.to_string(), session_id.to_string());
-    }
-
-    /// 处理 server → client 的 `notifications/elicitation/complete`。
-    ///
-    /// 2025-11-25 规范只允许 server 通知发起该 elicitation 的 client；本方法
-    /// 找不到 id 时返回 `None`（规范要求忽略未知 id）。返回发起会话供日志。
-    pub(crate) fn complete_url(&self, elicitation_id: &str) -> Option<String> {
-        let mut state = self.state.lock();
-        let session = state.url_routes.get(elicitation_id)?.clone();
-        state
-            .completed_urls
-            .insert(elicitation_id.to_string(), session.clone());
-        Some(session)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn completed_url_count(&self) -> usize {
-        self.state.lock().completed_urls.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_count(&self) -> usize {
-        self.state.lock().active.len()
-    }
-
-    /// 标记「本连接有一轮 elicitation 正在等待用户」；guard drop 即结束。
-    ///
-    /// 反向路径（handler）与 MRTR 路径共用同一活动计数，工具 deadline 续期
-    /// 才能同时覆盖两条协议。
-    pub(crate) fn begin_asking(&self) -> ElicitationAsking<'_> {
-        self.activity.enter();
-        ElicitationAsking {
-            activity: &self.activity,
-        }
-    }
-}
-
-/// elicitation 活动 guard：Drop 时结束，保证取消/早退也复位。
-pub(crate) struct ElicitationAsking<'a> {
-    activity: &'a ElicitationActivity,
-}
-
-impl Drop for ElicitationAsking<'_> {
-    fn drop(&mut self) {
-        self.activity.leave();
-    }
-}
-
-/// 一次工具调用持有的 elicitation 路由租约。
-pub(crate) struct ElicitationLease {
-    router: Arc<ElicitationRouter>,
-    seq: u64,
-    activity: Arc<ElicitationActivity>,
-    activity_rx: std::sync::Mutex<tokio::sync::watch::Receiver<u64>>,
-    cancellation: CancellationToken,
-}
-
-impl ElicitationLease {
-    pub(crate) fn is_asking(&self) -> bool {
-        self.activity.is_asking()
-    }
-
-    /// 活动变化订阅：elicitation 开始/结束时各推进一次版本。
-    pub(crate) fn activity_receiver(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.activity_rx
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// 用本调用的 broker/归属发起一次 elicitation。
-    ///
-    /// `cancellation` 来自本次工具调用（父令牌 + 本 lease 的取消）；工具结束、
-    /// 切会话或连接关闭时取消，broker future 立即丢弃并让 ACP transport 通过
-    /// `$/cancel_request` 撤销客户端提示。
+impl InteractionRoute {
     pub(crate) async fn ask(
         &self,
         params: &ElicitRequestParams,
     ) -> Result<MappedElicitation, ElicitationChannelFailure> {
-        let route = {
-            let state = self.router.state.lock();
-            state.active.get(&self.seq).cloned()
-        };
-        let Some(route) = route else {
-            return Ok(MappedElicitation {
-                decision: ElicitationDecision::Cancel,
-                unavailable: None,
-                url_mode: false,
-            });
-        };
-        let _asking = self.router.begin_asking();
         ask_elicitation(
-            &*route.broker,
-            route.owner.clone(),
-            &self.router.server,
-            &route.tool,
+            &*self.broker,
+            self.owner.clone(),
+            &self.server,
+            &self.tool,
             params,
-            &route.cancellation,
+            &self.cancellation,
         )
         .await
-    }
-}
-
-impl Drop for ElicitationLease {
-    fn drop(&mut self) {
-        self.router.state.lock().active.remove(&self.seq);
-        // 工具调用结束（成功 / 失败 / 取消 / 超时）时让仍在等待的反向请求
-        // 以 cancel 结算，而不是继续占用会话交互门到 broker 超时。
-        self.cancellation.cancel();
     }
 }
 
@@ -322,17 +85,11 @@ pub(crate) async fn ask_elicitation(
                 }
             })?,
         },
-        ElicitRequestParams::UrlElicitationParams {
-            message,
-            url,
-            elicitation_id,
-            ..
-        } => ElicitationRequest::Url {
+        ElicitRequestParams::UrlElicitationParams { message, url, .. } => ElicitationRequest::Url {
             server: server.to_string(),
             tool: tool.to_string(),
             message: message.clone(),
             url: url.clone(),
-            elicitation_id: elicitation_id.clone(),
         },
         _ => {
             return Err(ElicitationChannelFailure {
@@ -409,11 +166,6 @@ impl MappedElicitation {
     }
 }
 
-/// 无交互入口时回 `decline` + `_meta` 原因（不得伪装成用户拒绝）。
-pub(crate) fn unavailable_decline(cause: UnansweredCause) -> ElicitResult {
-    ElicitResult::new(ElicitationAction::Decline).with_meta(unavailable_meta(cause))
-}
-
 fn unavailable_meta(cause: UnansweredCause) -> MetaObject {
     let mut meta = MetaObject::new();
     meta.0.insert(
@@ -432,6 +184,8 @@ fn unavailable_meta(cause: UnansweredCause) -> MetaObject {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use peri_acp_types::interaction::InteractionContext;
+    use std::sync::Arc;
 
     struct StubBroker {
         response: Option<InteractionResponse>,
@@ -463,6 +217,16 @@ mod tests {
         TrustedInteractionOwner::host("peri/test", 1)
     }
 
+    fn route(broker: Arc<StubBroker>, cancellation: CancellationToken) -> InteractionRoute {
+        InteractionRoute {
+            server: "srv".to_string(),
+            tool: "tool".to_string(),
+            owner: owner(),
+            broker: broker as Arc<dyn UserInteractionBroker>,
+            cancellation,
+        }
+    }
+
     fn form_params() -> ElicitRequestParams {
         ElicitRequestParams::FormElicitationParams {
             meta: None,
@@ -474,138 +238,26 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn single_active_call_is_routed_and_removed_on_drop() {
-        let router = ElicitationRouter::new("srv", 1);
-        let lease = router.register(
-            "session-1",
-            "tool-1",
-            owner(),
-            StubBroker::new(InteractionResponse::Elicitation(
-                ElicitationDecision::Decline,
-            )),
-            CancellationToken::new(),
-        );
-        assert!(matches!(router.resolve(), RouteResolution::Unique(_)));
-        let mapped = lease.ask(&form_params()).await.expect("mapped");
-        assert_eq!(mapped.decision, ElicitationDecision::Decline);
-        drop(lease);
-        assert!(matches!(router.resolve(), RouteResolution::NoActiveCall));
-        assert_eq!(router.active_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn dropping_lease_does_not_cancel_parent_token() {
-        let router = ElicitationRouter::new("srv", 1);
-        let parent = CancellationToken::new();
-        let lease = router.register(
-            "session-1",
-            "tool-1",
-            owner(),
-            StubBroker::new(InteractionResponse::Elicitation(
-                ElicitationDecision::Decline,
-            )),
-            parent.clone(),
-        );
-        drop(lease);
-        assert!(
-            !parent.is_cancelled(),
-            "工具调用结束只能取消本 lease 的子令牌，不得取消调用方的父令牌"
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_active_calls_fail_closed() {
-        let router = ElicitationRouter::new("srv", 1);
-        let first = router.register(
-            "session-1",
-            "tool-1",
-            owner(),
-            StubBroker::new(InteractionResponse::Elicitation(
-                ElicitationDecision::Decline,
-            )),
-            CancellationToken::new(),
-        );
-        let _second = router.register(
-            "session-2",
-            "tool-2",
-            owner(),
-            StubBroker::new(InteractionResponse::Elicitation(
-                ElicitationDecision::Decline,
-            )),
-            CancellationToken::new(),
-        );
-        assert!(matches!(
-            router.resolve(),
-            RouteResolution::Ambiguous { active: 2 }
-        ));
-        drop(first);
-    }
-
-    #[tokio::test]
-    async fn cancellation_wins_over_pending_broker() {
-        struct HangingBroker;
-        #[async_trait]
-        impl UserInteractionBroker for HangingBroker {
-            async fn request(
-                &self,
-                _owner: TrustedInteractionOwner,
-                _ctx: InteractionContext,
-            ) -> InteractionResponse {
-                std::future::pending().await
-            }
+    fn url_params() -> ElicitRequestParams {
+        ElicitRequestParams::UrlElicitationParams {
+            meta: None,
+            message: "authorize".into(),
+            url: "https://example.com/connect".into(),
+            elicitation_id: String::new(),
         }
-
-        let router = ElicitationRouter::new("srv", 1);
-        let cancel = CancellationToken::new();
-        let lease = router.register(
-            "session-1",
-            "tool-1",
-            owner(),
-            Arc::new(HangingBroker),
-            cancel.clone(),
-        );
-        let task = {
-            let router = Arc::clone(&router);
-            let cancel = cancel.clone();
-            tokio::spawn(async move {
-                let lease = router.register(
-                    "session-1",
-                    "tool-1",
-                    owner(),
-                    Arc::new(HangingBroker),
-                    cancel,
-                );
-                lease.ask(&form_params()).await
-            })
-        };
-        drop(lease);
-        cancel.cancel();
-        let mapped = tokio::time::timeout(std::time::Duration::from_secs(1), task)
-            .await
-            .expect("cancellation wakes the ask")
-            .expect("join")
-            .expect("mapped");
-        assert_eq!(mapped.decision, ElicitationDecision::Cancel);
     }
 
     #[tokio::test]
-    async fn form_and_url_map_without_losing_identity() {
+    async fn form_maps_to_the_shared_interaction_entry() {
         let broker = StubBroker::new(InteractionResponse::Elicitation(
             ElicitationDecision::Accept {
                 content: serde_json::json!({ "approve": true }),
             },
         ));
-        let mapped = ask_elicitation(
-            &*broker,
-            owner(),
-            "srv",
-            "tool",
-            &form_params(),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("mapped");
+        let mapped = route(Arc::clone(&broker), CancellationToken::new())
+            .ask(&form_params())
+            .await
+            .expect("mapped");
         assert_eq!(
             mapped.decision,
             ElicitationDecision::Accept {
@@ -632,31 +284,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn url_maps_without_an_mcp_elicitation_id() {
+        let broker = StubBroker::new(InteractionResponse::Elicitation(
+            ElicitationDecision::Decline,
+        ));
+        let mapped = route(Arc::clone(&broker), CancellationToken::new())
+            .ask(&url_params())
+            .await
+            .expect("mapped");
+        assert_eq!(mapped.decision, ElicitationDecision::Decline);
+        let seen = broker.seen.lock();
+        let InteractionContext::Elicitation {
+            request:
+                ElicitationRequest::Url {
+                    server,
+                    tool,
+                    message,
+                    url,
+                },
+        } = &seen[0]
+        else {
+            panic!("expected url elicitation");
+        };
+        assert_eq!(server, "srv");
+        assert_eq!(tool, "tool");
+        assert_eq!(message, "authorize");
+        assert_eq!(url, "https://example.com/connect");
+    }
+
+    #[tokio::test]
     async fn timeout_maps_to_cancel_and_unanswered_maps_to_decline_with_meta() {
-        let timeout = ask_elicitation(
-            &*StubBroker::new(InteractionResponse::Failed {
+        let timeout = route(
+            StubBroker::new(InteractionResponse::Failed {
                 failure: InteractionFailure::Timeout,
             }),
-            owner(),
-            "srv",
-            "tool",
-            &form_params(),
-            &CancellationToken::new(),
+            CancellationToken::new(),
         )
+        .ask(&form_params())
         .await
         .expect("timeout is not a channel failure");
         assert_eq!(timeout.decision, ElicitationDecision::Cancel);
 
-        let unanswered = ask_elicitation(
-            &*StubBroker::new(InteractionResponse::Unanswered {
+        let unanswered = route(
+            StubBroker::new(InteractionResponse::Unanswered {
                 cause: UnansweredCause::NonInteractiveClient,
             }),
-            owner(),
-            "srv",
-            "tool",
-            &form_params(),
-            &CancellationToken::new(),
+            CancellationToken::new(),
         )
+        .ask(&form_params())
         .await
         .expect("unanswered is a decline");
         assert_eq!(unanswered.decision, ElicitationDecision::Decline);
@@ -675,22 +350,10 @@ mod tests {
                 content: serde_json::json!({ "unexpected": true }),
             },
         ));
-        let params = ElicitRequestParams::UrlElicitationParams {
-            meta: None,
-            message: "authorize".into(),
-            url: "https://example.com/connect".into(),
-            elicitation_id: "e-1".into(),
-        };
-        let mapped = ask_elicitation(
-            &*broker,
-            owner(),
-            "srv",
-            "tool",
-            &params,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("mapped");
+        let mapped = route(Arc::clone(&broker), CancellationToken::new())
+            .ask(&url_params())
+            .await
+            .expect("mapped");
         let result = mapped.into_result();
         assert_eq!(result.action, ElicitationAction::Accept);
         assert!(
@@ -699,12 +362,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn url_completion_only_for_known_route() {
-        let router = ElicitationRouter::new("srv", 1);
-        router.note_url_route("e-1", "session-1");
-        assert_eq!(router.complete_url("e-1").as_deref(), Some("session-1"));
-        assert_eq!(router.complete_url("unknown"), None);
-        assert_eq!(router.completed_url_count(), 1);
+    #[tokio::test]
+    async fn cancellation_wins_over_pending_broker() {
+        struct HangingBroker;
+        #[async_trait]
+        impl UserInteractionBroker for HangingBroker {
+            async fn request(
+                &self,
+                _owner: TrustedInteractionOwner,
+                _ctx: InteractionContext,
+            ) -> InteractionResponse {
+                std::future::pending().await
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let route = InteractionRoute {
+            server: "srv".to_string(),
+            tool: "tool".to_string(),
+            owner: owner(),
+            broker: Arc::new(HangingBroker),
+            cancellation: cancel.clone(),
+        };
+        let task = tokio::spawn(async move { route.ask(&form_params()).await });
+        cancel.cancel();
+        let mapped = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("cancellation wakes the ask")
+            .expect("join")
+            .expect("mapped");
+        assert_eq!(mapped.decision, ElicitationDecision::Cancel);
     }
 }
