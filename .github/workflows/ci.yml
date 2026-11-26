@@ -244,6 +244,13 @@ jobs:
                   # fail-closed recovery and concurrent delete. Every case owns a private
                   # schema, so the two suites can share one instance.
                   cargo test --locked -p peri-swarm --lib -- --ignored store::postgres --test-threads=2
+                  # HTTP delete of a `type=none` session needs a real state database that
+                  # is not the session database, so it gets its own two databases.
+                  docker exec "$db" psql -U postgres -qc 'CREATE DATABASE peri_swarm_session'
+                  docker exec "$db" psql -U postgres -qc 'CREATE DATABASE peri_swarm_state'
+                  export PERI_SWARM_SESSION_STORE="postgresql://postgres@${address}/peri_swarm_session"
+                  export PERI_SWARM_STATE_STORE="postgresql://postgres@${address}/peri_swarm_state"
+                  cargo test --locked -p peri-swarm --test it -- --ignored state_store_none_delete
 
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
               shell: bash

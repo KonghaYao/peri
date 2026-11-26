@@ -151,6 +151,27 @@ docker exec peri-swarm-pg psql -U peri -d peri_session -Atc \
 | 已初始化但缺权威表（`adcb9fe4d`） | `pg_dump peri_swarm_import \| psql peri_swarm_damaged`，再 `DROP TABLE swarm_inputs` 后启动 | exit 1：`swarm_meta says this database is initialized, but the authoritative table(s) swarm_inputs are missing; this build never re-creates them empty ...`；再次查询 `swarm_inputs` 仍不存在（未被悄悄建回） |
 | 会话库被误指为状态库（非空且有 `peri_store_meta`） | 由契约测试覆盖：`the_peri_session_schema_is_never_adopted` | `Schema` 错误，文案指向「这是 Peri 会话库」 |
 
+### 6.1 `type=none` 会话删除（复核新增回归）
+
+`type=none` 是 WeBots 秘书的默认形态，`environment_json` 没有 `id`；binding 锁查询因此
+返回**一行 SQL NULL**。原实现把 `fetch_optional` 的行按非空 `String` 解码，会在删除任何
+行之前失败。修复把两层可空显式解码（`Option<Option<String>>` + `flatten`），并补两条
+真实 PG 回归：
+
+```bash
+PERI_TEST_POSTGRES_URL='postgresql://peri:peri@127.0.0.1:55433/postgres' \
+  scripts/cargo-rmcp-patched.sh test -p peri-swarm --lib -- \
+  --ignored a_none_environment_session_deletes_and_cascades
+# ok（同一用例在未修复实现上 FAILED：delete_session 返回列解码错误）
+
+PERI_SWARM_SESSION_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_session' \
+PERI_SWARM_STATE_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_swarm_state' \
+  scripts/cargo-rmcp-patched.sh test -p peri-swarm --test it -- --ignored state_store_none_delete
+# ok：真实 axum router + 真实 PG，DELETE 返回 200/deleted=true，随后 GET 返回 404
+```
+
+既有的 hosted 环境并发删除用例（25 轮 + 外部锁串行）保持通过。
+
 ## 7. 离线导入演练（Loom SQLite 快照 → PostgreSQL）
 
 工具：`peri-swarm/scripts/import_loom_state.py`（Python 3 标准库；不运行网关、无
@@ -229,17 +250,17 @@ python3 peri-swarm/scripts/import_loom_state.py check \
 ```bash
 # 纯单测（无外部服务）
 scripts/cargo-rmcp-patched.sh test -p peri-swarm
-# lib: 357 passed; 0 failed; 19 ignored
-# it :  98 passed; 0 failed; 6 ignored
+# lib: 357 passed; 0 failed; 20 ignored
+# it :  98 passed; 0 failed; 7 ignored
 
 # 真实 PostgreSQL 契约/集成测试（每用例一个私有 schema，结束 DROP SCHEMA）
 PERI_TEST_POSTGRES_URL='postgresql://peri:peri@127.0.0.1:55433/postgres' \
   scripts/cargo-rmcp-patched.sh test -p peri-swarm --lib -- --ignored store::postgres
-# test result: ok. 19 passed; 0 failed
+# test result: ok. 20 passed; 0 failed
 # 含：首开建表、二次开只修派生对象、缺表/缺列 fail closed、版本 2 拒绝、非空库/会话库拒绝、
 #     会话身份冲突、list/metadata 过滤、input 幂等、seq 与 item 分页、append_items 回滚、
-#     并发同 seq、turn 对账、删除与绑定转交、同环境并发删除不留悬挂 binding、
-#     外部写事务持有 binding 锁时删除等待、提交前超时不可见
+#     并发同 seq、turn 对账、删除与绑定转交、`type=none` 删除级联、同环境并发删除不留
+#     悬挂 binding、外部写事务持有 binding 锁时删除等待、提交前超时不可见
 
 # 两个真实 PG 库的部署级测试（真实 turn + 两库隔离 + 重启续写）
 PERI_SWARM_SESSION_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_session' \
@@ -256,18 +277,26 @@ python3 peri-swarm/scripts/test-import-loom-state.py
 默认 `cargo test`（无 `--ignored`）完全跳过，无 PostgreSQL 的 CI 仍为绿。
 
 CI：`.github/workflows/ci.yml` 的 Linux 步骤 `Run PostgreSQL session and Swarm state
-contracts` 在一次性 `postgres:17-alpine` 上执行
-`cargo test -p peri-swarm --lib -- --ignored store::postgres --test-threads=2`
-（与现有会话存储契约测试共用同一实例）；`Test Loom state import tool` 步骤执行上面的
-Python 单测。两个真实 PG 库的部署级测试仍未接入 CI（见 §9）。
+contracts` 在一次性 `postgres:17-alpine` 上执行：
+
+- `cargo test -p peri-swarm --lib -- --ignored store::postgres --test-threads=2`（与现有
+  会话存储契约测试共用同一实例）；
+- 另建 `peri_swarm_session` / `peri_swarm_state` 两个库后执行
+  `cargo test -p peri-swarm --test it -- --ignored state_store_none_delete`（`type=none`
+  删除的真实 HTTP 回归）。
+
+`Test Loom state import tool` 步骤执行上面的 Python 单测。两个真实 PG 库的 ACP 部署级
+测试（`state_store_test` / `state_store_failure_test`，需进程内宿主与模型 stub）仍未接入
+CI（见 §9）。
 
 ## 9. 未跑通 / 未覆盖
 
 - **真实 Loom 生产快照**：离线导入只对脚本自建的 legacy fixture 演练过；现场快照的
   导出方式、`-wal` 一致性、数据规模与 UUID 前提未验证（§7 限制）。
-- **部署级两库测试未进 CI**：`--test it -- --ignored state_store` 需要两个数据库，耗时
-  ~40s 且会拉起进程内 ACP 宿主；本轮只在本地执行。接入方式：同一 CI 步骤内
-  `createdb` 两个库并设置两个 DSN，另立任务评估稳定性。
+- **ACP 部署级两库测试未进 CI**：`--test it -- --ignored state_store` 需要两个数据库，
+  耗时 ~40s 且会拉起进程内 ACP 宿主与模型 stub；本轮只在本地执行。`type=none` 删除回归
+  已单独进 CI（无 ACP，0.1s）。其余部署级用例的接入方式：同一 CI 步骤内复用
+  `peri_swarm_session` / `peri_swarm_state` 并设置模型 stub，另立任务评估稳定性。
 - **跨机 / TLS / 多副本并发首启**：未验收。advisory-lock 初始化与 `swarm_meta` 唯一行
   的设计目标覆盖并发首启，但只有单进程实测。
 - **导入后继续对话**：演练只覆盖 `GET`/items/SSE/幂等重放/重启。新输入需要 Peri 会话库

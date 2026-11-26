@@ -181,11 +181,19 @@ impl SwarmStateStore {
             // Serialize binding hand-over per hosted environment: without this
             // lock two concurrent deletes of one environment can hand the binding
             // to a session the other transaction is about to delete.
-            let environment_id: Option<String> = sqlx::query_scalar(SELECT_SESSION_ENV_ID_SQL)
-                .bind(logical_id.to_owned())
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(|error| classify("lock_binding", error))?;
+            //
+            // `environment_json::jsonb ->> 'id'` is a **row with a SQL NULL** for
+            // `{"type":"none"}` and a row with the id for `openai_hosted`; only a
+            // missing session yields no row. Decode both levels explicitly, or a
+            // plain `Option<String>` would try to read the NULL as a non-null
+            // `String` and fail before any row is deleted.
+            let environment_id: Option<String> =
+                sqlx::query_scalar::<_, Option<String>>(SELECT_SESSION_ENV_ID_SQL)
+                    .bind(logical_id.to_owned())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|error| classify("lock_binding", error))?
+                    .flatten();
             if let Some(environment_id) = &environment_id {
                 sqlx::query(LOCK_BINDING_SQL)
                     .bind(environment_id.clone())

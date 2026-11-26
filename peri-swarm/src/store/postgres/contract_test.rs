@@ -561,6 +561,52 @@ async fn hosted_session_requires_a_matching_binding() {
     fixture.close().await;
 }
 
+// ── `type=none` delete ──────────────────────────────────────────────────────
+
+/// `type=none` is the default session shape (WeBots secretaries). Its
+/// `environment_json` has no `id`, so the binding-lock lookup returns one row
+/// with a SQL NULL; that must read as "no environment", not fail the delete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn a_none_environment_session_deletes_and_cascades() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = fixture.store().await;
+    let row = session("logical-none", "/workspace/a");
+    assert_eq!(row.environment, EnvironmentRef::none());
+    store.swarm_upsert_session(row).await.expect("seed session");
+    store
+        .swarm_append_item(item("logical-none", 1, "item-1", "hi"))
+        .await
+        .expect("seed item");
+    store
+        .swarm_put_input(input("logical-none", "input-1", "fp"))
+        .await
+        .expect("seed receipt");
+    store
+        .swarm_upsert_turn(turn("logical-none", "turn-1", TurnStatus::Completed, 1))
+        .await
+        .expect("seed turn");
+
+    store
+        .swarm_delete_session("logical-none")
+        .await
+        .expect("a `type=none` session deletes");
+
+    assert!(store
+        .swarm_get_session("logical-none")
+        .await
+        .expect("read")
+        .is_none());
+    for table in ["swarm_items", "swarm_inputs", "swarm_turns"] {
+        assert_eq!(fixture.count(table).await, 0, "cascade removes {table}");
+    }
+
+    store.close().await.expect("close");
+    fixture.close().await;
+}
+
 // ── concurrent delete of one hosted environment ─────────────────────────────
 
 /// Two sessions of one hosted environment, both with rows a delete must carry.
