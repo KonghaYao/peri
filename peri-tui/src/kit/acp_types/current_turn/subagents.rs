@@ -361,6 +361,9 @@ impl CurrentTurn {
     }
 
     /// Route tool end into a sub-agent child message.
+    ///
+    /// 不接收图片：子 Agent 预览只有文本渲染路径，工具结果图片只进顶层工具卡
+    /// （见 `inline_image::request_vm_images` 的扫描范围）。
     pub fn end_subagent_tool(
         &mut self,
         agent_id: &str,

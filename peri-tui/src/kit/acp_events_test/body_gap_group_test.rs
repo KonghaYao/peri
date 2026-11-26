@@ -49,6 +49,8 @@ fn tool_started(id: &str) -> AcpEventData {
 
 fn tool_ended(id: &str) -> AcpEventData {
     AcpEventData::ToolEnded(TuiToolEnded {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: id.into(),
         output_summary: "ok".into(),
         is_error: false,

@@ -796,7 +796,8 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
             preview::FIELD_BYTES,
             &mut detail.preview_omitted,
         );
-        if t.finish(output, te.is_error) {
+        // bg 任务卡片只在后台预览里以文本展示，不渲染图片：不接收图片载荷。
+        if t.finish(output, te.is_error, Vec::new(), 0) {
             sync_tool_units(detail);
         }
     });

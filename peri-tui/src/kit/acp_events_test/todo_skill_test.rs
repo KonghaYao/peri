@@ -54,6 +54,8 @@ fn test_todo_snapshot_advances_only_after_successful_tool_end() {
     };
     let end = |id: &str, is_error: bool| {
         AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: id.into(),
             output_summary: "+[0]".into(),
             is_error,
@@ -126,6 +128,8 @@ fn test_duplicate_todo_end_cannot_roll_back_newer_successful_snapshot() {
     };
     let end = |id: &str| {
         AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: id.into(),
             output_summary: "saved".into(),
             is_error: false,
@@ -255,6 +259,8 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
     };
     let end = |id: &str| {
         AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: id.into(),
             output_summary: "saved".into(),
             is_error: false,

@@ -206,6 +206,25 @@ fn model_media_blocks(outcome: &ToolOutcome) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// 工具结果图片 → 展示面投影（ACP `ToolCallUpdateFields.content` / TUI 工具卡）。
+///
+/// 与模型面共用同一提取规则与预算（`model_media_blocks`）：模型看不到的图片
+/// 也不进入展示面，避免两套上限漂移；模型可见文本不受影响。
+fn display_images(output: &ToolOutput) -> Vec<peri_acp_types::tools::ToolImage> {
+    model_media_blocks(&output.outcome)
+        .into_iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image {
+                source: crate::messages::ImageSource::Base64 { media_type, data },
+            } => Some(peri_acp_types::tools::ToolImage {
+                mime_type: media_type,
+                data,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// 工具结果的 canonical 消息保留图片；具体 wire 位置由 provider adapter 决定。
 pub(super) fn settled_tool_message(settled: &SettledInvocation) -> BaseMessage {
     let result = &settled.result;
@@ -365,6 +384,7 @@ async fn run_before_tool_approvals(
                 for tc in &ready_calls {
                     let raw_call = event_calls.get(&tc.id).unwrap_or(tc);
                     ctx.emit_render(RenderEvent::ToolEnded {
+                        images: Vec::new(),
                         turn_id,
                         agent_id,
                         tool_call_id: raw_call.id.clone(),
@@ -439,6 +459,7 @@ async fn run_before_tool_approvals(
                         origin_readable,
                     });
                     ctx.emit_render(RenderEvent::ToolEnded {
+                        images: Vec::new(),
                         turn_id,
                         agent_id,
                         tool_call_id: raw_call.id.clone(),
@@ -459,6 +480,7 @@ async fn run_before_tool_approvals(
                 if let Some(turn_id) = turn_id {
                     for tc in &ready_calls {
                         ctx.emit_render(RenderEvent::ToolEnded {
+                            images: Vec::new(),
                             turn_id,
                             agent_id,
                             tool_call_id: tc.id.clone(),
@@ -653,7 +675,7 @@ async fn dispatch_concurrent(
                 };
                 // 工具完成即刻 emit ToolEnded，不等 join_all 返回
                 // 快速工具的 Langfuse observation endTime 不再被慢工具拖高
-                let (output, is_error) = match &result {
+                let (output, is_error, images) = match &result {
                     Ok(o) => (
                         output_limit
                             .map(|limit| o.bounded_text(limit))
@@ -668,6 +690,7 @@ async fn dispatch_concurrent(
                                         | crate::tools::ToolExecutionStatus::RunningAfterTimeout
                                 )
                             }),
+                        display_images(o),
                     ),
                     Err(e) => {
                         let output = ToolOutput {
@@ -680,6 +703,7 @@ async fn dispatch_concurrent(
                                 .map(|limit| output.bounded_text(limit))
                                 .unwrap_or_else(|| output.projected_text(None)),
                             true,
+                            Vec::new(),
                         )
                     }
                 };
@@ -696,6 +720,7 @@ async fn dispatch_concurrent(
                         name: raw_call.name.clone(),
                         output,
                         is_error,
+                        images,
                         subagent_failure,
                     });
                 }

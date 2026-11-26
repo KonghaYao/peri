@@ -50,12 +50,29 @@ pub struct TuiToolStarted {
     pub agent_id: Option<String>,
 }
 
+/// 工具结果携带的图片块（ACP `ToolCallUpdateFields.content` 的 image block）。
+///
+/// 载荷只在事件边界消费：登记进 `image_view` 上传仓库后，视图模型只保留摘要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiToolImage {
+    pub mime_type: String,
+    /// 标准 base64（无 data URI 前缀）。
+    pub base64: String,
+}
+
 /// `"tool-ended"` — 填充工具卡片结果。
 #[derive(Debug, Clone)]
 pub struct TuiToolEnded {
     pub tool_id: String,
     pub output_summary: String,
     pub is_error: bool,
+    /// 工具结果同时携带的图片（ACP 标准 content 块）。旧事件缺省为空。
+    pub images: Vec<TuiToolImage>,
+    /// 服务端展示预算省略的图片数（`_meta.peri.toolImagesOmitted`）。
+    ///
+    /// 载荷本身从未到达客户端（`content` 里没有这些块），只有计数；工具卡据此
+    /// 显示「图片过大未展示」meta 行。旧服务端缺省 0（没有省略）。
+    pub images_omitted: u32,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

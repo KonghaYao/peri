@@ -52,6 +52,8 @@ fn tool_only_turn_origin_message_is_evictable_and_page_refetchable() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-pure".into(),
             output_summary: "ok".into(),
             is_error: false,
@@ -239,6 +241,8 @@ fn nested_tool_without_readable_origin_is_not_evicted_with_outer_message() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-nested".into(),
             output_summary: "nested output".into(),
             is_error: false,
@@ -260,6 +264,8 @@ fn nested_tool_without_readable_origin_is_not_evicted_with_outer_message() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool-top".into(),
             output_summary: "top output".into(),
             is_error: false,

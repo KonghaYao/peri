@@ -21,6 +21,8 @@ fn todo_start() -> AcpEventData {
 
 fn todo_end() -> AcpEventData {
     AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: "todo-1".into(),
         output_summary: "+[0]".into(),
         is_error: false,

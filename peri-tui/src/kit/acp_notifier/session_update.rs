@@ -281,6 +281,7 @@ pub(super) fn decode_stream_update_with(
             };
             let is_error = status == "failed";
             if is_session_replay {
+                // 历史 replay 只持久化文本；上传图片不落盘，回放只剩 meta 行。
                 Some(AcpEventData::ReplayToolEnded {
                     tool_id,
                     output_summary,
@@ -291,6 +292,8 @@ pub(super) fn decode_stream_update_with(
                     tool_id,
                     output_summary,
                     is_error,
+                    images: tool_update_images(update),
+                    images_omitted: tool_update_images_omitted(update),
                     agent_id,
                 };
                 Some(AcpEventData::ToolEnded(tool_ended))
@@ -364,4 +367,55 @@ pub(super) fn decode_stream_update_with(
         _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)
     };
     StreamUpdate { event, token_count }
+}
+
+/// 提取 `_meta.peri.toolImagesOmitted`：服务端展示预算省略的图片数。
+///
+/// 超限图片不在 `content` 里，只有这个计数；缺省（旧服务端/无省略）按 0 处理。
+fn tool_update_images_omitted(update: &serde_json::Value) -> u32 {
+    update
+        .get("_meta")
+        .or_else(|| update.get("meta"))
+        .or_else(|| update.get("fields").and_then(|f| f.get("_meta")))
+        .and_then(|meta| meta.get("peri"))
+        .and_then(|peri| peri.get(peri_acp_types::tools::TOOL_IMAGES_OMITTED_META_KEY))
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// 提取 `ToolCallUpdateFields.content` 中的标准 image 块（MCP/ACP 透传）。
+///
+/// 兼容两种序列化形态：flatten 后的顶层 `content`，以及旧格式的 `fields.content`。
+/// 非 image 块（text/diff/terminal）忽略——工具输出文本已由 `rawOutput` 承载。
+fn tool_update_images(update: &serde_json::Value) -> Vec<crate::kit::stream_data::TuiToolImage> {
+    let content = update.get("content").or_else(|| {
+        update
+            .get("fields")
+            .and_then(|fields| fields.get("content"))
+    });
+    let Some(items) = content.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            // ToolCallContent::Content { content: ContentBlock::Image { .. } }
+            let block = item.get("content").unwrap_or(item);
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                return None;
+            }
+            let mime_type = block
+                .get("mimeType")
+                .and_then(serde_json::Value::as_str)
+                .filter(|mime| !mime.is_empty())?;
+            let base64 = block
+                .get("data")
+                .and_then(serde_json::Value::as_str)
+                .filter(|data| !data.is_empty())?;
+            Some(crate::kit::stream_data::TuiToolImage {
+                mime_type: mime_type.to_string(),
+                base64: base64.to_string(),
+            })
+        })
+        .collect()
 }

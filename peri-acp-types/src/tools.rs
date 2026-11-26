@@ -184,6 +184,26 @@ impl ToolOutcome {
     }
 }
 
+/// 工具结果携带的图片块（MCP `ImageContent` 的结构化投影）。
+///
+/// 展示面（ACP `ToolCallUpdateFields.content` / TUI 工具卡）据此渲染图片；
+/// 模型可见文本（`ToolOutput.text` 里的 `[image: mime]`）保持不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolImage {
+    /// MIME 类型（`image/png` 等）。
+    pub mime_type: String,
+    /// 标准 base64 载荷（无 data URI 前缀）。
+    pub data: String,
+}
+
+/// `_meta.peri` 下「因展示体积预算被省略的工具图片数」的键。
+///
+/// 展示面（ACP 投影）对超限图片只保留 `[image: mime]` 文本；该计数让客户端
+/// 渲染明确的「图片过大未展示」meta 行，而不是静默少一张图。生产方是
+/// `peri-acp` 的 `tool_projection`，消费方是 TUI 的事件解码。
+pub const TOOL_IMAGES_OMITTED_META_KEY: &str = "toolImagesOmitted";
+
 /// Tool text plus optional execution evidence and typed result outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {

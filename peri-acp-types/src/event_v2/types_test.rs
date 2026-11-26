@@ -93,6 +93,7 @@ fn test_render_event_tool_started_id_extraction() {
 fn test_render_event_tool_ended_id_extraction() {
     let (turn_id, agent_id) = make_ids();
     let event = RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "tc_1".to_string(),
@@ -110,6 +111,7 @@ fn test_render_event_tool_ended_carries_output() {
     // ToolEnded 必须携带非空 output，经 共享协议映射 透传后 TUI 才能拿到工具结果
     let (turn_id, agent_id) = make_ids();
     let event = RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "tc_out".to_string(),

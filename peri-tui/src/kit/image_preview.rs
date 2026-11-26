@@ -25,6 +25,7 @@
 //! alt screen 退出整体丢弃——T7 的隐藏/退出清理依赖此机制，不维护 id 表。
 
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use image::DynamicImage;
@@ -60,10 +61,11 @@ fn is_valid_cell_size((width, height): (u16, u16)) -> bool {
 
 /// 从 [`TerminalCaps`] 品牌映射构造 `Picker`。
 ///
-/// 不走 `from_query_stdio`（不读写 stdin）。[`GraphicsProtocol::Kitty`] 强制
-/// 对应 `ProtocolType`；[`GraphicsProtocol::Sixel`] 仅在拿到真实单元格尺寸时
-/// 切换（编码像素与预留区一致），否则保持 halfblocks 安全态。ITerm2（检测但
-/// disabled）与 None 同样保持 halfblocks，像素渲染由 [`supported`] 统一门控。
+/// 不走 `from_query_stdio`（不读写 stdin）。拿到真实单元格像素时（`TIOCGWINSZ`
+/// 的像素字段）**Kitty 与 Sixel 都用它**构造字体尺寸：编码像素网格必须与终端
+/// 实际单元格一致，否则图片会被拉伸（宽高比失真）——这是 Ghostty 下「看起来
+/// 不铺满/比例不对」的根因之一。取不到时退回 halfblocks 默认 10×20（仅影响
+/// 清晰度；布局由单元格数决定）。
 /// 注意：`Picker` 构造时按环境探测 tmux（TERM 以 `tmux` 开头或
 /// `TERM_PROGRAM == "tmux"` 时 spawn `tmux set -p allow-passthrough on`）；
 /// T1 探测矩阵保证自动探测下 `graphics` 非 None 时 TMUX 环境变量不存在，仅
@@ -76,15 +78,14 @@ pub(crate) fn picker_for_with_cell_size(
     caps: &TerminalCaps,
     cell_px: Option<(u16, u16)>,
 ) -> Picker {
+    let cell_px = cell_px.filter(|cell| is_valid_cell_size(*cell));
     let mut picker = match cell_px {
-        Some(cell) if caps.graphics == GraphicsProtocol::Sixel && is_valid_cell_size(cell) => {
-            picker_with_cell_size(cell)
-        }
+        Some(cell) if caps.graphics != GraphicsProtocol::None => picker_with_cell_size(cell),
         _ => Picker::halfblocks(),
     };
     match caps.graphics {
         GraphicsProtocol::Kitty => picker.set_protocol_type(ProtocolType::Kitty),
-        GraphicsProtocol::Sixel if cell_px.is_some_and(is_valid_cell_size) => {
+        GraphicsProtocol::Sixel if cell_px.is_some() => {
             picker.set_protocol_type(ProtocolType::Sixel);
         }
         GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel | GraphicsProtocol::None => {}
@@ -148,35 +149,57 @@ impl std::fmt::Debug for InlineImage {
 impl InlineImage {
     /// 在调用线程完成 resize+encode（只应在后台线程调用，编码可能耗时）。
     ///
-    /// `cols`/`rows` 是调用方的面积预算；实际编码尺寸按等比适配收窄，返回值
-    /// [`Self::cols`]/[`Self::rows`] 是真实占用的单元格。失败只记日志并返回
-    /// `None`——内联路径统一回落到文本降级，不向上抛第三方错误类型。
+    /// 默认 [Resize::Fit] 语义：**不放大**，只按等比缩小到 `cols`×`rows`。
+    /// 需要「铺满」时用 [`InlineImageEncoder::encode_scaled`]（目标格数由
+    /// `image_view::sizing` 先算好）。
     #[must_use]
     pub fn encode(picker: &Picker, img: DynamicImage, cols: u16, rows: u16) -> Option<Self> {
+        Self::encode_with(picker, img, cols, rows, Resize::Fit(None))
+    }
+
+    /// 按显式 resize 策略编码：`cols`/`rows` 是调用方算好的目标单元格。
+    ///
+    /// [Resize::Scale] 允许放大，`Resize::Fit` 不会——「铺满」的调用方必须先经
+    /// `image_view::sizing::fit` 得到目标格数再用 `Scale`，否则小图永远停在自然尺寸。
+    /// 失败只记日志并返回 `None`（内联路径统一回落到文本降级）。
+    #[must_use]
+    pub fn encode_with(
+        picker: &Picker,
+        img: DynamicImage,
+        cols: u16,
+        rows: u16,
+        resize: Resize,
+    ) -> Option<Self> {
         if cols == 0 || rows == 0 {
             return None;
         }
         let font = picker.font_size();
-        let target = Resize::Fit(None).size_for(&img, font, Size::new(cols, rows));
+        let target = resize.size_for(&img, font, Size::new(cols, rows));
         if target.width == 0 || target.height == 0 {
             return None;
         }
-        let protocol = match picker.new_protocol(img, Size::new(cols, rows), Resize::Fit(None)) {
+        // `Scale` 的实际格数由传入的目标区域决定（像素按比例 padding）；
+        // `Fit` 可能因不放大而更小，取 `size_for` 的结果。
+        let (cols, rows) = match resize {
+            Resize::Scale(_) => (cols, rows),
+            Resize::Fit(_) | Resize::Crop(_) => (target.width, target.height),
+        };
+        let protocol = match picker.new_protocol(img, Size::new(cols, rows), resize) {
             Ok(protocol) => protocol,
             Err(err) => {
                 tracing::warn!(error = %err, "内联图片 resize/encode 失败，回落文本降级");
                 return None;
             }
         };
-        let bytes = usize::from(target.width)
-            .saturating_mul(usize::from(target.height))
+        let bytes = usize::from(cols)
+            .saturating_mul(usize::from(rows))
             .saturating_mul(usize::from(font.width.max(1)))
             .saturating_mul(usize::from(font.height.max(1)))
             .saturating_mul(4);
         Some(Self {
             protocol,
-            cols: target.width,
-            rows: target.height,
+            cols,
+            rows,
             bytes,
         })
     }
@@ -225,10 +248,24 @@ impl InlineImageEncoder {
         })
     }
 
-    /// 在调用线程完成 resize+encode；面积预算由调用方给出。
+    /// 编码器使用的单元格像素（真实探测值，或 halfblocks 默认 10×20）。
+    /// 几何计算在拿不到 `TIOCGWINSZ` 像素字段时用它保持一致性。
+    #[must_use]
+    pub fn font_size(&self) -> (u16, u16) {
+        let font = self.picker.font_size();
+        (font.width.max(1), font.height.max(1))
+    }
+
+    /// 在调用线程完成 resize+encode；面积预算由调用方给出（`Fit` 语义）。
     #[must_use]
     pub fn encode(&self, img: DynamicImage, cols: u16, rows: u16) -> Option<InlineImage> {
         InlineImage::encode(&self.picker, img, cols, rows)
+    }
+
+    /// 按算好的目标格数放大/缩小铺满（`Resize::Scale`）。
+    #[must_use]
+    pub fn encode_scaled(&self, img: DynamicImage, cols: u16, rows: u16) -> Option<InlineImage> {
+        InlineImage::encode_with(&self.picker, img, cols, rows, Resize::Scale(None))
     }
 }
 
@@ -280,6 +317,9 @@ pub(crate) fn protocol_available(caps: &TerminalCaps, cell_px: Option<(u16, u16)
 pub struct AsyncImage {
     thread: ThreadProtocol,
     completed: Receiver<Result<ResizeResponse, Errors>>,
+    /// 原始像素尺寸与编码用的单元格像素（供调用方走共享 sizing 计算目标矩形）。
+    dims: (u32, u32),
+    cell_px: (u16, u16),
 }
 
 impl AsyncImage {
@@ -287,6 +327,9 @@ impl AsyncImage {
     /// 图片所有权转移给协议（内部保留原始 `DynamicImage` 供后续重编码）。
     #[must_use]
     pub fn new(picker: &Picker, img: DynamicImage) -> Self {
+        let dims = (img.width(), img.height());
+        let font = picker.font_size();
+        let cell_px = (font.width.max(1), font.height.max(1));
         let (tx_request, rx_request) = mpsc::channel::<ResizeRequest>();
         let (tx_completed, rx_completed) = mpsc::channel();
         // 后台线程：消费 resize 请求并回传结果。自然退出：请求 channel 的
@@ -302,7 +345,21 @@ impl AsyncImage {
         Self {
             thread: ThreadProtocol::new(tx_request, Some(picker.new_resize_protocol(img))),
             completed: rx_completed,
+            dims,
+            cell_px,
         }
+    }
+
+    /// 原始像素尺寸（宽, 高）。
+    #[must_use]
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.dims
+    }
+
+    /// 编码使用的单元格像素（与 Picker 字体尺寸一致）。
+    #[must_use]
+    pub fn cell_px(&self) -> (u16, u16) {
+        self.cell_px
     }
 
     /// 取回后台完成的 resize/encode 结果；返回是否应用了更新（尺寸变化帧
@@ -332,7 +389,10 @@ impl AsyncImage {
 
     /// 渲染当前帧（`Resize::Fit(None)` 语义）；必要时**非阻塞**发出
     /// resize 请求（S2 §6：不阻塞 UI 线程）。
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+    ///
+    /// `area` 应是调用方按等比铺满算出的目标矩形（`image_view::sizing`），
+    /// 不是整块预留区——`Fit` 不放大，画在更大的区域内会在右侧/下方留白。
+    pub fn render_at(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -347,3 +407,37 @@ impl AsyncImage {
 #[cfg(test)]
 #[path = "image_preview_test.rs"]
 mod tests;
+
+/// `Picker` 进程级缓存：单元格像素尺寸随终端字体变化；缓存按（能力位, 尺寸）
+/// 失效，避免交互式浮层反复构造（tmux 探测有 spawn 副作用）。
+///
+/// 放在本模块（唯一 `ratatui-image` 边界）而不是 `image_view`：上层只拿不透明
+/// 句柄转交 [`AsyncImage`]，不直接依赖第三方类型。
+static PICKER: OnceLock<Mutex<Option<CachedPicker>>> = OnceLock::new();
+
+struct CachedPicker {
+    caps: TerminalCaps,
+    cell_px: Option<(u16, u16)>,
+    picker: Picker,
+}
+
+/// 按当前能力位与单元格像素取共享 `Picker`。
+pub(crate) fn shared_picker(caps: &TerminalCaps, cell_px: Option<(u16, u16)>) -> Picker {
+    let cache = PICKER.get_or_init(|| Mutex::new(None));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = guard.as_ref()
+        && cached.cell_px == cell_px
+        && cached.caps == *caps
+    {
+        return cached.picker.clone();
+    }
+    let picker = picker_for_with_cell_size(caps, cell_px);
+    *guard = Some(CachedPicker {
+        caps: *caps,
+        cell_px,
+        picker: picker.clone(),
+    });
+    picker
+}

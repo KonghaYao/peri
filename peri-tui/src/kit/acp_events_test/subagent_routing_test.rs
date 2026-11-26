@@ -313,6 +313,8 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             agent_id: Some("sync-1".into()),
             tool_id: "tc-1".into(),
             output_summary: "10 lines".into(),
@@ -342,6 +344,130 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         }
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }
+}
+
+/// M4：子 Agent 工具结果不接收图片载荷——只有顶层工具卡 retain/渲染工具图片，
+/// 子 Agent 预览没有图片绘制路径。事件里的 image 块到这里必须被丢弃。
+#[test]
+#[serial]
+fn test_subagent_tool_end_drops_image_payloads() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::Idle, 0);
+
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-img".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: Some("sync-img".into()),
+            tool_name: "Read".into(),
+            tool_id: "tc-img".into(),
+            input_summary: "shot.png".into(),
+            raw_input: serde_json::Value::Null,
+            origin_message_id: None,
+            origin_readable: None,
+        }),
+    );
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: vec![crate::kit::stream_data::TuiToolImage {
+                mime_type: "image/png".into(),
+                base64: "AQID".into(),
+            }],
+            images_omitted: 1,
+            agent_id: Some("sync-img".into()),
+            tool_id: "tc-img".into(),
+            output_summary: "Image read\n[image: image/png]".into(),
+            is_error: false,
+        }),
+    );
+
+    let current_turn = state.current_turn.view_models().clone();
+    let TuiRenderUnit::TuiSubAgentGroup(group) = &current_turn[0] else {
+        panic!("expected TuiSubAgentGroup");
+    };
+    let cards: Vec<_> = group
+        .view_models
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => Some(card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards.len(), 1, "子 Agent 分组应有一个工具卡");
+    assert!(
+        cards[0].images.is_empty(),
+        "子 Agent 工具结果不得保留图片身份"
+    );
+    assert_eq!(
+        cards[0].images_omitted, 0,
+        "子 Agent 预览不渲染图片 meta 行"
+    );
+}
+
+/// M4 对照：顶层工具结束仍登记图片载荷，且只保留渲染上限
+/// [`crate::kit::inline_image::TOOL_IMAGE_MAX`] 张（其余不会被请求/绘制）。
+#[test]
+#[serial]
+fn test_root_tool_end_retains_images_up_to_render_limit() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    crate::kit::image_view::release_all_uploads();
+    let mut state = make_state(SessionPhase::Idle, 0);
+
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: None,
+            tool_name: "Read".into(),
+            tool_id: "tc-root-img".into(),
+            input_summary: "shots".into(),
+            raw_input: serde_json::Value::Null,
+            origin_message_id: None,
+            origin_readable: None,
+        }),
+    );
+    let images: Vec<_> = (0..6)
+        .map(|index| crate::kit::stream_data::TuiToolImage {
+            mime_type: "image/png".into(),
+            base64: format!("AQID{index}"),
+        })
+        .collect();
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images,
+            images_omitted: 0,
+            agent_id: None,
+            tool_id: "tc-root-img".into(),
+            output_summary: "Image read".into(),
+            is_error: false,
+        }),
+    );
+
+    let current_turn = state.current_turn.view_models().clone();
+    let card = current_turn
+        .iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => Some(card),
+            _ => None,
+        })
+        .expect("顶层工具卡");
+    assert_eq!(
+        card.images.len(),
+        crate::kit::inline_image::TOOL_IMAGE_MAX,
+        "只 retain 渲染上限内的图片"
+    );
+    crate::kit::image_view::release_all_uploads();
 }
 
 /// [回归测试] 并行多 Agent 批次（multitask）里，非首个工具调用的 `ToolStarted`
@@ -574,6 +700,8 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
         super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                images: Vec::new(),
+                images_omitted: 0,
                 agent_id: None,
                 tool_id: tool_id.into(),
                 output_summary: "started".into(),

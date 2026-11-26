@@ -116,6 +116,9 @@ pub enum RenderEvent {
         name: String,
         output: String,
         is_error: bool,
+        /// 工具结果携带的图片（展示面投影；旧事件缺省为空）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::tools::ToolImage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_failure: Option<SafeSubagentFailure>,
     },

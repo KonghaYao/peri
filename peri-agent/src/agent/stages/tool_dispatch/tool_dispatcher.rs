@@ -75,6 +75,7 @@ pub(super) fn emit_settled_tool_render(
         origin_readable: Some(true),
     });
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: call.id.clone(),

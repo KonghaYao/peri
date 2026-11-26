@@ -836,11 +836,7 @@ fn test_composer_label_caps_listed_names() {
 fn test_composer_label_non_image_keeps_file_count() {
     crate::kit::atoms::init_atoms();
     i18n::init(Some("zh-CN"));
-    let doc = PendingAttachment {
-        label: "report.pdf".to_string(),
-        media_type: "application/pdf".to_string(),
-        base64_data: "AQID".to_string(),
-    };
+    let doc = PendingAttachment::image("application/pdf", "AQID");
     assert_eq!(
         render::build_attachments_label(&[doc]).as_deref(),
         Some("@ 1 个文件")

@@ -74,6 +74,8 @@ fn duplicate_end_and_late_start_preserve_terminal_background_task() {
     super::handle_bg_tool_ended(
         "stream-agent",
         &TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool".into(),
             output_summary: "original".into(),
             is_error: false,
@@ -85,6 +87,8 @@ fn duplicate_end_and_late_start_preserve_terminal_background_task() {
     super::handle_bg_tool_ended(
         "stream-agent",
         &TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "tool".into(),
             output_summary: "duplicate".into(),
             is_error: true,
@@ -159,6 +163,8 @@ fn terminal_metadata_updates_do_not_rematerialize_published_tool_bodies() {
     super::handle_bg_tool_ended(
         "stream-agent",
         &TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "stable-tool".into(),
             output_summary: "retained tool result".into(),
             is_error: false,
@@ -379,6 +385,8 @@ fn all_background_display_payloads_are_bounded_without_changing_event_data() {
     super::handle_bg_tool_ended(
         "stream-agent",
         &TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: "huge-tool".into(),
             output_summary: huge.clone(),
             is_error: true,

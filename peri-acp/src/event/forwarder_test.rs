@@ -121,6 +121,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
         chunk: "hello".to_string(),
     });
     bus.emit_render(RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id: main_id,
         tool_call_id: "call_1".to_string(),

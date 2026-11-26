@@ -206,6 +206,7 @@ mod tests {
             origin_readable: None,
         });
         bridge.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id,
             agent_id: child_id,
             tool_call_id: "sub_read".to_string(),
@@ -224,6 +225,7 @@ mod tests {
 
         // 父 ToolEnded:只结束父工具记录,AGENT obs 未关闭
         bridge.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id,
             agent_id: main_id,
             tool_call_id: "call_fork".to_string(),
@@ -334,6 +336,7 @@ mod tests {
         });
         // 父 ToolEnded:只结束父工具记录,不关闭 AGENT obs
         bridge.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id,
             agent_id: main_id,
             tool_call_id: "call_bg".to_string(),
@@ -503,6 +506,7 @@ mod tests {
             origin_readable: None,
         });
         bridge.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id,
             agent_id: child_id,
             tool_call_id: "sub_bash".to_string(),
@@ -519,6 +523,7 @@ mod tests {
             duration_ms: 5,
         });
         bridge.process_render_event(&RenderEvent::ToolEnded {
+            images: Vec::new(),
             turn_id,
             agent_id: main_id,
             tool_call_id: "call_parent".to_string(),

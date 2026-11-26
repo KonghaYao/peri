@@ -379,6 +379,51 @@ async fn test_replay_tool_failure_keeps_safe_subagent_diagnostic_meta() {
         .contains("provider body"));
 }
 
+/// 回放契约：历史工具消息里的 image 块**不回放**（会话内可见、回放只投影文本），
+/// 只保留 `[image: mime]` 文本占位。原因是事件体积/首屏成本，见
+/// `session_replay::project_message_updates` 的工具结果分支。
+#[tokio::test]
+async fn test_replay_tool_message_never_emits_image_blocks() {
+    let text = "Image read\n[image: image/png]";
+    let message = BaseMessage::tool_result_with_execution_and_failure(
+        "tc-replay-img",
+        PeriMessageContent::Blocks(vec![
+            PeriContentBlock::Text { text: text.into() },
+            PeriContentBlock::Image {
+                source: peri_acp_types::messages::ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "AQID".into(),
+                },
+            },
+        ]),
+        false,
+        None,
+        None,
+    );
+    let updates = collect_replay(vec![message]).await;
+    let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+        panic!("expected ToolCallUpdate");
+    };
+    let content = update.fields.content.as_deref().expect("content");
+    assert!(
+        content.iter().all(|block| !matches!(
+            block,
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::Image(_))
+        )),
+        "回放不得重新下发图片块：{content:?}"
+    );
+    assert_eq!(
+        tool_call_output_text(&update.fields),
+        text,
+        "文本占位仍在，回放不丢语义"
+    );
+    assert_eq!(
+        update.fields.raw_output,
+        Some(serde_json::Value::String(text.to_string()))
+    );
+}
+
 #[tokio::test]
 async fn test_replay_tool_success_writes_standard_output() {
     // replay 成功工具 → status=completed + 标准 content 文本 + rawOutput
@@ -564,6 +609,7 @@ async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_
     for output in ["  ", r#"{"error":"failed"}"#] {
         let live = crate::event::map_event(
             &ExecutorEvent::ToolEnd {
+                images: Vec::new(),
                 message_id: MessageId::new(),
                 tool_call_id: "tc-completion".into(),
                 name: "delegate".into(),

@@ -178,6 +178,7 @@ fn test_tool_started_maps() {
 fn test_tool_ended_maps() {
     let (turn_id, agent_id) = ids();
     let r = RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "tc_1".to_string(),
@@ -204,6 +205,7 @@ fn test_render_event_tool_ended_carries_output() {
     // ToolEnded 携带非空 output → 共享协议映射 透传后 ExecutorEvent::ToolEnd.output 非空
     let (turn_id, agent_id) = ids();
     let r = RenderEvent::ToolEnded {
+        images: Vec::new(),
         turn_id,
         agent_id,
         tool_call_id: "tc_out".to_string(),

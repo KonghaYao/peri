@@ -122,11 +122,26 @@ pub(super) fn render_user_bubble_lines(
     let mut image_lines: Vec<ImageLineInfo> = Vec::new();
     let mut visual_count = 0usize; // 已渲染视觉行
     let mut total = 0usize; // 全部视觉行（含超限部分，用于 `… +N lines`）
-    // 附件记录行先于正文：一条一张，`[图片] 图片 1 · 128.0 KB`——发送后仍能看出
-    // 这条消息带了图片（上传式附件没有可复制的路径文本，只有这里的记录）。
+    // 附件先于正文：先画可用的图片像素区（独立行预算，不计入 6 行正文上限），
+    // 再输出 `[图片] 图片 1 · 128.0 KB` 记录行——发送后仍能看出这条消息带了图片
+    // （上传式附件没有可复制的路径文本，只有这里的记录）。
+    let image_cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
+    let image_prefix = u16::try_from(grid.cont_prefix_width()).unwrap_or(u16::MAX);
+    let mut image_rows_left = crate::kit::inline_image::USER_IMAGE_TOTAL_ROWS;
     {
         let iteration_items = data.attachments.iter().enumerate();
         for (index, attachment) in iteration_items {
+            if inline_pixels {
+                image_rows_left = push_uploaded_image(
+                    &mut lines,
+                    &mut image_lines,
+                    grid,
+                    attachment,
+                    image_cols,
+                    image_prefix,
+                    image_rows_left,
+                );
+            }
             push_meta_body_lines(
                 &mut lines,
                 grid,
@@ -165,42 +180,46 @@ pub(super) fn render_user_bubble_lines(
             continue;
         }
         // 整行仅 `![alt](path)`：协议可用且缓存命中 → 预留真实编码尺寸的像素区；
-        // 未命中/超出正文行预算保留原文（行内混排不解析，计划 MVP 边界）。
+        // 未命中/超出图片行预算保留原文（行内混排不解析，计划 MVP 边界）。
+        // 图片行数与正文视觉行分开计预算：图片最多 6 行/张、合计 10 行，
+        // 超出的图片只保留原文本（降级 meta）。
         // Detail 等没有 draw hook 的 surface（inline_pixels = false）保持文本，
         // 否则会留下无法填充的空白占位。
-        if inline_pixels && let Some(url) = crate::kit::inline_image::standalone_image_url(raw) {
-            let cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
-            if let Some(ready) = crate::kit::inline_image::lookup_ready(
-                &url,
-                cols,
+        if inline_pixels
+            && image_rows_left > 0
+            && let Some(url) = crate::kit::inline_image::standalone_image_url(raw)
+        {
+            let budget = crate::kit::image_view::Budget::new(
+                image_cols,
                 crate::kit::inline_image::USER_IMAGE_ROWS,
-            ) {
-                let rows = usize::from(ready.rows);
-                if visual_count.saturating_add(rows) <= USER_BODY_MAX_LINES {
-                    let logical_idx = lines.len();
-                    for _ in 0..rows {
-                        lines.push(super::helpers::prefixed_cont_line(
-                            grid,
-                            sem.text.secondary,
-                            Line::default(),
-                        ));
-                    }
-                    image_lines.push(ImageLineInfo {
-                        logical_idx,
-                        path: String::new(),
-                        managed: false,
-                        size_text: String::new(),
-                        inline: Some(super::InlineImagePlacement {
-                            cols: ready.cols,
-                            rows: ready.rows,
-                            x_offset: u16::try_from(grid.cont_prefix_width()).unwrap_or(u16::MAX),
-                            image: ready.image,
-                        }),
-                    });
-                    total += rows;
-                    visual_count += rows;
-                    continue;
+            );
+            if let Some(placement) = crate::kit::image_view::lookup(
+                &crate::kit::image_view::ImageSource::File(&url),
+                budget,
+            ) && placement.rows <= image_rows_left
+            {
+                let logical_idx = lines.len();
+                for _ in 0..placement.rows {
+                    lines.push(super::helpers::prefixed_cont_line(
+                        grid,
+                        sem.text.secondary,
+                        Line::default(),
+                    ));
                 }
+                image_lines.push(ImageLineInfo {
+                    logical_idx,
+                    path: String::new(),
+                    managed: false,
+                    size_text: String::new(),
+                    inline: Some(super::InlineImagePlacement {
+                        cols: placement.cols,
+                        rows: placement.rows,
+                        x_offset: image_prefix.saturating_add(placement.x_offset),
+                        image: placement.image,
+                    }),
+                });
+                image_rows_left = image_rows_left.saturating_sub(placement.rows);
+                continue;
             }
         }
         let wrapped = crate::truncate::wrap_by_width(raw, grid.content_width());
@@ -268,6 +287,57 @@ fn push_meta_body_lines(
     }
     *visual_count += take;
     (logical_idx, take, wrapped.len())
+}
+
+/// 上传附件 → 图片占位行（命中上传仓库且行预算够时）。
+///
+/// 返回剩余图片行预算：未命中/编码中/失败时保持原值（只留 meta 行，不产生空白）；
+/// 行预算不足时同样跳过（后续图片继续尝试更小的图）。
+fn push_uploaded_image(
+    lines: &mut Vec<Line<'static>>,
+    image_lines: &mut Vec<ImageLineInfo>,
+    grid: &GridSpec,
+    attachment: &UserAttachment,
+    cols: u16,
+    prefix: u16,
+    rows_left: u16,
+) -> u16 {
+    if rows_left == 0 {
+        return rows_left;
+    }
+    let budget =
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::USER_IMAGE_ROWS);
+    let Some(placement) = crate::kit::image_view::lookup(
+        &crate::kit::image_view::ImageSource::Uploaded(attachment.upload_id()),
+        budget,
+    ) else {
+        return rows_left;
+    };
+    if placement.rows == 0 || placement.rows > rows_left {
+        return rows_left;
+    }
+    let sem = THEME_ATOM.state().read().semantic;
+    let logical_idx = lines.len();
+    for _ in 0..placement.rows {
+        lines.push(super::helpers::prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::default(),
+        ));
+    }
+    image_lines.push(ImageLineInfo {
+        logical_idx,
+        path: String::new(),
+        managed: false,
+        size_text: String::new(),
+        inline: Some(super::InlineImagePlacement {
+            cols: placement.cols,
+            rows: placement.rows,
+            x_offset: prefix.saturating_add(placement.x_offset),
+            image: placement.image,
+        }),
+    });
+    rows_left.saturating_sub(placement.rows)
 }
 
 /// 附件记录行文本：`[图片] 图片 {序号} · {大小}`。

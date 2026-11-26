@@ -417,6 +417,8 @@ fn test_pending_interaction_of_matches_only_pending() {
     assert!(super::pending_interaction_of(&ask_user_block(true, None)).is_some());
     assert!(super::pending_interaction_of(&ask_user_block(false, None)).is_none());
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: "t1".into(),
         tool_name: "Bash".into(),
         input_summary: String::new(),
@@ -606,6 +608,8 @@ fn test_apply_fold_toggle_tool_writes_override() {
     crate::kit::atoms::init_atoms();
     *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tool-2".into(),
         tool_name: "Read".into(),
         input_summary: String::new(),
@@ -652,6 +656,8 @@ fn test_apply_fold_toggle_only_changes_clicked_entry() {
     *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
     let card = |id: &str| {
         let mut card = TuiToolCard {
+            images: Vec::new(),
+            images_omitted: 0,
             tool_id: id.into(),
             tool_name: "Read".into(),
             input_summary: "a.rs".into(),
@@ -940,6 +946,8 @@ fn test_set_entry_focus_derives_key_for_foldable_entry() {
     crate::kit::atoms::init_atoms();
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tool-focus-1".into(),
         tool_name: "Read".into(),
         input_summary: String::new(),

@@ -268,6 +268,8 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            images: Vec::new(),
+            images_omitted: 0,
             agent_id: Some("bg-agent-1".into()),
             tool_id: "bg-tc-1".into(),
             output_summary: "ok".into(),

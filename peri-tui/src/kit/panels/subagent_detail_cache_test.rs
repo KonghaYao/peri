@@ -44,6 +44,8 @@ fn group(instance_id: &str, text: &str) -> TuiSubAgentGroup {
 fn group_with_tool() -> TuiSubAgentGroup {
     let mut group = group("tool-run", "intro");
     let mut tool = TuiToolCard {
+        images: Vec::new(),
+        images_omitted: 0,
         tool_id: "tool-1".into(),
         tool_name: "Bash".into(),
         input_summary: "echo hello".into(),

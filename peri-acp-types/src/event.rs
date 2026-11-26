@@ -635,6 +635,9 @@ pub enum ExecutorEvent {
         name: String,
         output: String,
         is_error: bool,
+        /// 工具结果携带的图片（ACP 标准 content 块来源）；旧事件缺省为空。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::tools::ToolImage>,
         source_agent_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_failure: Option<crate::error::SafeSubagentFailure>,

@@ -109,6 +109,45 @@ fn picker_for_maps_caps_to_protocol_type() {
     );
 }
 
+/// 真实单元格像素必须同时用于 Kitty：编码像素网格与终端单元格一致，
+/// 否则图片会被拉伸（宽高比失真）；Sixel 保持同一规则。
+#[test]
+fn picker_uses_probed_cell_size_for_kitty_and_sixel() {
+    use ratatui_image::picker::ProtocolType;
+    let kitty = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Kitty), Some((8, 17)));
+    assert_eq!(kitty.protocol_type(), ProtocolType::Kitty);
+    assert_eq!(
+        (kitty.font_size().width, kitty.font_size().height),
+        (8, 17),
+        "Kitty 也必须用真实单元格像素计算编码密度/宽高比"
+    );
+    let sixel = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Sixel), Some((8, 17)));
+    assert_eq!((sixel.font_size().width, sixel.font_size().height), (8, 17));
+    // 无单元格像素时保持 halfblocks 默认字体（只影响清晰度）。
+    let fallback = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Kitty), None);
+    assert_eq!(
+        (fallback.font_size().width, fallback.font_size().height),
+        (10, 20)
+    );
+}
+
+/// `Resize::Scale` 允许放大到目标格数；`Resize::Fit` 不放大（保持旧契约）。
+#[test]
+fn encode_scaled_upscales_to_target_while_fit_does_not() {
+    let picker = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Kitty), Some((10, 20)));
+    let img = solid_image(8, 8);
+    let fitted = super::InlineImage::encode(&picker, img.clone(), 12, 6).expect("fit");
+    assert_eq!((fitted.cols(), fitted.rows()), (1, 1), "Fit 不放大");
+
+    let scaled =
+        super::InlineImage::encode_with(&picker, img, 12, 6, Resize::Scale(None)).expect("scale");
+    assert_eq!(
+        (scaled.cols(), scaled.rows()),
+        (12, 6),
+        "Scale 按目标格数放大（像素按比例填充）"
+    );
+}
+
 // ── static_protocol 跨帧 transmit（§6.5 第二组）───────────────────────
 
 #[test]
@@ -190,7 +229,7 @@ fn async_image_resizes_off_thread_and_renders() {
     );
 
     // 渲染：非阻塞发出请求（该帧可能暂无编码帧）。
-    async_img.render(area, &mut buf);
+    async_img.render_at(area, &mut buf);
 
     // 后台线程完成 → 结果应用。
     assert!(
@@ -205,7 +244,7 @@ fn async_image_resizes_off_thread_and_renders() {
     );
 
     // 渲染：首帧 transmit 可见。
-    async_img.render(area, &mut buf);
+    async_img.render_at(area, &mut buf);
     assert_eq!(count_transmit(&buf), 1, "首帧渲染应恰好 transmit 一次");
 
     // 面积变化 → 再次触发 resize（尺寸变化帧重传整图，协议必需）。
@@ -214,12 +253,12 @@ fn async_image_resizes_off_thread_and_renders() {
         async_img.needs_resize(&resize, smaller.into()).is_some(),
         "面积变化应触发 resize"
     );
-    async_img.render(smaller, &mut buf);
+    async_img.render_at(smaller, &mut buf);
     assert!(
         wait_for_resize(&mut async_img),
         "面积变化后的后台 resize 应在超时内完成"
     );
-    async_img.render(smaller, &mut buf);
+    async_img.render_at(smaller, &mut buf);
     assert_eq!(count_transmit(&buf), 1, "尺寸变化后首帧重新 transmit 一次");
     assert!(
         async_img.needs_resize(&resize, smaller.into()).is_none(),
@@ -237,7 +276,7 @@ fn async_image_poll_completed_reports_update() {
     // 无请求发出时：无更新。
     assert!(!async_img.poll_completed());
 
-    async_img.render(area, &mut buf);
+    async_img.render_at(area, &mut buf);
     assert!(wait_for_resize(&mut async_img), "发出请求后应能取回更新");
     // 已取回：再次轮询无更新。
     assert!(!async_img.poll_completed());

@@ -103,7 +103,7 @@ async fn test_tool_projection_input_upgrade_and_terminal_output() {
     assert_eq!(card(&mut turn).input_summary, "updated");
     assert_ne!(card(&mut turn).content_hash, initial_hash);
     tokio::time::advance(std::time::Duration::from_millis(1234)).await;
-    assert!(turn.end_tool("tool", "失败输出".repeat(512), true));
+    assert!(turn.end_tool("tool", "失败输出".repeat(512), true, Vec::new(), 0));
     let completed = card(&mut turn).clone();
     assert!(!completed.is_running);
     assert!(completed.is_error);

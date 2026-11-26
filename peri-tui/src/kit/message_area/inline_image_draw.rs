@@ -101,34 +101,21 @@ pub(super) fn clear(frame: State<InlineFrame>) {
     frame.vis_height = 0;
 }
 
-/// 把槽内视觉行折算成屏幕 Rect；越界（区域缩小/滚动偏移变化）返回 `None`。
-fn screen_rect(area: Rect, scroll_y: usize, draw: &InlineDraw) -> Option<Rect> {
-    let row = i64::from(area.y) + draw.vis_row as i64 - scroll_y as i64;
-    let top = i64::from(area.y);
-    let bottom = i64::from(area.bottom());
-    if row < top || row + i64::from(draw.rows) > bottom {
-        return None;
-    }
-    let x = i64::from(area.x) + i64::from(draw.x);
-    if x + i64::from(draw.cols) > i64::from(area.right()) {
-        return None;
-    }
-    Some(Rect::new(
-        u16::try_from(x).ok()?,
-        u16::try_from(row).ok()?,
-        draw.cols,
-        draw.rows,
-    ))
-}
-
 /// 绘制一帧内联图片；`clip` 是消息区当帧可见区域（已扣掉底部指示器）。
 pub(super) fn draw_placements(buf: &mut Buffer, clip: Rect, scroll_y: usize, draws: &[InlineDraw]) {
     for draw in draws {
         if draw.cols == 0 || draw.rows == 0 {
             continue;
         }
-        if let Some(rect) = screen_rect(clip, scroll_y, draw) {
-            draw.image.render(rect, buf);
+        if let Some(rect) = crate::kit::image_view::draw::screen_rect(
+            clip,
+            draw.vis_row,
+            scroll_y,
+            draw.x,
+            draw.cols,
+            draw.rows,
+        ) {
+            crate::kit::image_view::draw::draw(buf, rect, &draw.image);
         }
     }
 }

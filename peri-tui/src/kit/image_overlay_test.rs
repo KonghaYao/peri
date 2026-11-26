@@ -15,7 +15,7 @@ use super::FocusedEntry;
 use super::ImagePreviewState;
 use super::InputSnapshot;
 use super::Path;
-use super::decode_image;
+use crate::kit::image_view::decode_image;
 
 use crate::kit::message_area::ImageHoverState;
 use crate::kit::terminal_caps::GraphicsProtocol;
@@ -526,7 +526,7 @@ fn draw_preview_overlay_ready_transmits() {
     // 首帧：后台 resize/encode 完成前无编码帧（同 image_preview_test 时序）；
     // 先发出首帧请求并等后台完成，再断言 overlay 输出 transmit。
     let mut seed = Buffer::empty(Rect::new(0, 0, 40, 20));
-    async_img.render(Rect::new(11, 6, 22, 9), &mut seed);
+    async_img.render_at(Rect::new(11, 6, 22, 9), &mut seed);
     assert!(
         wait_for_resize(&mut async_img),
         "后台 resize 应在超时内完成"

@@ -130,11 +130,10 @@ fn placement_covers_encoded_rows_and_moves_with_scroll() {
     let grid = GridSpec::grid_for(width);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
     assert!(
-        crate::kit::inline_image::request_until_ready(
-            &source,
-            cols,
-            crate::kit::inline_image::MAX_ROWS,
-            std::time::Duration::from_secs(5),
+        crate::kit::image_view::request_until_ready(
+            crate::kit::image_view::ImageSource::File(&source),
+            crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+            std::time::Duration::from_secs(5)
         ),
         "图片缓存应在布局前就绪"
     );
@@ -197,11 +196,10 @@ fn partially_visible_image_is_not_drawn() {
     let height = 12u16;
     let grid = GridSpec::grid_for(width);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
-    assert!(crate::kit::inline_image::request_until_ready(
-        &source,
-        cols,
-        crate::kit::inline_image::MAX_ROWS,
-        std::time::Duration::from_secs(5),
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::File(&source),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+        std::time::Duration::from_secs(5)
     ));
 
     let mut harness = Harness::new(message_with_image(&source), width);
@@ -220,11 +218,10 @@ fn draw_is_clipped_to_shrunken_area() {
     let height = 12u16;
     let grid = GridSpec::grid_for(width);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
-    assert!(crate::kit::inline_image::request_until_ready(
-        &source,
-        cols,
-        crate::kit::inline_image::MAX_ROWS,
-        std::time::Duration::from_secs(5),
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::File(&source),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+        std::time::Duration::from_secs(5)
     ));
 
     let mut harness = Harness::new(message_with_image(&source), width);
@@ -252,11 +249,10 @@ fn mounted_message_area_paints_kitty_escape() {
     let source = red_png(&dir);
     let grid = GridSpec::grid_for(80);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
-    assert!(crate::kit::inline_image::request_until_ready(
-        &source,
-        cols,
-        crate::kit::inline_image::MAX_ROWS,
-        std::time::Duration::from_secs(5),
+    assert!(crate::kit::image_view::request_until_ready(
+        crate::kit::image_view::ImageSource::File(&source),
+        crate::kit::image_view::Budget::new(cols, crate::kit::inline_image::MAX_ROWS),
+        std::time::Duration::from_secs(5)
     ));
 
     let previous_session = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();

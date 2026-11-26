@@ -93,9 +93,15 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
         "child-1",
         ToolCardAccumulator::new("child-tool-1".into(), "Read".into(), "old.rs".into()),
     ));
-    assert!(ct.end_subagent_tool("child-1", "child-tool-1", "old output".into(), false));
+    assert!(ct.end_subagent_tool("child-1", "child-tool-1", "old output".into(), false,));
     ct.stop_subagent("child-1", true, "model stream interrupted");
-    assert!(ct.end_tool("agent-call-1", "child_thread_id: child-1".into(), true));
+    assert!(ct.end_tool(
+        "agent-call-1",
+        "child_thread_id: child-1".into(),
+        true,
+        Vec::new(),
+        0
+    ));
 
     ct.start_tool(ToolCardAccumulator::new(
         "agent-call-2".into(),
@@ -109,7 +115,7 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
         "child-1",
         ToolCardAccumulator::new("child-tool-2".into(), "Shell".into(), "cargo test".into()),
     ));
-    assert!(ct.end_subagent_tool("child-1", "child-tool-2", "passed".into(), false));
+    assert!(ct.end_subagent_tool("child-1", "child-tool-2", "passed".into(), false,));
     ct.stop_subagent("child-1", false, "completed");
 
     assert_ne!(

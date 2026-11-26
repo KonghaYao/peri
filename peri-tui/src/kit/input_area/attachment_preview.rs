@@ -1,35 +1,25 @@
 //! composer 上方的待发送图片预览（真实终端图片协议）。
 //!
-//! 数据流：渲染 body 只做「取最后一张图片附件 → 查缓存 → 写一帧预留几何」，
-//! base64 解码、尺寸校验（[`crate::kit::image_overlay::decode_image`]）与协议
-//! 编码（[`InlineImage::encode`]）全部由 effect 启动的后台线程完成；完成时
-//! bump `RENDER_HEARTBEAT` 唤醒 InputArea 重渲染（与消息区内联图片同一机制）。
+//! 数据流：渲染 body 只做「取最后一张图片附件 → 查 `image_view` 缓存 → 写一帧
+//! 预留几何」，base64 解码、尺寸校验与协议编码全部由 effect 启动的后台线程完成
+//! （与消息区、工具卡共用同一缓存）；完成时 bump `RENDER_HEARTBEAT` 唤醒 InputArea
+//! 重渲染，Ready 后预留高度收缩到图片实际行数。
 //!
-//! 门控：`InlineImageEncoder::for_caps` 返回 `None`（无协议 / ITerm2 / 缺单元格
-//! 尺寸的 Sixel）时**不发起任何请求**，composer 保持 `[Image #n]` 文本标签，
-//! 不做半块字符模拟。缓存只保留最近一张：附件一变就换键，旧编码结果不会画到
-//! 新附件上；附件清空（移除/提交）后槽位一并清空，重新粘贴可重试。
+//! 门控：`protocol_available` 为 false（无协议 / ITerm2 / 缺单元格尺寸的 Sixel）
+//! 时**不发起任何请求**，composer 保持 `[Image #n]` 文本标签。多图只预览最后一张，
+//! 底部标签仍列出全部。
 
-use std::sync::{Arc, OnceLock};
-
-use base64::Engine as _;
-use parking_lot::Mutex;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::buffer::Buffer;
 use ratatui_kit::ratatui::layout::{Constraint, Rect};
 
-use crate::kit::atoms::RENDER_HEARTBEAT;
 use crate::kit::atoms::{PENDING_ATTACHMENTS, PendingAttachment};
 use crate::kit::image_preview::protocol_available;
-use crate::kit::image_preview::{InlineImage, InlineImageEncoder};
+use crate::kit::image_view::{self, Budget, ImageSource, UploadId};
 use crate::kit::terminal_caps::TerminalCaps;
 
-/// 预览区固定行数（宽高比由 [`InlineImage::encode`] 等比适配，小图不放大）。
+/// 预览区最大行数（Pending 时预留；Ready 后收缩到实际行数）。
 pub(super) const PREVIEW_ROWS: u16 = 6;
-
-/// 预览编码的目标列宽上限：composer 再宽也只按 40 列编码，避免为
-/// 一张缩略图编码出整屏宽度的协议串。
-const MAX_PREVIEW_COLS: u16 = 40;
 
 /// 低于该列宽不再预览：6 行高、几列宽的图既不可辨，也不值得起编码线程。
 const MIN_PREVIEW_COLS: u16 = 8;
@@ -43,21 +33,28 @@ pub(super) fn target(attachments: &[PendingAttachment]) -> Option<&PendingAttach
 }
 
 /// 预览编码列宽：取 composer 内容宽度（两侧各留 1 列），窄屏返回 0（不预览）。
+///
+/// 不再有 40 列上限：图片按输入区全宽等比铺满（最多 [`PREVIEW_ROWS`] 行），
+/// 大图由行数上限约束内存与布局高度。
 pub(super) fn preview_cols(composer_width: u16) -> u16 {
-    let cols = composer_width.saturating_sub(2).min(MAX_PREVIEW_COLS);
+    let cols = composer_width.saturating_sub(2);
     if cols < MIN_PREVIEW_COLS { 0 } else { cols }
+}
+
+fn preview_budget(cols: u16) -> Budget {
+    Budget::new(cols, PREVIEW_ROWS)
 }
 
 /// 预留高度：预算不足时整块让位（返回 0），保证 transcript 与 composer 可用。
 ///
 /// `reserved` 是 composer + 弹出层已占用行数；预览不与 composer 争预算。
-pub(super) fn layout_height(budget: Option<u16>, reserved: u16, wanted: bool) -> u16 {
-    if !wanted {
+pub(super) fn layout_height(budget: Option<u16>, reserved: u16, rows: u16) -> u16 {
+    if rows == 0 {
         return 0;
     }
     match budget {
-        Some(budget) if reserved.saturating_add(PREVIEW_ROWS) > budget => 0,
-        _ => PREVIEW_ROWS,
+        Some(budget) if reserved.saturating_add(rows) > budget => 0,
+        _ => rows,
     }
 }
 
@@ -78,260 +75,6 @@ pub(super) fn preview_rect(area: Rect, y_offset: u16, height: u16) -> Option<Rec
     Some(Rect::new(area.x, y, area.width, height))
 }
 
-// ── 缓存键 ────────────────────────────────────────────────────────────────
-
-/// 预览身份：base64 内容哈希 + media_type + 目标单元格尺寸。
-///
-/// 内容哈希用 FNV-1a（进程内身份，不落盘不跨进程），避免为几 MB 载荷引入
-/// 新依赖；哈希只在附件变化时计算一次（见 [`PreviewKeyMemo`]）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PreviewKey {
-    digest: u64,
-    media_type: String,
-    cols: u16,
-    rows: u16,
-}
-
-impl PreviewKey {
-    fn new(attachment: &PendingAttachment, cols: u16, rows: u16) -> Self {
-        Self {
-            digest: content_digest(&attachment.base64_data),
-            media_type: attachment.media_type.clone(),
-            cols,
-            rows,
-        }
-    }
-}
-
-fn content_digest(base64_data: &str) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in base64_data.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// 同一附件只算一次内容哈希。
-///
-/// base64 载荷上限 20MiB → ~27MiB 文本，每帧全量哈希是纯浪费：
-/// `PendingAttachment` 在 composer 内不可变，`(数量, media_type, 长度, 缓冲地址,
-/// 目标尺寸)` 足以识别「同一个附件」。附件清空时指纹一并清空——重新粘贴
-/// （哪怕内容相同）会重新哈希并允许重试。
-#[derive(Default)]
-pub(super) struct PreviewKeyMemo {
-    fingerprint: Option<Fingerprint>,
-    key: Option<Arc<PreviewKey>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Fingerprint {
-    count: usize,
-    media_type: String,
-    len: usize,
-    ptr: usize,
-    cols: u16,
-    rows: u16,
-}
-
-impl Hook for PreviewKeyMemo {}
-
-impl PreviewKeyMemo {
-    pub(super) fn key_for(
-        &mut self,
-        target: Option<&PendingAttachment>,
-        count: usize,
-        cols: u16,
-        rows: u16,
-    ) -> Option<Arc<PreviewKey>> {
-        let target = target.filter(|_| cols > 0 && rows > 0);
-        let fingerprint = target.map(|attachment| Fingerprint {
-            count,
-            media_type: attachment.media_type.clone(),
-            len: attachment.base64_data.len(),
-            ptr: attachment.base64_data.as_ptr() as usize,
-            cols,
-            rows,
-        });
-        if self.fingerprint != fingerprint {
-            self.fingerprint = fingerprint;
-            self.key = target.map(|attachment| Arc::new(PreviewKey::new(attachment, cols, rows)));
-        }
-        self.key.clone()
-    }
-}
-
-// ── 三态缓存 ──────────────────────────────────────────────────────────────
-
-/// 三态：渲染 body 只克隆 [`Arc`]，不做 IO。
-#[derive(Clone)]
-pub(super) enum PreviewState {
-    Pending,
-    Ready(Arc<InlineImage>),
-    /// 失败原因只用于诊断与单测；渲染统一回落文本标签，不向用户展示。
-    Failed(&'static str),
-}
-
-impl std::fmt::Debug for PreviewState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pending => f.write_str("Pending"),
-            Self::Ready(image) => f.debug_tuple("Ready").field(image).finish(),
-            Self::Failed(reason) => f.debug_tuple("Failed").field(reason).finish(),
-        }
-    }
-}
-
-/// 只保留最近一个请求的槽位：同一时刻 composer 只显示一张预览。
-#[derive(Default)]
-struct Cache {
-    key: Option<PreviewKey>,
-    state: Option<PreviewState>,
-    inflight: Option<u64>,
-    next_request: u64,
-    revision: u64,
-}
-
-impl Cache {
-    fn state(&self, key: &PreviewKey) -> Option<PreviewState> {
-        (self.key.as_ref() == Some(key))
-            .then(|| self.state.clone())
-            .flatten()
-    }
-
-    /// 登记一次请求；同键已有条目（含 Pending/Failed）时返回 `None`（去重）。
-    fn begin(&mut self, key: PreviewKey) -> Option<u64> {
-        if self.key.as_ref() == Some(&key) && self.state.is_some() {
-            return None;
-        }
-        self.next_request = self.next_request.wrapping_add(1);
-        self.key = Some(key);
-        self.state = Some(PreviewState::Pending);
-        self.inflight = Some(self.next_request);
-        Some(self.next_request)
-    }
-
-    /// 写回后台结果；请求代数或键不匹配（被新附件取代）时丢弃。返回是否更新。
-    fn complete(
-        &mut self,
-        key: &PreviewKey,
-        id: u64,
-        result: Result<Arc<InlineImage>, &'static str>,
-    ) -> bool {
-        if self.inflight != Some(id) || self.key.as_ref() != Some(key) {
-            return false;
-        }
-        self.inflight = None;
-        self.state = Some(match result {
-            Ok(image) => PreviewState::Ready(image),
-            Err(reason) => PreviewState::Failed(reason),
-        });
-        self.revision = self.revision.wrapping_add(1);
-        true
-    }
-
-    fn clear(&mut self) {
-        self.key = None;
-        self.state = None;
-        self.inflight = None;
-    }
-}
-
-static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-
-fn cache() -> &'static Mutex<Cache> {
-    CACHE.get_or_init(|| Mutex::new(Cache::default()))
-}
-
-/// 纯查表：Ready 返回协议句柄，Pending/Failed/无条目返回 `None`。
-pub(super) fn lookup_ready(key: &PreviewKey) -> Option<Arc<InlineImage>> {
-    match cache().lock().state(key) {
-        Some(PreviewState::Ready(image)) => Some(image),
-        _ => None,
-    }
-}
-
-/// 当前附件编码是否失败：失败不预留高度，避免永久空白条。
-pub(super) fn failed(key: &PreviewKey) -> bool {
-    matches!(cache().lock().state(key), Some(PreviewState::Failed(_)))
-}
-
-/// effect 边界请求：`target`/`key` 为 `None` 时清空槽位（附件移除/提交）。
-///
-/// 同键重复调用走缓存去重，不重复解码；后台线程只持有 base64 副本与编码器。
-pub(super) fn request(
-    target: Option<&PendingAttachment>,
-    key: Option<&PreviewKey>,
-    cols: u16,
-    rows: u16,
-    caps: &TerminalCaps,
-    cell_px: Option<(u16, u16)>,
-) {
-    let (Some(target), Some(key)) = (target, key) else {
-        cache().lock().clear();
-        return;
-    };
-    // 协议不可用时在构造 Picker 之前返回（`Picker::halfblocks` 有 tmux 副作用）。
-    let Some(encoder) = InlineImageEncoder::for_caps(caps, cell_px) else {
-        cache().lock().clear();
-        return;
-    };
-    let Some(id) = cache().lock().begin(key.clone()) else {
-        return;
-    };
-    let base64_data = target.base64_data.clone();
-    let thread_key = key.clone();
-    let spawned = std::thread::Builder::new()
-        .name("peri-attachment-preview".to_string())
-        .spawn(move || {
-            // 解码/编码 panic 也要回收 inflight 槽位，否则同键请求会永久停在 Pending。
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                encode(&encoder, &base64_data, cols, rows)
-            }))
-            .unwrap_or(Err("panic"));
-            finish(thread_key, id, result);
-        });
-    if spawned.is_err() {
-        finish(key.clone(), id, Err("spawn"));
-    }
-}
-
-fn encode(
-    encoder: &InlineImageEncoder,
-    base64_data: &str,
-    cols: u16,
-    rows: u16,
-) -> Result<Arc<InlineImage>, &'static str> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_data)
-        .map_err(|_| "base64")?;
-    let image = crate::kit::image_overlay::decode_image(bytes)?;
-    encoder
-        .encode(image, cols, rows)
-        .map(Arc::new)
-        .ok_or("encode")
-}
-
-fn finish(key: PreviewKey, id: u64, result: Result<Arc<InlineImage>, &'static str>) {
-    // 状态与唤醒在同一把锁内发布：否则重渲染可能先看到 Ready、再读到旧版本。
-    let updated = cache().lock().complete(&key, id, result);
-    if updated {
-        RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
-    }
-}
-
-/// 单测：缓存版本号（只在编码完成并发布时递增）。
-#[cfg(test)]
-pub(super) fn revision() -> u64 {
-    cache().lock().revision
-}
-
-/// 单测：读取当前槽位状态。
-#[cfg(test)]
-pub(super) fn state_of(key: &PreviewKey) -> Option<PreviewState> {
-    cache().lock().state(key)
-}
-
 // ── 一帧几何 + 绘制钩子 ───────────────────────────────────────────────────
 
 /// 渲染 body 的输入：全部是当帧已知值（附件、宽度、能力、预算）。
@@ -346,64 +89,70 @@ pub(super) struct PreviewInputs<'a> {
     pub(super) visible: bool,
 }
 
-/// 一帧的预览结果（预留高度 + 缓存键）：占位高度与编码请求都以它为准。
+/// 一帧的预览结果（预留高度 + 附件身份）：占位高度与绘制都以它为准。
 pub(super) struct PreviewPlan {
     pub(super) height: u16,
-    key: Option<Arc<PreviewKey>>,
+    source: Option<UploadId>,
 }
 
-/// InputArea 的预览入口：解析缓存键、按预算定高度、注册编码 effect。
+/// InputArea 的预览入口：按缓存状态定高度并注册编码 effect。
 ///
-/// 只在这里调用 `hooks.use_hook`/`use_effect`，保证 hook 顺序与组件一致。
+/// 只在这里调用 `hooks.use_effect`，保证 hook 顺序与组件一致。
 pub(super) fn use_preview(hooks: &mut Hooks<'_, '_>, inputs: PreviewInputs<'_>) -> PreviewPlan {
     let cols = preview_cols(inputs.composer_width);
-    let (key, is_failed) = {
-        let memo = hooks.use_hook(PreviewKeyMemo::default);
-        let key = memo.key_for(
-            target(inputs.attachments),
-            inputs.attachments.len(),
-            cols,
-            PREVIEW_ROWS,
-        );
-        let is_failed = key.as_ref().is_some_and(|key| failed(key));
-        (key, is_failed)
-    };
+    let source = target(inputs.attachments)
+        .filter(|_| cols > 0)
+        .map(PendingAttachment::upload_id);
     // 单元格像素尺寸只在真的有图片附件时才探测（`window_size` 是 ioctl）。
-    let cell_px = key
+    let cell_px = source
         .as_ref()
         .and_then(|_| crate::kit::image_preview::cell_pixel_size());
-    let protocol = key
-        .as_ref()
-        .is_some_and(|_| protocol_available(&inputs.caps, cell_px));
-    let height = layout_height(
-        inputs.budget,
-        inputs.reserved,
-        protocol && !is_failed && inputs.visible,
-    );
+    let protocol = source.is_some_and(|_| protocol_available(&inputs.caps, cell_px));
+    let budget = preview_budget(cols);
+    let (ready_rows, failed) = match (protocol, source) {
+        (true, Some(id)) => (
+            image_view::lookup(&ImageSource::Uploaded(id), budget).map(|placement| placement.rows),
+            image_view::failed(&ImageSource::Uploaded(id), budget),
+        ),
+        _ => (None, false),
+    };
+    // Pending 预留满高，Ready 收缩到实际行数，失败不预留（避免永久空白条）。
+    let rows = if !protocol || !inputs.visible {
+        0
+    } else if let Some(rows) = ready_rows {
+        rows.min(PREVIEW_ROWS)
+    } else if failed {
+        0
+    } else {
+        PREVIEW_ROWS
+    };
+    let height = layout_height(inputs.budget, inputs.reserved, rows);
     let caps = inputs.caps;
-    let request_key = key.clone();
+    let request_source = source;
+    // revision 必须在 deps 里：`image_view::request` 可能因并发解码槽位已满返回
+    // Deferred（不登记 Pending）；槽位释放在完成回调里 bump revision——effect
+    // 不跟随 revision 重跑，预览就会一直停在文本降级（直到别的输入变化）。
+    let revision = image_view::revision();
     hooks.use_effect(
         move || {
+            if !protocol {
+                return;
+            }
             let atom = PENDING_ATTACHMENTS.state();
             let attachments = atom.read();
-            request(
-                target(&attachments),
-                request_key.as_deref(),
-                cols,
-                PREVIEW_ROWS,
-                &caps,
-                cell_px,
-            );
+            if let Some(id) = target(&attachments).map(PendingAttachment::upload_id) {
+                image_view::request(ImageSource::Uploaded(id), budget, &caps, cell_px);
+            }
         },
-        (key.clone(), cols),
+        (request_source, cols, protocol, cell_px, revision),
     );
-    PreviewPlan { height, key }
+    PreviewPlan { height, source }
 }
 
 /// 每帧写预留几何（钩子只读；`write_no_update` 避免渲染自激）。
 pub(super) fn write_frame(frame: State<PreviewFrame>, plan: &PreviewPlan, y_offset: u16) {
     let mut frame = frame.write_no_update();
-    frame.update(plan.height, y_offset, plan.key.clone());
+    frame.update(plan.height, y_offset, plan.source);
 }
 
 /// 预览占位 View：只占高度，不渲染内容（像素由 [`AttachmentPreviewDrawHook`] 写）。
@@ -424,28 +173,34 @@ pub(super) struct PreviewFrame {
     height: u16,
     /// 预留区相对输入区顶部的行偏移（弹出层 + 队列高度）。
     y_offset: u16,
-    key: Option<Arc<PreviewKey>>,
+    source: Option<UploadId>,
 }
 
 impl PreviewFrame {
-    pub(super) fn update(&mut self, height: u16, y_offset: u16, key: Option<Arc<PreviewKey>>) {
+    pub(super) fn update(&mut self, height: u16, y_offset: u16, source: Option<UploadId>) {
         self.height = height;
         self.y_offset = y_offset;
-        self.key = key;
+        self.source = source;
     }
 
     /// 在输入区当帧区域 `area` 内绘制 Ready 的预览；其余状态 no-op。
     fn draw(&self, buf: &mut Buffer, area: Rect) {
-        let Some(key) = self.key.as_ref() else {
+        let Some(source) = self.source else {
             return;
         };
         let Some(rect) = preview_rect(area, self.y_offset, self.height) else {
             return;
         };
-        let Some(image) = lookup_ready(key) else {
+        let cols = preview_cols(area.width);
+        let Some(placement) =
+            image_view::lookup(&ImageSource::Uploaded(source), preview_budget(cols))
+        else {
             return;
         };
-        image.render(rect, buf);
+        if let Some(target) = image_view::draw::centered_rect(rect, placement.cols, placement.rows)
+        {
+            image_view::draw::draw(buf, target, &placement.image);
+        }
     }
 }
 

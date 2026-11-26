@@ -59,7 +59,7 @@ fn test_start_then_end_tool() {
     assert_eq!(ct.tool_cards.len(), 1);
     assert!(ct.active);
 
-    ct.end_tool("tc-1", "updated 3 lines".into(), false);
+    ct.end_tool("tc-1", "updated 3 lines".into(), false, Vec::new(), 0);
     let card = &ct.tool_cards[0];
     assert_eq!(card.output_summary.as_deref(), Some("updated 3 lines"));
     assert!(!card.is_error);
@@ -107,7 +107,7 @@ fn test_end_tool_unknown_id_is_noop() {
         "Edit".into(),
         "x".into(),
     ));
-    ct.end_tool("does-not-exist", "out".into(), true);
+    ct.end_tool("does-not-exist", "out".into(), true, Vec::new(), 0);
     assert!(ct.tool_cards[0].output_summary.is_none());
     assert!(!ct.tool_cards[0].is_error);
 }
@@ -137,14 +137,14 @@ fn test_build_view_models_interleaves_text_and_tools() {
         "Read".into(),
         "file: a.rs".into(),
     ));
-    ct.end_tool("tc-1", "ok".into(), false);
+    ct.end_tool("tc-1", "ok".into(), false, Vec::new(), 0);
     ct.append_text("2", Some("msg_B"));
     ct.start_tool(ToolCardAccumulator::new(
         "tc-2".into(),
         "Bash".into(),
         "echo hi".into(),
     ));
-    ct.end_tool("tc-2", "hi".into(), false);
+    ct.end_tool("tc-2", "hi".into(), false, Vec::new(), 0);
 
     let vms: Vec<_> = ct.view_models().iter().cloned().collect();
     assert_eq!(vms.len(), 4, "应为 4 项：Text→Tool→Text→Tool");
@@ -208,7 +208,7 @@ fn test_no_message_id_uses_tool_boundaries() {
         "Read".into(),
         "f: x.rs".into(),
     ));
-    ct.end_tool("tc-1", "ok".into(), false);
+    ct.end_tool("tc-1", "ok".into(), false, Vec::new(), 0);
     ct.append_text("b", None);
 
     let vms: Vec<_> = ct.view_models().iter().cloned().collect();
@@ -245,9 +245,21 @@ fn test_first_tool_in_batch_is_running_false_after_end() {
         "git show --stat e5239171".into(),
     ));
     // 第一个工具结束
-    ct.end_tool("tc-shell-1", "c4596722 refactor...".into(), false);
+    ct.end_tool(
+        "tc-shell-1",
+        "c4596722 refactor...".into(),
+        false,
+        Vec::new(),
+        0,
+    );
     // 第二个工具结束
-    ct.end_tool("tc-shell-2", "commit e5239171...".into(), false);
+    ct.end_tool(
+        "tc-shell-2",
+        "commit e5239171...".into(),
+        false,
+        Vec::new(),
+        0,
+    );
 
     let vms: Vec<_> = ct.view_models().iter().cloned().collect();
 
@@ -347,7 +359,13 @@ fn workspace_edit_builds_diff() {
             serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
             None,
         ));
-        assert!(ct.end_tool("tc-1", "Added 3 lines to render.rs".into(), is_error));
+        assert!(ct.end_tool(
+            "tc-1",
+            "Added 3 lines to render.rs".into(),
+            is_error,
+            Vec::new(),
+            0
+        ));
         let vm = ct.view_models();
         let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
             panic!("expected tool card for {tool_name}");
@@ -376,7 +394,13 @@ fn workspace_edit_builds_diff() {
         serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
         None,
     ));
-    assert!(ct.end_tool("tc-2", "Added 3 lines to render.rs".into(), false));
+    assert!(ct.end_tool(
+        "tc-2",
+        "Added 3 lines to render.rs".into(),
+        false,
+        Vec::new(),
+        0
+    ));
     let vm = ct.view_models();
     let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
         panic!("expected tool card for mcp__foo__Edit");
@@ -400,7 +424,7 @@ fn has_running_bash_tool_matches_workspace_effective_name() {
             "cargo test".into(),
         ));
         assert!(ct.has_running_bash_tool(), "{tool_name} 运行中必须命中");
-        assert!(ct.end_tool("tc-1", "test result: ok".into(), false));
+        assert!(ct.end_tool("tc-1", "test result: ok".into(), false, Vec::new(), 0));
         assert!(!ct.has_running_bash_tool(), "{tool_name} 完成后不得命中");
     }
 

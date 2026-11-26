@@ -465,7 +465,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let inline_image_end = inline_image_visible.end;
     let inline_image_content_cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
     let inline_image_process_cols = u16::try_from(grid.process_content_width()).unwrap_or(u16::MAX);
-    let inline_image_revision = crate::kit::inline_image::revision();
+    let inline_image_revision = crate::kit::image_view::revision();
     {
         let snapshot = snapshot.clone();
         hooks.use_effect(

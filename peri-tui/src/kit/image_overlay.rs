@@ -21,8 +21,8 @@
 //! 之后绘制）。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
 use crate::i18n;
@@ -35,10 +35,7 @@ use crate::kit::tui_render_unit::TuiRenderUnit;
 
 use fluent_bundle::FluentValue;
 use image::DynamicImage;
-use image::GenericImageView;
-use parking_lot::Mutex;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_image::picker::Picker;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::buffer::Buffer;
 use ratatui_kit::ratatui::layout::Rect;
@@ -54,33 +51,6 @@ const MIN_PREVIEW_TERM_H: u16 = 12;
 
 /// 预览请求 id——切换时旧解码线程的陈旧结果据此丢弃（§7.5 竞态防御）。
 static PREVIEW_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
-
-/// `Picker` 进程级缓存：`TerminalCaps` 启动时探测一次，但单元格像素尺寸会
-/// 随终端字体变化；缓存按尺寸失效，避免同一面板反复构造（tmux 探测有 spawn
-/// 副作用）。测试不走此缓存（直接 `picker_for` 构造），避免全局污染。
-static PICKER: OnceLock<Mutex<Option<CachedPicker>>> = OnceLock::new();
-
-struct CachedPicker {
-    cell_px: Option<(u16, u16)>,
-    picker: Picker,
-}
-
-fn cached_picker(cell_px: Option<(u16, u16)>) -> Picker {
-    let cache = PICKER.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock();
-    if let Some(cached) = guard.as_ref()
-        && cached.cell_px == cell_px
-    {
-        return cached.picker.clone();
-    }
-    let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
-    let picker = crate::kit::image_preview::picker_for_with_cell_size(&caps, cell_px);
-    *guard = Some(CachedPicker {
-        cell_px,
-        picker: picker.clone(),
-    });
-    picker
-}
 
 // ── 触发仲裁（§7.3）──────────────────────────────────────────────────────
 
@@ -162,42 +132,10 @@ pub(crate) fn preview_geometry(term_w: u16, term_h: u16) -> Option<Rect> {
 
 // ── 请求流程（§7.3，事件边界调用）────────────────────────────────────────
 
-/// 后台解码（生产路径，overlay 与消息区内联图片共用）：从 T5 已校验缓冲
-/// 解码（F2：**不得按路径二次打开**——validate 通过后文件可能被替换，缓冲是
-/// 唯一可信数据源，字节数 ≤ [`MAX_IMAGE_BYTES`] 天然生效）。header 尺寸校验
-/// （防恶意 header 撑爆内存）→ 整图解码 → 解码后复核尺寸（纵深防御）。返回
-/// 内部原因分类（"io"/"format"/"too-large"），不泄漏路径细节。
-pub(crate) fn decode_image(buf: Vec<u8>) -> Result<DynamicImage, &'static str> {
-    let reader = image::ImageReader::new(std::io::Cursor::new(&buf))
-        .with_guessed_format()
-        .map_err(|_| "format")?;
-    let (w, h) = reader.into_dimensions().map_err(|_| "format")?;
-    if u64::from(w) * u64::from(h) > crate::kit::image_safety::MAX_TOTAL_PIXELS
-        || w > crate::kit::image_safety::MAX_IMAGE_SIDE
-        || h > crate::kit::image_safety::MAX_IMAGE_SIDE
-    {
-        return Err("too-large");
-    }
-    // 二次构造 Reader（`into_dimensions` 消耗 self）；仍从同一缓冲读取。
-    let img = image::ImageReader::new(std::io::Cursor::new(&buf))
-        .with_guessed_format()
-        .map_err(|_| "format")?
-        .decode()
-        .map_err(|_| "format")?;
-    let (w, h) = img.dimensions();
-    if u64::from(w) * u64::from(h) > crate::kit::image_safety::MAX_TOTAL_PIXELS
-        || w > crate::kit::image_safety::MAX_IMAGE_SIDE
-        || h > crate::kit::image_safety::MAX_IMAGE_SIDE
-    {
-        return Err("too-large");
-    }
-    Ok(img)
-}
-
 /// 请求预览（事件边界调用，非 render body——TUI-RENDER-001）。`path=None`
 /// （触发清空/遮挡）→ `Idle`（隐藏清理，§7.5）。
 pub(crate) fn request_preview(path: Option<&str>) {
-    request_preview_with(path, None, decode_image);
+    request_preview_with(path, None, crate::kit::image_view::decode_image);
 }
 
 /// [`request_preview`] 注入版（单测）：`managed_root` 模拟受管理根
@@ -421,7 +359,22 @@ fn draw_preview_overlay(
         return;
     }
     if let Some(img) = async_img {
-        img.render(pixel_area, buf);
+        // 尺寸走共享 sizing（不复用转录区缓存：面积随终端/光标变化，需要交互式
+        // resize）；`Fit` 不放大，因此必须把目标矩形收紧到图片实际格数，
+        // 否则小图会画在像素区左上角、右侧/下方留白。
+        let (iw, ih) = img.dimensions();
+        let budget = crate::kit::image_view::Budget::new(pixel_area.width, pixel_area.height);
+        if let Some(cells) = crate::kit::image_view::sizing::fit(
+            iw,
+            ih,
+            img.cell_px(),
+            budget,
+            crate::kit::image_view::Fill::NoUpscale,
+        ) && let Some(target) =
+            crate::kit::image_view::draw::centered_rect(pixel_area, cells.cols, cells.rows)
+        {
+            img.render_at(target, buf);
+        }
     }
 }
 
@@ -496,7 +449,11 @@ impl Hook for OverlayDrawHook {
                     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
                     if crate::kit::image_preview::supported_with_cell_size(&caps, cell_px) {
                         let img = (**img).clone();
-                        self.async_img = Some(AsyncImage::new(&cached_picker(cell_px), img));
+                        let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
+                        self.async_img = Some(AsyncImage::new(
+                            &crate::kit::image_preview::shared_picker(&caps, cell_px),
+                            img,
+                        ));
                         self.async_path = Some(path.clone());
                         self.async_cell_px = cell_px;
                         redraw = true;
