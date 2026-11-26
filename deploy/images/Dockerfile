@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # Build the patched peri-swarm gateway. The repository pins Rust 1.99.0 and
 # requires scripts/cargo-rmcp-patched.sh for the rmcp/hyper-util patches.
 FROM rust:1.99.0-bookworm AS rust-build

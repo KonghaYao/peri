@@ -125,5 +125,14 @@ docker compose exec --index=2 peri-swarm cat /var/lib/peri-swarm/machine-id
 - `rivetdev/engine` 的 tag 需要 pin；官方文档默认 `latest`，与仓库
   `rivetkit 3.1.1` 的兼容性需要实测。engine 的 `/health` 之后几秒内 API 可能
   返回 `depot.overloaded`，`rivet-init` 会重试。
+- 若本机 buildkit 拉不到 Dockerfile frontend，或构建容器解析不了
+  `deb.debian.org` / `static.crates.io`（OrbStack 默认网络会这样），用 host
+  网络预构建，再跳过构建启动：
+
+  ```bash
+  docker buildx build --network=host --pull=false \
+    -f images/Dockerfile --target peri-swarm -t peri-swarm:local ..
+  docker compose up -d --no-build
+  ```
 - 没有 sandbox：不设置 `PERI_SWARM_BUN_URL`，`type=none` 正常，
   `openai_hosted` 创建时失败。
