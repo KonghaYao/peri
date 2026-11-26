@@ -241,6 +241,19 @@ python3 peri-swarm/scripts/import_loom_state.py check \
   `json!` 的插入顺序。修正后 fixture 指纹等于真实值
   `42b95665…`（单测固定该值），重放得到 `202 existing`。
 
+WAL 快照（复核者补丁）：
+
+- 冻结副本保留主文件与非空 `-wal` 时，WAL 内的提交会被导入；manifest 的
+  `source_sha256` / `source_wal_sha256` 分开记录。手工演练（复制 fixture + 未 checkpoint 的
+  WAL，8272 字节）：`inspect --immutable` exit 2，文案
+  `--immutable ignores a non-empty WAL; omit --immutable or use a checkpointed copy`；
+  去掉 `--immutable` 后 `swarm_inputs` 从 1 变 2（WAL 内新增的收据可见），
+  `wal sha256=a983e9343b2d5813...`。
+- 读取在同一 SQLite 事务内完成；若读取期间主文件或 WAL 的 stamp 变化，导入直接失败
+  （`snapshot files changed during the read`），要求从冻结副本重新导出。
+- 导入器用例 23 → 26（新增 WAL 提交可见、`--immutable` 接受缺失/空 WAL、读取期间
+  源文件变化被拒绝）。
+
 **限制**：本演练的源快照是脚本自建的 legacy fixture，**未对真实 Loom 生产快照验证**。
 现场还需确认存储方导出格式、`-wal` 一致性、数据规模与 `inputId` 均为 UUID；导入是只读
 快照 + 空库写入，旧库不被修改。
@@ -271,7 +284,7 @@ PERI_SWARM_STATE_STORE='postgresql://peri:peri@127.0.0.1:55433/peri_swarm_state'
 
 # 离线导入工具（fixture 驱动，无 PostgreSQL）
 python3 peri-swarm/scripts/test-import-loom-state.py
-# Ran 23 tests ... OK
+# Ran 26 tests ... OK
 ```
 
 未设置 `PERI_TEST_POSTGRES_URL` / 两个 DSN 时上述 ignored 用例打印一行 skip 后返回，

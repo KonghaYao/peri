@@ -222,7 +222,10 @@ turns / bindings 游标）。
 1. **停写并取快照**。停掉旧网关后，用存储方提供的只读备份/导出得到 SQLite 格式文件；
    若拿到的是 `.dump` 文本，先还原成普通 SQLite 文件：
    `sqlite3 snapshot.db < dump.sql`。热拷贝要连 `-wal`/`-shm` 一起复制（或先 checkpoint），
-   否则可能丢最后若干提交。快照 sha256 会记录在 `expected.json` 的 manifest 里。
+   否则可能丢最后若干提交；工具在同一 SQLite 事务里读取，若读取期间主文件或 WAL 变化
+   会拒绝导入。manifest 分别记录主文件与非空 WAL 的 sha256。`--immutable` 只用于已
+   checkpoint（没有非空 `-wal`）的副本——带未 checkpoint 的 WAL 时会直接拒绝，避免
+   `immutable=1` 静默忽略最后的提交。
 2. **检查快照**（只读打开，不写源文件）：
    ```bash
    python3 peri-swarm/scripts/import_loom_state.py inspect --snapshot snapshot.db
@@ -264,7 +267,8 @@ turn 时间 `INTEGER → BIGINT`，JSON 列保持 TEXT 原样字节；旧 build 
   `last_item_seq` 改成 `MAX(seq)`、丢弃无会话的 items/inputs/turns/bindings；
   `--strict` 改为直接失败。
 - 已用脚本自建的 legacy SQLite fixture 做过端到端演练（导入 → 启动网关 → 校验
-  `rootSessionId`、旧 `inputId` 幂等、SSE 游标续读 → 重启），命令与输出见
+  `rootSessionId`、旧 `inputId` 幂等、SSE 游标续读 → 重启），并单独验证过未 checkpoint
+  的 WAL（复制主文件 + 非空 `-wal`）：WAL 内提交可导入，`--immutable` 被拒绝。命令与输出见
   [验收记录](../docs/verification/peri-swarm-postgres-state-2026-11-24.md) 的「离线导入演练」。
   **未对真实 Loom 生产快照验证**：现场快照的 `-wal` 状态、存储方导出格式与数据规模
   仍需在割接窗口内按上面第 1–4 步实测。
