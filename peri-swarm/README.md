@@ -216,7 +216,7 @@ turns / bindings 游标）。
 **B. 保留旧状态（离线导入，一次性）**
 
 [`scripts/import_loom_state.py`](scripts/import_loom_state.py) 是 Python 3 标准库脚本：
-读取旧库的**只读 SQLite 快照**，生成并执行写 PostgreSQL 的 SQL，再对账。它不运行网关，
+读取旧库的**只读 SQLite 快照**，生成写 PostgreSQL 的 SQL（由 `psql` 执行），再对账。它不运行网关，
 也不给网关增加任何 Loom/Turso 依赖。
 
 1. **停写并取快照**。停掉旧网关后，用存储方提供的只读备份/导出得到 SQLite 格式文件；
@@ -237,7 +237,8 @@ turns / bindings 游标）。
    ```
    产出 `01-schema.sql`（新 schema + `swarm_meta` 身份行，镜像 `schema.rs` 的 DDL）、
    `02-data.sql`（按主键顺序的 INSERT，单事务）、`03-verify.sql`（对账查询）、
-   `expected.json`（期望值 + manifest）。目标 schema 非空时脚本拒绝执行。
+   `expected.json`（期望值 + manifest）。目标 schema 非空时，生成的 SQL 在执行阶段
+   直接 `RAISE EXCEPTION`（不会覆盖已有数据）。
 4. **导入空库并核对**：
    ```bash
    psql "$PERI_SWARM_STATE_STORE" -v ON_ERROR_STOP=1 -f out/01-schema.sql
