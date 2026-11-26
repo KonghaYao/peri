@@ -581,3 +581,79 @@ async fn cron_jobs(
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     serde_json::from_value(value["jobs"].clone()).unwrap()
 }
+
+#[tokio::test]
+#[serial]
+async fn meta_harness_cron_false_disables_session_cron_scheduler_and_bridge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "test",
+            "openai",
+            "test-key",
+            "test-model",
+        ),
+    );
+    config.config.meta_harness = Some(std::collections::HashMap::from([("cron".into(), false)]));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cwd = tmp.path().canonicalize().unwrap();
+    let cfg = crate::host::assemble::assemble_server_config_with_capabilities(
+        crate::host::assemble::HostAssemblyInput {
+            provider,
+            peri_config: Arc::new(parking_lot::RwLock::new(config)),
+            config_source: Arc::new(
+                crate::provider::ConfigSource::load_at(&cwd, tmp.path().join("settings.json"))
+                    .unwrap(),
+            ),
+            permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+            session_resources: peri_agent::resources::open_session_resources_with(Some(
+                tmp.path().join("threads.db"),
+            ))
+            .await
+            .unwrap(),
+            session_store_shutdown: None,
+            workspace_id: None,
+            cwd: cwd.to_string_lossy().into_owned(),
+            bare: false,
+            lazy_workspace: false,
+            drive_cron_tick: true,
+            builtin_assembly_mode: None,
+            workspace_input: None,
+            workspace_resources: None,
+            workflow_input: None,
+            builtin_closed: Default::default(),
+            skills_face_closed: false,
+            plugin_face_closed: false,
+            prepared_plugins: None,
+            session_mcp_servers: None,
+            reserved_root_session_id: false,
+        },
+        Default::default(),
+    )
+    .await;
+    assert!(cfg.cron_scheduler.is_some());
+
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let mut sessions = HashMap::new();
+    let id = new_session(&cfg, &mut sessions, &transport, &cwd_str).await;
+    let env = sessions[&id].environment.clone().unwrap();
+    assert!(
+        env.cfg.cron_scheduler.is_none(),
+        "meta_harness.cron=false must disable session cron_scheduler"
+    );
+    assert!(
+        !env.cfg.session_manager.cron_bridge_for(&id),
+        "meta_harness.cron=false must not start SessionCronBridge polling"
+    );
+    crate::host::requests::handle_request(
+        "session/close",
+        &json!({"sessionId": id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+}
