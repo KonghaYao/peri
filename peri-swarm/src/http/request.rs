@@ -381,11 +381,12 @@ fn merge_agent_field(
 /// Accepts the OpenAI Agents API MCP tool shape at both the flat and the nested
 /// `agent` position. The official `transport` object wins: `transport.type ==
 /// "http"` maps its `server_url`/`headers` onto [`McpToolSpec`] and its
-/// `authorization` becomes an `Authorization: Bearer` header unless that header
-/// is already present. The earlier flat `server_url`/`headers` shape remains as
-/// a deprecated alias; when both shapes carry a URL they must agree. `stdio`
-/// and unknown transport types are a stated gap (`unsupported_tool`), never a
-/// misleading `server_url` report. Nothing is filtered by name, URL or
+/// `authorization` becomes an `Authorization` header unless that header is
+/// already present; a value without an auth scheme gets the `Bearer` prefix,
+/// while `"Bearer ..."`/`"Basic ..."` is kept verbatim. The earlier flat
+/// `server_url`/`headers` shape remains as a deprecated alias; when both shapes
+/// carry a URL they must agree. `stdio` and unknown transport types are a
+/// stated gap (`unsupported_tool`), never a misleading `server_url` report. Nothing is filtered by name, URL or
 /// credential policy: only shapes that cannot be represented as an
 /// [`McpToolSpec`] are rejected, and every rejection names its field path.
 /// Non-MCP tool types are an implementation gap reported as `unsupported_tool`,
@@ -490,7 +491,7 @@ fn normalize_tool(prefix: &str, index: usize, value: &Value) -> Result<McpToolSp
         if !has_authorization {
             headers.push(McpHeader {
                 name: "Authorization".to_owned(),
-                value: format!("Bearer {authorization}"),
+                value: authorization_header_value(&authorization),
             });
             headers.sort_by(|left, right| left.name.cmp(&right.name));
         }
@@ -597,6 +598,59 @@ fn optional_tool_string(value: Option<&Value>, field: &str) -> Result<Option<Str
         return Err(invalid_tool(field, "field must not be empty"));
     }
     Ok(Some(text.to_owned()))
+}
+
+/// Build the `Authorization` header value from official
+/// `transport.authorization`.
+///
+/// Official clients send both the bare token (Responses API: "provide the
+/// token here") and a complete credential (`"Bearer token"`, `"Basic ..."`;
+/// Agents API: "the authorization value sent to the MCP server"), so the
+/// `Bearer` prefix is only added when no auth scheme is present.
+fn authorization_header_value(authorization: &str) -> String {
+    if has_auth_scheme_prefix(authorization) {
+        authorization.to_owned()
+    } else {
+        format!("Bearer {authorization}")
+    }
+}
+
+/// Whether `value` starts with an HTTP auth scheme token (RFC 7235) followed
+/// by whitespace, e.g. `Bearer ` or `Basic `. Equivalent to the anchored
+/// pattern `^[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+`.
+fn has_auth_scheme_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let is_scheme_char = byte.is_ascii_alphabetic()
+            || (index > 0
+                && (byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                            | b'-'
+                    )));
+        if !is_scheme_char {
+            break;
+        }
+        index += 1;
+    }
+    index > 0
+        && bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
 }
 
 fn normalize_headers(value: Option<&Value>, field: &str) -> Result<Vec<McpHeader>, SwarmError> {

@@ -1415,6 +1415,84 @@ async fn official_transport_and_flat_alias_normalize_to_one_declaration() {
 }
 
 #[tokio::test]
+async fn transport_authorization_is_idempotent_and_empty_is_rejected() {
+    let harness = harness_with_store();
+    for (logical_id, authorization, expected) in [
+        ("agent-token", "token", "Bearer token"),
+        ("agent-bearer", "Bearer token", "Bearer token"),
+        ("agent-basic", "Basic abc", "Basic abc"),
+    ] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions",
+            Some(json!({
+                "logicalId": logical_id,
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "get-time",
+                    "transport": {
+                        "type": "http",
+                        "server_url": "https://mcp.example.test/mcp",
+                        "authorization": authorization
+                    }
+                }]
+            })),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+
+        let row = harness
+            .store
+            .swarm_get_session(logical_id)
+            .await
+            .expect("store read")
+            .expect("row");
+        assert_eq!(
+            row.mcp_tools[0].headers.len(),
+            1,
+            "authorization 只能产生一条头：{authorization}"
+        );
+        assert_eq!(row.mcp_tools[0].headers[0].name, "Authorization");
+        assert_eq!(
+            row.mcp_tools[0].headers[0].value, expected,
+            "{authorization}"
+        );
+    }
+
+    for authorization in ["", "   "] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions",
+            Some(json!({
+                "logicalId": "agent-empty",
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "get-time",
+                    "transport": {
+                        "type": "http",
+                        "server_url": "https://mcp.example.test/mcp",
+                        "authorization": authorization
+                    }
+                }]
+            })),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+        assert_eq!(value["error"]["code"], json!("invalid_input"));
+        assert_eq!(
+            value["error"]["details"]["field"],
+            json!("tools[0].transport.authorization")
+        );
+    }
+}
+
+#[tokio::test]
 async fn disagreeing_flat_and_transport_urls_are_rejected_at_the_transport_path() {
     let harness = harness_with_store();
     let (status, _, value) = send(

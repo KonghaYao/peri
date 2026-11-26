@@ -130,6 +130,73 @@ fn an_explicit_authorization_header_wins_over_transport_authorization() {
 }
 
 #[test]
+fn transport_authorization_only_gains_a_missing_bearer_scheme() {
+    for (authorization, expected) in [
+        ("token", "Bearer token"),
+        ("Bearer token", "Bearer token"),
+        ("Basic abc", "Basic abc"),
+        ("bearer token", "bearer token"),
+    ] {
+        let tools = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect("transport");
+
+        let authorization_headers = tools[0]
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authorization_headers.len(),
+            1,
+            "authorization 只能产生一条头：{authorization}"
+        );
+        assert_eq!(authorization_headers[0].value, expected, "{authorization}");
+        assert!(
+            !authorization_headers[0].value.contains("Bearer Bearer"),
+            "不应重复 Bearer 前缀：{authorization}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_transport_authorization_is_rejected() {
+    for authorization in ["", "   "] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect_err("empty authorization");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(field(&error), "tools[0].transport.authorization");
+        assert!(
+            error.message().contains("empty"),
+            "理由应写明不能为空：{}",
+            error.message()
+        );
+    }
+}
+
+#[test]
 fn flat_and_transport_server_urls_must_agree() {
     let accepted = resolve_tools(&body(json!({
         "logicalId": "agent-01",
