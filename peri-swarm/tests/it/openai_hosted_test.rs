@@ -439,12 +439,23 @@ async fn an_anonymous_hosted_session_reserves_a_bun_workspace() {
     );
 
     let workspace_path = format!("/sandboxes/{env_id}/mcp");
+    // The gateway issues `tools/list` right after each handshake; waiting only
+    // for the handshake races with that follow-up call on slow (Windows) hosts.
     assert!(
         wait_for(&stub, Duration::from_secs(5), |stub| {
-            stub.handshake(&workspace_path).is_some() && stub.handshake("/caller/mcp").is_some()
+            stub.handshake(&workspace_path).is_some()
+                && stub.handshake("/caller/mcp").is_some()
+                && stub
+                    .mcp_methods(&workspace_path)
+                    .iter()
+                    .any(|method| method == "tools/list")
+                && stub
+                    .mcp_methods("/caller/mcp")
+                    .iter()
+                    .any(|method| method == "tools/list")
         })
         .await,
-        "MCP handshakes missing: {:?}",
+        "MCP handshake or tools/list missing: {:?}",
         stub.mcp.lock()
     );
     let handshake = stub
