@@ -53,7 +53,10 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   - 非空但无 `swarm_meta`：拒绝接管；命中 `peri_store_meta` 时给出「这是 Peri 会话库」
     的专门文案；
   - 版本更高或未知：`SchemaVersion{found,expected}` fail closed。
-- 跨引擎（Loom→PostgreSQL）不做自动迁移：旧库只读保留，割接与校验 SQL 见
+- 跨引擎（Loom→PostgreSQL）不做自动迁移，也不保留 Loom/Hrana 运行时依赖：割接时停写、
+  取旧库只读 SQLite 快照，用一次性离线脚本
+  [`peri-swarm/scripts/import_loom_state.py`](../../peri-swarm/scripts/import_loom_state.py)
+  导入空的专用库并对账；网关本身只认 PostgreSQL。步骤与限制见
   [peri-swarm README](../../peri-swarm/README.md#升级与回退状态库)。
 - 工作区归属仍由 Peri 的远端工作区实现（`RemoteWorkspaceEnvironment`）决定：`cwd`
   必须落在虚拟根内，workspace 登记与准入语义不在 `peri-swarm` 复制一份；相关边界见
@@ -609,8 +612,9 @@ PostgreSQL：
   渲染 `postgres://host:port/db`，不含凭据。
 - 状态库首次启动自动建表；`swarm_meta` 记录 engine `postgres` 与 contract
   `peri.swarm.postgres/v1`，因此把 Loom/SQLite 文件或会话库误指过来都会显式失败。
-- 从 Loom 割接不做自动迁移；需要保留旧状态库内容时继续用旧镜像，或按 README 的人工步骤
-  导入。
+- 从 Loom 割接不做自动迁移，网关不读取旧库文件；需要保留旧状态库内容时停写后取只读
+  SQLite 快照，按 README 的离线导入工具（`import_loom_state.py`）写入空的专用库并
+  对账。导入只在离线阶段发生，运行时不引入 Loom/Turso 依赖。
 
 Rivet：
 

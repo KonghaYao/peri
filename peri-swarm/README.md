@@ -196,8 +196,10 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 
 ### 从 Loom 割接
 
-本版本**不做跨引擎自动迁移**：Loom 是 SQLite/libSQL，网关不读取它的数据文件，也没有
-导出客户端。割接按下面的顺序做，旧库只读保留：
+本版本**不做自动迁移**：网关不连接旧库，也没有 Loom/Hrana 运行时依赖。割接有两条路，
+按是否需要保留旧 Swarm 状态选择。
+
+**A. 不要旧状态（空库启动）**
 
 1. 等客户端空闲后停掉旧网关；旧状态库不再被写入。
 2. 准备**专用** PostgreSQL 数据库（不要与会话库同库）：
@@ -207,14 +209,71 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
    库内出现 `swarm_meta(version=1, engine=postgres, contract=peri.swarm.postgres/v1)`。
 4. 旧 Loom 库原样保留（只读，供事后核对）。新 build 从不连接它。
 
-影响声明：**既有 Loom 会话不会被新部署看到**（`sessions.list` 从空开始，旧
-`logicalId` 的 `GET` 返回 404）。Peri 会话历史在会话库里不受影响，丢的是 Swarm 侧的
-投影行（会话/items/turns/bindings 游标）。需要保留旧状态库内容时，只能继续用旧镜像，
-或等后续的导出/导入工具（本版本不提供）。
+影响：旧 Loom 会话对新部署不可见（`sessions.list` 从空开始，旧 `logicalId` 的 `GET`
+返回 404）。Peri 会话历史在会话库里不受影响，丢的是 Swarm 侧的投影行（会话 / items /
+turns / bindings 游标）。
+
+**B. 保留旧状态（离线导入，一次性）**
+
+[`scripts/import_loom_state.py`](scripts/import_loom_state.py) 是 Python 3 标准库脚本：
+读取旧库的**只读 SQLite 快照**，生成并执行写 PostgreSQL 的 SQL，再对账。它不运行网关，
+也不给网关增加任何 Loom/Turso 依赖。
+
+1. **停写并取快照**。停掉旧网关后，用存储方提供的只读备份/导出得到 SQLite 格式文件；
+   若拿到的是 `.dump` 文本，先还原成普通 SQLite 文件：
+   `sqlite3 snapshot.db < dump.sql`。热拷贝要连 `-wal`/`-shm` 一起复制（或先 checkpoint），
+   否则可能丢最后若干提交。快照 sha256 会记录在 `expected.json` 的 manifest 里。
+2. **检查快照**（只读打开，不写源文件）：
+   ```bash
+   python3 peri-swarm/scripts/import_loom_state.py inspect --snapshot snapshot.db
+   ```
+   输出五表行数与不变式；无法被新 build 读取的形状（未知枚举、非法 JSON、非整数
+   `seq`/时间、`truncated` 非 0/1、重复主键、非 UUID `inputId`、`swarm_meta.version != 1`）
+   直接拒绝并给出原因。
+3. **生成 SQL**：
+   ```bash
+   python3 peri-swarm/scripts/import_loom_state.py export \
+     --snapshot snapshot.db --out-dir out/
+   ```
+   产出 `01-schema.sql`（新 schema + `swarm_meta` 身份行，镜像 `schema.rs` 的 DDL）、
+   `02-data.sql`（按主键顺序的 INSERT，单事务）、`03-verify.sql`（对账查询）、
+   `expected.json`（期望值 + manifest）。目标 schema 非空时脚本拒绝执行。
+4. **导入空库并核对**：
+   ```bash
+   psql "$PERI_SWARM_STATE_STORE" -v ON_ERROR_STOP=1 -f out/01-schema.sql
+   psql "$PERI_SWARM_STATE_STORE" -v ON_ERROR_STOP=1 -f out/02-data.sql
+   psql "$PERI_SWARM_STATE_STORE" -v ON_ERROR_STOP=1 -qAt -f out/03-verify.sql > out/observed.txt
+   python3 peri-swarm/scripts/import_loom_state.py check \
+     --expected out/expected.json --observed out/observed.txt
+   ```
+   对账项：五表行数、`swarm_meta` 身份、`last_item_seq = MAX(seq)`、`seq` 从 1 起且无洞、
+   重复 `(logical_id, seq)` / 重复 `inputId` / 重复 `root_session_id`、悬挂行、枚举与
+   JSON 可解码、JSON/TEXT 字节总量。
+5. **启动新 build**。首次打开会走「已初始化」分支：只校验身份与列形状，不重写数据；
+   旧 `rootSessionId`、items、`lastItemSeq`、`inputId` 收据和 SSE 游标都按原值恢复。
+
+列映射由旧 DDL（`9332fae19:peri-swarm/src/store/turso.rs`）推导，工具内置同一份 DDL
+并有单测比对 `schema.rs`：`truncated` `INTEGER 0/1 → BOOLEAN`，`seq`/`last_item_seq`/
+turn 时间 `INTEGER → BIGINT`，JSON 列保持 TEXT 原样字节；旧 build 用 `ALTER TABLE`
+追加的 `metadata_json` / `prompt_cache_options_json` 缺失时按 `NULL` 导入。
+
+已知修复与限制：
+
+- 旧删除不是单事务，快照可能有悬挂行。工具默认修复并写进 manifest：陈旧
+  `last_item_seq` 改成 `MAX(seq)`、丢弃无会话的 items/inputs/turns/bindings；
+  `--strict` 改为直接失败。
+- 已用脚本自建的 legacy SQLite fixture 做过端到端演练（导入 → 启动网关 → 校验
+  `rootSessionId`、旧 `inputId` 幂等、SSE 游标续读 → 重启），命令与输出见
+  [验收记录](../docs/verification/peri-swarm-postgres-state-2026-11-24.md) 的「离线导入演练」。
+  **未对真实 Loom 生产快照验证**：现场快照的 `-wal` 状态、存储方导出格式与数据规模
+  仍需在割接窗口内按上面第 1–4 步实测。
+- 导入只恢复 Swarm 侧投影。会话能否继续对话取决于 Peri 会话库里对应的
+  `root_session_id` 历史；历史不在时导入的会话是只读的（`GET`/items/SSE 可用，新输入
+  需要能重新 attach 的宿主）。
 
 ### 校验 SQL
 
-按语义核对（在状态库执行）：
+导入工具已内置这些检查（`03-verify.sql`）。需要人工复核时在状态库执行同样的语义：
 
 ```sql
 SELECT version, engine, contract FROM swarm_meta;                  -- 1 | postgres | peri.swarm.postgres/v1
@@ -234,16 +293,17 @@ HAVING s.last_item_seq <> COALESCE(MAX(i.seq), 0);
 SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logical_id ORDER BY 1;
 ```
 
-人工导入（可选，本版本不提供工具）时按列显式写入，注意 `truncated` 是 `BOOLEAN`、
+需要手工导入（例如快照形状超出工具支持）时按列显式写入：`truncated` 是 `BOOLEAN`、
 `seq`/`last_item_seq`/turn 时间是 `BIGINT`、JSON 列是 `TEXT`（原样字节）；导入前后用上面
-的计数与 `MAX(seq)` 对账。
+的计数与 `MAX(seq)` 对账。手工导入仍需先满足 `swarm_meta` 身份行与列形状，否则新 build
+会 fail closed。
 
 ### 回退
 
 - **回退到 Loom 版本**：停新网关 → 换回上一版镜像 → 恢复旧的
   `PERI_SWARM_STATE_STORE`（Loom locator）与 `PERI_SWARM_STORE_TOKEN_ENV`/token。
-  新 build 从未写过 Loom，旧库内容与割接前一致；割接窗口内产生的新会话只存在于
-  PostgreSQL，不会回灌。
+  新 build 从未写过 Loom，旧库内容与割接前一致（离线导入只读快照）；割接窗口内产生的
+  新会话只存在于 PostgreSQL，不会回灌。
 - **回退 PostgreSQL 内的一次升级**（未来）：升级前 `pg_dump -Fc peri_swarm_state >
   peri_swarm_state.dump`；回退 = 旧镜像 + `pg_restore`。`swarm_meta.version` 比当前
   build 高时进程会 fail closed，不会静默降级。
