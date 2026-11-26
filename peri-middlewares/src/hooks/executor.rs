@@ -146,7 +146,17 @@ pub async fn execute_command_hook_owned(
         // Write input JSON to stdin
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(input_json.as_bytes()).await {
-                tracing::warn!("Failed to write to hook stdin: {}", e);
+                // A hook that exits without reading stdin is legitimate: its
+                // read end closes first, so the write fails with EPIPE. Only
+                // that case is expected; other failures stay actionable warns.
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    tracing::debug!(
+                        "Failed to write to hook stdin (hook closed it early): {}",
+                        e
+                    );
+                } else {
+                    tracing::warn!("Failed to write to hook stdin: {}", e);
+                }
             }
             drop(stdin);
         }

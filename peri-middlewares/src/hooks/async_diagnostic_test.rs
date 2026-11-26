@@ -8,6 +8,9 @@
 //! [TRAP] 证据命令必须用**模块过滤** `--lib async_diagnostic_tests`；用
 //! `async_hook` 名称前缀过滤只会跑到 3 个 tokio 用例，分类器用例漏网，
 //! 日志与"4 passed"的文字声明对不上。
+//! [TRAP] 无输出用例把 stdin JSON 撑到 256KiB，确定性触发 `echo done` 退出后的
+//! `BrokenPipe`（hook 不读 stdin 属合法场景）；把 payload 缩小会让该回归测试
+//! 退回依赖调度时序的偶发覆盖。
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -182,6 +185,11 @@ async fn async_hook_decision_is_recorded_as_ignored() {
 }
 
 /// 无输出的异步 hook 正常完成：不得产生 warn 噪声（完成记录走 debug）。
+///
+/// 该用例覆盖"hook 不读 stdin 即退出"这一合法场景：`echo done` 从不读取 stdin，
+/// 子进程退出后写端必然拿到 `BrokenPipe`。为让该竞争**确定性**发生，把
+/// `HookInput` 撑到 256KiB（远超 64KiB stdin 管道缓冲区），`write_all` 不可能在
+/// 子进程退出前写完，于是写入一定观察到对端关闭。
 #[tokio::test]
 async fn async_hook_without_output_completes_without_warn_noise() {
     let warns = Arc::new(Mutex::new(Vec::new()));
@@ -193,8 +201,11 @@ async fn async_hook_without_output_completes_without_warn_noise() {
         async_command_hook("echo done"),
     )]);
 
+    let mut input = session_input();
+    input.additional_data = Some(serde_json::Value::String("x".repeat(256 * 1024)));
+
     let action = mw
-        .fire_event(HookEvent::Notification, &session_input(), None, None)
+        .fire_event(HookEvent::Notification, &input, None, None)
         .await;
     assert!(matches!(action, HookAction::Allow));
 
