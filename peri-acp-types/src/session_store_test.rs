@@ -18,16 +18,16 @@ fn default_is_local_read_write() {
 
 #[test]
 fn builders_carry_locator_engine_credential_and_access() {
-    let deployment = SessionStoreDeployment::from_locator("env:TURSO_URL")
-        .with_engine("turso")
-        .with_credential_env("TURSO_TOEKN")
+    let deployment = SessionStoreDeployment::from_locator("env:DATABASE_URL")
+        .with_engine("postgres")
+        .with_credential_env("PERI_PG_PASSWORD")
         .with_access(AccessMode::ReadOnly);
     assert_eq!(
         deployment.locator(),
-        &SessionStoreLocator::Locator("env:TURSO_URL".to_owned())
+        &SessionStoreLocator::Locator("env:DATABASE_URL".to_owned())
     );
-    assert_eq!(deployment.engine_name(), Some("turso"));
-    assert_eq!(deployment.credential_env_name(), Some("TURSO_TOEKN"));
+    assert_eq!(deployment.engine_name(), Some("postgres"));
+    assert_eq!(deployment.credential_env_name(), Some("PERI_PG_PASSWORD"));
     assert_eq!(deployment.access(), AccessMode::ReadOnly);
 }
 
@@ -79,14 +79,15 @@ fn local_path_keeps_non_utf8_bytes() {
 }
 
 #[test]
-fn debug_preserves_locator_and_credential_name() {
-    let deployment = SessionStoreDeployment::from_locator("turso://sentinel-db-sentinel.turso.io")
-        .with_credential_env("PERI_SENTINEL_TOKEN_NAME");
+fn debug_redacts_locator_and_keeps_credential_name() {
+    let deployment =
+        SessionStoreDeployment::from_locator("postgres://sentinel-db-sentinel.invalid")
+            .with_credential_env("PERI_SENTINEL_TOKEN_NAME");
     let rendered = format!("{deployment:?}");
 
     assert!(rendered.contains("Locator"));
     assert!(rendered.contains("ReadWrite"));
-    assert!(rendered.contains("sentinel-db-sentinel"));
+    assert!(!rendered.contains("sentinel-db-sentinel"));
     assert!(rendered.contains("PERI_SENTINEL_TOKEN_NAME"));
 }
 

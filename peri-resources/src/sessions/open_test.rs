@@ -15,7 +15,7 @@ use super::open::{
 };
 use super::remote::{CredentialError, EndpointError, RemoteEngine};
 
-const FAKE_HOST: &str = "sentinel-db-sentinel-org.turso.io";
+const FAKE_HOST: &str = "sentinel-db-sentinel-org.invalid";
 const FAKE_TOKEN_ENV: &str = "SENTINEL_TOKEN_ENVIRONMENT_NAME";
 
 fn request(
@@ -85,29 +85,23 @@ fn windows_drive_and_unc_stay_paths() {
 }
 
 #[test]
-fn remote_locator_requires_confirmed_engine_and_credential_source() {
-    let ambiguous = request(&format!("https://{FAKE_HOST}"), None, Some(FAKE_TOKEN_ENV))
+fn postgres_locator_allows_driver_authentication_or_an_explicit_password() {
+    let unsupported = request(&format!("https://{FAKE_HOST}"), None, None)
         .resolve_locator()
         .unwrap_err();
     assert_eq!(
-        ambiguous,
-        LocatorError::Remote(EndpointError::AmbiguousEngine)
+        unsupported,
+        LocatorError::Remote(EndpointError::UnsupportedScheme)
     );
-
-    let no_credential = request(&format!("turso://{FAKE_HOST}"), None, None)
-        .resolve_locator()
-        .unwrap_err();
-    assert_eq!(no_credential, LocatorError::MissingCredentialSource);
-
-    let resolved = request(&format!("turso://{FAKE_HOST}"), None, Some(FAKE_TOKEN_ENV))
-        .resolve_locator()
-        .expect("resolve");
-    match resolved {
-        ResolvedLocator::Remote(endpoint) => {
-            assert_eq!(endpoint.engine(), RemoteEngine::Turso);
-            assert_eq!(endpoint.host_class(), "official_turso_cloud_domain");
-        }
-        other => panic!("expected remote resolution, got {other:?}"),
+    for variable in [None, Some(FAKE_TOKEN_ENV)] {
+        let raw = format!("postgres://alice@{FAKE_HOST}/sessions?sslmode=require");
+        let resolved = request(&raw, None, variable)
+            .resolve_locator()
+            .expect("PostgreSQL locator");
+        let ResolvedLocator::Remote(endpoint) = resolved else {
+            panic!("expected PostgreSQL");
+        };
+        assert_eq!(endpoint.sdk_url(), raw);
     }
 }
 
@@ -136,7 +130,7 @@ fn empty_and_unknown_scheme_locators_are_rejected() {
 #[test]
 fn env_indirection_resolves_exactly_once() {
     let url_var = "PERI_OPEN_TEST_STORE_URL_4a1";
-    std::env::set_var(url_var, format!("turso://{FAKE_HOST}"));
+    std::env::set_var(url_var, format!("postgres://{FAKE_HOST}"));
 
     let resolved = request(&format!("env:{url_var}"), None, Some(FAKE_TOKEN_ENV))
         .resolve_locator()
@@ -184,24 +178,26 @@ fn env_indirection_resolves_exactly_once() {
 #[test]
 fn request_debug_preserves_remote_locator() {
     let request = request(
-        &format!("turso://{FAKE_HOST}"),
-        Some(RemoteEngine::Turso),
+        &format!("postgres://{FAKE_HOST}"),
+        Some(RemoteEngine::Postgres),
         Some(FAKE_TOKEN_ENV),
     );
     let rendered = format!("{request:?}");
     assert!(rendered.contains(FAKE_TOKEN_ENV)); // 变量名本身不是凭证
-    assert_eq!(
-        request.credential_source().expect("source").name(),
-        FAKE_TOKEN_ENV
-    );
     assert!(!rendered.contains("sentinel-db"));
     assert!(!rendered.contains("remote locator redacted"));
 }
 
 #[test]
 fn engine_names_are_a_fixed_set() {
-    assert_eq!(RemoteEngine::parse("turso"), Some(RemoteEngine::Turso));
-    assert_eq!(RemoteEngine::parse("libsql"), Some(RemoteEngine::LibSql));
+    assert_eq!(
+        RemoteEngine::parse("postgres"),
+        Some(RemoteEngine::Postgres)
+    );
+    assert_eq!(
+        RemoteEngine::parse("postgresql"),
+        Some(RemoteEngine::Postgres)
+    );
     assert_eq!(RemoteEngine::parse("mysql"), None);
 }
 
@@ -261,7 +257,7 @@ async fn deployment_conflicts_fail_before_any_io() {
         ),
         (
             "engine without locator",
-            deployment(None, Some("turso"), None, AccessMode::ReadWrite),
+            deployment(None, Some("postgres"), None, AccessMode::ReadWrite),
         ),
         (
             "credential without locator",
@@ -280,7 +276,7 @@ async fn deployment_conflicts_fail_before_any_io() {
             "engine for local path",
             deployment(
                 Some(missing.to_str().unwrap()),
-                Some("libsql"),
+                Some("postgresql"),
                 None,
                 AccessMode::ReadWrite,
             ),
@@ -306,7 +302,7 @@ async fn deployment_conflicts_fail_before_any_io() {
 async fn cloud_environment_variables_do_not_switch_the_backend() {
     let url_var = "PERI_OPEN_TEST_CLOUD_URL_7c2";
     let token_var = "PERI_OPEN_TEST_CLOUD_TOKEN_7c2";
-    std::env::set_var(url_var, format!("turso://{FAKE_HOST}"));
+    std::env::set_var(url_var, format!("postgres://{FAKE_HOST}"));
     std::env::set_var(token_var, "sentinel-credential-222222222222");
 
     // 请求层：默认路径解析成本机 Default，不因环境里的远程 URL 变成 Remote。
@@ -337,45 +333,13 @@ async fn cloud_environment_variables_do_not_switch_the_backend() {
     std::env::remove_var(token_var);
 }
 
-/// 带凭证的 URL 在打开入口就被拒绝：错误不回显 locator 原文与凭证值。
-#[tokio::test]
-async fn url_with_embedded_secret_is_rejected_without_echo() {
+#[test]
+fn locator_errors_do_not_echo_embedded_passwords() {
     let secret = "sentinel-credential-333333333333";
-    let raw = format!("turso://user:{secret}@{FAKE_HOST}");
-    // 请求层：带凭证 URL 在解析 locator 时按稳定分类拒绝（词法层不替它做判断）。
-    let request = SessionStoreOpenRequest::from_locator(
-        &raw,
-        None,
-        Some(FAKE_TOKEN_ENV),
-        AccessIntent::ReadWrite,
-    )
-    .expect("词法层只做 env:/原文分流");
-    assert_eq!(
-        request.resolve_locator().unwrap_err(),
-        LocatorError::Remote(EndpointError::UserInfoPresent)
-    );
-
-    let error = match crate::Resources::open_deployment(&deployment(
-        Some(&raw),
-        None,
-        Some(FAKE_TOKEN_ENV),
-        AccessMode::ReadWrite,
-    ))
-    .await
-    {
-        Ok(_) => panic!("带凭证 URL 必须被拒绝"),
-        Err(error) => error,
-    };
-    let rendered = format!("{error:#}");
-    assert!(
-        rendered.contains("must not carry credentials"),
-        "必须给出稳定分类: {rendered}"
-    );
-    assert!(!rendered.contains(secret), "错误不得回显凭证: {rendered}");
-    assert!(
-        !rendered.contains("sentinel-db"),
-        "错误不得回显 locator 原文: {rendered}"
-    );
+    let raw = format!("postgres://user:{secret}@{FAKE_HOST}/db#invalid");
+    let error = request(&raw, None, None).resolve_locator().unwrap_err();
+    assert_eq!(error, LocatorError::Remote(EndpointError::UnparsableUrl));
+    assert!(!format!("{error:?}: {error}").contains(secret));
 }
 
 /// `file://` 不被静默当成本机路径：未确认的 scheme 直接拒绝。
@@ -498,7 +462,7 @@ async fn remote_open_is_not_silently_downgraded_to_local() {
     // 在任何 I/O 之前失败**：凭证来源缺失、引擎名不认识，都不连接远端、不开本机库，
     // 也绝不静默回落到本机存储。
     let error = match crate::Resources::open_deployment(&deployment(
-        Some(&format!("turso://{FAKE_HOST}")),
+        Some(&format!("postgres://{FAKE_HOST}")),
         None,
         Some(FAKE_TOKEN_ENV),
         AccessMode::ReadOnly,
@@ -522,7 +486,7 @@ async fn remote_open_is_not_silently_downgraded_to_local() {
 
     // 未知引擎名在解析期失败，不进入任何 I/O。
     let error = match crate::Resources::open_deployment(&deployment(
-        Some(&format!("turso://{FAKE_HOST}")),
+        Some(&format!("postgres://{FAKE_HOST}")),
         Some("mysql"),
         Some(FAKE_TOKEN_ENV),
         AccessMode::ReadWrite,
@@ -731,7 +695,7 @@ fn env_colon_literal_is_a_file_name_for_db_path_but_a_reference_for_session_stor
 fn remote_only_parameters_on_confirmed_local_path_fail_early() {
     let base = SessionStoreDeployment::local_path(PathBuf::from("/tmp/threads.db"));
 
-    let with_engine = base.clone().with_engine("turso");
+    let with_engine = base.clone().with_engine("postgres");
     assert_eq!(
         SessionStoreOpenRequest::from_deployment(&with_engine).unwrap_err(),
         LocatorError::EngineForLocalStore

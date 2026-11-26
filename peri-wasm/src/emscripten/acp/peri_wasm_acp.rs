@@ -45,7 +45,10 @@ impl PeriWasmAcp {
             .get("storage")
             .ok_or_else(|| JsValue::from_str("storage is required"))?;
         let locator = required_string(storage, "url")?;
-        let token = required_string(storage, "authToken")?;
+        let http_endpoint = storage
+            .get("httpEndpoint")
+            .map(|_| required_string(storage, "httpEndpoint"))
+            .transpose()?;
         let settings = input
             .get("settings")
             .filter(|value| value.is_object())
@@ -68,9 +71,9 @@ impl PeriWasmAcp {
             .ok_or_else(|| JsValue::from_str("No LLM provider configured in settings"))?;
         let config = source.loaded_merged();
 
-        let resources = peri_resources::Resources::open_turso_writable(
+        let resources = peri_resources::Resources::open_postgres_writable(
             &locator,
-            token,
+            http_endpoint,
             cwd.clone().into(),
             &machine_id,
         )
@@ -116,7 +119,7 @@ impl PeriWasmAcp {
         }
     }
 
-    /// Close client admission, then wait for the Host to drain and close Turso.
+    /// Close client admission, then wait for the Host to drain and close PostgreSQL.
     #[wasm_bindgen(experimental_tokio)]
     pub async fn close(&self) -> Result<(), JsValue> {
         self.bridge.close().await;

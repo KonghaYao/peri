@@ -430,16 +430,19 @@ fn test_session_store_flags_parse() {
     let cli = TestCli::try_parse_from([
         "peri",
         "--session-store",
-        "env:TURSO_URL",
+        "env:DATABASE_URL",
         "--session-store-token-env",
-        "TURSO_TOEKN",
+        "PERI_PG_PASSWORD",
         "--session-store-engine",
-        "turso",
+        "postgres",
     ])
     .expect("session store flags parse: the fixture command-line arguments must parse");
-    assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
-    assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
-    assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
+    assert_eq!(cli.session_store.as_deref(), Some("env:DATABASE_URL"));
+    assert_eq!(
+        cli.session_store_token_env.as_deref(),
+        Some("PERI_PG_PASSWORD")
+    );
+    assert_eq!(cli.session_store_engine.as_deref(), Some("postgres"));
 }
 
 #[test]
@@ -451,7 +454,7 @@ fn test_session_store_camel_aliases_parse() {
         "--sessionStoreTokenEnv",
         "PERI_TEST_TOKEN",
         "--sessionStoreEngine",
-        "libsql",
+        "postgresql",
     ])
     .expect("session store camel aliases parse: the fixture command-line arguments must parse");
     assert_eq!(cli.session_store.as_deref(), Some("/tmp/threads.db"));
@@ -459,7 +462,7 @@ fn test_session_store_camel_aliases_parse() {
         cli.session_store_token_env.as_deref(),
         Some("PERI_TEST_TOKEN")
     );
-    assert_eq!(cli.session_store_engine.as_deref(), Some("libsql"));
+    assert_eq!(cli.session_store_engine.as_deref(), Some("postgresql"));
 }
 
 #[test]
@@ -474,14 +477,17 @@ fn test_real_cli_parses_session_store_flags() {
     // 直测真实 Cli（防 TestCli 镜像漂移）
     let cli = Cli::try_parse_from([
         "peri",
-        "--session-store=env:TURSO_URL",
-        "--session-store-token-env=TURSO_TOEKN",
-        "--session-store-engine=turso",
+        "--session-store=env:DATABASE_URL",
+        "--session-store-token-env=PERI_PG_PASSWORD",
+        "--session-store-engine=postgres",
     ])
     .expect("real cli parses session store flags: the fixture command-line arguments must parse");
-    assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
-    assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
-    assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
+    assert_eq!(cli.session_store.as_deref(), Some("env:DATABASE_URL"));
+    assert_eq!(
+        cli.session_store_token_env.as_deref(),
+        Some("PERI_PG_PASSWORD")
+    );
+    assert_eq!(cli.session_store_engine.as_deref(), Some("postgres"));
 }
 
 /// [回归测试] 退役的审批快捷参数不得再被真实 CLI 接受。

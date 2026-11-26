@@ -1,4 +1,4 @@
-//! Explicit cloud deployment lifecycle. Each phase runs in a new process. Turso
+//! Explicit cloud deployment lifecycle. Each phase runs in a new process. PostgreSQL
 //! stores every persistent fact remotely; no phase may create a local SQLite file.
 
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ const READ_ONLY_CHILD: &str = "sessions::remote::cloud_deployment_child_tests::c
 /// 父进程不碰门面：它只提供合成环境、拉起子进程，并用**新连接**在阶段之间核对云端事实
 /// （写入落库、删除生效、只读零副作用），最后按正常删除路径清理本轮命名空间。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_deployment_entry_point_full_lifecycle() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-facade");
@@ -82,14 +82,14 @@ async fn lifecycle_flow(
     )?;
     super::cloud_tests::check(
         !local_sqlite_path(home).exists(),
-        "Turso write opened a local SQLite file",
+        "PostgreSQL write opened a local SQLite file",
     )?;
     lines.push(format!(
         "after_write sessions={} messages={}",
         written.sessions, written.messages
     ));
 
-    // A damaged local database must have no bearing on Turso cold recovery.
+    // A damaged local database must have no bearing on PostgreSQL cold recovery.
     let poisoned = local_sqlite_path(home);
     std::fs::create_dir_all(poisoned.parent().expect("SQLite path has a parent"))
         .map_err(|error| error.to_string())?;
@@ -103,7 +103,7 @@ async fn lifecycle_flow(
     )?;
     super::cloud_tests::check(
         std::fs::read(&poisoned).map_err(|error| error.to_string())? == b"damaged local SQLite",
-        "Turso cold recovery touched local SQLite",
+        "PostgreSQL cold recovery touched local SQLite",
     )?;
     lines.push(format!(
         "after_recovery sessions={} messages={}",
@@ -119,7 +119,7 @@ async fn lifecycle_flow(
     )?);
     super::cloud_tests::check(
         !local_sqlite_path(read_only_home).exists(),
-        "fresh read-only Turso open created local SQLite",
+        "fresh read-only PostgreSQL open created local SQLite",
     )?;
     lines.extend(run_child(
         READ_ONLY_CHILD,
@@ -130,7 +130,7 @@ async fn lifecycle_flow(
     )?);
     super::cloud_tests::check(
         std::fs::read(&poisoned).map_err(|error| error.to_string())? == b"damaged local SQLite",
-        "read-only Turso open touched local SQLite",
+        "read-only PostgreSQL open touched local SQLite",
     )?;
     let after = counts_now(target, run).await?;
     super::cloud_tests::check(

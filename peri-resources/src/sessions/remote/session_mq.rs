@@ -1,6 +1,6 @@
 //! Thread MQ 的远端行为：条件批处理 + 一致读取，不回落成两次独立写入。
 //!
-//! 远端的执行器只有一种原子单位——托管事务批（`BEGIN IMMEDIATE` … `COMMIT`），且批次内
+//! 远端的执行器只有一种原子单位——托管事务批（`BEGIN` … `COMMIT`），且批次内
 //! 只回受影响行数、不回结果集。因此每条领域操作都写成「静态 SQL + 参数 + 条件语句」：
 //!
 //! - **入队**用 `INSERT ... SELECT ... WHERE NOT EXISTS` 做条件插入，0 行即可判定「已有
@@ -19,6 +19,7 @@
 
 use std::str::FromStr;
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{
     MessageSource, MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter,
@@ -28,7 +29,6 @@ use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
-use turso_serverless::Value;
 
 use crate::sessions::mq_rows::RawMqRow;
 use crate::sessions::mq_rows::DELETE_THREAD_MQ_ROW_SQL;
@@ -50,10 +50,10 @@ use super::sql::StatementSpec;
 /// 是否属于「同一条消息」由调用方用 `same_payload` 判定；SQL 只做并发守卫，
 /// 不用 payload 文本比较（重序列化后的文本可能不同）。
 const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
-    WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'
+    WHERE id = $1 AND work_state = 'idle' AND agent_status = 'active'
       AND EXISTS (
         SELECT 1 FROM thread_mq
-        WHERE thread_id = ?1 AND id = ?2 AND enqueued_at = ?3
+        WHERE thread_id = $1 AND id = $2 AND enqueued_at = $3
       )";
 
 /// turn 收尾：没有待处理的 `EnsureProcessing` 条目才把 `working` 收敛为 `idle`。
@@ -62,54 +62,54 @@ const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
 /// `MessagePolicy::ensures_processing()` 的序列化固定（required + model_visible +
 /// activation.kind = ensure_processing）。`stopped` 不被收尾解除（设计 §5.1）。
 const SETTLE_WORK_STATE_SQL: &str = "UPDATE threads SET work_state = 'idle'
-    WHERE id = ?1 AND work_state = 'working'
+    WHERE id = $1 AND work_state = 'working'
       AND NOT EXISTS (
         SELECT 1 FROM thread_mq
-        WHERE thread_id = ?1
-          AND json_extract(policy_json, '$.requirement') = 'required'
-          AND json_extract(policy_json, '$.model_visible') = 1
-          AND json_extract(policy_json, '$.activation.kind') = 'ensure_processing'
+        WHERE thread_id = $1
+          AND policy_json::jsonb ->> 'requirement' = 'required'
+          AND policy_json::jsonb -> 'model_visible' = 'true'::jsonb
+          AND policy_json::jsonb #>> '{activation,kind}' = 'ensure_processing'
       )";
 
 /// 批内会话存在性守卫：`peri_store_meta` 只有一行，会话缺失时这次插入撞主键，
 /// 整批回滚。与 `session_lifecycle` / `session_history` 的同一技巧（远端批没有条件分支）。
 const GUARD_SESSION_ABSENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
-    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
+    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = $1)";
 
 /// 结果 ID 已属于别的 thread：批内中止，避免终态越过冲突提交。
 const GUARD_RESULT_ID_FOREIGN_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE
-      EXISTS (SELECT 1 FROM messages WHERE message_id = ?1 AND thread_id <> ?2)
-      OR EXISTS (SELECT 1 FROM thread_mq WHERE id = ?1 AND thread_id <> ?2)";
+      EXISTS (SELECT 1 FROM messages WHERE message_id = $1 AND thread_id <> $2)
+      OR EXISTS (SELECT 1 FROM thread_mq WHERE id = $1 AND thread_id <> $2)";
 
 /// 结算终态 + 工作意图：只在 child 仍 `active` 时生效，后到的结算不能覆盖已提交的终态。
 pub(super) const SETTLE_CHILD_STATE_SQL: &str = "UPDATE threads
-    SET agent_status = ?1, updated_at = ?2, work_state = ?3
-    WHERE id = ?4 AND agent_status = 'active'";
+    SET agent_status = $1, updated_at = $2, work_state = $3
+    WHERE id = $4 AND agent_status = 'active'";
 
-const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
+const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = $1";
 
-const SELECT_THREAD_EXISTS_SQL: &str = "SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
+const SELECT_THREAD_EXISTS_SQL: &str = "SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1)";
 
 /// 结算批内的结果接纳：与 [`INSERT_THREAD_MQ_SQL`] 同列同条件，额外要求 child 仍 `active`。
 ///
 /// 静态 SQL 不能由常量拼接，因此列清单在这里重复一次；两条语句必须同步修改。
 const INSERT_TERMINAL_RESULT_SQL: &str = "INSERT INTO thread_mq
     (thread_id, id, enqueued_at, kind, source, policy_json, payload_json, original_draft)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)
-      AND NOT EXISTS (SELECT 1 FROM thread_mq WHERE id = ?2)
-      AND EXISTS (SELECT 1 FROM threads WHERE id = ?1)
-      AND EXISTS (SELECT 1 FROM threads WHERE id = ?9 AND agent_status = 'active')";
+    SELECT $1, $2, $3, $4, $5, $6, $7, $8
+    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = $2)
+      AND NOT EXISTS (SELECT 1 FROM thread_mq WHERE id = $2)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = $1)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = $9 AND agent_status = 'active')";
 
 /// 结算批内的接收方提升：`Inserted` 与 `Existing` 都以「目标 MQ 里仍有这条待发结果」
 /// 为事实；已移交历史的结果没有 MQ 行，不能把刚写的 child 终态重新提升为 `working`。
 /// 同时要求 target 与 child 都仍 `active`：终态 target 的 `work_state` 是派生值，
 /// 后到的结算既不覆盖终态，也不改变接收方的意图。
 const PROMOTE_RECEIVER_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
-    WHERE id = ?1 AND work_state = 'idle' AND agent_status = 'active'
-      AND EXISTS (SELECT 1 FROM thread_mq WHERE thread_id = ?1 AND id = ?2)
-      AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND agent_status = 'active')";
+    WHERE id = $1 AND work_state = 'idle' AND agent_status = 'active'
+      AND EXISTS (SELECT 1 FROM thread_mq WHERE thread_id = $1 AND id = $2)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = $3 AND agent_status = 'active')";
 
 impl RemoteSessionData {
     pub(super) async fn enqueue_mq(

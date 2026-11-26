@@ -3,21 +3,21 @@ import type { ChatSessionDirectoryEntry } from "../contracts/chat";
 export const SESSION_LIST_SQL = `
   SELECT id, title, cwd, message_count, created_at, updated_at
   FROM threads
-  WHERE hidden = 0 AND cwd = ?
+  WHERE hidden = 0 AND cwd = $1
   ORDER BY updated_at DESC, id DESC
 `;
 
 export const SESSION_BY_ID_SQL = `
   SELECT id, title, cwd, message_count, created_at, updated_at
   FROM threads
-  WHERE id = ?
+  WHERE id = $1
 `;
 
 export type SessionRow = {
   id: string;
   title: string | null;
   cwd: string;
-  message_count: number;
+  message_count: number | string;
   created_at: string;
   updated_at: string;
 };
@@ -30,7 +30,7 @@ export function sessionDirectoryEntry(
     sessionId: row.id,
     title: row.title,
     cwd: row.cwd,
-    messageCount: row.message_count,
+    messageCount: Number(row.message_count),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

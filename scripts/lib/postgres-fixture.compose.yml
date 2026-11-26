@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: ${PERI_FIXTURE_PASSWORD:?}
+      POSTGRES_DB: main
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "main"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  proxy:
+    image: ghcr.io/timowilhelm/local-neon-http-proxy@sha256:cd2ae14edf2feafbc3330492de5c80506f77274c3bd013154cdef697bdeb768a
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_CONNECTION_STRING: postgres://postgres:${PERI_FIXTURE_PASSWORD:?}@postgres/main
+    ports:
+      - "127.0.0.1::4444"

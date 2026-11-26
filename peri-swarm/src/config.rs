@@ -94,13 +94,45 @@ pub enum StoreAccess {
     ReadWrite,
 }
 
+/// The PostgreSQL DSN may contain credentials in userinfo or query parameters.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PostgresLocator(Url);
+
+impl PostgresLocator {
+    pub(crate) fn parse(value: &str, variable: &'static str) -> Result<Self, ConfigError> {
+        let url = Url::parse(value)
+            .map_err(|_| ConfigError::invalid(variable, "invalid PostgreSQL URL"))?;
+        if !matches!(url.scheme(), "postgres" | "postgresql")
+            || !url.has_host()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::invalid(
+                variable,
+                "expected a postgres:// or postgresql:// DSN",
+            ));
+        }
+        Ok(Self(url))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for PostgresLocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PostgresLocator(<redacted>)")
+    }
+}
+
 /// Typed view of the remote Peri store deployment (`design §4.1`).
 ///
 /// S3 does not open a connection; the locator and credential variable name are
 /// carried so S6 can build `SessionStoreDeployment` without re-parsing strings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionStoreConfig {
-    pub locator: Option<Url>,
+    pub locator: Option<PostgresLocator>,
     pub engine: String,
     pub credential_env: Option<String>,
     pub access: StoreAccess,
@@ -160,10 +192,10 @@ impl SwarmConfig {
 
         let session_store = SessionStoreConfig {
             locator: match lookup(STORE_LOCATOR_ENV) {
-                Some(value) => Some(validate_store_locator(&value, STORE_LOCATOR_ENV)?),
+                Some(value) => Some(PostgresLocator::parse(&value, STORE_LOCATOR_ENV)?),
                 None => None,
             },
-            engine: "turso".to_owned(),
+            engine: "postgres".to_owned(),
             credential_env: optional_env_name(lookup(STORE_CREDENTIAL_ENV), STORE_CREDENTIAL_ENV)?,
             access: StoreAccess::ReadWrite,
         };
@@ -283,11 +315,11 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(canonical)
 }
 
-/// Remote session-store locator: HTTP(S), no embedded credentials.
+/// The independent Loom state store uses HTTP(S) and a separate bearer credential.
 ///
 /// `variable` names the source in errors so the process entry can reuse the
 /// rule for its own environment names without forking the check.
-pub(crate) fn validate_store_locator(
+pub(crate) fn validate_state_store_locator(
     value: &str,
     variable: &'static str,
 ) -> Result<Url, ConfigError> {

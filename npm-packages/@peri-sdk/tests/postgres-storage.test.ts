@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { Connection } from "@tursodatabase/serverless";
+import type { DirectoryConnection as Connection } from "../src/storage/postgres-storage";
 import type { ChatSessionDirectoryEntry } from "../src/contracts/chat";
-import { TursoStorage, mergeSessionDirectories } from "../src/storage/turso-storage";
+import { PostgresStorage, mergeSessionDirectories } from "../src/storage/postgres-storage";
 
 function entry(
   sessionId: string,
@@ -19,11 +19,11 @@ function entry(
   };
 }
 
-describe("TursoStorage storageConfig", () => {
+describe("PostgresStorage storageConfig", () => {
   test("returns plain JSON with only connection keys", () => {
-    const storage = new TursoStorage({
-      url: "http://127.0.0.1:8081",
-      authToken: "secret",
+    const storage = new PostgresStorage({
+      url: "postgresql://test@localhost/peri",
+      httpEndpoint: "http://127.0.0.1:4444/sql",
       legacyCwd: "/workspace",
       currentCwd: "/workspace/",
     });
@@ -31,8 +31,8 @@ describe("TursoStorage storageConfig", () => {
     const config = storage.storageConfig;
 
     expect(Object.getPrototypeOf(config)).toBe(Object.prototype);
-    expect(Object.keys(config).sort()).toEqual(["authToken", "url"]);
-    expect(config).toEqual({ url: "http://127.0.0.1:8081", authToken: "secret" });
+    expect(Object.keys(config).sort()).toEqual(["httpEndpoint", "url"]);
+    expect(config).toEqual({ url: "postgresql://test@localhost/peri", httpEndpoint: "http://127.0.0.1:4444/sql" });
     expect(config).not.toHaveProperty("legacyCwd");
     expect(config).not.toHaveProperty("currentCwd");
     expect(JSON.parse(JSON.stringify(config))).toEqual(config);
@@ -40,16 +40,16 @@ describe("TursoStorage storageConfig", () => {
     expect(storage.storageConfig).toEqual(config);
   });
 
-  test("omits authToken when undefined", () => {
-    const config = new TursoStorage({ url: "http://127.0.0.1:8081" }).storageConfig;
+  test("omits httpEndpoint when undefined", () => {
+    const config = new PostgresStorage({ url: "postgresql://test@localhost/peri" }).storageConfig;
 
     expect(Object.keys(config)).toEqual(["url"]);
-    expect(config).toEqual({ url: "http://127.0.0.1:8081" });
-    expect(JSON.stringify(config)).toBe('{"url":"http://127.0.0.1:8081"}');
+    expect(config).toEqual({ url: "postgresql://test@localhost/peri" });
+    expect(JSON.stringify(config)).toBe('{"url":"postgresql://test@localhost/peri"}');
   });
 });
 
-describe("TursoStorage session directory", () => {
+describe("PostgresStorage session directory", () => {
   test("merges legacy and current cwd; current wins on duplicate id", () => {
     const legacy = [
       entry("a", "/workspace", "2026-01-01T00:00:00Z", "legacy"),
@@ -109,7 +109,7 @@ function connectionStub(rows: SessionRow[]) {
     opened,
     closes: () => closes,
     maxActive: () => maxActive,
-    connector: (config: { url: string; authToken?: string }): Connection => {
+    connector: (config: { url: string; httpEndpoint?: string }): Connection => {
       opened.push(config.url);
       return {
         all: async () => {
@@ -127,18 +127,18 @@ function connectionStub(rows: SessionRow[]) {
   };
 }
 
-describe("TursoStorage connection lifecycle", () => {
+describe("PostgresStorage connection lifecycle", () => {
   test("reuses one connection across queries and closes it once", async () => {
     const stub = connectionStub([sessionRow("a")]);
-    const storage = new TursoStorage(
-      { url: "http://127.0.0.1:8081" },
+    const storage = new PostgresStorage(
+      { url: "postgresql://test@localhost/peri" },
       stub.connector,
     );
 
     expect(await storage.getSession("a")).toMatchObject({ sessionId: "a" });
     await storage.listSessions("/workspace");
     await storage.listSessions("/workspace/");
-    expect(stub.opened).toEqual(["http://127.0.0.1:8081"]);
+    expect(stub.opened).toEqual(["postgresql://test@localhost/peri"]);
 
     await storage.close();
     await storage.close();
@@ -147,8 +147,8 @@ describe("TursoStorage connection lifecycle", () => {
 
   test("serializes concurrent queries on the single stream", async () => {
     const stub = connectionStub([sessionRow("a")]);
-    const storage = new TursoStorage(
-      { url: "http://127.0.0.1:8081" },
+    const storage = new PostgresStorage(
+      { url: "postgresql://test@localhost/peri" },
       stub.connector,
     );
 
@@ -162,8 +162,8 @@ describe("TursoStorage connection lifecycle", () => {
 
   test("close waits for the in-flight query and rejects later queries", async () => {
     const stub = connectionStub([sessionRow("a")]);
-    const storage = new TursoStorage(
-      { url: "http://127.0.0.1:8081" },
+    const storage = new PostgresStorage(
+      { url: "postgresql://test@localhost/peri" },
       stub.connector,
     );
 
@@ -173,14 +173,14 @@ describe("TursoStorage connection lifecycle", () => {
     await closing;
     expect(stub.closes()).toBe(1);
     await expect(storage.getSession("a")).rejects.toThrow(
-      "TursoStorage is closed",
+      "PostgresStorage is closed",
     );
   });
 
   test("retries the close after a failure while still rejecting new queries", async () => {
     let closes = 0;
-    const storage = new TursoStorage(
-      { url: "http://127.0.0.1:8081" },
+    const storage = new PostgresStorage(
+      { url: "postgresql://test@localhost/peri" },
       () => ({
         all: async () => [sessionRow("a")],
         close: async () => {
@@ -194,11 +194,41 @@ describe("TursoStorage connection lifecycle", () => {
     await expect(storage.close()).rejects.toThrow("close failed");
     // 第一次 close 未确认：连接仍保留，但新查询立即拒绝。
     await expect(storage.getSession("a")).rejects.toThrow(
-      "TursoStorage is closed",
+      "PostgresStorage is closed",
     );
     await storage.close();
     expect(closes).toBe(2);
     await storage.close();
     expect(closes).toBe(2);
+  });
+});
+
+describe("PostgresStorage HTTP transport", () => {
+  test("requires an explicit trusted proxy for a self-hosted PostgreSQL DSN", async () => {
+    const url = "postgresql://test@db.example.org/peri";
+    await expect(new PostgresStorage({ url }).getSession("a")).rejects.toThrow("requires httpEndpoint");
+    const insecure = new PostgresStorage({ url, httpEndpoint: "http://proxy.example.org/sql" });
+    await expect(insecure.getSession("a")).rejects.toThrow("requires HTTPS");
+  });
+
+  test("preserves database errors other than an uninitialized directory", async () => {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const { queries } = await request.json();
+      expect(request.headers.get("Neon-Batch-Read-Only")).toBe("true");
+      expect(queries[0].query).toContain("pg_catalog.current_schema()");
+      const id = queries[1].params[0];
+      return Response.json({ code: id === "missing" ? "42P01" : "42501" }, { status: 400 });
+    } });
+    try {
+      const storage = new PostgresStorage({
+        url: "postgresql://test@localhost/peri",
+        httpEndpoint: `http://127.0.0.1:${server.port}/sql`,
+      });
+      expect(await storage.getSession("missing")).toBeNull();
+      await expect(storage.getSession("denied")).rejects.toMatchObject({ code: "42501" });
+      await storage.close();
+    } finally {
+      server.stop(true);
+    }
   });
 });

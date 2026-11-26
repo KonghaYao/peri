@@ -1,6 +1,6 @@
 //! 远端 Thread MQ：条件批处理、状态判定与契约升级。
 //!
-//! 夹具让一个真 SQLite 池扮演远端服务端（同一个 [`SqliteTransport`]），因此走的是真实
+//! 夹具让隔离的 PostgreSQL 测试库（同一个 [`PgTestTransport`]），因此走的是真实
 //! 托管批次与账本：条件插入/删除的影响行数就是生产路径读到的证据。
 
 use std::sync::Arc;
@@ -14,25 +14,23 @@ use peri_acp_types::session::{
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{FaultPlan, RemoteStore, StoreAccess};
+use super::postgres_fixture::PgTestTransport;
 use super::schema::{self, StoreId};
-use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 
 struct Fixture {
-    _directory: tempfile::TempDir,
-    pool: SqlitePool,
-    transport: Arc<SqliteTransport>,
+    pool: PgPool,
+    transport: Arc<PgTestTransport>,
     data: RemoteSessionData,
 }
 
 struct MqFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     gate: Arc<ConnectionGate>,
 }
 
@@ -52,20 +50,13 @@ impl ConnectionFactory for MqFactory {
 
 /// 当前契约的远端库 + 两条会话行（外键不强制，与真实远端同一条件）。
 async fn fixture() -> Fixture {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-mq.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
     for statement in super::session_schema::initialization_plan() {
         sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
+    sqlx::raw_sql("INSERT INTO machines VALUES ('host', 'host', 'known');
+         INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ('ws','host','/tmp','unverified')")
+        .execute(&pool).await.unwrap();
     sqlx::query(schema::CREATE_STORE_META_SQL)
         .execute(&pool)
         .await
@@ -74,7 +65,7 @@ async fn fixture() -> Fixture {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'mq-test', ?2, 'now')")
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, $1, 'mq-test', $2, 'now')")
         .bind(schema::REMOTE_SCHEMA_VERSION)
         .bind(schema::STORE_CONTRACT)
         .execute(&pool)
@@ -83,14 +74,14 @@ async fn fixture() -> Fixture {
     for thread in ["mq-thread", "other-thread"] {
         sqlx::query(
             "INSERT INTO threads (id, cwd, created_at, updated_at, workspace_id)
-             VALUES (?1, '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'ws')",
+             VALUES ($1, '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'ws')",
         )
         .bind(thread)
         .execute(&pool)
         .await
         .unwrap();
     }
-    let transport = Arc::new(SqliteTransport::for_test(pool.clone()));
+    let transport = Arc::new(PgTestTransport::for_test(pool.clone()));
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(
         transport.clone(),
@@ -108,7 +99,6 @@ async fn fixture() -> Fixture {
         gate,
     );
     Fixture {
-        _directory: directory,
         pool,
         transport,
         data,
@@ -148,7 +138,7 @@ fn terminal_input(id: MessageId, text: &str) -> MqInput {
 
 /// 读 `(agent_status, work_state)`，用于断言「一条都没写」。
 async fn terminal_facts(fixture: &Fixture, thread: &ThreadId) -> (String, String) {
-    sqlx::query_as("SELECT agent_status, work_state FROM threads WHERE id = ?1")
+    sqlx::query_as("SELECT agent_status, work_state FROM threads WHERE id = $1")
         .bind(thread.as_str())
         .fetch_one(&fixture.pool)
         .await
@@ -177,7 +167,7 @@ fn selection(
 }
 
 async fn mq_rows(fixture: &Fixture, thread: &ThreadId) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM thread_mq WHERE thread_id = ?1")
+    sqlx::query_scalar("SELECT COUNT(*) FROM thread_mq WHERE thread_id = $1")
         .bind(thread.as_str())
         .fetch_one(&fixture.pool)
         .await
@@ -185,26 +175,16 @@ async fn mq_rows(fixture: &Fixture, thread: &ThreadId) -> i64 {
 }
 
 async fn history_rows(fixture: &Fixture, thread: &ThreadId) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ?1")
+    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
         .bind(thread.as_str())
         .fetch_one(&fixture.pool)
         .await
         .unwrap()
 }
 
-/// 契约与版本代数是本代：`v9` + 15。
-#[test]
-fn the_mq_generation_is_the_current_contract() {
-    assert_eq!(schema::STORE_CONTRACT, "peri.session.store/v9");
-    assert_eq!(schema::REMOTE_SCHEMA_VERSION, 15);
-    assert_eq!(
-        schema::PREVIOUS_CURRENT_STORE_CONTRACT,
-        "peri.session.store/v8"
-    );
-}
-
 /// 条件插入：第一次接纳，第二次复用原水位；不同内容与跨 thread 都是身份冲突。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn enqueue_is_conditional_and_conflicts_on_identity() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -250,6 +230,7 @@ async fn enqueue_is_conditional_and_conflicts_on_identity() {
 
 /// 移交的状态判定完全由批次影响行数给出：Committed / Missing / Suppressed。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn receive_classifies_from_batch_counts() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -268,7 +249,7 @@ async fn receive_classifies_from_batch_counts() {
     assert_eq!(history_rows(&fixture, &main).await, 1);
     assert_eq!(mq_rows(&fixture, &main).await, 0);
     let (title, count): (Option<String>, i64) =
-        sqlx::query_as("SELECT title, message_count FROM threads WHERE id = ?1")
+        sqlx::query_as("SELECT title, message_count FROM threads WHERE id = $1")
             .bind(main.as_str())
             .fetch_one(&fixture.pool)
             .await
@@ -313,6 +294,7 @@ async fn receive_classifies_from_batch_counts() {
 
 /// 历史已有同 ID 不同内容：Conflict，MQ 行删除、历史不被覆盖。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn receive_conflict_keeps_history_and_drops_the_pending_row() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -336,7 +318,7 @@ async fn receive_conflict_keeps_history_and_drops_the_pending_row() {
     assert_eq!(outcome.items[0].status, MqReceiveStatus::Conflict);
     assert_eq!(mq_rows(&fixture, &main).await, 0);
     let (content,): (String,) =
-        sqlx::query_as("SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2")
+        sqlx::query_as("SELECT content FROM messages WHERE thread_id = $1 AND message_id = $2")
             .bind(main.as_str())
             .bind(id.as_uuid().to_string())
             .fetch_one(&fixture.pool)
@@ -348,6 +330,7 @@ async fn receive_conflict_keeps_history_and_drops_the_pending_row() {
 
 /// 历史已有同 ID 同内容：AlreadyPresent，只删 MQ 行，不重复写历史。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn receive_reports_already_present_for_the_same_content() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -376,6 +359,7 @@ async fn receive_reports_already_present_for_the_same_content() {
 
 /// 取消按 `(thread_id, id, enqueued_at)` 删除并有条件地报告结果。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn cancel_deletes_by_watermark_and_reports_state() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -419,6 +403,7 @@ async fn cancel_deletes_by_watermark_and_reports_state() {
 
 /// 查询走一致读取并按 `(enqueued_at, id)` 升序；清理与删除树都显式删行。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn query_clear_and_tree_deletion_follow_the_thread_scope() {
     let fixture = fixture().await;
     let main = thread("mq-thread");
@@ -469,6 +454,7 @@ async fn query_clear_and_tree_deletion_follow_the_thread_scope() {
 
 /// 远端接纳 `EnsureProcessing` 消息同样维护工作意图：`idle → working`，不解除 `stopped`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_acceptance_promotes_idle_without_unlocking_stopped() {
     use peri_acp_types::thread::WorkState;
 
@@ -509,12 +495,13 @@ async fn remote_acceptance_promotes_idle_without_unlocking_stopped() {
 
 /// 终态 thread 的迟到接纳不得重新授予续跑意图。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_acceptance_does_not_promote_terminal_thread() {
     use peri_acp_types::thread::WorkState;
 
     let fixture = fixture().await;
     let thread = thread("mq-thread");
-    sqlx::query("UPDATE threads SET agent_status = 'error' WHERE id = ?1")
+    sqlx::query("UPDATE threads SET agent_status = 'error' WHERE id = $1")
         .bind(thread.as_str())
         .execute(&fixture.pool)
         .await
@@ -534,6 +521,7 @@ async fn remote_acceptance_does_not_promote_terminal_thread() {
 
 /// 已移交历史的消息重复接纳不能重新授予执行资格。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_reaccepting_handed_off_message_keeps_idle() {
     use peri_acp_types::thread::WorkState;
 
@@ -573,6 +561,7 @@ async fn remote_reaccepting_handed_off_message_keeps_idle() {
 
 /// 收尾收敛：待处理的 `EnsureProcessing` 阻止写 `idle`；`stopped` 不被解除。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_settle_after_turn_respects_pending_work_and_stop() {
     use peri_acp_types::thread::WorkState;
 
@@ -629,6 +618,7 @@ async fn remote_settle_after_turn_respects_pending_work_and_stop() {
 
 /// 同 ID 不同内容的接纳冲突不得改变目标工作意图（批次已提交也不例外）。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_conflicting_reacceptance_does_not_promote_work_state() {
     use peri_acp_types::thread::WorkState;
 
@@ -668,6 +658,7 @@ async fn remote_conflicting_reacceptance_does_not_promote_work_state() {
 
 /// 同 ID 重试时存储侧文本可能被重新序列化；`same_payload` 判定为同一条时仍须提升。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_normalized_retry_promotes_work_intent() {
     use peri_acp_types::thread::WorkState;
 
@@ -690,7 +681,7 @@ async fn remote_normalized_retry_promotes_work_intent() {
         .await
         .unwrap();
     // 语义相同、文本不同：模拟存储侧重新序列化。
-    sqlx::query("UPDATE thread_mq SET payload_json = payload_json || ' ' WHERE id = ?1")
+    sqlx::query("UPDATE thread_mq SET payload_json = payload_json || ' ' WHERE id = $1")
         .bind(id.as_uuid().to_string())
         .execute(&fixture.pool)
         .await
@@ -712,6 +703,7 @@ async fn remote_normalized_retry_promotes_work_intent() {
 /// #342 回归按单批接纳语义适配：插入与提升同批，提升失败时整批不生效；同一 ID
 /// 重试才真正接纳并提升，不会留下 `idle + pending`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
     let fixture = fixture().await;
     let thread = thread("mq-thread");
@@ -723,8 +715,7 @@ async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
         .unwrap();
     sqlx::query(
         "CREATE TRIGGER fail_work_promote BEFORE UPDATE ON threads
-         WHEN NEW.work_state = 'working'
-         BEGIN SELECT RAISE(ABORT, 'injected promote failure'); END",
+         FOR EACH ROW WHEN (NEW.work_state = 'working') EXECUTE FUNCTION pg_temp.reject_fixture_write()",
     )
     .execute(&fixture.pool)
     .await
@@ -755,7 +746,7 @@ async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
         "首次接纳失败时不能留下 idle + pending"
     );
 
-    sqlx::query("DROP TRIGGER fail_work_promote")
+    sqlx::query("DROP TRIGGER fail_work_promote ON threads")
         .execute(&fixture.pool)
         .await
         .unwrap();

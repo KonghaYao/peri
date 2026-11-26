@@ -1,7 +1,7 @@
 //! 远端有界回退候选读取：与 SQLite adapter 同一套语义，走真实批次与账本。
 //!
 //! 夹具复用 [`super::session_history_page_tests::remote_with_history`]（同一个
-//! `SqliteTransport` 扮演远端服务端）；断言只看调用方可见结果：顺序、上限、归档可见。
+//! `PgTestTransport` 扮演远端服务端）；断言只看调用方可见结果：顺序、上限、归档可见。
 
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
@@ -18,6 +18,7 @@ fn texts(candidates: &[peri_acp_types::session_resources::RewindCandidate]) -> V
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_candidates_are_user_only_newest_first_and_bounded() {
     let history = vec![
         PersistedPayload::Message(BaseMessage::human("第一轮问题")),
@@ -32,7 +33,7 @@ async fn remote_candidates_are_user_only_newest_first_and_bounded() {
         PersistedPayload::Message(BaseMessage::human("第二轮问题")),
         PersistedPayload::Message(BaseMessage::human("第三轮问题")),
     ];
-    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
+    let data = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
 
     let candidates = data.load_rewind_candidates(&id, 64).await.unwrap();
@@ -51,6 +52,7 @@ async fn remote_candidates_are_user_only_newest_first_and_bounded() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_candidates_survive_trailing_reminders_across_batches() {
     let mut history: Vec<PersistedPayload> = (0..64)
         .map(|index| PersistedPayload::Message(BaseMessage::human(format!("valid-{index}"))))
@@ -60,7 +62,7 @@ async fn remote_candidates_survive_trailing_reminders_across_batches() {
             "<system-reminder>notice-{index}</system-reminder>"
         )))
     }));
-    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
+    let data = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
 
     let candidates = data.load_rewind_candidates(&id, 64).await.unwrap();
@@ -70,13 +72,14 @@ async fn remote_candidates_survive_trailing_reminders_across_batches() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_candidates_include_users_archived_by_compaction() {
     let history = vec![
         PersistedPayload::Message(BaseMessage::human("归档问题")),
         PersistedPayload::Message(BaseMessage::ai("回答")),
         PersistedPayload::Message(BaseMessage::human("仍然有效的问题")),
     ];
-    let (_directory, data) = super::session_history_page_tests::remote_with_history(&history).await;
+    let data = super::session_history_page_tests::remote_with_history(&history).await;
     let id: ThreadId = REWIND_CANDIDATES_SESSION.to_owned();
     data.apply_message_projections(
         &id,

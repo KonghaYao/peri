@@ -210,7 +210,7 @@ export interface ChatManagerOptions {
     store: ChatStoreConfig;
     /**
      * 只读会话目录。连接归宿主所有：Manager 不会关闭注入实例；
-     * 宿主在进程退出前应调用实现的 close()（如 `TursoStorage.close()`）。
+     * 宿主在进程退出前应调用实现的 close()（如 `PostgresStorage.close()`）。
      */
     database: ChatDatabase;
     /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */

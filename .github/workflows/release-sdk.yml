@@ -156,55 +156,9 @@ jobs:
                   bun -e 'const sdk = await import("./dist/index.js"); if (typeof sdk.ChatManager !== "function") throw new Error("ChatManager missing from dist/index.js")'
                   bun -e 'const sdk = await import("./dist/sandbox.js"); if (typeof sdk.SandboxManager !== "function") throw new Error("SandboxManager missing from dist/sandbox.js")'
 
-            # SDK 的 wasm-acp-integration 测试需要真实 Hrana 后端。CI 启动一个共享的平台版
-            # peri-loom 容器（固定端口 18091），测试之间靠各自 cwd/machineId 隔离。
-            # PERI_TEST_STORAGE_URL/TOKEN 成对配置时可直连外部端点，是唯一排障通道。
-            - name: Start peri-loom for SDK tests
-              run: |
-                  set -euo pipefail
-                  run_dir="$(mktemp -d)"
-                  chmod 700 "${run_dir}"
-                  echo "PERI_LOOM_RUN_DIR=${run_dir}" >> "${GITHUB_ENV}"
-                  docker run -d --name peri-loom-ci \
-                      --network host \
-                      -v "${run_dir}:/data/peri" \
-                      --env PERI_HRANA_EXPERIMENTAL=1 \
-                      ghcr.io/konghayao/peri-loom:v1.1.24 \
-                      --run-dir /data/peri --backend local --listen 127.0.0.1:18091 --no-build
-                  for attempt in $(seq 1 120); do
-                      if docker logs peri-loom-ci 2>&1 | grep -q '"ready": true'; then
-                          break
-                      fi
-                      if [[ "$(docker inspect -f '{{.State.Running}}' peri-loom-ci)" != "true" ]]; then
-                          docker logs peri-loom-ci
-                          echo "::error::peri-loom exited before ready"
-                          exit 1
-                      fi
-                      if [[ "${attempt}" == "120" ]]; then
-                          docker logs peri-loom-ci
-                          echo "::error::peri-loom did not become ready within 120s"
-                          exit 1
-                      fi
-                      sleep 1
-                  done
-                  docker cp peri-loom-ci:/data/peri/connection.json "${RUNNER_TEMP}/peri-loom.json"
-                  token="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_api_key"])' "${RUNNER_TEMP}/peri-loom.json")"
-                  echo "::add-mask::${token}"
-                  {
-                      echo "PERI_TEST_STORAGE_URL=http://127.0.0.1:18091/db/local_default/demo/main"
-                      echo "PERI_TEST_STORAGE_TOKEN=${token}"
-                  } >> "${GITHUB_ENV}"
-                  rm -f "${RUNNER_TEMP}/peri-loom.json"
-
             - name: Run SDK tests
               working-directory: npm-packages/@peri-sdk
               run: bun test
-
-            - name: Stop peri-loom
-              if: always()
-              run: |
-                  docker rm -f peri-loom-ci || true
-                  if [[ -n "${PERI_LOOM_RUN_DIR:-}" ]]; then rm -rf "${PERI_LOOM_RUN_DIR}"; fi
 
             # 打包前才改版本：测试始终跑在仓库声明的版本上，避免测试结果依赖 tag。
             # npm 会把 LICENSE 自动放进 tarball；files 声明 dist、src/openui 与 README。

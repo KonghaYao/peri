@@ -1,9 +1,7 @@
-//! SDK 失败 → 私有分类 → 领域失败。
-//!
-//! SDK 文本保留在诊断与领域 detail 中，分类与执行结果语义保持独立。
+//! Redacted PostgreSQL and transport errors exposed through the session resource contract.
 
+use super::connection::TransportError;
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
-use turso_serverless::Error as SdkError;
 
 /// 远程失败的稳定分类（不含服务端文本、URL、凭证）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,8 +22,6 @@ pub(crate) enum RemoteFailureClass {
     Readonly,
     /// 写冲突/快照忙：可重试，但不代表未生效。
     Busy,
-    /// 目标不是本驱动能读的库。
-    NotAdb,
     /// 数据损坏。
     Corrupt,
     /// 驱动侧类型转换或用法不支持。
@@ -45,7 +41,6 @@ impl RemoteFailureClass {
             Self::Constraint => "constraint",
             Self::Readonly => "readonly",
             Self::Busy => "busy",
-            Self::NotAdb => "not_a_database",
             Self::Corrupt => "corrupt",
             Self::Unsupported => "unsupported",
             Self::Unknown => "unknown",
@@ -69,11 +64,9 @@ impl RemoteFailureClass {
             Self::Constraint => SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
                 detail: "remote constraint violation".to_owned(),
             }),
-            Self::NotAdb | Self::Corrupt => {
-                SessionResourceError::new(SessionResourceErrorKind::Corrupt {
-                    detail: "remote session store contents are unreadable".to_owned(),
-                })
-            }
+            Self::Corrupt => SessionResourceError::new(SessionResourceErrorKind::Corrupt {
+                detail: "remote session store contents are unreadable".to_owned(),
+            }),
             Self::Transport
             | Self::ServerError
             | Self::Busy
@@ -85,74 +78,33 @@ impl RemoteFailureClass {
     }
 }
 
-/// SDK 失败 → 稳定分类。参数顺序固定，先判约束/只读这类确定性最高的失败。
-pub(crate) fn classify(error: &SdkError) -> RemoteFailureClass {
-    match error {
-        SdkError::QueryReturnedNoRows => RemoteFailureClass::NotFound,
-        SdkError::Constraint(_) => RemoteFailureClass::Constraint,
-        SdkError::Readonly(_) => RemoteFailureClass::Readonly,
-        SdkError::Busy(_) | SdkError::BusySnapshot(_) => RemoteFailureClass::Busy,
-        SdkError::NotAdb(_) => RemoteFailureClass::NotAdb,
-        SdkError::Corrupt(_) => RemoteFailureClass::Corrupt,
-        SdkError::Interrupt(_) => RemoteFailureClass::Timeout,
-        SdkError::Misuse(_)
-        | SdkError::ConversionFailure(_)
-        | SdkError::ToSqlConversionFailure(_) => RemoteFailureClass::Unsupported,
-        SdkError::Error(_) | SdkError::DatabaseFull(_) => RemoteFailureClass::ServerError,
-        SdkError::Http(message) => classify_http(message),
-        SdkError::BatchStatementFailed { error, .. }
-        | SdkError::BatchRollbackFailed { error, .. } => classify(error),
-        // `Error` 是 non_exhaustive：未来变体一律保守归入未知，不假装成功。
-        _ => RemoteFailureClass::Unknown,
+/// Map server diagnostics by SQLSTATE. Server messages can contain row values and credentials.
+pub(super) fn sqlstate_class(code: &str) -> RemoteFailureClass {
+    use RemoteFailureClass::*;
+    match code {
+        "42501" => AuthRejected,
+        "25006" => Readonly,
+        "40001" | "40P01" | "55P03" => Busy,
+        "57014" => Timeout,
+        "XX001" | "XX002" => Corrupt,
+        _ if code.starts_with("28") => AuthRejected,
+        _ if code.starts_with("23") => Constraint,
+        _ if code.starts_with("08") || code.starts_with("57P0") => Transport,
+        _ => ServerError,
     }
 }
 
-/// 这一失败是否让**当前连接代际**不再可信。
-///
-/// 只有「没有拿到确定的远端回答」才算：连接/DNS/TLS/非预期状态码（`Transport`）、
-/// 预算内没有结果（`Timeout`）、驱动未分类的失败（`Unknown`）。远端明确回答的拒绝
-/// （约束、只读、缺行、鉴权、引擎错误）说明流本身仍然活着，不因此换连接——
-/// 把确定回答也当作连接失效，只会让一次普通的业务拒绝变成一次多余的重连。
-pub(crate) fn invalidates_connection(error: &SdkError) -> bool {
+pub(super) fn invalidates_connection(error: &TransportError) -> bool {
     matches!(
-        classify(error),
+        error.class(),
         RemoteFailureClass::Transport | RemoteFailureClass::Timeout | RemoteFailureClass::Unknown
     )
 }
 
-/// 只读 HTTP 失败文本里的安全特征：只看关键字，不转发文本。
-fn classify_http(message: &str) -> RemoteFailureClass {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("401")
-        || lower.contains("403")
-        || lower.contains("unauthorized")
-        || lower.contains("forbidden")
-    {
-        RemoteFailureClass::AuthRejected
-    } else if lower.contains("timed out") || lower.contains("timeout") {
-        RemoteFailureClass::Timeout
-    } else {
-        RemoteFailureClass::Transport
-    }
-}
-
-pub(crate) fn from_sdk_error(error: &SdkError) -> SessionResourceError {
-    let class = classify(error);
-    tracing::error!(error = %error, source = ?error, class = class.as_str(), "remote session store operation failed");
-    let detail = peri_acp_types::session::bounded_error_message(&error.to_string(), 2_000);
-    let kind = match class {
-        RemoteFailureClass::AuthRejected | RemoteFailureClass::Constraint => {
-            SessionResourceErrorKind::InvalidInput { detail }
-        }
-        RemoteFailureClass::NotAdb | RemoteFailureClass::Corrupt => {
-            SessionResourceErrorKind::Corrupt { detail }
-        }
-        RemoteFailureClass::Transport
-        | RemoteFailureClass::ServerError
-        | RemoteFailureClass::Busy
-        | RemoteFailureClass::Unsupported
-        | RemoteFailureClass::Unknown => SessionResourceErrorKind::Unavailable { detail },
-        _ => return class.into_session_resource_error(),
-    };
-    SessionResourceError::new(kind)
+pub(super) fn from_transport_error(error: &TransportError) -> SessionResourceError {
+    tracing::debug!(
+        class = error.class().as_str(),
+        "PostgreSQL session store operation failed"
+    );
+    error.class().into_session_resource_error()
 }

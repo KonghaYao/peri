@@ -27,7 +27,7 @@ fn parses_defaults() {
     let config = parse(base_env(&workspace)).expect("config");
     assert_eq!(config.bind_addr, DEFAULT_BIND.parse().expect("bind"));
     assert_eq!(config.sse_heartbeat, Duration::from_millis(15_000));
-    assert_eq!(config.session_store.engine, "turso");
+    assert_eq!(config.session_store.engine, "postgres");
     assert_eq!(config.session_store.access, StoreAccess::ReadWrite);
     assert!(config.session_store.locator.is_none());
     assert_eq!(
@@ -185,25 +185,26 @@ fn credential_fields_accept_names_not_values() {
 }
 
 #[test]
-fn store_locator_rejects_embedded_credentials() {
+fn session_store_requires_postgres_and_redacts_the_dsn() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut env = base_env(&workspace);
     env.insert(
         STORE_LOCATOR_ENV.to_owned(),
         "http://user:pass@127.0.0.1:8080/db/t/d/b/".to_owned(),
     );
-    let error = parse(env).expect_err("embedded credentials");
-    assert!(error.to_string().contains("embedded credentials"));
+    let error = parse(env).expect_err("HTTP is not a PostgreSQL DSN");
+    assert!(error.to_string().contains("postgres://"));
 
     let mut env = base_env(&workspace);
     env.insert(
         STORE_LOCATOR_ENV.to_owned(),
-        "http://127.0.0.1:8080/db/t/d/b/".to_owned(),
+        "postgres://user:secret@localhost:5444/peri".to_owned(),
     );
     let config = parse(env).expect("locator");
+    assert!(!format!("{config:?}").contains("secret"));
     assert_eq!(
         config.session_store.locator.expect("url").as_str(),
-        "http://127.0.0.1:8080/db/t/d/b/"
+        "postgres://user:secret@localhost:5444/peri"
     );
 }
 

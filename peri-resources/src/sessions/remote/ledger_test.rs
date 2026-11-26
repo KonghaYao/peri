@@ -1,6 +1,6 @@
 //! `ledger` 的离线测试：唯一键空间、参数化、身份/收据不泄露、解码不猜。全部不联网。
 
-use turso_serverless::Value;
+use super::sql::Value;
 
 use super::ledger::LedgerRow;
 use super::ledger::OperationId;

@@ -1,7 +1,7 @@
 //! 远程会话读取行为：一致快照、绑定分类、历史、metadata、分页与树。
 //!
 //! 读取不写、不改写、不发 DDL；`load_snapshot` 这类需要多段事实来自同一时刻的读取走
-//! [`super::mutation::RemoteStore::read_batch`]（同一请求内的 `BEGIN DEFERRED` 只读事务），
+//! [`super::mutation::RemoteStore::read_batch`]（`REPEATABLE READ` 只读事务），
 //! 不把多次独立查询的结果拼成「一致快照」。回复形状不符（结果集或行数不对）在这里是
 //! **错误**：不完整的读取绝不能降级成「这个会话没有历史」或「没有这一行」。
 //!
@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::history_page::HistoryCursor;
 use peri_acp_types::history_page::HistoryCursorError;
 use peri_acp_types::history_page::HistoryForwardCursor;
@@ -35,7 +36,6 @@ use peri_acp_types::thread::{ThreadId, ThreadListEntry, ThreadMeta};
 use peri_acp_types::workspace::{
     ScopedThreadEntry, ScopedThreadPage, ScopedThreadQuery, SessionBinding, ThreadListCursor,
 };
-use turso_serverless::Value;
 
 use super::session_codec as codec;
 use super::session_data::RemoteSessionData;
@@ -50,7 +50,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id, self.meta_projection()),
+                session_sql::select_session_statement(id),
                 session_sql::select_messages_statement(id),
             )
             .await?;
@@ -76,7 +76,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id, self.meta_projection()),
+                session_sql::select_session_statement(id),
                 session_sql::select_active_messages_statement(id),
             )
             .await?;
@@ -156,10 +156,7 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<BindingState> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(
-                id,
-                self.meta_projection(),
-            ))
+            .fetch_row(&session_sql::select_session_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
         let binding = codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)?;
@@ -175,7 +172,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id, self.meta_projection()),
+                session_sql::select_session_statement(id),
                 session_sql::select_messages_statement(id),
             )
             .await?;
@@ -542,10 +539,7 @@ impl RemoteSessionData {
     pub(super) async fn read_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
         let store = self.store().await?;
         let row = store
-            .fetch_row(&session_sql::select_meta_statement(
-                id,
-                self.meta_projection(),
-            ))
+            .fetch_row(&session_sql::select_meta_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
         codec::decode_meta(&row)
@@ -567,20 +561,9 @@ impl RemoteSessionData {
         query: &ScopedThreadQuery,
         archived: bool,
     ) -> SessionResourceResult<ScopedThreadPage> {
-        // 压缩前的形状没有 `archived` 列：归档面在它上面恒为空，分页也走老形状的语句。
-        if self.legacy_shape && archived {
-            return Ok(ScopedThreadPage {
-                entries: Vec::new(),
-                next_cursor: None,
-            });
-        }
         let limit = query.limit.clamp(1, 200) as usize;
         let store = self.store().await?;
-        let statement = if self.legacy_shape {
-            session_sql::page_statement_v11(query, self.meta_projection())?
-        } else {
-            session_sql::page_statement_for_archive(query, archived, self.meta_projection())?
-        };
+        let statement = session_sql::page_statement_for_archive(query, archived)?;
         let rows = store.fetch_rows(&statement).await?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -623,10 +606,7 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Vec<ThreadMeta>> {
         let store = self.store().await?;
         let rows = store
-            .fetch_rows(&session_sql::select_children_statement(
-                parent,
-                self.meta_projection(),
-            ))
+            .fetch_rows(&session_sql::select_children_statement(parent))
             .await?;
         rows.iter().map(|row| codec::decode_meta(row)).collect()
     }
@@ -638,10 +618,7 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Vec<ThreadMeta>> {
         let store = self.store().await?;
         let rows = store
-            .fetch_rows(&session_sql::select_tree_statement(
-                root,
-                self.meta_projection(),
-            ))
+            .fetch_rows(&session_sql::select_tree_statement(root))
             .await?;
         rows.iter().map(|row| codec::decode_meta(row)).collect()
     }
@@ -650,10 +627,7 @@ impl RemoteSessionData {
     pub(super) async fn exists(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         let store = self.store().await?;
         Ok(store
-            .fetch_row(&session_sql::select_meta_statement(
-                id,
-                self.meta_projection(),
-            ))
+            .fetch_row(&session_sql::select_meta_statement(id))
             .await?
             .is_some())
     }
@@ -662,10 +636,7 @@ impl RemoteSessionData {
     pub(super) async fn frozen_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(
-                id,
-                self.meta_projection(),
-            ))
+            .fetch_row(&session_sql::select_session_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
         Ok(super::sql::text_at(&facts, session_sql::FACT_FROZEN).map(str::to_owned))
@@ -678,10 +649,7 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Option<SessionBinding>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(
-                id,
-                self.meta_projection(),
-            ))
+            .fetch_row(&session_sql::select_session_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
         codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)

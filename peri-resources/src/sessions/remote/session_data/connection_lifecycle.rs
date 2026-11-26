@@ -11,7 +11,7 @@ use tokio::sync::RwLockReadGuard;
 
 #[cfg(test)]
 use super::super::generation::ConnectionFactory;
-use super::super::mutation::{RemoteStore, StoreAccess};
+use super::super::mutation::RemoteStore;
 use super::super::schema::StoreIdentityRead;
 use super::super::session_codec;
 use super::RemoteSessionData;
@@ -103,14 +103,9 @@ impl RemoteSessionData {
     /// 只读打开因此与可写打开走同一条重建路径，且不产生任何写入。
     async fn verify_reconnect(&self, store: &RemoteStore) -> SessionResourceResult<()> {
         match store.read_identity().await? {
-            StoreIdentityRead::Present(snapshot)
-                if !(snapshot.matches_build()
-                    || (store.access() == StoreAccess::ReadOnly && snapshot.readable())) =>
-            {
-                Err(super::unsupported_behavior(
-                    "unrecognized remote store schema after reconnect",
-                ))
-            }
+            StoreIdentityRead::Present(snapshot) if !snapshot.matches_build() => Err(
+                super::unsupported_behavior("unrecognized remote store schema after reconnect"),
+            ),
             StoreIdentityRead::Present(snapshot)
                 if snapshot.store_id.as_str() != self.store_id.as_str() =>
             {

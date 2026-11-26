@@ -7,6 +7,24 @@
 
 已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。下表 F-MCP-015/016 已单独按 `b71c5e82` 对齐 #449 合入状态；其余行仍沿用各自注明的证据基线。
 
+### PostgreSQL 会话存储验收
+
+在 `a2c0149` 上应用 PostgreSQL 替换后，在独立 PostgreSQL 17 与 19 实例运行了远程会话契约。
+部署入口经过创建、关闭、换进程冷恢复、只读打开及删除会话树；另外验证了并发初始化、
+事务回滚、取消、分页、MQ 与 OAuth。常规资源测试通过 623 项；两种 PostgreSQL 版本各通过 107 项显式远程测试。运行命令如下，数据库使用专用测试库。
+
+```sh
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib
+PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
+  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- --ignored sessions::remote::
+```
+
+在 PostgreSQL 19 上，SDK 已分别通过 TCP 和 Neon 兼容 HTTP 验证。两个独立 Bun 进程运行完整 WASM ACP，
+前一进程通过 `session/new` 创建会话，后一进程通过 `session/load` 恢复了相同 ID。
+完整 WASM ACP 的会话与生命周期 smoke 均通过，覆盖两个连接独立取消、正常关闭及重启后的回复回放。
+打包 SDK 的 WASM 集成测试通过 2 项、24 个断言。
+空投递队列的 WASM 修正也经过原生 `peri-agent --lib` 验证，1,603 项通过、5 项忽略。
+
 | ID | 实现状态 | 契约 | 证据或缺口 | 验证状态 |
 | --- | --- | --- | --- | --- |
 | F-CORE-001 | 源码存在 | [契约](../design/architecture.md) | [源码](../../peri-agent/src/agent/stages/react_loop.rs)；[相关测试](../../peri-agent/src/agent/stages/loop_lifecycle_test.rs)；缺口：RCRA 循环：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |

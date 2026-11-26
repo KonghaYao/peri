@@ -206,7 +206,7 @@ async fn missing_credential_configuration_is_a_configuration_error() {
     );
 
     let outcome = super::run_meta_session(
-        SessionStoreDeployment::from_locator("turso://sentinel-db-sentinel-org.turso.io")
+        SessionStoreDeployment::from_locator("postgres://sentinel-db-sentinel-org.invalid")
             .with_credential_env(ABSENT_CREDENTIAL_ENV)
             .with_access(AccessMode::ReadOnly),
         META_TEST_UUID.to_owned(),

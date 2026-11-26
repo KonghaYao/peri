@@ -1,28 +1,46 @@
-use super::*;
+use super::postgres_fixture::{test_pool, PgTestTransport};
+use super::{
+    generation::ConnectionGate,
+    mutation::{RemoteStore, StoreAccess},
+    schema,
+};
+use async_trait::async_trait;
+use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKind};
+use std::sync::Arc;
+
+async fn database() -> (sqlx::PgPool, Arc<PgTestTransport>) {
+    let pool = test_pool().await;
+    let transport = Arc::new(PgTestTransport::for_test(pool.clone()));
+    let gate = Arc::new(ConnectionGate::default());
+    let store = RemoteStore::new(transport.clone(), StoreAccess::ReadWrite, gate.mint(), gate);
+    store.initialize_store().await.unwrap();
+    (pool, transport)
+}
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::RewindBoundary;
 use peri_acp_types::store::PersistedPayload;
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_close_intent_finishes_without_execution_ownership() {
     use crate::sessions::data::SessionDataPort;
-    let fixture = Fixture::new().await;
-    let store = fixture.store(StoreAccess::ReadWrite);
-    schema_upgrade::upgrade(&store, &fixture.snapshot)
-        .await
-        .unwrap();
+    let (pool, transport) = database().await;
+    sqlx::raw_sql("INSERT INTO machines VALUES ('machine', 'machine', 'known');
+        INSERT INTO workspaces(id,machine_id,path,path_source) VALUES ('ws','machine','/tmp','unverified');
+        INSERT INTO threads(id,cwd,created_at,updated_at,workspace_id) VALUES ('session','/tmp','now','now','ws')")
+        .execute(&pool).await.unwrap();
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(
-        fixture.transport.clone(),
+        transport.clone(),
         StoreAccess::ReadWrite,
         gate.mint(),
         gate.clone(),
     );
-    let data = super::super::session_data::RemoteSessionData::with_connection_for_test(
-        fixture.snapshot.store_id.clone(),
+    let data = super::session_data::RemoteSessionData::with_connection_for_test(
+        schema::StoreId::mint(),
         store,
         Arc::new(FullRemoteFactory {
-            transport: fixture.transport.clone(),
+            transport: transport.clone(),
             gate: gate.clone(),
         }),
         gate,
@@ -45,16 +63,16 @@ async fn remote_close_intent_finishes_without_execution_ownership() {
     );
     data.mark_session_closing(&id).await.unwrap();
     let read_only_gate = Arc::new(ConnectionGate::default());
-    let read_only = super::super::session_data::RemoteSessionData::with_connection_for_test(
-        fixture.snapshot.store_id.clone(),
+    let read_only = super::session_data::RemoteSessionData::with_connection_for_test(
+        schema::StoreId::mint(),
         RemoteStore::new(
-            fixture.transport.clone(),
+            transport.clone(),
             StoreAccess::ReadOnly,
             read_only_gate.mint(),
             read_only_gate.clone(),
         ),
         Arc::new(FullRemoteFactory {
-            transport: fixture.transport.clone(),
+            transport: transport.clone(),
             gate: read_only_gate.clone(),
         }),
         read_only_gate,
@@ -67,7 +85,7 @@ async fn remote_close_intent_finishes_without_execution_ownership() {
         read_only.close_settlement(&id).await.unwrap(),
         CloseSettlement::Pending
     );
-    data.inject_faults(super::super::mutation::FaultPlan {
+    data.inject_faults(super::mutation::FaultPlan {
         drop_reply: Some("finish_close".to_owned()),
         drop_before_send: None,
     })
@@ -94,15 +112,14 @@ async fn remote_close_intent_finishes_without_execution_ownership() {
     ));
 }
 
-// A SQLite-backed transport stands in for Turso's SQL wire protocol. The
-// application composition below has no local SQLite execution database.
+// The adapters under test share an isolated PostgreSQL schema.
 struct FullRemoteFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     gate: Arc<ConnectionGate>,
 }
 
 #[async_trait]
-impl super::super::generation::ConnectionFactory for FullRemoteFactory {
+impl super::generation::ConnectionFactory for FullRemoteFactory {
     async fn connect(
         &self,
     ) -> peri_acp_types::session_resources::SessionResourceResult<RemoteStore> {
@@ -116,7 +133,7 @@ impl super::super::generation::ConnectionFactory for FullRemoteFactory {
 }
 
 fn full_remote_facade(
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
 ) -> Arc<crate::sessions::SessionResourcesImpl> {
     use crate::sessions::data::SessionDataPort;
     use crate::sessions::local_port::LocalExecutionPort;
@@ -128,7 +145,7 @@ fn full_remote_facade(
         gate.clone(),
     );
     let data = Arc::new(
-        super::super::session_data::RemoteSessionData::with_connection_for_test(
+        super::session_data::RemoteSessionData::with_connection_for_test(
             schema::StoreId::mint(),
             store,
             Arc::new(FullRemoteFactory {
@@ -138,9 +155,8 @@ fn full_remote_facade(
             gate,
         ),
     );
-    let local: Arc<dyn LocalExecutionPort> = Arc::new(
-        super::super::execution::RemoteExecution::new(data.clone(), false),
-    );
+    let local: Arc<dyn LocalExecutionPort> =
+        Arc::new(super::execution::RemoteExecution::new(data.clone(), false));
     let data: Arc<dyn SessionDataPort> = data;
     Arc::new(crate::sessions::SessionResourcesImpl::from_ports(
         data,
@@ -150,8 +166,8 @@ fn full_remote_facade(
 }
 
 fn virtual_remote_facade(
-    transport: Arc<SqliteTransport>,
-    environment: super::super::environment::RemoteWorkspaceEnvironment,
+    transport: Arc<PgTestTransport>,
+    environment: super::environment::RemoteWorkspaceEnvironment,
 ) -> Arc<crate::sessions::SessionResourcesImpl> {
     use crate::sessions::data::SessionDataPort;
     use crate::sessions::local_port::LocalExecutionPort;
@@ -162,7 +178,7 @@ fn virtual_remote_facade(
         gate.mint(),
         gate.clone(),
     );
-    let mut data = super::super::session_data::RemoteSessionData::with_connection_for_test(
+    let mut data = super::session_data::RemoteSessionData::with_connection_for_test(
         schema::StoreId::mint(),
         store,
         Arc::new(FullRemoteFactory {
@@ -174,11 +190,7 @@ fn virtual_remote_facade(
     data.machine_id = environment.machine_id().unwrap();
     let data = Arc::new(data);
     let local: Arc<dyn LocalExecutionPort> = Arc::new(
-        super::super::execution::RemoteExecution::new_in_environment(
-            data.clone(),
-            false,
-            environment,
-        ),
+        super::execution::RemoteExecution::new_in_environment(data.clone(), false, environment),
     );
     let data: Arc<dyn SessionDataPort> = data;
     Arc::new(crate::sessions::SessionResourcesImpl::from_ports(
@@ -189,8 +201,9 @@ fn virtual_remote_facade(
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
-    use super::super::environment::RemoteWorkspaceEnvironment;
+    use super::environment::RemoteWorkspaceEnvironment;
     use peri_acp_types::session_resources::{
         BindingRecheck, ExecutionAvailability, FrozenSnapshotBytes, NewSession, NewSessionMeta,
         SessionResources,
@@ -198,45 +211,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
     use peri_acp_types::thread::CancelPolicy;
     use peri_acp_types::workspace::SessionBinding;
 
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("virtual-wire.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in super::super::session_schema::initialization_plan() {
-        sqlx::query(statement.sql).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(super::super::ledger::CREATE_OP_LEDGER_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'virtual-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION)
-        .bind(schema::STORE_CONTRACT)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool: pool.clone(),
-        writes: AtomicUsize::new(0),
-        read_batches: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        fail_recovery_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        before_batch: Mutex::new(None),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
+    let (pool, transport) = database().await;
     let machine = uuid::Uuid::new_v4().to_string();
     let root = std::env::temp_dir().join("virtual-peri-workspace");
     let environment =
@@ -326,7 +301,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
 
     // The former WASM adapter persisted an unversioned {root} snapshot. It
     // remains readable, but cannot acquire execution under the shared format.
-    sqlx::query("UPDATE session_bindings SET discovery_snapshot = ?1 WHERE thread_id = ?2")
+    sqlx::query("UPDATE session_bindings SET discovery_snapshot = $1 WHERE thread_id = $2")
         .bind(serde_json::json!({ "root": root }).to_string())
         .bind(&session_id)
         .execute(&pool)
@@ -343,7 +318,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         Some(ExecutionAvailability::WorkspaceUnavailable)
     );
 
-    sqlx::query("UPDATE session_bindings SET discovery_snapshot = NULL WHERE thread_id = ?1")
+    sqlx::query("UPDATE session_bindings SET discovery_snapshot = NULL WHERE thread_id = $1")
         .bind(&session_id)
         .execute(&pool)
         .await
@@ -361,6 +336,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registration() {
     use peri_acp_types::session_resources::{
         BindingRecheck, ExecutionAvailability, FrozenSnapshotBytes, NewSession, NewSessionMeta,
@@ -371,47 +347,9 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
 
     crate::sessions::machine::initialize().await.unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let remote_file = directory.path().join("wire-server.db");
     let poisoned_local_file = directory.path().join("threads.db");
     std::fs::write(&poisoned_local_file, b"broken local SQLite").unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&remote_file)
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in super::super::session_schema::initialization_plan() {
-        sqlx::query(statement.sql).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(super::super::ledger::CREATE_OP_LEDGER_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'remote-only-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION)
-        .bind(schema::STORE_CONTRACT)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool: pool.clone(),
-        writes: AtomicUsize::new(0),
-        read_batches: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        fail_recovery_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        before_batch: Mutex::new(None),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
+    let (pool, transport) = database().await;
     let workspace_dir = directory.path().join("workspace");
     std::fs::create_dir(&workspace_dir).unwrap();
     let first = full_remote_facade(transport.clone());
@@ -457,7 +395,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
     // v19 起绑定行的 workspace_id 必须就是会话归属行的 id：不一致的行再也无法靠
     // 「另一张表里的旧登记」被追认，只能失败关闭（与本机组合同一结论）。
     let old_registration = uuid::Uuid::new_v4().to_string();
-    sqlx::query("UPDATE session_bindings SET workspace_id=?1 WHERE thread_id=?2")
+    sqlx::query("UPDATE session_bindings SET workspace_id=$1 WHERE thread_id=$2")
         .bind(&old_registration)
         .bind(&session_id)
         .execute(&pool)
@@ -503,7 +441,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
     );
     drop(cold);
     // 把这一行改回归属行：后面的阶段各自验证自己的条件，不再被这条带偏。
-    sqlx::query("UPDATE session_bindings SET workspace_id=?1 WHERE thread_id=?2")
+    sqlx::query("UPDATE session_bindings SET workspace_id=$1 WHERE thread_id=$2")
         .bind(workspace.workspace_id.to_string())
         .bind(&session_id)
         .execute(&pool)
@@ -581,7 +519,12 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
 
     let original_machine = crate::sessions::machine::current().unwrap();
     let other_machine = uuid::Uuid::new_v4().to_string();
-    sqlx::query("UPDATE workspaces SET machine_id=?1 WHERE id=?2")
+    sqlx::query("INSERT INTO machines VALUES ($1,'other','known')")
+        .bind(&other_machine)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspaces SET machine_id=$1 WHERE id=$2")
         .bind(&other_machine)
         .bind(workspace.workspace_id.to_string())
         .execute(&pool)
@@ -598,14 +541,14 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         Some(ExecutionAvailability::WorkspaceUnavailable)
     );
     drop(foreign);
-    sqlx::query("UPDATE workspaces SET machine_id=?1 WHERE id=?2")
+    sqlx::query("UPDATE workspaces SET machine_id=$1 WHERE id=$2")
         .bind(original_machine)
         .bind(workspace.workspace_id.to_string())
         .execute(&pool)
         .await
         .unwrap();
 
-    sqlx::query("UPDATE session_bindings SET discovery_snapshot=NULL WHERE thread_id=?1")
+    sqlx::query("UPDATE session_bindings SET discovery_snapshot=NULL WHERE thread_id=$1")
         .bind(&session_id)
         .execute(&pool)
         .await
@@ -655,14 +598,14 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         rejected_adoption.unwrap_err().kind(),
         SessionResourceErrorKind::Unsupported
     ));
-    let title: Option<String> = sqlx::query_scalar("SELECT title FROM threads WHERE id=?1")
+    let title: Option<String> = sqlx::query_scalar("SELECT title FROM threads WHERE id=$1")
         .bind(&session_id)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(title.as_deref(), Some("verified owner"));
     let snapshot: Option<String> =
-        sqlx::query_scalar("SELECT discovery_snapshot FROM session_bindings WHERE thread_id=?1")
+        sqlx::query_scalar("SELECT discovery_snapshot FROM session_bindings WHERE thread_id=$1")
             .bind(&session_id)
             .fetch_one(&pool)
             .await
@@ -675,10 +618,11 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
 }
 
 /// 有效视图与有界 flags 在本机/远端必须是同一套语义，且过滤发生在存储层：
-/// 本用例用 SQLite 扮演的远端服务端真跑一遍生产语句。
+/// 本用例在 PostgreSQL 上执行生产语句。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_active_snapshot_and_bounded_flags_filter_at_the_storage_layer() {
-    use super::super::environment::RemoteWorkspaceEnvironment;
+    use super::environment::RemoteWorkspaceEnvironment;
     use peri_acp_types::messages::BaseMessage;
     use peri_acp_types::session_resources::{
         FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
@@ -688,44 +632,7 @@ async fn remote_active_snapshot_and_bounded_flags_filter_at_the_storage_layer() 
     use peri_acp_types::workspace::SessionBinding;
 
     let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("filter-wire.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in super::super::session_schema::initialization_plan() {
-        sqlx::query(statement.sql).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(super::super::ledger::CREATE_OP_LEDGER_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'filter-test', ?2, 'now')")
-        .bind(schema::REMOTE_SCHEMA_VERSION)
-        .bind(schema::STORE_CONTRACT)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool: pool.clone(),
-        writes: AtomicUsize::new(0),
-        read_batches: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        fail_recovery_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        before_batch: Mutex::new(None),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
+    let (_, transport) = database().await;
     let machine = uuid::Uuid::new_v4().to_string();
     let workspace_dir = directory.path().join("workspace");
     std::fs::create_dir(&workspace_dir).unwrap();
@@ -819,7 +726,5 @@ async fn remote_active_snapshot_and_bounded_flags_filter_at_the_storage_layer() 
         .is_empty());
 }
 
-// rewind 有效视图合同（远端批）见子模块；本文件经 schema_upgrade_test.rs `include!` 装载，
-// 装载方式下需显式声明子模块。
 #[path = "full_remote_rewind_test.rs"]
 mod full_remote_rewind_tests;

@@ -35,18 +35,19 @@ bun add unstorage
 ```ts
 import { createStorage } from "unstorage";
 import {
-  BareHarnessConfig, ChatManager, ChatUserAction, ChatViewRegistry, TursoStorage,
+  BareHarnessConfig, ChatManager, ChatUserAction, ChatViewRegistry, PostgresStorage,
   type PeriConfig, type KvStorage,
 } from "@peri-code/sdk";
 
-// 1. Store 连接只声明一次；本地 peri-loom 的 authToken 取自容器内 connection.json 的 project_api_key。
+// 1. 原生 SDK 支持 PostgreSQL DSN。WASM 经可信的 Neon SQL-over-HTTP 端点访问同一数据库。
+// 托管 Neon 的端点可自动推导；自托管代理请设置 PERI_STORAGE_HTTP_ENDPOINT。
 const storeConnection = {
-  url: process.env.PERI_STORAGE_URL ?? "http://127.0.0.1:8091/db/local_default/demo/main",
-  authToken: process.env.PERI_STORAGE_TOKEN!,
+  url: process.env.PERI_STORAGE_URL!,
+  httpEndpoint: process.env.PERI_STORAGE_HTTP_ENDPOINT,
 };
 
 // 2. SDK 会话目录（只读）；store.storage 复用同一连接配置，写入仍由 Peri 完成。
-const database = new TursoStorage(storeConnection);
+const database = new PostgresStorage(storeConnection);
 
 // 3. Session ownership：只需 getItem/setItem/removeItem；多实例必须换共享 driver。
 const kv: KvStorage = createStorage();
@@ -160,8 +161,8 @@ await database.close(); // Manager 不关闭注入的 database
 | `ChatManager` | `store`、`database`、`kv`、`chatConfig.runtime` | `chatConfig.session`、`chatConfig.lifecycle` |
 | `createChat` | `workspace`、`agent` | `sessionPath`、`session`、`lifecycle`、`runtime`、`payloadBudgets` |
 
-- `store.storage` 是 Peri 写侧 Store，`database` 是 SDK 只读会话目录；`TursoStorage` 同时提供（实例给 `database`，`storageConfig` 给 `store.storage`）。
-- `database` 的连接归宿主所有：`manager.shutdown()` 只结算 Chat，不关闭注入实例；同一进程内重建 Manager 前必须调用 `database.close()`（如 `TursoStorage.close()`），否则旧连接会一直保留。
+- `store.storage` 是 Peri 写侧 Store，`database` 是 SDK 只读会话目录；`PostgresStorage` 同时提供（实例给 `database`，`storageConfig` 给 `store.storage`）。
+- `database` 的连接归宿主所有：`manager.shutdown()` 只结算 Chat，不关闭注入实例；同一进程内重建 Manager 前必须调用 `database.close()`（如 `PostgresStorage.close()`），否则旧连接会一直保留。
 - `kv` 只需 `getItem`/`setItem`/`removeItem`；`unstorage` 的 `Storage` 直接满足。进程内 memory 只适合单进程，多实例必须换共享 driver 并由路由层串行化。
 - `machineId` 是宿主持久化的执行环境身份，不是 session/workspace id；每个 WASM 实例只使用一个 `machineId`。
 - per-chat `agent.cwd` 由 `workspace.runtimePath` 派生；`agent` 顶层不能声明 `storage`/`machineId`（由 Manager 注入）；每个 Chat 独立深拷贝。

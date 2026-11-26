@@ -1,6 +1,6 @@
 //! peri-sessions — 会话持久化子模块（自 peri-agent/src/thread 迁入）。
 //!
-//! Native 可使用 SQLite 数据/执行面或 Turso 远端数据；WASM 使用 Turso 远端数据
+//! Native 可使用 SQLite 数据/执行面或 PostgreSQL 远端数据；WASM 使用 PostgreSQL HTTP 远端数据
 //! 与虚拟工作区执行面。具体后端由部署装配入口选择。
 //! 契约类型（`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags`）位于
 //! peri-acp-types（接口契约归 peri-acp-types），本模块仅实现，不解释业务语义。
@@ -29,8 +29,11 @@ pub(crate) use machine::set_explicit as set_explicit_machine_id;
 mod mq_rows;
 mod open;
 mod remote;
+#[cfg(not(target_os = "emscripten"))]
 mod schema_cleanup;
+#[cfg(not(target_os = "emscripten"))]
 mod schema_shape;
+#[cfg(not(target_os = "emscripten"))]
 mod storage_v2_plan;
 // `CredentialError` 只做 crate 内最小 re-export：分类（`classify_open_failure`）要按类型认出
 // 「凭证来源不可用」，但凭证类型不进公共 API，也不向消费侧暴露 SDK 类型或凭证值。
@@ -48,17 +51,6 @@ pub use resources::SessionResourcesImpl;
 pub use sqlite_store::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError, SqliteThreadStore};
 
 pub(crate) use open::{AccessIntent, LocatorError, ResolvedLocator, SessionStoreOpenRequest};
-
-#[cfg(target_os = "emscripten")]
-pub(crate) fn remote_engine_turso() -> remote::RemoteEngine {
-    remote::RemoteEngine::Turso
-}
-#[cfg(target_os = "emscripten")]
-pub(crate) fn credential_from_value(
-    value: String,
-) -> Result<remote::SessionStoreCredential, remote::CredentialError> {
-    remote::SessionStoreCredential::try_new(value)
-}
 
 #[cfg(not(target_os = "emscripten"))]
 use std::path::PathBuf;

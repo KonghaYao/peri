@@ -10,7 +10,7 @@ export * from "./chat";
 
 export { BareHarnessConfig } from "../config/peri-bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
-export { TursoStorage } from "../storage/turso-storage";
+export { PostgresStorage } from "../storage/native-postgres-storage";
 export {
     SESSION_BY_ID_SQL,
     SESSION_LIST_SQL,

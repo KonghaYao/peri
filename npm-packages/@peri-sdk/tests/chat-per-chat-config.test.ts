@@ -49,7 +49,7 @@ function captureManager(options: {
     const ownership = new OwnershipProbe();
     const managerOptions: ChatManagerInternalOptions = {
         store: {
-            storage: options.storage ?? { url: "libsql://shared" },
+            storage: options.storage ?? { url: "postgresql://shared" },
             machineId: options.machineId ?? "machine-1",
         },
         database,
@@ -130,7 +130,7 @@ describe("per-chat agent", () => {
         };
         const manager = new ChatManager({
             store: {
-                storage: { url: "libsql://shared" },
+                storage: { url: "postgresql://shared" },
                 machineId: "machine-1",
             },
             database: new FakeDatabase(),
@@ -158,12 +158,12 @@ describe("per-chat agent", () => {
         const secondConfig = JSON.parse(starts[1]!.configJson!);
         expect(firstConfig).toEqual({
             cwd: "/workspace-a",
-            storage: { url: "libsql://shared" },
+            storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
         expect(secondConfig).toEqual({
             cwd: "/workspace-b",
-            storage: { url: "libsql://shared" },
+            storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
         expect(firstConfig.storage).not.toBe(secondConfig.storage);
@@ -178,7 +178,7 @@ describe("per-chat agent", () => {
         let sessions = 0;
         const manager = new ChatManager({
             store: {
-                storage: { url: "libsql://shared" },
+                storage: { url: "postgresql://shared" },
                 machineId: "machine-1",
             },
             database: new FakeDatabase(),
@@ -262,14 +262,14 @@ describe("per-chat agent", () => {
 
     test("per-chat agent cannot declare storage or machineId, even with Manager values", () => {
         const manager = createManager({
-            storage: { url: "libsql://shared" },
+            storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
 
         expect(() =>
             manager.createChat({
                 workspace: ROOT_WORKSPACE,
-                agent: { storage: { url: "libsql://other" } },
+                agent: { storage: { url: "postgresql://other" } },
             }),
         ).toThrow(/agent\.storage is Manager-scoped/);
         expect(() =>
@@ -289,7 +289,7 @@ describe("per-chat agent", () => {
             manager.createChat({
                 workspace: ROOT_WORKSPACE,
                 agent: {
-                    storage: { url: "libsql://shared" },
+                    storage: { url: "postgresql://shared" },
                     machineId: "machine-1",
                 },
             }),
@@ -380,7 +380,7 @@ describe("per-chat agent", () => {
         }> = [];
         const manager = new ChatManager({
             store: {
-                storage: { url: "libsql://shared" },
+                storage: { url: "postgresql://shared" },
                 machineId: "machine-1",
             },
             database: new FakeDatabase(),
@@ -408,7 +408,7 @@ describe("per-chat agent", () => {
         expect(calls[0]!.agentConfig).toEqual({
             cwd: "/workspace",
             settings: { chat: true },
-            storage: { url: "libsql://shared" },
+            storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
         expect(calls[0]!.signal).toBeDefined();

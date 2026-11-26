@@ -16,23 +16,18 @@
 //!   连接失效，adapter 按同一份打开事实重建，见 `generation` 与 `RemoteSessionData::store`），
 //!   再按同一份远端库**重开**新实例收敛。两段都必须给出同一个确定终态。
 //!
-//! P5 的静态部分（SDK 是否自动重试 mutating 请求）不是行为断言，结论写在母需求本轮小节里：
-//! `turso_serverless` 0.1.3 的源码里没有 retry/backoff/sleep 逻辑，我方也没有重试层，只有 20s
-//! 请求预算——预算超时归「结果未知」，不会推断为已生效。因此「同一次发送的重试」只可能是调用
-//! 方重新发起，而每次**新的领域调用**都会铸造新的操作 id（R1 的身份修正）。
-//!
 //! 安全与清理：只操作本轮 run 命名空间；合成工作区在系统临时目录；只输出计数、字节数与
 //! 类别名；不打印 locator、token、会话内容或凭证；结束按正常删除路径清理并复核计数为 0。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_limit_
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::sql::Value;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     AccessMode, ExecutionAvailability, NewSession, NewSessionMeta, PersistenceRecovery,
@@ -41,7 +36,6 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
-use turso_serverless::Value;
 
 use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
@@ -61,7 +55,7 @@ const IN_FLIGHT_BUDGET: Duration = Duration::from_millis(400);
 /// 不含任何 payload——账本里本来就没有会话内容。
 const LEDGER_STATS_SQL: &str = "SELECT COUNT(*), COALESCE(SUM(LENGTH(operation_id) + LENGTH(kind) \
      + LENGTH(digest) + LENGTH(state) + LENGTH(COALESCE(receipt, '')) + LENGTH(updated_at)), 0) \
-     FROM peri_op_ledger WHERE operation_id LIKE ?1";
+     FROM peri_op_ledger WHERE operation_id LIKE $1";
 
 /// 失败的步骤名 + 类别名：`unexpected failure: Timeout` 这样的一行读不出「卡在哪一步」，
 /// 而云实验的失败大多数是传输层瞬时问题，必须能区分「逻辑错」与「这一次网络不好」。
@@ -229,7 +223,7 @@ async fn ledger_stats(
 // ─── P6：超大单批写入 ────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_oversized_write_is_all_or_nothing() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-limit");
@@ -334,7 +328,7 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 // ─── P7：收据保留与空间成本 ──────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_receipts_are_retained_with_measured_cost() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-retain");
@@ -421,7 +415,7 @@ async fn retention_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 // ─── P5：在途请求被取消 ──────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_cancelled_write_applies_at_most_once() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-cancel");
@@ -539,7 +533,7 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
 // ─── 带父会话的新建输入 ──────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_remote_create_refuses_parent_input() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-parent");
@@ -569,13 +563,18 @@ async fn cloud_remote_create_refuses_parent_input() {
 async fn parent_input_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, String> {
     let env = fixture_env(run).await?;
     let session = create_session_at(target, &env).await?;
+    let workspace = step(
+        "resolve workspace",
+        session.facade.resolve_workspace(env.workspace.path()),
+    )
+    .await?;
     let child = ThreadId::from(format!("{run}-child"));
     let input = NewSession {
         thread_id: child.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         meta: NewSessionMeta {
             title: Some(format!("synthetic {run}-child")),
-            cwd: "/tmp/peri-cloud-synth".to_owned(),
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
             // 唯一被拒的形状：远程新建只接受 root，有父必须走 child 通路。
             parent_thread_id: Some(env.root.to_string()),
             hidden: true,
@@ -585,9 +584,9 @@ async fn parent_input_flow(target: &CloudTarget, run: &str) -> Result<Vec<String
         binding: SessionBinding {
             schema_version: SESSION_BINDING_VERSION,
             revision: 1,
-            project_id: peri_acp_types::workspace::ProjectId::new(),
-            workspace_id: peri_acp_types::workspace::WorkspaceId::new(),
-            cwd_relative_to_workspace: PathBuf::new(),
+            project_id: workspace.project_id,
+            workspace_id: workspace.workspace_id,
+            cwd_relative_to_workspace: workspace.relative_cwd,
         },
         frozen: peri_acp_types::session_resources::FrozenSnapshotBytes::new(format!(
             "{{\"frozen\":\"{run}-child\"}}"
@@ -619,7 +618,7 @@ async fn parent_input_flow(target: &CloudTarget, run: &str) -> Result<Vec<String
     let store = step("open raw connection", target.store(StoreAccess::ReadOnly)).await?;
     let batches = store
         .read_batch(vec![StatementSpec::new(
-            "SELECT COUNT(*) FROM threads WHERE id = ?1",
+            "SELECT COUNT(*) FROM threads WHERE id = $1",
             vec![Value::Text(child.to_string())],
         )])
         .await

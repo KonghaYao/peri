@@ -11,7 +11,33 @@
 //! 投影是幂等的：对已收缩的形态再投影结果不变，因此迁移、新建与 fork 自复制三条路径
 //! 可以共用同一份判定，不会出现双形态并存。
 
+use std::path::Path;
+
 use anyhow::{bail, Result};
+
+/// Stored execution roots may originate on a different operating system.
+pub(super) fn validate_saved_cwd(path: &Path) -> Result<()> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("legacy session path is not UTF-8"))?;
+    let posix_absolute = text.starts_with('/');
+    let windows_drive = text.as_bytes().get(1) == Some(&b':')
+        && text
+            .as_bytes()
+            .get(2)
+            .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
+        && text.as_bytes()[0].is_ascii_alphabetic();
+    let windows_unc = text.starts_with("\\\\")
+        && text[2..]
+            .split('\\')
+            .filter(|part| !part.is_empty())
+            .count()
+            >= 2;
+    if !posix_absolute && !windows_drive && !windows_unc {
+        bail!("legacy session path is not absolute");
+    }
+    Ok(())
+}
 
 /// 把创建证据收缩为最小执行根。输入可以是完整 `Discovery`、已收缩形态或两者的混合。
 ///
@@ -30,7 +56,7 @@ pub(super) fn project(raw: &str) -> Result<String> {
         .filter(|root| !root.is_empty())
         .ok_or_else(|| anyhow::anyhow!("binding evidence has no root"))?;
     // 证据可能由另一台主机写入（远端库跨 OS 迁移），不能按本机语法判绝对。
-    if crate::sessions::storage_v2_plan::validate_saved_cwd(std::path::Path::new(root)).is_err() {
+    if validate_saved_cwd(Path::new(root)).is_err() {
         bail!("binding evidence root is not absolute: {root:?}");
     }
     let projected = match object.get("kind").and_then(serde_json::Value::as_str) {

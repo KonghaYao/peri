@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::sql::Value;
 use async_trait::async_trait;
 use peri_acp_types::oauth_credentials::OAuthCredentialError;
 use peri_acp_types::oauth_credentials::OAuthCredentialPort;
@@ -7,7 +8,6 @@ use peri_acp_types::oauth_credentials::OAuthCredentialResult;
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::WorkspaceId;
-use turso_serverless::Value;
 
 use crate::sessions::canonical::{
     DELETE_ALL_OAUTH_CREDENTIALS_SQL, DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL,

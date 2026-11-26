@@ -14,10 +14,6 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
         // 与本地 adapter 同语义：先严格解析根（远端不退回自身），再读根子树的 working 候选。
         let root = self.root_of(id).await?;
-        // 旧形状（v10/v11 只读）没有两列工作快照：读不到工作意图就是零候选，不能猜成 working。
-        if self.legacy_shape {
-            return Ok(peri_acp_types::recovery::RecoveryScope::idle(root));
-        }
         let store = self.store().await?;
         let rows = store
             .fetch_rows(&session_sql::select_working_tree_statement(&root))
@@ -58,10 +54,6 @@ impl RemoteSessionData {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>> {
-        // 旧形状没有工作快照列：读不到工作意图就是零候选，不能猜成 idle。
-        if self.legacy_shape {
-            return Ok(Vec::new());
-        }
         let root = self.root_of(id).await?;
         let store = self.store().await?;
         let rows = store

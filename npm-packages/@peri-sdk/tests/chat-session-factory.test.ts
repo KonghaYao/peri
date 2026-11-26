@@ -31,7 +31,7 @@ function input(
             sessionId: "session-1",
             workspace: TEST_WORKSPACE,
             agent: {},
-            storage: { url: "libsql://session" },
+            storage: { url: "postgresql://session" },
         },
         database: new FakeDatabase(),
         ownership: new OwnershipProbe(),
@@ -134,7 +134,7 @@ describe("createChatSession", () => {
             {
                 target: {
                     ...base.target,
-                    storage: { url: "libsql://x", authToken: 1 as never },
+                    storage: { url: "postgresql://x", httpEndpoint: 1 as never },
                 },
             },
             { chatConfig: { runtime: { kind: "nope" } } as never },
@@ -203,7 +203,7 @@ describe("createChatSessionInternal seams", () => {
                 target: {
                     ...input().target,
                     agent: { settings: { chat: true } },
-                    storage: { url: "libsql://session", authToken: "token-1" },
+                    storage: { url: "postgresql://session", httpEndpoint: "https://proxy.example.org/sql" },
                 },
                 chatConfig: {
                     runtime: { kind: "wasm", env: { BASE: "1" } },
@@ -230,7 +230,7 @@ describe("createChatSessionInternal seams", () => {
         expect(snapshot).toMatchObject({
             cwd: "/workspace",
             settings: { chat: true },
-            storage: { url: "libsql://session", authToken: "token-1" },
+            storage: { url: "postgresql://session", httpEndpoint: "https://proxy.example.org/sql" },
             machineId: "machine-1",
         });
         expect(readChatSessionState(chat)?.sessionId).toBe("session-1");

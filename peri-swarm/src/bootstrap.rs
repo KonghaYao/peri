@@ -32,10 +32,10 @@
 //! | `PERI_SWARM_BIND` | gateway address, default `127.0.0.1:8080` |
 //! | `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` | opt-in switch for a non-loopback bind, default off |
 //! | `PERI_SWARM_API_KEY` | deployment bearer key (required) |
-//! | `PERI_SWARM_SESSION_STORE` | Peri session store locator `http(s)://…` (required) |
+//! | `PERI_SWARM_SESSION_STORE` | Peri session store PostgreSQL DSN (required) |
 //! | `PERI_SWARM_STATE_STORE` | Swarm state store locator `http(s)://…` (required, distinct) |
-//! | `PERI_SWARM_STORE_ENGINE` | remote engine name, default `turso` |
-//! | `PERI_SWARM_STORE_TOKEN_ENV` | **name** of the variable holding the store token (both databases) |
+//! | `PERI_SWARM_STORE_ENGINE` | remote engine name, default `postgres` |
+//! | `PERI_SWARM_STORE_TOKEN_ENV` | **name** of the variable holding the Swarm state store token |
 //! | `PERI_SWARM_MACHINE_ID` | stable machine UUID (required) |
 //! | `PERI_SWARM_WORKSPACE_ROOT` | absolute, normalized virtual workspace root |
 //! | `PERI_SWARM_MODEL` | optional deployment model |
@@ -73,18 +73,17 @@ use crate::actor::swarm;
 use crate::config::{
     is_env_var_name, is_loopback_endpoint, optional_non_empty, parse_bind,
     parse_bind_allow_non_loopback, parse_sse_heartbeat, validate_bun_url, validate_rivet_endpoint,
-    validate_rivet_identity, validate_store_locator, BunConfig, ConfigError, DeploymentApiKey,
-    ModelConfig, SessionStoreConfig, StoreAccess, SwarmConfig, API_KEY_ENV, BIND_ENV,
-    BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV, MODEL_ENV,
-    WORKSPACE_ROOT_ENV,
+    validate_rivet_identity, validate_state_store_locator, BunConfig, ConfigError,
+    DeploymentApiKey, ModelConfig, PostgresLocator, SessionStoreConfig, StoreAccess, SwarmConfig,
+    API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV,
+    MODEL_ENV, WORKSPACE_ROOT_ENV,
 };
 use crate::gateway::{RivetServiceConfig, RivetSwarmService};
 use crate::http::{build_router, AppState};
 use crate::sandbox::SandboxClientConfig;
 use crate::store::{SwarmStateStore, SwarmStateStoreConfig, SwarmStore};
 
-/// Remote Loom locator for the Peri session store
-/// (`http://127.0.0.1:<port>/db/<tenant>/<database>/<branch>/`).
+/// PostgreSQL DSN for the Peri session store.
 pub const SESSION_STORE_ENV: &str = "PERI_SWARM_SESSION_STORE";
 /// Remote Loom locator for the **Swarm state** database (S6c1a).
 ///
@@ -101,7 +100,7 @@ pub const MACHINE_ID_ENV: &str = "PERI_SWARM_MACHINE_ID";
 pub const SETTINGS_JSON_ENV: &str = "PERI_SWARM_SETTINGS_JSON";
 
 pub const DEFAULT_BOOTSTRAP_BIND: &str = "127.0.0.1:8080";
-pub const DEFAULT_STORE_ENGINE: &str = "turso";
+pub const DEFAULT_STORE_ENGINE: &str = "postgres";
 
 /// Rivet engine endpoint (M1). A local engine is the default; an external one
 /// is reachable through the same configuration surface.
@@ -283,7 +282,7 @@ pub enum BootstrapError {
 pub struct BootstrapConfig {
     pub bind_addr: SocketAddr,
     pub api_key: DeploymentApiKey,
-    pub session_store_locator: Url,
+    pub session_store_locator: PostgresLocator,
     pub state_store_locator: Url,
     pub store_engine: String,
     pub store_token_env: String,
@@ -324,7 +323,7 @@ impl BootstrapConfig {
 
         let locator_raw =
             lookup(SESSION_STORE_ENV).ok_or(ConfigError::MissingEnv(SESSION_STORE_ENV))?;
-        let session_store_locator = validate_store_locator(&locator_raw, SESSION_STORE_ENV)?;
+        let session_store_locator = PostgresLocator::parse(&locator_raw, SESSION_STORE_ENV)?;
 
         // The Swarm facts have their own database (S6c1a). Both locators are
         // required: a missing state store is a startup error, and pointing both
@@ -332,16 +331,16 @@ impl BootstrapConfig {
         // store, which is exactly what the split avoids.
         let state_locator_raw =
             lookup(STATE_STORE_ENV).ok_or(ConfigError::MissingEnv(STATE_STORE_ENV))?;
-        let state_store_locator = validate_store_locator(&state_locator_raw, STATE_STORE_ENV)?;
-        if same_store_locator(&state_store_locator, &session_store_locator) {
-            return Err(ConfigError::Invalid {
-                variable: STATE_STORE_ENV,
-                reason: format!("must name a database separate from {SESSION_STORE_ENV}"),
-            });
-        }
-
+        let state_store_locator =
+            validate_state_store_locator(&state_locator_raw, STATE_STORE_ENV)?;
         let store_engine = optional_non_empty(lookup(STORE_ENGINE_ENV), STORE_ENGINE_ENV)?
             .unwrap_or_else(|| DEFAULT_STORE_ENGINE.to_owned());
+        if !matches!(store_engine.as_str(), "postgres" | "postgresql") {
+            return Err(ConfigError::Invalid {
+                variable: STORE_ENGINE_ENV,
+                reason: "expected postgres or postgresql".to_owned(),
+            });
+        }
 
         // The token is a source, never a value: validate the name, then require
         // the named variable to be present and non-empty without keeping it.
@@ -481,7 +480,6 @@ impl BootstrapConfig {
     fn session_store_deployment(&self) -> SessionStoreDeployment {
         SessionStoreDeployment::from_locator(self.session_store_locator.as_str())
             .with_engine(self.store_engine.clone())
-            .with_credential_env(self.store_token_env.clone())
     }
 
     fn state_store_config(&self) -> SwarmStateStoreConfig {
@@ -515,7 +513,7 @@ impl BootstrapConfig {
             session_store: SessionStoreConfig {
                 locator: Some(self.session_store_locator.clone()),
                 engine: self.store_engine.clone(),
-                credential_env: Some(self.store_token_env.clone()),
+                credential_env: None,
                 access: StoreAccess::ReadWrite,
             },
             bun: self.bun.clone(),
@@ -889,15 +887,6 @@ fn validate_bun_token(value: &str, variable: &'static str) -> Result<(), ConfigE
         });
     }
     Ok(())
-}
-
-/// Two locators name one database when scheme, host, port and path agree.
-/// The trailing slash is not part of the identity (`…/main/` == `…/main`).
-fn same_store_locator(left: &Url, right: &Url) -> bool {
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.port_or_known_default() == right.port_or_known_default()
-        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
 }
 
 /// Flatten one finished server task into a diagnosable reason.

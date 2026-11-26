@@ -6,9 +6,7 @@
 use super::{SqliteConnectOptions, SqliteThreadStore, ThreadMeta};
 use peri_acp_types::store::ThreadStore;
 
-use crate::sessions::canonical::{
-    CREATE_THREAD_MQ_ORDER_INDEX_SQL, CURRENT_SCHEMA_VERSION, THREADS_V14_COLUMNS,
-};
+use crate::sessions::canonical::{CURRENT_SCHEMA_VERSION, THREADS_V14_COLUMNS};
 use peri_acp_types::thread::WorkState;
 use sqlx::{Connection, SqliteConnection};
 use std::path::{Path, PathBuf};
@@ -254,10 +252,7 @@ async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
     .fetch_one(&mut connection)
     .await
     .unwrap();
-    assert_eq!(
-        mq_index, 1,
-        "{CREATE_THREAD_MQ_ORDER_INDEX_SQL} 必须重放一次"
-    );
+    assert_eq!(mq_index, 1, "升级后必须有 idx_thread_mq_order");
     let (usage, state): (Option<i64>, String) =
         sqlx::query_as("SELECT context_usage_tokens, work_state FROM threads WHERE id = 'session'")
             .fetch_one(&mut connection)

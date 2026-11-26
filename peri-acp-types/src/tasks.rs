@@ -638,6 +638,12 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         delivery: OnBgCompleteFn,
     ) -> Result<bool, String>;
 
+    /// Whether the synchronous retry pass may have work. Implementations without a
+    /// queue probe retain their existing retry behavior.
+    fn has_pending_deliveries(&self) -> bool {
+        true
+    }
+
     /// 重试保留的结果，返回已成功交付的数量，不重跑任务执行。
     fn retry_pending_deliveries(&self) -> usize;
 
@@ -750,6 +756,10 @@ impl TaskManager for NoopTaskManager {
         _delivery: OnBgCompleteFn,
     ) -> Result<bool, String> {
         Err("task completion delivery is unavailable".into())
+    }
+
+    fn has_pending_deliveries(&self) -> bool {
+        false
     }
 
     fn retry_pending_deliveries(&self) -> usize {

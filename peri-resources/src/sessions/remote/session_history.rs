@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     RewindBoundary, RewindOutcome, SessionResourceError, SessionResourceErrorKind,
@@ -34,7 +35,6 @@ use peri_acp_types::store::MessageFlags;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::Value;
 
 use super::session_codec as codec;
 use super::session_data::RemoteSessionData;
@@ -45,7 +45,7 @@ use crate::sessions::canonical;
 
 /// 会话不存在：中止整批（归 `NotFound`）。
 const GUARD_SESSION_ABSENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
-    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
+    SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = $1)";
 
 /// 目标条目不属于本会话（不存在，或属于别的会话）：中止整批。
 ///
@@ -53,22 +53,19 @@ const GUARD_SESSION_ABSENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
 /// （谓词成立 → 整批回滚；不成立 → 一行都不插）。
 pub(super) const GUARD_MESSAGE_NOT_IN_SESSION_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE NOT EXISTS (
-        SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2)";
+        SELECT 1 FROM messages WHERE thread_id = $1 AND message_id = $2)";
 
 /// 条目存在但属于别的会话：中止整批（「精确移除」不得跨会话命中）。
 const GUARD_MESSAGE_FOREIGN_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE EXISTS (
-        SELECT 1 FROM messages WHERE message_id = ?1 AND thread_id <> ?2)";
+        SELECT 1 FROM messages WHERE message_id = $1 AND thread_id <> $2)";
 
 /// rewind 的删除下界必须仍是批外读到的**同一行**：中止整批。
 ///
-/// 边界 `rowid` 是在批外解析的，而删掉尾部行之后新追加的行会复用这些 `rowid`
-/// （本机同一事实，见 `HISTORY_PAGE_ROWS_SQL` 的注记）。少了这条守卫，一次并发追加
-/// 的合规条目会落进 `rowid >= 边界` 的删除区间，被这次 rewind 一并删掉——它从未被
-/// 本次操作看见，也没有任何前置一致读或清零守卫能拦住它。
+/// The transaction verifies both the boundary ID and its original insertion position.
 const GUARD_BOUNDARY_ROWID_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE NOT EXISTS (
-        SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3)";
+        SELECT 1 FROM messages WHERE thread_id = $1 AND message_id = $2 AND rowid = $3)";
 
 // ─── 效果语句 ─────────────────────────────────────────────────────────────────
 
@@ -79,35 +76,35 @@ const GUARD_BOUNDARY_ROWID_SQL: &str = "INSERT INTO peri_store_meta(singleton)
 /// 「先读序号再写」的往返，也不需要远端曾经那列显式 `ordinal`。
 const APPEND_MESSAGE_SQL: &str = "INSERT INTO messages
     (message_id, thread_id, role, content, truncated, excluded, projection)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+    VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
 /// 改写一条条目的 flags（投影与 compact 的 flag 更新共用同一形状）。
 pub(super) const UPDATE_FLAGS_SQL: &str = "UPDATE messages
-    SET truncated = ?1, excluded = ?2, projection = ?3
-    WHERE thread_id = ?4 AND message_id = ?5";
+    SET truncated = $1, excluded = $2, projection = $3
+    WHERE thread_id = $4 AND message_id = $5";
 
 /// 重数派生计数并推进 `updated_at`（与本机 `refresh_history_derivations` 同一规则，
 /// 同一条语句在两种执行器上执行）。
-const REFRESH_COUNTS_SQL: &str = "UPDATE threads SET updated_at = ?1,
-    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
-    WHERE id = ?2";
+const REFRESH_COUNTS_SQL: &str = "UPDATE threads SET updated_at = $1,
+    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = $2)
+    WHERE id = $2";
 
 /// 自动标题：只在标题仍缺失时补一次（本机同一规则：`title IS NULL` 才写）。
 const SET_TITLE_IF_ABSENT_SQL: &str =
-    "UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL";
+    "UPDATE threads SET title = $1 WHERE id = $2 AND title IS NULL";
 
 /// rewind 两个显式边界：比较按 `rowid`（canonical 历史顺序的载体，与本机同一句形态）。
-const REWIND_KEEP_THROUGH_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2";
-const REWIND_REMOVE_FROM_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2";
+const REWIND_KEEP_THROUGH_SQL: &str = "DELETE FROM messages WHERE thread_id = $1 AND rowid > $2";
+const REWIND_REMOVE_FROM_SQL: &str = "DELETE FROM messages WHERE thread_id = $1 AND rowid >= $2";
 
 /// 精确移除单条条目。
-const REMOVE_MESSAGE_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+const REMOVE_MESSAGE_SQL: &str = "DELETE FROM messages WHERE thread_id = $1 AND message_id = $2";
 
 // ─── 前置一致读（只读） ────────────────────────────────────────────────────────
 
-const SELECT_MESSAGE_OWNER_SQL: &str = "SELECT thread_id FROM messages WHERE message_id = ?1";
+const SELECT_MESSAGE_OWNER_SQL: &str = "SELECT thread_id FROM messages WHERE message_id = $1";
 const SELECT_ROWID_SQL: &str =
-    "SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+    "SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $2";
 
 impl RemoteSessionData {
     /// 全局消息主键承担并发去重；冲突后的精确读区分重放与内容碰撞。
@@ -141,7 +138,7 @@ impl RemoteSessionData {
         message_id: MessageId,
     ) -> SessionResourceResult<Option<(String, String)>> {
         let statement = StatementSpec::new(
-            "SELECT thread_id, content FROM messages WHERE message_id = ?1",
+            "SELECT thread_id, content FROM messages WHERE message_id = $1",
             vec![Value::Text(message_label(message_id))],
         );
         let store = self.store().await?;
@@ -353,7 +350,7 @@ impl RemoteSessionData {
             return Ok(RewindOutcome::BoundaryMissing);
         };
         let tail_rows = self.store().await?.fetch_rows(&StatementSpec::new(
-            "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            "SELECT message_id, rowid FROM messages WHERE thread_id = $1 ORDER BY rowid DESC LIMIT 1",
             vec![Value::Text(id.clone())],
         )).await?;
         let tail = tail_rows.first().ok_or_else(|| {
@@ -375,8 +372,8 @@ impl RemoteSessionData {
             RewindBoundary::RemoveFrom(_) => (REWIND_REMOVE_FROM_SQL, "remove_from"),
         };
         let select = match boundary {
-            RewindBoundary::KeepThrough(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
-            RewindBoundary::RemoveFrom(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND rowid < ?2 ORDER BY rowid",
+            RewindBoundary::KeepThrough(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = $1 AND rowid <= $2 ORDER BY rowid",
+            RewindBoundary::RemoveFrom(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = $1 AND rowid < $2 ORDER BY rowid",
         };
         let rows = self
             .store()
@@ -399,14 +396,14 @@ impl RemoteSessionData {
         let updates = peri_acp_types::store::history::rewind_projection_updates(&retained, &unique);
         let mut effects = Vec::with_capacity(updates.len() * 2 + retained.len() + 3);
         effects.push(StatementSpec::new(
-            "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3 AND rowid = (SELECT MAX(rowid) FROM messages WHERE thread_id = ?1))",
+            "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = $1 AND message_id = $2 AND rowid = $3 AND rowid = (SELECT MAX(rowid) FROM messages WHERE thread_id = $1))",
             vec![Value::Text(id.clone()), tail[0].clone(), tail[1].clone()],
         ));
         // Every dependency snapshot is guarded before deletion, preventing concurrent flags
         // from being silently overwritten by a plan computed against older evidence.
         for row in &rows {
             effects.push(StatementSpec::new(
-                "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND truncated = ?3 AND excluded = ?4 AND projection IS ?5)",
+                "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = $1 AND message_id = $2 AND truncated = $3 AND excluded = $4 AND projection IS NOT DISTINCT FROM $5)",
                 vec![Value::Text(id.clone()), row[0].clone(), row[1].clone(), row[2].clone(), row[3].clone()],
             ));
         }
@@ -425,7 +422,7 @@ impl RemoteSessionData {
         ));
         // rewind 退回历史边界：仍待发的 MQ 行属于被退回的那段上下文，同一批清理。
         effects.push(StatementSpec::new(
-            crate::sessions::canonical::DELETE_THREAD_MQ_BY_THREAD_SQL,
+            canonical::DELETE_THREAD_MQ_BY_THREAD_SQL,
             vec![Value::Text(id.as_str().to_owned())],
         ));
         for (message, flags) in &updates {
@@ -619,7 +616,7 @@ pub(super) fn check_reminder_row(
 
 // ─── 语句组装 ─────────────────────────────────────────────────────────────────
 
-/// 追加语句：`?1` 消息 id、`?2` 会话 id、`?3` role、`?4` 内容、`?5..?7` 默认 flags。
+/// 追加语句：`$1` 消息 id、`$2` 会话 id、`$3` role、`$4` 内容、`$5..$7` 默认 flags。
 fn append_statement(id: &ThreadId, message: MessageId, content: &str, role: &str) -> StatementSpec {
     StatementSpec::new(
         APPEND_MESSAGE_SQL,
@@ -761,7 +758,7 @@ mod tests {
 
     /// 每条语句的占位符个数必须与它绑定的参数个数一致：这是「静态 SQL + 全绑定」的可核对形式。
     fn placeholders(sql: &str) -> usize {
-        sql.matches('?').count()
+        sql.matches('$').count()
     }
 
     /// 值只能走绑定参数：SQL 文本里不得出现字符串字面量（那才是把内容拼进语句）。
@@ -777,10 +774,10 @@ mod tests {
             (GUARD_MESSAGE_FOREIGN_SQL, 2),
             // 边界守卫同时钉住会话、条目与**批外读到的那个 rowid** 三个绑定值。
             (GUARD_BOUNDARY_ROWID_SQL, 3),
-            // 追加语句里 `?2`（会话 id）被主查询与取序号的子查询共用，因此是 7 个占位符。
+            // 追加语句里 `$2`（会话 id）被主查询与取序号的子查询共用，因此是 7 个占位符。
             (APPEND_MESSAGE_SQL, 7),
             (UPDATE_FLAGS_SQL, 5),
-            // 同一次「重数 + 推进时间戳」里 `?2` 出现两次。
+            // 同一次「重数 + 推进时间戳」里 `$2` 出现两次。
             (REFRESH_COUNTS_SQL, 3),
             (SET_TITLE_IF_ABSENT_SQL, 2),
             (REWIND_KEEP_THROUGH_SQL, 2),
@@ -810,19 +807,19 @@ mod tests {
         }
         // 会话缺失：谓词是「不存在」；跨会话命中：谓词是「存在且属于别人」。
         assert!(GUARD_SESSION_ABSENT_SQL.contains("NOT EXISTS"));
-        assert!(GUARD_MESSAGE_NOT_IN_SESSION_SQL.contains("thread_id = ?1 AND message_id = ?2"));
-        assert!(GUARD_MESSAGE_FOREIGN_SQL.contains("thread_id <> ?2"));
-        // 删除下界：边界行必须仍以**批外读到的那个 rowid** 存在（rowid 会被复用）。
+        assert!(GUARD_MESSAGE_NOT_IN_SESSION_SQL.contains("thread_id = $1 AND message_id = $2"));
+        assert!(GUARD_MESSAGE_FOREIGN_SQL.contains("thread_id <> $2"));
+        // 删除下界：边界行必须仍以**批外读到的那个 rowid** 存在。
         assert!(
-            GUARD_BOUNDARY_ROWID_SQL.contains("thread_id = ?1 AND message_id = ?2 AND rowid = ?3")
+            GUARD_BOUNDARY_ROWID_SQL.contains("thread_id = $1 AND message_id = $2 AND rowid = $3")
         );
     }
 
     /// 两个 rewind 边界只差一个比较符：`KeepThrough` 保留到该条、`RemoveFrom` 从该条起删。
     #[test]
     fn rewind_boundaries_differ_only_in_the_comparison() {
-        assert!(REWIND_KEEP_THROUGH_SQL.ends_with("rowid > ?2"));
-        assert!(REWIND_REMOVE_FROM_SQL.ends_with("rowid >= ?2"));
+        assert!(REWIND_KEEP_THROUGH_SQL.ends_with("rowid > $2"));
+        assert!(REWIND_REMOVE_FROM_SQL.ends_with("rowid >= $2"));
     }
 
     /// 操作身份必须区分「同内容的两批追加」：只按内容摘要会让第二批被当成重放静默跳过。

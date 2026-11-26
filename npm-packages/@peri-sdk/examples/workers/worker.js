@@ -12,7 +12,7 @@
  *
  * 队列路径的执行由 Peri mailbox 调度：入队回执只说明已受理，turn 结束必须等
  * `peri/agent_event_done`，投递必须等 `peri/agent_event` 的 `user_input_delivered`。
- * Store 位置与凭证全部显式传入（`STORAGE_URL` / `STORAGE_TOKEN` / `MODEL_URL`），不读宿主进程环境。
+ * Store 位置与凭证全部显式传入（`STORAGE_URL` / `STORAGE_HTTP_ENDPOINT` / `MODEL_URL`），不读宿主进程环境。
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
@@ -72,7 +72,7 @@ function hostConfig(env) {
       providers: [{ id: 'fixture', type: 'openai', apiKey: 'fixture-key', baseUrl: env.MODEL_URL }],
       profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
     } },
-    storage: { url: env.STORAGE_URL, authToken: env.STORAGE_TOKEN },
+    storage: { url: env.STORAGE_URL, httpEndpoint: env.STORAGE_HTTP_ENDPOINT },
     // smoke fixture 的固定身份；仅用于示例。
     machineId: '00000000-0000-4000-8000-000000000004',
   };

@@ -136,11 +136,22 @@ Workspace 身份，也不参与执行准入（v15 删除了与 `discovery.root_i
 缺快照的记录明确保持缺失，仅可按 ID 读取历史，不得用当前同名目录、本地旧登记或新的
 文件系统观测补造执行资格。
 
-选择 Turso locator 是持久化后端的全量切换：Machine、Workspace、Session、消息、
+选择 PostgreSQL locator 是持久化后端的全量切换：Machine、Workspace、Session、消息、
 绑定、执行发现快照与 Workspace 级 OAuth 只读写远端库。运行时可以读取机器 ID
 文件、访问工作目录并由 `peri-sdk` 管理执行唯一性；写打开和只读打开均不得打开、创建、
 升级或查询本地 SQLite（包括 `~/.peri/threads/threads.db`）。本地 locator 才使用
 本地 SQLite 及其迁移路径。
+
+原生部署通过 SQLx `PgPool` 使用 `postgres://` 或 `postgresql://` 连接串。将
+`--session-store 'postgresql://peri@db.example/peri'` 与
+`--session-store-token-env PERI_PG_PASSWORD` 一起使用时，从命名环境变量读取数据库密码。
+首次写打开在一个事务内初始化 PostgreSQL 表、操作账本与 store 身份。
+只读打开要求已有匹配的 schema。历史顺序存储在显式的 64 位消息序号中。
+WASM 通过部署指定的 PostgreSQL HTTP 接口执行相同语句。
+
+两端共享 SessionDataPort 和可移植的参数化 SQL。共享查询采用 SQLx SQLite 和
+PostgreSQL 都识别的 `$1` 序号绑定。方言差异（例如 JSON 操作、数据库目录与
+事务锁）在后端实现中表达。旧远程 SQLite 的数据需要单独导出与迁移。
 
 机器、Workspace 与 Session 的归属关系是持久事实：普通 load、resume、列表查询
 和更改归档状态都不得重写 `machine_id`、`path` 或 `workspace_id`。需要跨机器或
@@ -357,7 +368,7 @@ SQL 的 `WHERE`/主键中使用。ACP 装配先由 Session 取得 Workspace ID�
 - 同机同路径目录对象重建：Workspace ID 不变，旧绑定的执行快照不被新发现覆盖；
   旧 Session 只要 cwd 仍可用就可继续执行，新 Session 保存新快照；项目沿用原
   workspace 行登记值（只有新路径才按 canonical locator 选择/复用项目）。
-- Turso 写打开、只读打开及冷恢复在全新或损坏本地 SQLite 的 HOME 均不访问本地库。
+- PostgreSQL 写打开、只读打开及冷恢复在全新或损坏本地 SQLite 的 HOME 均不访问本地库。
 - 旧本机库、旧远端库、跨 Machine 共用旧 Workspace UUID、Git 不可用与缺目录：
   迁移保存 ThreadId/消息/frozen，归档全 false；不确定归属或证据保持只读。
 - 旧远端由异机先升级：原机器仍能按 ID 读取历史；远端已有快照才可执行复核，

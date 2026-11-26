@@ -5,15 +5,15 @@ use super::{
     SessionResourceErrorKind, StatementSpec, Value,
 };
 
+use super::super::postgres_fixture::test_pool;
 use crate::sessions::canonical::{
-    CREATE_OAUTH_CREDENTIALS_TABLE_SQL, DELETE_ALL_OAUTH_CREDENTIALS_SQL,
-    DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL, SELECT_OAUTH_CREDENTIAL_SQL,
-    UPSERT_OAUTH_CREDENTIAL_SQL,
+    DELETE_ALL_OAUTH_CREDENTIALS_SQL, DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL,
+    SELECT_OAUTH_CREDENTIAL_SQL, UPSERT_OAUTH_CREDENTIAL_SQL,
 };
 use crate::sessions::data::SessionDataPort;
-use sqlx::{Connection, Row, SqliteConnection};
+use sqlx::{PgPool, Row};
 
-async fn execute(connection: &mut SqliteConnection, spec: StatementSpec) {
+async fn execute(connection: &PgPool, spec: StatementSpec) {
     let mut query = sqlx::query(spec.sql);
     for param in spec.params {
         match param {
@@ -24,7 +24,7 @@ async fn execute(connection: &mut SqliteConnection, spec: StatementSpec) {
     query.execute(connection).await.unwrap();
 }
 
-async fn read(connection: &mut SqliteConnection, spec: StatementSpec) -> Vec<Vec<Value>> {
+async fn read(connection: &PgPool, spec: StatementSpec) -> Vec<Vec<Value>> {
     let mut query = sqlx::query(spec.sql);
     for param in spec.params {
         match param {
@@ -41,41 +41,20 @@ async fn read(connection: &mut SqliteConnection, spec: StatementSpec) -> Vec<Vec
         .collect()
 }
 
-async fn database() -> SqliteConnection {
-    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
-    execute(
-        &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_MACHINES_TABLE_SQL),
-    )
-    .await;
-    execute(
-        &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_PROJECTS_TABLE_SQL),
-    )
-    .await;
-    execute(
-        &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_WORKSPACES_TABLE_SQL),
-    )
-    .await;
+async fn database() -> PgPool {
+    let pool = test_pool().await;
+    for statement in super::super::session_schema::initialization_plan() {
+        sqlx::query(statement.sql).execute(&pool).await.unwrap();
+    }
     sqlx::query("INSERT INTO machines VALUES ('test-machine', 'Test', 'known')")
-        .execute(&mut connection)
+        .execute(&pool)
         .await
         .unwrap();
     for id in ["machine", "first", "second"] {
-        sqlx::query("INSERT INTO workspaces (id, machine_id, path, path_source) VALUES (?1, 'test-machine', ?2, 'unverified')")
-            .bind(id)
-            .bind(format!("/test/{id}"))
-            .execute(&mut connection)
-            .await
-            .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, machine_id, path, path_source) VALUES ($1,'test-machine',$2,'unverified')")
+            .bind(id).bind(format!("/test/{id}")).execute(&pool).await.unwrap();
     }
-    execute(
-        &mut connection,
-        StatementSpec::bare(CREATE_OAUTH_CREDENTIALS_TABLE_SQL),
-    )
-    .await;
-    connection
+    pool
 }
 
 #[test]
@@ -123,79 +102,80 @@ fn sql_binds_all_dynamic_values() {
         _ => panic!("timestamp must be text"),
     }
     let debug = format!("{spec:?}");
-    for value in [principal, machine, key, "top-secret"] {
-        assert!(debug.contains(value));
+    for value in [principal, machine, key, "top-secret", payload] {
+        assert!(!debug.contains(value));
     }
-    assert!(debug.contains(&format!("{:?}", Value::Text(payload.into()))));
 }
 
 #[tokio::test]
-async fn sqlite_roundtrip_preserves_complete_json_and_updates_same_key() {
-    let mut connection = database().await;
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn postgres_roundtrip_preserves_complete_json_and_updates_same_key() {
+    let connection = database().await;
     let payload =
         r#"{ "access_token": "secret", "refresh_token": "refresh", "unknown": {"nested": true} }"#;
     let key = "server'; DELETE FROM mcp_oauth_credentials;--";
     execute(
-        &mut connection,
+        &connection,
         super::save_statement("local", "machine", key, payload),
     )
     .await;
     let rows = read(
-        &mut connection,
+        &connection,
         super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
     assert_eq!(super::decode_load(rows).unwrap().as_deref(), Some(payload));
     execute(
-        &mut connection,
+        &connection,
         super::save_statement("local", "machine", key, r#"{"access_token":"changed"}"#),
     )
     .await;
     let rows = read(
-        &mut connection,
+        &connection,
         super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "machine", None),
     )
     .await;
     assert_eq!(super::decode_list(rows).unwrap(), vec![key]);
     execute(
-        &mut connection,
+        &connection,
         super::statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
     let rows = read(
-        &mut connection,
+        &connection,
         super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
     assert!(super::decode_load(rows).unwrap().is_none());
     execute(
-        &mut connection,
+        &connection,
         super::statement(DELETE_OAUTH_CREDENTIAL_SQL, "local", "machine", Some(key)),
     )
     .await;
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn principal_and_machine_scope_isolate_all_crud() {
-    let mut connection = database().await;
+    let connection = database().await;
     for (principal, machine, payload) in [
         ("local", "first", r#"{"token":"first"}"#),
         ("local", "second", r#"{"token":"second"}"#),
         ("other", "first", r#"{"token":"other"}"#),
     ] {
         execute(
-            &mut connection,
+            &connection,
             super::save_statement(principal, machine, "same-key", payload),
         )
         .await;
     }
     execute(
-        &mut connection,
+        &connection,
         super::save_statement("local", "first", "another-key", "{}"),
     )
     .await;
     let rows = read(
-        &mut connection,
+        &connection,
         super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
@@ -204,7 +184,7 @@ async fn principal_and_machine_scope_isolate_all_crud() {
         vec!["another-key", "same-key"]
     );
     execute(
-        &mut connection,
+        &connection,
         super::statement(
             DELETE_OAUTH_CREDENTIAL_SQL,
             "local",
@@ -214,12 +194,12 @@ async fn principal_and_machine_scope_isolate_all_crud() {
     )
     .await;
     execute(
-        &mut connection,
+        &connection,
         super::statement(DELETE_ALL_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
     let rows = read(
-        &mut connection,
+        &connection,
         super::statement(LIST_OAUTH_CREDENTIALS_SQL, "local", "first", None),
     )
     .await;
@@ -229,7 +209,7 @@ async fn principal_and_machine_scope_isolate_all_crud() {
         ("other", "first", r#"{"token":"other"}"#),
     ] {
         let rows = read(
-            &mut connection,
+            &connection,
             super::statement(
                 SELECT_OAUTH_CREDENTIAL_SQL,
                 principal,
@@ -358,10 +338,11 @@ fn errors_discard_backend_detail() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn old_readonly_schema_query_does_not_create_table() {
-    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
-    sqlx::query("PRAGMA query_only = ON")
-        .execute(&mut connection)
+    let connection = test_pool().await;
+    sqlx::query("SET default_transaction_read_only = on")
+        .execute(&connection)
         .await
         .unwrap();
     let spec = super::statement(SELECT_OAUTH_CREDENTIAL_SQL, "local", "machine", Some("key"));
@@ -369,13 +350,13 @@ async fn old_readonly_schema_query_does_not_create_table() {
         .bind("local")
         .bind("machine")
         .bind("key")
-        .fetch_all(&mut connection)
+        .fetch_all(&connection)
         .await
         .is_err());
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'mcp_oauth_credentials'",
+        "SELECT COUNT(*) FROM pg_catalog.pg_tables WHERE schemaname = current_schema() AND tablename = 'mcp_oauth_credentials'",
     )
-    .fetch_one(&mut connection)
+    .fetch_one(&connection)
     .await
     .unwrap();
     assert_eq!(count, 0);
@@ -383,14 +364,6 @@ async fn old_readonly_schema_query_does_not_create_table() {
         super::storage_error(RemoteFailureClass::ServerError.into_session_resource_error()),
         OAuthCredentialError::Unavailable
     ));
-}
-
-#[test]
-fn writable_initialization_uses_shared_ddl() {
-    let plan = super::super::session_schema::initialization_plan();
-    assert!(plan
-        .iter()
-        .any(|spec| spec.sql == CREATE_OAUTH_CREDENTIALS_TABLE_SQL && spec.params.is_empty()));
 }
 
 #[tokio::test]

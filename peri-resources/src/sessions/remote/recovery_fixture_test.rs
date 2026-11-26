@@ -13,11 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::connection::{TransportError, TransportResult};
+use super::failure::RemoteFailureClass;
+use super::sql::Value;
 use async_trait::async_trait;
 use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::{Error as SdkError, Value};
 
 use super::connection::RemoteTransport;
 use super::generation::{ConnectionFactory, ConnectionGate};
@@ -247,19 +249,14 @@ impl FakeBackend {
                 None => Vec::new(),
             };
         }
-        if spec.sql
-            == session_sql::select_meta_statement("probe", session_sql::MetaProjection::Current).sql
-        {
+        if spec.sql == session_sql::select_meta_statement("probe").sql {
             return if self.session_row.load(Ordering::SeqCst) {
                 vec![vec![Value::Null; session_sql::META_COLUMN_COUNT]]
             } else {
                 Vec::new()
             };
         }
-        if spec.sql
-            == session_sql::select_session_statement("probe", session_sql::MetaProjection::Current)
-                .sql
-        {
+        if spec.sql == session_sql::select_session_statement("probe").sql {
             return if self.session_row.load(Ordering::SeqCst) {
                 vec![vec![Value::Null; session_sql::FACT_COLUMN_TOTAL]]
             } else {
@@ -280,11 +277,9 @@ struct FakeConnection {
 
 impl FakeConnection {
     /// 与 SDK 观察到的形状一致：被丢弃的在途请求之后，这条连接上的请求在连接层失败。
-    fn reject_if_dead(&self) -> turso_serverless::Result<()> {
+    fn reject_if_dead(&self) -> TransportResult<()> {
         if self.dead.load(Ordering::Acquire) {
-            return Err(SdkError::Http(
-                "fake connection: stream is unusable after an abandoned request".to_owned(),
-            ));
+            return Err(TransportError::Uncertain(RemoteFailureClass::Transport));
         }
         Ok(())
     }
@@ -317,7 +312,7 @@ impl Drop for DeadOnDrop<'_> {
 
 #[async_trait]
 impl RemoteTransport for FakeConnection {
-    async fn sql_values(&self, spec: &StatementSpec) -> turso_serverless::Result<Vec<Vec<Value>>> {
+    async fn sql_values(&self, spec: &StatementSpec) -> TransportResult<Vec<Vec<Value>>> {
         self.reject_if_dead()?;
         self.backend.retire_queued_generation();
         self.record(spec);
@@ -327,10 +322,7 @@ impl RemoteTransport for FakeConnection {
         Ok(self.backend.answer_read(spec))
     }
 
-    async fn managed_batch(
-        &self,
-        statements: Vec<StatementSpec>,
-    ) -> turso_serverless::Result<Vec<u64>> {
+    async fn managed_batch(&self, statements: Vec<StatementSpec>) -> TransportResult<Vec<u64>> {
         self.reject_if_dead()?;
         for spec in &statements {
             self.record(spec);
@@ -349,7 +341,7 @@ impl RemoteTransport for FakeConnection {
     async fn consistent_read(
         &self,
         statements: Vec<StatementSpec>,
-    ) -> turso_serverless::Result<Vec<Vec<Vec<Value>>>> {
+    ) -> TransportResult<Vec<Vec<Vec<Value>>>> {
         self.reject_if_dead()?;
         self.backend.retire_queued_generation();
         let mut sets = Vec::with_capacity(statements.len());
@@ -360,11 +352,7 @@ impl RemoteTransport for FakeConnection {
         Ok(sets)
     }
 
-    fn is_autocommit(&self) -> turso_serverless::Result<bool> {
-        Ok(true)
-    }
-
-    async fn close(&self) -> turso_serverless::Result<()> {
+    async fn close(&self) -> TransportResult<()> {
         self.backend
             .close_attempts
             .lock()
@@ -376,7 +364,7 @@ impl RemoteTransport for FakeConnection {
             release.await;
         }
         if self.backend.fail_close.load(Ordering::SeqCst) {
-            return Err(SdkError::Http("fake close failed".to_owned()));
+            return Err(TransportError::Uncertain(RemoteFailureClass::Transport));
         }
         self.backend.close_successes.fetch_add(1, Ordering::SeqCst);
         Ok(())

@@ -9,18 +9,19 @@ use peri_acp_types::session_resources::SessionResourceError;
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::session_resources::SessionResourceResult;
 
-pub(crate) const TAIL_SQL: &str = "SELECT message_id FROM messages WHERE thread_id = ?1 AND (?2 IS NULL OR message_id = ?2) ORDER BY rowid DESC LIMIT 1";
+pub(crate) const TAIL_SQL: &str = "SELECT message_id FROM messages WHERE thread_id = $1 AND (CAST($2 AS TEXT) IS NULL OR message_id = $2) ORDER BY rowid DESC LIMIT 1";
 pub(crate) const METADATA_SQL: &str = "SELECT message_id,
- CASE WHEN length(CAST(projection AS BLOB)) <= ?8 THEN projection ELSE NULL END,
- coalesce(length(CAST(projection AS BLOB)), 0)
- FROM messages WHERE thread_id = ?1
- AND rowid <= (SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2)
- AND (?3 IS NULL OR message_id = ?3)
- AND (?4 IS NULL OR rowid >= (SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?4))
- AND (?5 IS NULL OR rowid <= (SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?5))
- AND (?6 IS NULL OR rowid > (SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?6))
+ CASE WHEN octet_length(projection) <= $8 THEN projection ELSE NULL END,
+ coalesce(octet_length(projection), 0)
+ FROM messages WHERE thread_id = $1
+ AND rowid <= (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $2)
+ AND (CAST($3 AS TEXT) IS NULL OR message_id = $3)
+ AND (CAST($4 AS TEXT) IS NULL OR rowid >= (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $4))
+ AND (CAST($5 AS TEXT) IS NULL OR rowid <= (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $5))
+ AND (CAST($6 AS TEXT) IS NULL OR rowid > (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $6))
 
- ORDER BY rowid LIMIT ?7";
+ ORDER BY rowid LIMIT $7";
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) const CHUNK_SQL: &str =
     "SELECT substr(CAST(content AS BLOB), ?4 + 1, ?5), length(CAST(content AS BLOB))
  FROM messages WHERE thread_id = ?1 AND message_id = ?2
@@ -92,6 +93,7 @@ pub(crate) fn page(
 
 /// Grants are read only from the current session's frozen inherited flags. The
 /// requested anchor must be inside the persisted root range and committed tail.
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) const INHERITED_GRANT_SQL: &str = "SELECT root.value
  FROM threads child, json_each(child.inherited_context, '$.flags') flag,
  json_each(flag.value, '$.projection.archive_roots') root
@@ -106,7 +108,7 @@ pub(crate) const INHERITED_GRANT_SQL: &str = "SELECT root.value
 
 /// Validate range identities in the same read transaction as the bounded rows.
 pub(crate) const BOUNDS_SQL: &str =
-    "SELECT COUNT(*) FROM messages WHERE thread_id = ?1 AND message_id IN (?2, ?3, ?4, ?5)";
+    "SELECT COUNT(*) FROM messages WHERE thread_id = $1 AND message_id IN ($2, $3, $4, $5)";
 pub(crate) fn bound_identity_count(tail: MessageId, plan: &ArchiveMetadataQuery) -> i64 {
     [Some(tail), plan.first_anchor, plan.last_anchor, plan.after]
         .into_iter()

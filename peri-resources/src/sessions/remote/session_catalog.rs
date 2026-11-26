@@ -2,8 +2,8 @@
 
 use super::session_data::RemoteSessionData;
 use super::sql::StatementSpec;
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session_resources::SessionResourceResult;
-use turso_serverless::Value;
 
 impl RemoteSessionData {
     pub(super) async fn workspace_for_path(
@@ -11,16 +11,11 @@ impl RemoteSessionData {
         machine_id: &str,
         path: &str,
     ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
-        if self.legacy_shape {
-            return Err(super::session_data::unsupported_behavior(
-                "workspace ownership requires the current schema generation",
-            ));
-        }
         let row = self
             .store()
             .await?
             .fetch_row(&StatementSpec::new(
-                "SELECT id FROM workspaces WHERE machine_id = ?1 AND path = ?2",
+                "SELECT id FROM workspaces WHERE machine_id = $1 AND path = $2",
                 vec![
                     Value::Text(machine_id.to_owned()),
                     Value::Text(path.to_owned()),
@@ -39,11 +34,6 @@ impl RemoteSessionData {
     pub(super) async fn catalog_machines(
         &self,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
-        if self.legacy_shape {
-            return Err(super::session_data::unsupported_behavior(
-                "machine catalog requires the current schema generation",
-            ));
-        }
         use peri_acp_types::workspace::{MachineIdentityKind, MachineInfo};
         let store = self.store().await?;
         let rows = store
@@ -82,15 +72,10 @@ impl RemoteSessionData {
         &self,
         machine_id: &str,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
-        if self.legacy_shape {
-            return Err(super::session_data::unsupported_behavior(
-                "workspace catalog requires the current schema generation",
-            ));
-        }
         use peri_acp_types::workspace::{WorkspaceInfo, WorkspacePathSource};
         let store = self.store().await?;
         let rows = store.fetch_rows(&StatementSpec::new(
-            "SELECT id, path, path_source FROM workspaces WHERE machine_id = ?1 ORDER BY path, id",
+            "SELECT id, path, path_source FROM workspaces WHERE machine_id = $1 ORDER BY path, id",
             vec![Value::Text(machine_id.to_owned())],
         )).await?;
         rows.into_iter()
@@ -126,11 +111,6 @@ impl RemoteSessionData {
         machine_id: &str,
         name: &str,
     ) -> SessionResourceResult<()> {
-        if self.legacy_shape {
-            return Err(super::session_data::unsupported_behavior(
-                "machine rename requires the current schema generation",
-            ));
-        }
         let name = name.trim();
         if name.is_empty() || name.len() > 200 {
             return Err(super::session_data::invalid_input(
@@ -142,7 +122,7 @@ impl RemoteSessionData {
                 "rename_machine",
                 &[machine_id.to_owned(), name.to_owned()],
                 vec![StatementSpec::new(
-                    "UPDATE machines SET name = ?1 WHERE id = ?2",
+                    "UPDATE machines SET name = $1 WHERE id = $2",
                     vec![
                         Value::Text(name.to_owned()),
                         Value::Text(machine_id.to_owned()),

@@ -2,13 +2,12 @@
 // parsing, connection management, discovery, and tool execution stay in Rust.
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createServer as createTcpServer } from 'node:net';
 import { writeFile } from 'node:fs/promises';
 import { lookupEnv } from './lib/local-store.mjs';
 
 const profile = process.env.PERI_WASM_PROFILE === 'debug' ? 'debug' : 'release';
 const output = new URL(`../target/wasm32-unknown-emscripten/${profile}/`, import.meta.url);
-let loom;
+let pgStore;
 let model;
 let acp;
 const modelRequests = [];
@@ -27,15 +26,6 @@ function withTimeout(promise, label, milliseconds = 30_000) {
       timer = setTimeout(() => reject(new Error(`${label} timed out after ${milliseconds}ms`)), milliseconds);
     }),
   ]).finally(() => clearTimeout(timer));
-}
-
-async function unusedPort() {
-  const server = createTcpServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = server.address().port;
-  await new Promise((done) => server.close(done));
-  return port;
 }
 
 async function waitUntil(label, predicate) {
@@ -118,7 +108,7 @@ function modelEvent(response, message, finishReason) {
 }
 
 try {
-  loom = await lookupEnv({ port: await unusedPort() });
+  pgStore = await lookupEnv();
 
   model = createServer(async (request, response) => {
     const chunks = [];
@@ -162,7 +152,7 @@ try {
       meta_harness: { McpMiddleware: true, ToolSearch: true,
         PermissionMiddleware: false, HumanInTheLoopMiddleware: false, WorkspaceMiddleware: false },
     } },
-    storage: { url: loom.url, authToken: loom.token },
+    storage: { url: pgStore.url, httpEndpoint: pgStore.httpEndpoint },
     machineId: '00000000-0000-4000-8000-000000000003',
   })), 'start ACP Host');
   const wire = acpClient(acp);
@@ -193,7 +183,7 @@ try {
     toolCalls: toolCalls.length, notificationCount: wire.notifications.length }));
 } catch (error) {
   console.error(JSON.stringify({ passed: false, mcpMethods, modelCalls: modelRequests.length,
-    toolCalls, loomLog: (await loom?.logs?.()) ?? '' }));
+    toolCalls, pgStoreLog: (await pgStore?.logs?.()) ?? '' }));
   throw error;
 } finally {
   if (acp) {
@@ -201,5 +191,5 @@ try {
     acp.free();
   }
   if (model) await new Promise((done) => model.close(done));
-  if (loom) await loom.stop();
+  if (pgStore) await pgStore.stop();
 }

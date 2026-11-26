@@ -2,7 +2,7 @@
 //! 整批不生效并如实回报，而不是静默删掉一条本次操作从未看见的条目。清零侧同样钉住载荷
 //! 语义：被清零的行整条 `projection` 一并清掉，`truncated` 与未清零行的 flags 都原样。
 //!
-//! 夹具与 [`super::session_history_page_tests`] 同形：一个真 SQLite 池扮演远端服务端，走真实
+//! 夹具与 [`super::session_history_page_tests`] 同形：隔离的 PostgreSQL 测试库，走真实
 //! 批次与账本（传输面的并发注入点 `before_batch` 见 `schema_upgrade_test.rs`）。四个观察点：
 //!
 //! | 用例 | 断言的事实 |
@@ -23,32 +23,33 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{ProjectId, ResolvedWorkspace, SessionBinding, WorkspaceId};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::PgPool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
 use super::mutation::{RemoteStore, StoreAccess};
+use super::postgres_fixture::PgTestTransport;
 use super::schema::{self, StoreId};
-use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 
 const REWIND_SESSION: &str = "remote-history-rewind";
 
 const SELECT_ROWID_SQL: &str =
-    "SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2";
-const COUNT_ROWS_SQL: &str = "SELECT COUNT(*) FROM messages WHERE thread_id = ?1";
+    "SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $2";
+const COUNT_ROWS_SQL: &str = "SELECT COUNT(*) FROM messages WHERE thread_id = $1";
 const COUNT_MESSAGE_SQL: &str =
-    "SELECT COUNT(*) FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+    "SELECT COUNT(*) FROM messages WHERE thread_id = $1 AND message_id = $2";
 const EXCLUDED_OF_SQL: &str =
-    "SELECT excluded FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+    "SELECT excluded FROM messages WHERE thread_id = $1 AND message_id = $2";
 /// 行级 flags 三列：清零是列级事实，直接读列才能证明 `projection` 真的变成 NULL。
 const FLAGS_OF_SQL: &str = "SELECT truncated, excluded, projection FROM messages
-    WHERE thread_id = ?1 AND message_id = ?2";
+    WHERE thread_id = $1 AND message_id = $2";
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn repeated_rewind_of_same_boundary_removes_the_new_suffix() {
     let history = messages(2);
-    let (_directory, transport, data) = remote_with_history(&history).await;
+    let (transport, data) = remote_with_history(&history).await;
     let id = REWIND_SESSION.to_string();
     let boundary = RewindBoundary::KeepThrough(history[0].id());
     data.rewind_history(&id, boundary, &[]).await.unwrap();
@@ -97,7 +98,7 @@ fn workspace(binding: &SessionBinding) -> ResolvedWorkspace {
 
 /// 与生产同一条重建路径的工厂：换代时重建到访问意图相同的一条连接。
 struct RewindFactory {
-    transport: Arc<SqliteTransport>,
+    transport: Arc<PgTestTransport>,
     access: StoreAccess,
     gate: Arc<ConnectionGate>,
 }
@@ -114,8 +115,8 @@ impl ConnectionFactory for RewindFactory {
     }
 }
 
-/// 夹具适配器：一个真 SQLite 池扮演远端服务端（当前契约的库，走真实批次与账本）。
-fn rewind_data(transport: &Arc<SqliteTransport>, access: StoreAccess) -> RemoteSessionData {
+/// 夹具适配器：隔离的 PostgreSQL 测试库（当前契约的库，走真实批次与账本）。
+fn rewind_data(transport: &Arc<PgTestTransport>, access: StoreAccess) -> RemoteSessionData {
     let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(transport.clone(), access, gate.mint(), gate.clone());
     RemoteSessionData::with_connection_for_test(
@@ -133,19 +134,9 @@ fn rewind_data(transport: &Arc<SqliteTransport>, access: StoreAccess) -> RemoteS
 /// 建库 + 一条新会话（历史为空时不发空批）。
 async fn remote_with_history(
     history: &[PersistedPayload],
-) -> (tempfile::TempDir, Arc<SqliteTransport>, RemoteSessionData) {
-    let directory = tempfile::tempdir().unwrap();
+) -> (Arc<PgTestTransport>, RemoteSessionData) {
     // 单连接足够：每个测试自己顺序使用这条夹具，不必与全量测试集的并行度抢连接。
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-history-rewind.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
+    let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
     for statement in super::session_schema::initialization_plan() {
         sqlx::query(statement.sql).execute(&pool).await.unwrap();
     }
@@ -157,13 +148,13 @@ async fn remote_with_history(
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'history-rewind-test', ?2, 'now')")
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, $1, 'history-rewind-test', $2, 'now')")
         .bind(schema::REMOTE_SCHEMA_VERSION)
         .bind(schema::STORE_CONTRACT)
         .execute(&pool)
         .await
         .unwrap();
-    let transport = Arc::new(SqliteTransport::for_test(pool));
+    let transport = Arc::new(PgTestTransport::for_test(pool));
     let data = rewind_data(&transport, StoreAccess::ReadWrite);
     let id: ThreadId = REWIND_SESSION.to_owned();
     let binding = binding();
@@ -189,10 +180,10 @@ async fn remote_with_history(
     if !history.is_empty() {
         data.append_history(&id, history).await.unwrap();
     }
-    (directory, transport, data)
+    (transport, data)
 }
 
-async fn rowid_of(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> i64 {
+async fn rowid_of(pool: &PgPool, id: &ThreadId, message: MessageId) -> i64 {
     sqlx::query_scalar(SELECT_ROWID_SQL)
         .bind(id.as_str())
         .bind(message.as_uuid().to_string())
@@ -201,7 +192,7 @@ async fn rowid_of(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> i64 {
         .unwrap()
 }
 
-async fn count_rows(pool: &SqlitePool, id: &ThreadId) -> i64 {
+async fn count_rows(pool: &PgPool, id: &ThreadId) -> i64 {
     sqlx::query_scalar(COUNT_ROWS_SQL)
         .bind(id.as_str())
         .fetch_one(pool)
@@ -209,7 +200,7 @@ async fn count_rows(pool: &SqlitePool, id: &ThreadId) -> i64 {
         .unwrap()
 }
 
-async fn count_message(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> i64 {
+async fn count_message(pool: &PgPool, id: &ThreadId, message: MessageId) -> i64 {
     sqlx::query_scalar(COUNT_MESSAGE_SQL)
         .bind(id.as_str())
         .bind(message.as_uuid().to_string())
@@ -218,7 +209,7 @@ async fn count_message(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> 
         .unwrap()
 }
 
-async fn excluded_of(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> i64 {
+async fn excluded_of(pool: &PgPool, id: &ThreadId, message: MessageId) -> i64 {
     sqlx::query_scalar(EXCLUDED_OF_SQL)
         .bind(id.as_str())
         .bind(message.as_uuid().to_string())
@@ -229,11 +220,7 @@ async fn excluded_of(pool: &SqlitePool, id: &ThreadId, message: MessageId) -> i6
 
 /// 行级 flags：`(truncated, excluded, projection JSON)`。载荷列必须是 `NULL`，而不是「解析
 /// 不出来」——本机与远端读路径都会把不可解析的载荷判成损坏，所以清不清得看列值本身。
-async fn row_flags(
-    pool: &SqlitePool,
-    id: &ThreadId,
-    message: MessageId,
-) -> (i64, i64, Option<String>) {
+async fn row_flags(pool: &PgPool, id: &ThreadId, message: MessageId) -> (i64, i64, Option<String>) {
     sqlx::query_as(FLAGS_OF_SQL)
         .bind(id.as_str())
         .bind(message.as_uuid().to_string())
@@ -245,8 +232,9 @@ async fn row_flags(
 /// 追加到不存在的会话：批内守卫中止整批，错误类别仍是 `NotFound`，
 /// 不能被守卫的约束拒绝折成 `InvalidInput`。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_append_to_a_missing_session_reports_not_found() {
-    let (_fixture, _transport, data) = remote_with_history(&[]).await;
+    let (_transport, data) = remote_with_history(&[]).await;
     let error = data
         .append_history(&"missing-remote-session".to_owned(), &messages(1))
         .await
@@ -259,9 +247,10 @@ async fn remote_append_to_a_missing_session_reports_not_found() {
 
 /// 未知边界：不删除、不清零、不报成功——本机与远端必须是同一个可观察结果。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_reports_a_missing_boundary_without_touching_history() {
     let history = messages(3);
-    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let (transport, data) = remote_with_history(&history).await;
     let id: ThreadId = REWIND_SESSION.to_owned();
     let unknown = BaseMessage::human("never stored").id();
     // 保留前缀里的排除必须活过这次调用：清零集合与删除同批，批没生效就一条都不能落。
@@ -296,13 +285,12 @@ async fn remote_rewind_reports_a_missing_boundary_without_touching_history() {
     );
 }
 
-/// F2 回归：边界 rowid 在批次之外读出，批次之前另一条连接删掉了边界行并追加了一条复用该
-/// rowid 的条目。没有批内守卫时，`rowid >= 边界` 的删除会命中这条**本次操作从未看见**的新
-/// 条目；有守卫时整批回滚，调用方拿到可区分的冲突（先重读再决定），而不是静默成功。
+/// Concurrent replacement of the rewind boundary must roll back the entire batch.
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_aborts_when_the_boundary_row_is_replaced_mid_flight() {
     let history = messages(3);
-    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let (transport, data) = remote_with_history(&history).await;
     let id: ThreadId = REWIND_SESSION.to_owned();
     let boundary = history[2].id();
     let retained = history[0].id();
@@ -320,7 +308,7 @@ async fn remote_rewind_aborts_when_the_boundary_row_is_replaced_mid_flight() {
     .unwrap();
     let boundary_rowid = rowid_of(&transport.pool, &id, boundary).await;
 
-    // 并发改动：删掉边界行（尾部行 → 它的 rowid 会被下一次插入复用），追加一条新条目。
+    // 并发改动：删掉边界行，追加一条新条目。
     // 语句文本是测试夹具自己拼的，不含外部输入。
     let replacement = MessageId::new();
     let session = id.as_str().replace('\'', "''");
@@ -358,11 +346,7 @@ async fn remote_rewind_aborts_when_the_boundary_row_is_replaced_mid_flight() {
         1,
         "整批回滚：清零不得单独落地"
     );
-    assert_eq!(
-        rowid_of(&transport.pool, &id, replacement).await,
-        boundary_rowid,
-        "复用 rowid 正是这条守卫要拦住的并发形态"
-    );
+    assert!(rowid_of(&transport.pool, &id, replacement).await > boundary_rowid);
 }
 
 /// 清零的远端语义：被清零的行**整条 `projection` 载荷一并清掉**（`superseded_by` 只在
@@ -373,11 +357,12 @@ async fn remote_rewind_aborts_when_the_boundary_row_is_replaced_mid_flight() {
 /// （`peri-agent/src/agent/compact_v2/full.rs`），写 flags 时用 `..Default::default()`
 /// 整体覆盖，被排除的行本来就不带渲染指令。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_clears_the_whole_projection_payload_of_cleared_rows() {
     // 历史形状：`A B | S1 | P | E | S2 | C`（A、B 由第一次 Full 排除，E 由第二次排除，
     // P 是第二次之前追加的普通条目，C 是最后一次追加）。
     let covered = messages(2);
-    let (_fixture, transport, data) = remote_with_history(&covered).await;
+    let (transport, data) = remote_with_history(&covered).await;
     let id: ThreadId = REWIND_SESSION.to_owned();
 
     let supersede = |summary: MessageId, truncated: bool| MessageFlags {
@@ -510,9 +495,10 @@ async fn remote_rewind_clears_the_whole_projection_payload_of_cleared_rows() {
 /// 本机 adapter 的同类路径先 `writable()` 再读边界（`sqlite_store/session_history_test.rs`
 /// 的只读用例断言同一个分类），远端必须同序，否则只读打开时一次写请求会以成功收场。
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_read_only_store_refuses_rewind_with_an_unknown_boundary() {
     let history = messages(2);
-    let (_fixture, transport, _writer) = remote_with_history(&history).await;
+    let (transport, _writer) = remote_with_history(&history).await;
     let reader = rewind_data(&transport, StoreAccess::ReadOnly);
     let id: ThreadId = REWIND_SESSION.to_owned();
     let unknown = BaseMessage::human("never stored").id();
@@ -534,12 +520,13 @@ async fn remote_read_only_store_refuses_rewind_with_an_unknown_boundary() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_rewind_revokes_micro_group_and_keeps_canonical_prefix() {
     use peri_acp_types::projection::{
         ArchiveGroupLink, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
     };
     let history = messages(2);
-    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let (transport, data) = remote_with_history(&history).await;
     let id: ThreadId = REWIND_SESSION.into();
     let anchor = history[1].id();
     let catalog = peri_acp_types::context_archive::build_catalog(
@@ -600,10 +587,11 @@ async fn remote_rewind_revokes_micro_group_and_keeps_canonical_prefix() {
 }
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_compaction_appended_root_and_projection_upgrade_are_atomic() {
     use peri_acp_types::projection::{ProjectionAction, ProjectionActionEntry, ProjectionTarget};
     let history = messages(1);
-    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let (transport, data) = remote_with_history(&history).await;
     let id: ThreadId = REWIND_SESSION.into();
     let summary = BaseMessage::human("Summary without IDs");
     let first = MessageFlags {

@@ -11,7 +11,7 @@ const config = {
     },
 };
 // session 的存储器配置，只需传递给 peri，peri 会自动连接
-const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken: "<secret>" });
+const storage = new PostgresStorage({ url: "postgresql://user:password@db.example.org/peri", httpEndpoint: "https://pg-proxy.example.org/sql" });
 
 // 宿主持久化的 UUID，标识逻辑执行环境；不要用 workspaceId/sessionId 代替。
 const machineId = "<stable-machine-uuid>";
@@ -29,7 +29,7 @@ const manager = new ChatManager({
         storage: storage.storageConfig,
         machineId,
     },
-    // 只读 Session 目录：TursoStorage 直接实现 ChatDatabase。
+    // 只读 Session 目录：PostgresStorage 直接实现 ChatDatabase。
     database: storage,
     kv: managedAgentStorage,
     chatConfig: {

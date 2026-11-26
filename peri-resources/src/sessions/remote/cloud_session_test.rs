@@ -18,12 +18,11 @@
 //! - 测试数据全部是本进程合成的短文本（不含真实历史、当前项目内容或凭证）。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_session_
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
@@ -35,13 +34,11 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::AgentStatus;
-use peri_acp_types::workspace::{
-    ProjectId, ScopedThreadQuery, SessionBinding, ThreadScope, WorkspaceId,
-};
+use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope};
 
 /// 实验一：写 → 重连（只读打开）读回全部事实 → 列举/树 → 只读拒绝 → 关闭。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_session_write_read_reconnect_round_trip() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-sess");
@@ -71,25 +68,17 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
     let root = format!("{run}-root");
     let fork = format!("{run}-fork");
     let child = format!("{run}-child");
-    let binding = SessionBinding {
-        schema_version: 1,
-        revision: 1,
-        project_id: ProjectId::new(),
-        workspace_id: WorkspaceId::new(),
-        cwd_relative_to_workspace: PathBuf::from("sub"),
-    };
+    let (_directory, workspace) = super::cloud_tests::workspace(&writer).await?;
+    let binding = SessionBinding::from_workspace(&workspace);
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
     let created_at = chrono::Utc::now().to_rfc3339();
 
     // 新建：meta + 绑定 + frozen 一次落库。
     writer
-        .save_new_session(&super::cloud_tests::session_input(
-            &root,
-            &created_at,
-            &binding,
-            &frozen,
-            None,
-        ))
+        .save_new_session_in_workspace(
+            &super::cloud_tests::session_input(&root, &created_at, &workspace, &frozen, None),
+            &workspace,
+        )
         .await
         .map_err(super::cloud_tests::failure)?;
     // 定向 metadata：标题与状态。
@@ -119,12 +108,21 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
         },
     );
     writer
-        .save_fork(&ForkSnapshot {
-            target: super::cloud_tests::session_input(&fork, &created_at, &binding, &frozen, None),
-            source_id: root.clone(),
-            payloads: vec![first.clone(), second.clone()],
-            flags,
-        })
+        .save_fork_in_workspace(
+            &ForkSnapshot {
+                target: super::cloud_tests::session_input(
+                    &fork,
+                    &created_at,
+                    &workspace,
+                    &frozen,
+                    None,
+                ),
+                source_id: root.clone(),
+                payloads: vec![first.clone(), second.clone()],
+                flags,
+            },
+            &workspace,
+        )
         .await
         .map_err(super::cloud_tests::failure)?;
 
@@ -135,7 +133,7 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
             target: super::cloud_tests::session_input(
                 &child,
                 &created_at,
-                &binding,
+                &workspace,
                 &frozen,
                 Some(&root),
             ),
@@ -307,13 +305,16 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
 
     // 只读打开不写：写路径在发请求前就拒绝。
     let refused = reader
-        .save_new_session(&super::cloud_tests::session_input(
-            &format!("{run}-extra"),
-            &created_at,
-            &binding,
-            &frozen,
-            None,
-        ))
+        .save_new_session_in_workspace(
+            &super::cloud_tests::session_input(
+                &format!("{run}-extra"),
+                &created_at,
+                &workspace,
+                &frozen,
+                None,
+            ),
+            &workspace,
+        )
         .await;
     super::cloud_tests::check(
         matches!(&refused, Err(error) if matches!(error.kind(), SessionResourceErrorKind::ReadOnlyStore)),
@@ -335,7 +336,7 @@ async fn session_round_trip(target: &CloudTarget, run: &str) -> Result<(), Strin
 /// 注意与 C-03 第二批的差别：操作身份不再由内容派生，因此「同内容再来一次」是**新的
 /// 领域调用**（照实撞主键），而不是被当成重放静默跳过——重放语义只覆盖同一次操作。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_session_refusals_and_replay_leave_facts_unchanged() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-sess-neg");
@@ -360,20 +361,14 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
         .map_err(super::cloud_tests::failure)?;
     let root = format!("{run}-root");
     let child = format!("{run}-child");
-    let binding = SessionBinding {
-        schema_version: 1,
-        revision: 1,
-        project_id: ProjectId::new(),
-        workspace_id: WorkspaceId::new(),
-        cwd_relative_to_workspace: PathBuf::from("sub"),
-    };
+    let (_directory, workspace) = super::cloud_tests::workspace(&adapter).await?;
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
     let created_at = chrono::Utc::now().to_rfc3339();
     let first_input =
-        super::cloud_tests::session_input(&root, &created_at, &binding, &frozen, None);
+        super::cloud_tests::session_input(&root, &created_at, &workspace, &frozen, None);
 
     adapter
-        .save_new_session(&first_input)
+        .save_new_session_in_workspace(&first_input, &workspace)
         .await
         .map_err(super::cloud_tests::failure)?;
 
@@ -381,11 +376,13 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     let conflicting = super::cloud_tests::session_input(
         &root,
         &created_at,
-        &binding,
+        &workspace,
         &format!("{{\"frozen\":\"{run}-other\"}}"),
         None,
     );
-    let conflict = adapter.save_new_session(&conflicting).await;
+    let conflict = adapter
+        .save_new_session_in_workspace(&conflicting, &workspace)
+        .await;
     super::cloud_tests::check(
         matches!(&conflict, Err(error) if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })),
         "a re-create with different content must fail",
@@ -395,7 +392,9 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
     // 它照实撞上会话主键 → 确定未生效（InvalidInput），且不改动已有行、不产生第二行。
     // 「同一次请求的重试」由 adapter 内部复用同一操作 id 承担（v10 撤销本机日志后不再有
     // 跨进程的原 id 取回路径），不靠调用方传令牌。
-    let repeated = adapter.save_new_session(&first_input).await;
+    let repeated = adapter
+        .save_new_session_in_workspace(&first_input, &workspace)
+        .await;
     super::cloud_tests::check(
         matches!(&repeated, Err(error) if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })),
         "re-saving the same input is a new operation and must fail on the existing row",
@@ -407,7 +406,7 @@ async fn session_refusals(target: &CloudTarget, run: &str) -> Result<(), String>
             target: super::cloud_tests::session_input(
                 &child,
                 &created_at,
-                &binding,
+                &workspace,
                 &format!("{{\"frozen\":\"{run}-foreign\"}}"),
                 Some(&root),
             ),

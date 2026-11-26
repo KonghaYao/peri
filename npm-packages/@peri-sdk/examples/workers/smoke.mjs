@@ -1,6 +1,6 @@
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { mkdtemp, open, rm } from 'node:fs/promises';
+import { mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -11,7 +11,7 @@ const { lookupEnv } = await import(new URL('../../../../scripts/lib/local-store.
 const here = import.meta.dir;
 const sdkRoot = resolve(here, '../..');
 const scratch = await mkdtemp(resolve(tmpdir(), 'peri-wrangler-smoke-'));
-let loom;
+let pgStore;
 let wrangler;
 let model;
 let log;
@@ -40,7 +40,7 @@ try {
   });
   if (await build.exited !== 0) throw new Error('Workers probe build failed');
 
-  loom = await lookupEnv({ port: await freePort() });
+  pgStore = await lookupEnv();
 
   let modelCalls = 0;
   const modelPaths = [];
@@ -59,13 +59,17 @@ try {
 
   const workerPort = await freePort();
   log = await open(resolve(scratch, 'wrangler.log'), 'w');
+  // Keep the DSN out of Wrangler's command line and diagnostic output.
+  const secretFile = resolve(scratch, 'worker.env');
+  const envValue = JSON.stringify(pgStore.url).replaceAll('$', '\\$');
+  await writeFile(secretFile, `STORAGE_URL=${envValue}\n`, { mode: 0o600 });
   wrangler = Bun.spawn([
     'bun', 'run', 'wrangler', 'dev', '--config', resolve(here, 'wrangler.toml'),
     '--local', '--ip', '127.0.0.1',
     '--port', String(workerPort),
     '--persist-to', resolve(scratch, 'wrangler-state'),
-    '--var', `STORAGE_URL:${loom.url}`,
-    '--var', `STORAGE_TOKEN:${loom.token}`,
+    '--env-file', secretFile,
+    ...(pgStore.httpEndpoint ? ['--var', `STORAGE_HTTP_ENDPOINT:${pgStore.httpEndpoint}`] : []),
     '--var', `MODEL_URL:http://127.0.0.1:${model.port}/v1`,
   ], { cwd: sdkRoot, stdout: log.fd, stderr: log.fd });
   const url = `http://127.0.0.1:${workerPort}`;
@@ -120,7 +124,7 @@ try {
   throw error;
 } finally {
   if (wrangler) { wrangler.kill('SIGINT'); await wrangler.exited; }
-  if (loom) await loom.stop();
+  if (pgStore) await pgStore.stop();
   model?.stop(true);
   await log?.close();
   await rm(scratch, { recursive: true, force: true });

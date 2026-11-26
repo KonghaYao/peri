@@ -6,7 +6,15 @@
 
 use std::fmt;
 
-use turso_serverless::Value;
+/// The scalar types used by the session storage contract. Parameters never enter SQL text.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Value {
+    Null,
+    Integer(i64),
+    Text(String),
+    Real(f64),
+    Blob(Vec<u8>),
+}
 
 /// 一条参数化语句。
 ///
@@ -22,7 +30,7 @@ impl fmt::Debug for StatementSpec {
         formatter
             .debug_struct("StatementSpec")
             .field("sql", &self.sql)
-            .field("params", &self.params)
+            .field("parameter_count", &self.params.len())
             .finish()
     }
 }
@@ -43,9 +51,7 @@ impl StatementSpec {
     #[cfg(test)]
     pub(super) fn is_read_only(&self) -> bool {
         let head = self.sql.trim_start().to_ascii_uppercase();
-        head.starts_with("SELECT")
-            || head.starts_with("WITH")
-            || head.starts_with("PRAGMA TABLE_XINFO(")
+        head.starts_with("SELECT") || head.starts_with("WITH")
     }
 }
 

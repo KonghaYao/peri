@@ -301,7 +301,7 @@ const ABSENT_CREDENTIAL_ENV: &str = "PERI_CONTEXT_TEST_ABSENT_TOKEN_ENV";
 const HOME_GUARD_ENV: &str = "PERI_CONTEXT_TEST_REMOTE_CREDENTIAL_HOME";
 /// locator 哨兵：断言错误输出不回显它。
 #[cfg(unix)]
-const LOCATOR_SENTINEL: &str = "turso://sentinel-db-sentinel-org.turso.io";
+const LOCATOR_SENTINEL: &str = "postgres://sentinel-db-sentinel-org.invalid";
 /// 子进程跑到断言的标记（父用例据此确认证据真的产生了）。
 #[cfg(unix)]
 const CHILD_REACHED_MARKER: &str = "context-child-verified-no-side-effects";

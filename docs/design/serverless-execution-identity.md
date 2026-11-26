@@ -32,7 +32,7 @@ flowchart LR
 
     subgraph External["外部依赖"]
         Kv[("共享 Session KV<br/>归属绑定标记（非互斥原语）")]
-        Store[("Turso 远端 Store<br/>Machine → Workspace → Session")]
+        Store[("PostgreSQL 远端 Store<br/>Machine → Workspace → Session")]
         Model["模型端点"]
         Mcp["外部远程 MCP<br/>工作区文件工具"]
     end
@@ -73,11 +73,11 @@ WASM 是兼容性目标，不是第二套 Peri：`wasm32-unknown-emscripten` 模
 | --- | --- |
 | `cwd` | 虚拟文件系统中的绝对路径身份；模块建立同名空目录并 canonicalize，使配置作用域与会话归属可解析 |
 | `settings` | 整份注入的配置文档，与 stdio 启动同构；替换 Peri 全局配置 |
-| `storage` | Turso locator 与凭证来源；写打开直接连接远端 Store |
+| `storage` | PostgreSQL locator 与凭证来源；写打开直接连接远端 Store |
 | `machineId` | 宿主持久化的 UUID 执行身份，供跨模块重启的会话恢复 |
 
 虚拟目录只承载路径身份，不代表真实文件系统事实。Emscripten 编译闭包排除 SQLx、
-进程执行、stdio transport 与全部 builtin MCP；模型、远程 MCP 与 Turso
+进程执行、stdio transport 与全部 builtin MCP；模型、远程 MCP 与 PostgreSQL
 复用 HTTP 路径。工作区文件工具必须由外部 MCP 提供。
 
 ## 2. 身份与所有权
@@ -186,7 +186,7 @@ KV 归属记录与执行准入都不改变 Peri 的机器归属、binding/path �
   机器级旧凭证，Yjs、KV 与 SDK 状态不持有鉴权事实。
 - 只读打开不假装可写：历史可读、可回放，执行准入与写入拒绝；写打开失败不静默
   回退到本机库或另一个身份。
-- 托管 Cloudflare 部署、生产 Turso／模型端点、资源限制与 Workers 上的 TypeScript
+- 托管 Cloudflare 部署、生产 PostgreSQL／模型端点、资源限制与 Workers 上的 TypeScript
   SDK 入口尚未验收；Node socket 路线不支持浏览器。
 - `ChatView`/`ChatReplica` 是进程内投影与只读副本，不替代 Store 恢复，也不承诺跨实例实时同步；
   SDK 的 Session 归属记录域独立于 Peri Machine 归属，完整跨实例接管仍未验收。

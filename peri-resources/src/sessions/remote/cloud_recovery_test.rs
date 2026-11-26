@@ -16,7 +16,7 @@
 //! 并复核计数为 0；不打印 locator、token 或会话内容。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_recovery_
 //! ```
 
@@ -30,7 +30,7 @@ use crate::sessions::data::SessionDataPort;
 
 /// 实验：响应在回程丢失 —— 远端已提交、本机只能看见未知。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_lost_reply_converges_to_applied() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-rec-lost");
@@ -64,13 +64,17 @@ async fn lost_reply_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>,
         .map_err(super::cloud_tests::failure)?;
     let thread = super::cloud_tests::synth_thread(&format!("{run}-lost"));
     let frozen = format!("{{\"synth\":\"{run}\"}}");
-    data.save_new_session(&super::cloud_tests::session_input(
-        thread.as_str(),
-        &chrono::Utc::now().to_rfc3339(),
-        &super::cloud_tests::synth_binding(),
-        &frozen,
-        None,
-    ))
+    let (_directory, workspace) = super::cloud_tests::workspace(&data).await?;
+    data.save_new_session_in_workspace(
+        &super::cloud_tests::session_input(
+            thread.as_str(),
+            &chrono::Utc::now().to_rfc3339(),
+            &workspace,
+            &frozen,
+            None,
+        ),
+        &workspace,
+    )
     .await
     .map_err(super::cloud_tests::failure)?;
 

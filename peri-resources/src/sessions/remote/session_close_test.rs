@@ -15,6 +15,7 @@ use super::session_data::RemoteSessionData;
 use crate::sessions::data::SessionDataPort;
 
 #[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn close_without_a_connection_is_not_reported_as_success() {
     // 关闭态装配：连接从来没有过（没有任何真实资源可关，也没有关闭句柄可用）。
     let adapter = RemoteSessionData::closed_for_test(StoreId::mint());

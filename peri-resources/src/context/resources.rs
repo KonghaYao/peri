@@ -70,10 +70,7 @@ impl Resources {
         let ResolvedLocator::Remote(endpoint) = request.resolve_locator()? else {
             anyhow::bail!("remote workspace environment requires a remote session store");
         };
-        let Some(source) = request.credential_source() else {
-            return Err(LocatorError::MissingCredentialSource.into());
-        };
-        let credential = source.resolve()?;
+        let credential = request.resolve_credential()?;
         crate::sessions::open_remote_in_environment(
             &endpoint,
             &credential,
@@ -116,7 +113,7 @@ impl Resources {
     /// [`SessionStoreDeployment`] 携带中性定位描述——已确认本机路径（`--db-path`）、
     /// 待解析 locator 原文（`--session-store`：本机路径、远程 locator 或 `env:<变量名>`）
     /// 或默认本机库——另加可选的显式引擎名、凭证**来源**（环境变量名，不接受 token
-    /// 字面量）与访问意图。**只设置 `TURSO_URL` 不会切换后端**。
+    /// 字面量）与访问意图。**只设置 `DATABASE_URL` 不会切换后端**。
     ///
     /// 部署参数在这里**一次性**转成 typed open request：locator 形态、引擎名与凭证
     /// 来源的冲突全部在进入任何 I/O（含建目录、开库、连接）之前失败，错误保持类型化
@@ -124,8 +121,8 @@ impl Resources {
     /// 只读意图绝不做写探测，也不退回写打开再降级。
     ///
     /// 后端选择只发生在这里：原生本机 locator 走 SQLite 装配，远程 locator 走
-    /// Turso adapter。Emscripten 不提供本机库；其可写远端部署须显式提供稳定的
-    /// 虚拟工作区身份，见 `Resources::open_turso_writable`。
+    /// PostgreSQL adapter。Emscripten 不提供本机库；其可写远端部署须显式提供稳定的
+    /// 虚拟工作区身份，见 `Resources::open_postgres_writable`。
     ///
     /// 环境变量只在两处被读取：`--session-store env:` 形式的 locator，以及远程 adapter
     /// 打开时按凭证来源取凭证值。**仅仅存在某个云 URL/token 变量不会切换后端**，
@@ -134,13 +131,13 @@ impl Resources {
         Self::open_request(SessionStoreOpenRequest::from_deployment(deployment)?).await
     }
 
-    /// Open a writable Turso store for a WASM host with a virtual workspace.
+    /// Open a writable PostgreSQL store for a WASM host with a virtual workspace.
     /// The host must persist this machine UUID and root across module restarts so
     /// that existing sessions can regain execution eligibility.
     #[cfg(target_os = "emscripten")]
-    pub async fn open_turso_writable(
+    pub async fn open_postgres_writable(
         locator: &str,
-        token: String,
+        http_endpoint: Option<String>,
         workspace_root: PathBuf,
         machine_id: &str,
     ) -> Result<Self> {
@@ -149,14 +146,11 @@ impl Resources {
             workspace_root,
         )?;
         crate::sessions::set_explicit_machine_id(machine_id)?;
-        let endpoint = crate::sessions::RemoteEndpoint::parse(
-            locator,
-            Some(crate::sessions::remote_engine_turso()),
-        )?;
-        let credential = crate::sessions::credential_from_value(token)?;
+        let endpoint =
+            crate::sessions::RemoteEndpoint::parse(locator)?.with_http_endpoint(http_endpoint)?;
         crate::sessions::open_remote_in_environment(
             &endpoint,
-            &credential,
+            &Default::default(),
             peri_acp_types::session_resources::AccessMode::ReadWrite,
             environment,
         )
@@ -196,17 +190,14 @@ impl Resources {
         }
     }
 
-    /// Turso locator: all persistent Session facts use the remote store.
+    /// PostgreSQL locator: all persistent Session facts use the remote store.
     /// Local SQLite is never resolved or opened on this branch.
     pub(super) async fn open_remote(
         request: &SessionStoreOpenRequest,
         endpoint: &crate::sessions::RemoteEndpoint,
     ) -> Result<Self> {
         // 凭证解析在任何 I/O 之前：来源缺失、变量未设置、空值都在这里失败。
-        let Some(source) = request.credential_source() else {
-            return Err(LocatorError::MissingCredentialSource.into());
-        };
-        let credential = source.resolve()?;
+        let credential = request.resolve_credential()?;
         crate::sessions::open_remote(endpoint, &credential, request.access())
             .await
             .map(Self::from_facade)

@@ -1,8 +1,8 @@
-//! canonical 形状的**声明式快照**与比对：新建、迁移终点与远端服务端共用一份判定。
+//! 本机 SQLite 的 schema 声明，用于校验新库和迁移结果。
 //!
 //! 为什么不直接比对 DDL 文本：升级库的 `sqlite_master.sql` 保留历史建表文本（旧版本建表、
 //! 后续补列），逐字比对会误拒真实库。形状判定的对象因此是**结构**——表的列序列、NOT NULL
-//! 列与主键列——由两种执行器各自用同一条只读语句读回（[`CURRENT_COLUMNS_SQL`] /
+//! 列与主键列——由只读语句读回（[`CURRENT_COLUMNS_SQL`] /
 //! [`INPUT_COLUMNS_SQL`]），再与这里的声明比对。
 //!
 //! 声明与 canonical DDL 的一致性不靠人工维护：`schema_shape_test` 断言「真实新建库的实际
@@ -449,14 +449,6 @@ pub(super) fn current_tables() -> Vec<&'static TableShape> {
         .collect()
 }
 
-/// 当前形状（v15）的表名序列：`current_tables()`（九张表，两张 inherited 派生索引已退役）。
-///
-/// 远端打开按它逐表下发 `PRAGMA table_xinfo`：探测面与 [`check_current_shape`] 的判定面
-/// 必须逐表一致，否则会出现「读了却没判」的表。
-pub(super) fn current_table_names() -> impl Iterator<Item = &'static str> {
-    current_tables().into_iter().map(|table| table.name)
-}
-
 /// 压缩前形状的 `threads` 列（14 列；当前形状的 `workspace_id` / `archived` 与两列工作
 /// 快照都不在其中）。
 const INPUT_THREADS_COLUMNS: &[&str] = &[
@@ -585,10 +577,7 @@ pub(super) const DROPPED_TABLES: &[DroppedTable] = &[
         // 搬运为读入规划而补齐这张表（缺表则建、缺行则补）：搬完之后它必然存在，
         // 无条件删除，否则「为规划而建的表」会留在当前形状里。
         //
-        // `IF EXISTS`：本机在规划前补齐它，但远端的升级输入可能整表缺失（远端初始化
-        // 从未建过环境表，判定也允许缺表）——删除语句必须对缺表幂等，否则这类库会卡在
-        // 「形状判定通过、批次在 DROP 处报 no such table」。同名异形的表仍由
-        // [`check_dropped_shape`] 在计划之前拦下，`IF EXISTS` 不放松这条守卫。
+        // [`check_dropped_shape`] rejects unexpected columns before dropping the table.
         always_dropped: true,
         drop_sql: "DROP TABLE IF EXISTS session_environments",
     },
@@ -612,7 +601,7 @@ pub(super) const DROPPED_TABLES: &[DroppedTable] = &[
             not_null: &["snapshot_id", "ordinal", "entry_id", "raw_start", "raw_len"],
             primary_key: &["snapshot_id", "ordinal"],
         },
-        // 只是派生索引：内容可从 `threads.inherited_context` 重建。缺表（远端从未建过）跳过；
+        // 只是派生索引：内容可从 `threads.inherited_context` 重建。缺表时跳过；
         // 同名异形仍由 `check_dropped_shape` 拦下——迁移不认识的表不删。
         always_dropped: false,
         drop_sql: "DROP TABLE inherited_payload_index",
@@ -639,7 +628,7 @@ pub(super) struct DroppedTable {
     pub drop_sql: &'static str,
 }
 
-/// 读回当前形状的全部列形状（一条只读语句，本机与远端共用）。
+/// 读回当前形状的全部列形状（一条只读语句，本机 SQLite）。
 ///
 /// 表不存在时该表没有任何行；调用方必须把「没有行」判成缺表，而不是空形状。
 /// 列顺序由 `pragma_table_xinfo` 的 `cid` 决定，`ORDER BY 1, 5` 只按表名与 cid 稳定排序。
@@ -800,8 +789,7 @@ pub(super) fn check_current_shape(
 
 /// 读回**要删除**对象的列形状（v14 冻结声明里的两张 inherited 派生索引表 + 压缩前对象）。
 ///
-/// 这些表既不在当前形状的读取面里（v15 已退役），也可能不在迁移输入的读取面里（远端
-/// 从未建过），因此单独一条只读语句；调用方把它并入形状映射后交给 [`check_dropped_shape`]。
+/// 这些表既不在当前形状的读取面里（v15 已退役），也可能不在迁移输入的读取面里，因此单独一条只读语句；调用方把它并入形状映射后交给 [`check_dropped_shape`]。
 pub(super) const DROPPED_COLUMNS_SQL: &str =
     "SELECT 'inherited_snapshot_index' AS t, name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_snapshot_index')
     UNION ALL SELECT 'inherited_payload_index', name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_payload_index')
@@ -863,7 +851,7 @@ pub(super) fn check_input_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> 
 /// `mcp_oauth_credentials` 已是 workspace 作用域的新形状——按完整的迁移期删除清单判定
 /// 会把它误判成同名异形。这里只覆盖两张派生表：
 ///
-/// - 缺表合法（远端从未建过派生索引，本机也可能手工删过）；
+/// - 派生索引缺表时跳过；
 /// - 存在时必须与 v14 冻结声明逐列相符，同名异形的表**不删**并拒绝整段升级。
 pub(super) fn inherited_retirement_plan(
     tables: &HashMap<String, Vec<ActualColumn>>,
@@ -889,7 +877,6 @@ pub(super) fn inherited_retirement_plan(
 /// 按 `(表名, 列名, NOT NULL, 主键)` 的四列读取结果分组为逐表列序列。
 ///
 /// 生产读取语句是[`CURRENT_COLUMNS_SQL`] / [`INPUT_COLUMNS_SQL`]（自带 `cid` 排序），
-/// 远端执行器把读回的 `Value` 解成同样的四列后复用本函数。
 pub(super) fn group_columns(
     rows: impl IntoIterator<Item = (String, String, bool, i64)>,
 ) -> HashMap<String, Vec<ActualColumn>> {

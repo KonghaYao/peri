@@ -2,18 +2,18 @@
 
 更新：2026-11-23
 
-`peri-wasm/src/emscripten/acp/peri_wasm_acp.rs` 导出 `PeriWasmAcp`。启动配置注入现有 `ConfigSource`，以 `Resources::open_turso_writable` 打开可写会话存储，并调用 `peri-acp::host::assemble_wasm_server_config` 和 `spawn_acp_server`。`peri-acp::transport::mpsc_transport_pair` 与 `WireBridge` 仅交换原始 JSON-RPC 帧；ACP 方法、Agent 执行、模型和会话规则仍在原有 crate。
+`peri-wasm/src/emscripten/acp/peri_wasm_acp.rs` 导出 `PeriWasmAcp`。启动配置注入现有 `ConfigSource`，以 `Resources::open_postgres_writable` 打开可写会话存储，并调用 `peri-acp::host::assemble_wasm_server_config` 和 `spawn_acp_server`。`peri-acp::transport::mpsc_transport_pair` 与 `WireBridge` 仅交换原始 JSON-RPC 帧；ACP 方法、Agent 执行、模型和会话规则仍在原有 crate。
 
 Host 配置直接启动普通 ACP runtime，与 stdio 一样不依赖 SDK admission、entry 或 settlement；已移除 `ReverseExecutionAdmission` 接线。历史查询与普通执行保留，不接管旧执行。Cloudflare/SDK 的旧恢复协调消费端仍须单独适配，不能把其旧测试视为当前后端兼容证明。
 
-WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP packages，保留 `mcp-packages/credentials` 的受信 bootstrap MCP 通道；远程 MCP 客户端与 ACP 承载通路保留。Agent 定义与任务 scope 的共用规则在 `peri-mcp-core/`，原生 package 通过 re-export 复用。配置文件在 Emscripten 虚拟文件系统中由 `peri-config::io` 读取；OAuth 凭证经部署注入的 `OAuthCredentialPort` 和共用 MCP client/server 异步访问。显式关闭会等待凭证清理，意外 drop 的兜底清理在浏览器事件循环中异步执行。`cwd` 是 Emscripten 虚拟文件系统中的绝对路径身份，文件工具需要另接远程 MCP。启动必须传入持久 UUID 作为 machine ID，供 Turso 历史恢复使用。
+WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP packages，保留 `mcp-packages/credentials` 的受信 bootstrap MCP 通道；远程 MCP 客户端与 ACP 承载通路保留。Agent 定义与任务 scope 的共用规则在 `peri-mcp-core/`，原生 package 通过 re-export 复用。配置文件在 Emscripten 虚拟文件系统中由 `peri-config::io` 读取；OAuth 凭证经部署注入的 `OAuthCredentialPort` 和共用 MCP client/server 异步访问。显式关闭会等待凭证清理，意外 drop 的兜底清理在浏览器事件循环中异步执行。`cwd` 是 Emscripten 虚拟文件系统中的绝对路径身份，文件工具需要另接远程 MCP。启动必须传入持久 UUID 作为 machine ID，供 PostgreSQL 历史恢复使用。
 
 | 任务 | 入口 |
 | --- | --- |
 | Emscripten 导出与 ACP Host 生命周期 | `peri-wasm/src/emscripten/acp/peri_wasm_acp.rs` |
 | 原始 ACP 帧桥 | `peri-acp/src/transport/wire_bridge.rs` |
 | WASM Host 装配 | `peri-acp/src/host/assemble.rs` |
-| 可写 Turso、当前 schema 与虚拟执行资格 | `peri-resources/src/sessions/remote/{composition,remote_workspace_environment,remote_execution}.rs`、`storage_v2_plan.rs` |
+| 可写 PostgreSQL、当前 schema 与虚拟执行资格 | `peri-resources/src/sessions/remote/{composition,remote_workspace_environment,remote_execution}.rs`、`storage_v2_plan.rs` |
 | 模型 HTTP/SSE | `peri-model/src/transport/http.rs`、`runtime/retry.rs`；`cloudflare` feature 下原生 Fetch adapter 为 `transport/cloudflare.rs` |
 | 工具链 | `scripts/cargo-rmcp-patched.sh`、`scripts/cargo-wasm.sh` |
 | ACP 端到端验收 | `scripts/smoke-wasm-acp.mjs` |

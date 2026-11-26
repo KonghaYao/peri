@@ -1,29 +1,19 @@
 // Run after: scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
-// Real ACP Host + local peri-loom container; only the OpenAI HTTP endpoint is simulated.
+// Real ACP Host + local PostgreSQL container; only the OpenAI HTTP endpoint is simulated.
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createServer as createTcpServer } from 'node:net';
 import { writeFile } from 'node:fs/promises';
 import { lookupEnv } from './lib/local-store.mjs';
 
 const profile = process.env.PERI_WASM_PROFILE === 'release' ? 'release' : 'debug';
 const output = new URL(`../target/wasm32-unknown-emscripten/${profile}/`, import.meta.url);
 const modelRequests = [];
-let loom;
+let pgStore;
 let model;
 let acp;
 
 function assert(value, message) {
   if (!value) throw new Error(message);
-}
-
-async function unusedPort() {
-  const server = createTcpServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = server.address().port;
-  await new Promise((done) => server.close(done));
-  return port;
 }
 
 function withTimeout(promise, label) {
@@ -68,7 +58,7 @@ function assertBypassMode(result, label) {
 }
 
 try {
-  loom = await lookupEnv({ port: await unusedPort() });
+  pgStore = await lookupEnv();
 
   model = createServer(async (request, response) => {
     const chunks = [];
@@ -102,7 +92,7 @@ try {
         profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
       },
     },
-    storage: { url: loom.url, authToken: loom.token },
+    storage: { url: pgStore.url, httpEndpoint: pgStore.httpEndpoint },
     machineId: '00000000-0000-4000-8000-000000000002',
   });
 
@@ -123,15 +113,20 @@ try {
     sessionId, prompt: [{ type: 'text', text: 'Reply once' }],
   });
   assert(prompted.result?.stopReason === 'end_turn', `session/prompt failed: ${JSON.stringify(prompted)}`);
-  assert(modelRequests.length === 1, `expected one real model HTTP call, got ${modelRequests.length}`);
-  assert(modelRequests[0].url === '/v1/chat/completions' &&
-    modelRequests[0].authorization === 'Bearer fixture-key' &&
-    JSON.stringify(modelRequests[0].body).includes('Reply once'),
-    `wrong model request: ${JSON.stringify(modelRequests[0])}`);
+  // The prediction service can make its own request with this turn in its history.
+  const foreground = modelRequests.filter(({ body }) => {
+    const last = body.messages?.at(-1);
+    return last?.role === 'user' && last.content === 'Reply once';
+  });
+  assert(foreground.length === 1, `expected one foreground model call, got ${foreground.length}`);
+  assert(modelRequests.every(({ url, authorization }) =>
+    url === '/v1/chat/completions' && authorization === 'Bearer fixture-key'),
+    'unexpected model request path or authorization');
   const visible = await wire.request('session/list', { cwd: '/workspace' });
   assert(visible.result?.sessions?.some((entry) => entry.sessionId === sessionId),
     `prompted session is missing: ${JSON.stringify(visible)}`);
-  assert(wire.notifications.some((frame) => frame.method === 'session/update'),
+  assert(wire.notifications.some((frame) => frame.method === 'session/update' &&
+    JSON.stringify(frame).includes('WASM_ACP_REPLY')),
     `missing ACP session/update: ${JSON.stringify(wire.notifications)}`);
   await withTimeout(acp.close(), 'close ACP Host');
   acp.free();
@@ -143,7 +138,7 @@ try {
   assert(resumedInit.result?.protocolVersion === 1, `restart initialize failed: ${JSON.stringify(resumedInit)}`);
   const listed = await wire.request('session/list', { cwd: '/workspace' });
   assert(listed.result?.sessions?.some((entry) => entry.sessionId === sessionId),
-    `Turso session lost across Host restart: ${JSON.stringify(listed)}`);
+    `PostgreSQL session lost across Host restart: ${JSON.stringify(listed)}`);
   const loaded = await wire.request('session/load', { sessionId, cwd: '/workspace', mcpServers: [] });
   assert(loaded.result?.modes && Array.isArray(loaded.result.configOptions),
     `session/load failed: ${JSON.stringify(loaded)}`);
@@ -152,7 +147,7 @@ try {
     notificationCount: wire.notifications.length, persistedAcrossRestart: true }));
 } catch (error) {
   console.error(JSON.stringify({ passed: false, modelCalls: modelRequests.length,
-    loomLog: (await loom?.logs?.()) ?? '' }));
+    pgStoreLog: (await pgStore?.logs?.()) ?? '' }));
   throw error;
 } finally {
   if (acp) {
@@ -160,5 +155,5 @@ try {
     acp.free();
   }
   if (model) await new Promise((done) => model.close(done));
-  if (loom) await loom.stop();
+  if (pgStore) await pgStore.stop();
 }

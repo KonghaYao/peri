@@ -22,7 +22,7 @@
 //! - 只输出安全状态/版本/计数/布尔事实，全部经 `SafeOut` 校验。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_mutation_
 //! ```
 
@@ -140,23 +140,6 @@ async fn prepare(target: &CloudTarget) -> Result<(RemoteStore, String), String> 
             super::cloud_tests::remote_error_class(&error)
         )
     })?;
-    // canonical 会话表就位（全部 `IF NOT EXISTS`，重复执行是空操作）：本轮不写它们，
-    // 但清理语句删的正是这几张表，形状得先到——不依赖「别的用例已经建过表」。
-    store.force_parent_checks_off().await.map_err(|error| {
-        format!(
-            "foreign key reset failed: {}",
-            super::cloud_tests::remote_error_class(&error)
-        )
-    })?;
-    store
-        .apply_schema(super::session_schema::initialization_plan())
-        .await
-        .map_err(|error| {
-            format!(
-                "session schema failed: {}",
-                super::cloud_tests::remote_error_class(&error)
-            )
-        })?;
     let run = super::cloud_tests::unique_run_label("peri-mut");
     let mut out = target.out();
     out.push(format!("run_prefix={}", &run[..14.min(run.len())]));
@@ -174,7 +157,7 @@ async fn prepare(target: &CloudTarget) -> Result<(RemoteStore, String), String> 
 
 /// 实验一：原子批中途失败 → 零部分结果。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_mutation_atomic_batch_leaves_no_partial_results() {
     let target = CloudTarget::load();
     let (store, run) = prepare(&target).await.expect("cloud target unusable");
@@ -259,7 +242,7 @@ async fn cloud_mutation_atomic_batch_leaves_no_partial_results() {
 
 /// 实验二：同一 operation_id 重复调用返回原收据，且不写第二个效果。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
     let target = CloudTarget::load();
     let (store, run) = prepare(&target).await.expect("cloud target unusable");
@@ -358,7 +341,7 @@ async fn cloud_mutation_repeat_qualification_returns_the_original_receipt() {
 
 /// 实验三：两个连接竞争同一 operation_id → 至多一方提交。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_mutation_concurrent_qualification_applies_once() {
     let target = CloudTarget::load();
     let (store, run) = prepare(&target).await.expect("cloud target unusable");
@@ -457,7 +440,7 @@ async fn cloud_mutation_concurrent_qualification_applies_once() {
 
 /// 实验四：终态封闭——封闭先提交则迟到的原请求不可能再生效；封闭已生效操作返回原收据。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
     let target = CloudTarget::load();
     let (store, run) = prepare(&target).await.expect("cloud target unusable");
@@ -564,7 +547,7 @@ async fn cloud_mutation_closure_beats_late_original_and_replays_applied() {
 
 /// 实验五：提交后的行对新连接可读；身份读取与初始化幂等（不覆盖既有身份）。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_mutation_committed_rows_are_visible_to_a_new_connection() {
     let target = CloudTarget::load();
     let (store, run) = prepare(&target).await.expect("cloud target unusable");

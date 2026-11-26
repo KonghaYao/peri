@@ -1,18 +1,12 @@
-//! Remote store opening verdict and legacy-shape probe.
+//! Open and validate the PostgreSQL schema before exposing a session handle.
 
-use super::super::mutation::RemoteStore;
-use super::super::mutation::StoreAccess;
-use super::super::schema;
-use super::super::schema::StoreId;
-use super::super::schema::StoreIdentityOutcome;
-use super::super::schema::StoreIdentityRead;
-use super::super::schema::StoreShapeRead;
-use super::super::sql::StatementSpec;
+use super::super::mutation::{RemoteStore, StoreAccess};
+use super::super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
+use super::super::sql::{self, StatementSpec, Value};
 use super::StoreInitialization;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
-use turso_serverless::Value;
 
 /// Resolve the execution machine only after the remote store's identity has
 /// been read. A read-only Native open must not create a local machine ID.
@@ -35,197 +29,50 @@ pub(super) async fn resolve_open_machine_id(
         .to_owned())
 }
 
-/// 只读身份读取之后的下一步（纯函数结论）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::sessions::remote) enum OpenStep {
-    /// 已有本构建认识的身份：本次打开没有建立任何东西。
-    Existing(StoreId),
-    Upgrade(schema::StoreSnapshot),
-    /// 明确为空：写打开在这里才继续初始化；只读打开到这一步就拒绝。
-    NeedsInitialization,
-}
-
-/// 身份读取 + 形状探测 + 访问意图 → 打开的下一步（纯函数，真引擎 seam 与生产共用）。
-///
-/// 拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、会话表形状与契约声明的代数**不符**、
-/// 只读打开遇上尚未初始化或**还没有会话表**的 store（没有会话事实可读，也不越权建表）。
-pub(in crate::sessions::remote) fn open_step(
-    read: StoreIdentityRead,
-    shape: Option<StoreShapeRead>,
-    access: StoreAccess,
-) -> SessionResourceResult<OpenStep> {
-    match read {
-        StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
-            accept_shape(shape, access)?;
-            Ok(OpenStep::Existing(snapshot.store_id))
-        }
-        StoreIdentityRead::Present(snapshot) if snapshot.readable() => {
-            accept_shape(shape, access)?;
-            match access {
-                StoreAccess::ReadOnly => Ok(OpenStep::Existing(snapshot.store_id)),
-                StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
-            }
-        }
-        StoreIdentityRead::Present(_) => Err(super::unsupported_behavior(
-            "unrecognized remote store schema",
-        )),
-        StoreIdentityRead::Malformed => Err(super::super::session_codec::corrupt(
-            "remote session store metadata is not interpretable",
-        )),
-        StoreIdentityRead::Uninitialized => match access {
-            StoreAccess::ReadOnly => Err(super::unsupported_behavior(
-                "read-only open of an uninitialized remote store",
-            )),
-            StoreAccess::ReadWrite => Ok(OpenStep::NeedsInitialization),
-        },
-    }
-}
-
-/// 只读旧契约打开的末次身份校验；升级或身份替换期间不能交付旧版读法。
-pub(in crate::sessions::remote) fn verify_legacy_open_identity(
-    initial: &StoreIdentityRead,
-    final_read: &StoreIdentityRead,
-) -> SessionResourceResult<()> {
-    if initial == final_read {
-        Ok(())
-    } else {
-        Err(super::unsupported_behavior(
-            "remote store schema changed during read-only open",
-        ))
-    }
-}
-
-/// 形状探测（单次只读批）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
-///
-/// 只发只读 PRAGMA/SELECT——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
-/// 依据**：写打开的迁移批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
-/// 本构建不读的库（契约/版本不认识，或元数据本身读不出身份）没有可探的形状，返回 `None`——
-/// 那一面的拒绝由身份读取单独给出。
-pub(in crate::sessions::remote) async fn probe_shape(
+pub(super) async fn open_schema(
     store: &RemoteStore,
-    read: &StoreIdentityRead,
-) -> SessionResourceResult<Option<StoreShapeRead>> {
-    let StoreIdentityRead::Present(snapshot) = read else {
-        return Ok(None);
-    };
-    let Some(probe) = schema::shape_probe(snapshot) else {
-        return Ok(None);
-    };
-    let tables: Vec<_> = probe.table_names().collect();
-    let mut statements: Vec<_> = tables
-        .iter()
-        .map(|table| {
-            schema::ShapeProbe::pragma_table_xinfo(table)
-                .map(StatementSpec::bare)
-                .ok_or_else(|| {
-                    super::super::mutation::incomplete_reply(
-                        "remote shape probe table is not supported",
-                    )
-                })
-        })
-        .collect::<SessionResourceResult<_>>()?;
-    if probe == schema::ShapeProbe::Current {
-        statements.push(StatementSpec::bare(schema::CURRENT_INDEX_DEFINITIONS_SQL));
-    }
-    let mut results = store.read_batch(statements).await?.into_iter();
-    let mut columns = Vec::new();
-    let mut missing_close_intents = false;
-    for table in tables {
-        let rows = results
-            .next()
-            .ok_or_else(|| super::super::mutation::incomplete_reply("missing shape result set"))?;
-        if table == "session_close_intents" && rows.is_empty() {
-            missing_close_intents = true;
+    access: StoreAccess,
+) -> SessionResourceResult<(StoreId, StoreInitialization)> {
+    let identity = match store.read_identity().await? {
+        StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
+            StoreIdentityOutcome::Existing(snapshot.store_id)
         }
-        let indexed_entries = rows.into_iter().enumerate();
-        for (index, row) in indexed_entries {
-            if row.len() != 7
-                || super::super::sql::int_at(&row, 0) != Some(index as i64)
-                || super::super::sql::int_at(&row, 6) != Some(0)
-            {
-                return Err(super::super::mutation::incomplete_reply(
-                    "session shape pragma returned invalid columns",
-                ));
-            }
-            columns.push(vec![
-                Value::Text(table.to_owned()),
-                row[1].clone(),
-                row[3].clone(),
-                row[5].clone(),
-            ]);
-        }
-    }
-    let shape = probe.check(&schema::decode_column_map(&columns)?);
-    if shape == StoreShapeRead::Consistent && probe == schema::ShapeProbe::Current {
-        let indexes = results
-            .next()
-            .ok_or_else(|| super::super::mutation::incomplete_reply("missing index result set"))?;
-        if indexes
-            .iter()
-            .any(|row| row.len() != 3 || !row.iter().all(|value| matches!(value, Value::Text(_))))
-        {
-            return Err(super::super::mutation::incomplete_reply(
-                "session index probe returned invalid columns",
+        StoreIdentityRead::Present(_) => {
+            return Err(super::unsupported_behavior(
+                "unrecognized PostgreSQL store schema",
             ));
         }
-        let missing_indexes =
-            schema::current_indexes_missing(&indexes).map_err(StoreShapeRead::Drifted);
-        let missing_indexes = match missing_indexes {
-            Ok(missing) => missing,
-            Err(drifted) => return Ok(Some(drifted)),
-        };
-        if missing_indexes || missing_close_intents {
-            return Ok(Some(StoreShapeRead::NeedsCurrentRepair {
-                missing_indexes,
-                missing_close_intents,
-            }));
+        StoreIdentityRead::Malformed => {
+            return Err(super::super::session_codec::corrupt(
+                "PostgreSQL store metadata is not interpretable",
+            ));
+        }
+        StoreIdentityRead::Uninitialized if access == StoreAccess::ReadOnly => {
+            return Err(super::unsupported_behavior(
+                "read-only open of an uninitialized PostgreSQL store",
+            ));
+        }
+        StoreIdentityRead::Uninitialized => store.initialize_store().await?,
+    };
+    if let StoreIdentityOutcome::Existing(id) = &identity {
+        let shape = store
+            .fetch_row(&StatementSpec::new(
+                schema::VERIFY_SHAPE_SQL,
+                vec![
+                    Value::Text(super::super::session_schema::reserved_objects()),
+                    Value::Text(id.as_str().to_owned()),
+                ],
+            ))
+            .await?;
+        if shape.as_deref().and_then(|row| sql::int_at(row, 0)) != Some(1) {
+            return Err(super::unsupported_behavior(
+                "PostgreSQL store schema differs from its initialized shape",
+            ));
         }
     }
-    Ok(Some(shape))
+    Ok(open_verdict(identity))
 }
 
-/// 形状判定：本构建读得动的库必须探测过，且形状要么相符、要么**还没建立**。
-///
-/// - `Consistent`：按契约声明的形状读写。
-/// - `Unbuilt`：会话表一张都没建，**写打开**照旧在打开路径上按各自契约补齐（本代库的幂等
-///   DDL）或升级（`v2` 库的空库分支）；**只读打开拒绝**——没有会话事实可读，也不越权建表，
-///   与「只读打开尚未初始化的 store」同一条规则。
-/// - `Drifted`：拒绝，并把**具体哪个判定失败**记进日志（[`refuse_drifted_shape`]）。
-fn accept_shape(shape: Option<StoreShapeRead>, access: StoreAccess) -> SessionResourceResult<()> {
-    match shape {
-        Some(StoreShapeRead::Consistent) => Ok(()),
-        Some(StoreShapeRead::NeedsCurrentRepair { .. }) => Ok(()),
-        Some(StoreShapeRead::Unbuilt) if access == StoreAccess::ReadWrite => Ok(()),
-        Some(StoreShapeRead::Unbuilt) => Err(super::unsupported_behavior(
-            "read-only open of a remote store without its session tables",
-        )),
-        Some(StoreShapeRead::Drifted(detail)) => Err(refuse_drifted_shape(&detail)),
-        // 读得动的库必须被探测过：调用点漏探是内部矛盾，不静默放行。
-        None => Err(SessionResourceError::new(
-            SessionResourceErrorKind::Internal {
-                detail: "remote session shape was not probed".to_owned(),
-            },
-        )),
-    }
-}
-
-/// 形状不符的拒绝：分类沿用「不认识的 store schema」（`Unsupported`），诊断走日志。
-///
-/// `SessionResourceErrorKind::Unsupported` 不携带 detail，而这一路最需要回答的正是「为什么
-/// 拒绝」——判定来源（`schema_shape`）给出的那句「哪张表/哪一列不符」按 `warn` 记录，
-/// 不含会话内容与绑定值。
-fn refuse_drifted_shape(detail: &str) -> SessionResourceError {
-    tracing::warn!(
-        detail,
-        "unrecognized remote store schema: session tables drifted from the shape their contract declares"
-    );
-    SessionResourceError::new(SessionResourceErrorKind::Unsupported)
-}
-
-/// 身份竞争的结论 → 权威身份 + 本次打开的初始化事实（首次登记资格的唯一映射）。
-///
-/// `CreatedByThisOpen` 只能由 `Created` 产生：竞败方读回的胜者身份也是 `Existing`，
-/// 所以败方没有首次登记资格，但它用的仍是同一个权威身份。
 pub(in crate::sessions::remote) fn open_verdict(
     outcome: StoreIdentityOutcome,
 ) -> (StoreId, StoreInitialization) {
@@ -235,35 +82,4 @@ pub(in crate::sessions::remote) fn open_verdict(
         }
         StoreIdentityOutcome::Existing(store_id) => (store_id, StoreInitialization::Existing),
     }
-}
-
-/// 旧形状探测（只读、单条 SELECT）：写打开遇上未初始化的库时，先问一次「这里有没有
-/// 统一之前的远端会话表」。
-///
-/// 命中即拒绝（`Unsupported`）：这不是空库，而是一个本构建不认识的旧形状库。
-/// **不自动迁移**——迁移要重命名表并搬运每一行，而本段的运行前提是新库没有历史数据；
-/// **也不覆盖**——覆盖等于替使用者丢掉他看不见的数据。只发一条只读语句，不建表、不写行。
-pub(super) async fn refuse_legacy_shape(store: &RemoteStore) -> SessionResourceResult<()> {
-    let row = store
-        .fetch_row(&StatementSpec::new(
-            schema::COUNT_LEGACY_TABLES_SQL,
-            schema::LEGACY_SHAPE_TABLES
-                .iter()
-                .map(|table| Value::Text((*table).to_owned()))
-                .collect(),
-        ))
-        .await?;
-    // 读不到计数不是「没有旧表」：形状不完整的读取按未决上报，不放行初始化。
-    let count = row
-        .as_ref()
-        .and_then(|values| super::super::sql::int_at(values, 0))
-        .ok_or_else(|| {
-            super::super::mutation::incomplete_reply("legacy shape probe returned no count")
-        })?;
-    if count > 0 {
-        return Err(super::unsupported_behavior(
-            "remote store has the pre-unification session tables; it is not migrated automatically",
-        ));
-    }
-    Ok(())
 }

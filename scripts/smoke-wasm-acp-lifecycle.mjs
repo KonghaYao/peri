@@ -1,18 +1,19 @@
 // Run after: PERI_WASM_PROFILE=release scripts/cargo-wasm.sh build --locked -p peri-wasm --target wasm32-unknown-emscripten
-// Exercises the real ACP Host and peri-loom store; only the LLM endpoint is simulated.
+// Exercises the real ACP Host and PostgreSQL store; only the LLM endpoint is simulated.
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createServer as createTcpServer } from 'node:net';
 import { writeFile } from 'node:fs/promises';
 import { lookupEnv } from './lib/local-store.mjs';
 
 const output = new URL('../target/wasm32-unknown-emscripten/release/', import.meta.url);
 const timeoutMs = 30_000;
 const modelRequests = [];
-let loom;
+let pgStore;
 let model;
 let acp;
 let wire;
+let slowHost;
+let slowWire;
 let slowRequestArrived;
 const slowRequest = new Promise((resolve) => { slowRequestArrived = resolve; });
 
@@ -28,15 +29,6 @@ function withTimeout(promise, label, ms = timeoutMs) {
       timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     }),
   ]).finally(() => clearTimeout(timer));
-}
-
-async function unusedPort() {
-  const server = createTcpServer();
-  server.listen(0, '127.0.0.1');
-  await withTimeout(once(server, 'listening'), 'reserve loom port');
-  const port = server.address().port;
-  await new Promise((done) => server.close(done));
-  return port;
 }
 
 // This is only JSON-RPC frame correlation; method behavior stays in peri-acp.
@@ -105,18 +97,20 @@ async function checkedRequest(client, method, params) {
 }
 
 try {
-  loom = await lookupEnv({ port: await unusedPort() });
+  pgStore = await lookupEnv();
 
   model = createServer(async (request, response) => {
     try {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString());
-      const serialized = JSON.stringify(body);
-      const slow = serialized.includes('LIFECYCLE_SLOW_PROMPT');
-      const fast = serialized.includes('LIFECYCLE_FAST_PROMPT');
+      const last = body.messages?.at(-1);
+      const slow = last?.role === 'user' && last.content === 'LIFECYCLE_SLOW_PROMPT';
+      const fast = last?.role === 'user' && last.content === 'LIFECYCLE_FAST_PROMPT';
+      const prediction = body.messages?.some(({ role, content }) =>
+        role === 'system' && typeof content === 'string' && content.includes('<prediction_directive>'));
       modelRequests.push({ slow, fast, url: request.url, authorization: request.headers.authorization });
-      assert(slow || fast, `unexpected model input: ${serialized}`);
+      assert(slow || fast || prediction, 'unexpected model input');
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       if (slow) {
         response.flushHeaders();
@@ -150,7 +144,7 @@ try {
         profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
       },
     },
-    storage: { url: loom.url, authToken: loom.token },
+    storage: { url: pgStore.url, httpEndpoint: pgStore.httpEndpoint },
     machineId: '00000000-0000-4000-8000-000000000003',
   });
 
@@ -158,30 +152,40 @@ try {
   wire = rpc(acp);
   const init = await checkedRequest(wire, 'initialize', { protocolVersion: 1, clientCapabilities: {} });
   assert(init.protocolVersion === 1, `unexpected protocol: ${JSON.stringify(init)}`);
-  const first = await checkedRequest(wire, 'session/new', { cwd: '/workspace', mcpServers: [] });
+  // Each ACP connection owns one active Session. Both hosts share the same database.
+  const slowModule = await withTimeout(Module(), 'load slow-session module');
+  slowHost = await withTimeout(slowModule.PeriWasmAcp.start(config), 'start slow-session host');
+  slowWire = rpc(slowHost);
+  await checkedRequest(slowWire, 'initialize', { protocolVersion: 1, clientCapabilities: {} });
+  const first = await checkedRequest(slowWire, 'session/new', { cwd: '/workspace', mcpServers: [] });
   const second = await checkedRequest(wire, 'session/new', { cwd: '/workspace', mcpServers: [] });
   const cancelledId = first.sessionId;
   const completedId = second.sessionId;
   assert(cancelledId && completedId && cancelledId !== completedId, 'two distinct sessions were not created');
 
-  const interrupted = checkedRequest(wire, 'session/prompt', {
+  const interrupted = checkedRequest(slowWire, 'session/prompt', {
     sessionId: cancelledId, prompt: [{ type: 'text', text: 'LIFECYCLE_SLOW_PROMPT' }],
   });
   await withTimeout(slowRequest, 'slow LLM request');
   const continuing = checkedRequest(wire, 'session/prompt', {
     sessionId: completedId, prompt: [{ type: 'text', text: 'LIFECYCLE_FAST_PROMPT' }],
   });
-  await wire.notify('session/cancel', { sessionId: cancelledId });
+  await slowWire.notify('session/cancel', { sessionId: cancelledId });
   const cancelled = await withTimeout(interrupted, 'cancelled prompt response');
   const completed = await withTimeout(continuing, 'independent prompt response');
   assert(cancelled.stopReason === 'cancelled', `cancelled prompt returned: ${JSON.stringify(cancelled)}`);
   assert(completed.stopReason === 'end_turn', `independent prompt returned: ${JSON.stringify(completed)}`);
-  assert(modelRequests.length >= 2 && modelRequests.some((request) => request.slow) &&
-    modelRequests.some((request) => request.fast), `model calls: ${JSON.stringify(modelRequests)}`);
+  assert(modelRequests.filter((request) => request.slow).length === 1 &&
+    modelRequests.filter((request) => request.fast).length === 1, `model calls: ${JSON.stringify(modelRequests)}`);
   assert(modelRequests.every((request) => request.url === '/v1/chat/completions' &&
     request.authorization === 'Bearer fixture-key'), 'LLM HTTP request path or authorization differs');
   assert(wire.notifications.some((frame) => frame.method === 'session/update' &&
     JSON.stringify(frame).includes('LIFECYCLE_FAST_REPLY')), 'successful session answer was not emitted');
+
+  await withTimeout(slowHost.close(), 'close slow-session host');
+  await withTimeout(slowWire.reader, 'drain slow-session reader');
+  slowHost.free();
+  slowHost = undefined;
 
   const beforeClose = await checkedRequest(wire, 'session/list', { cwd: '/workspace' });
   assert(beforeClose.sessions?.some((entry) => entry.sessionId === completedId),
@@ -201,23 +205,25 @@ try {
   await checkedRequest(wire, 'session/load', { sessionId: completedId, cwd: '/workspace', mcpServers: [] });
   assert(wire.notifications.some((frame) => frame.method === 'session/update' &&
     JSON.stringify(frame).includes('LIFECYCLE_FAST_REPLY')),
-  'completed answer missing from Turso history replay');
+  'completed answer missing from PostgreSQL history replay');
   console.log(JSON.stringify({ passed: true, sessions: [cancelledId, completedId],
     cancelledStopReason: cancelled.stopReason, completedStopReason: completed.stopReason,
     modelCalls: modelRequests.length, persistedAcrossRestart: true }));
 } catch (error) {
   console.error(JSON.stringify({ passed: false, modelCalls: modelRequests.length,
-    loomLog: (await loom?.logs?.()) ?? '' }));
+    pgStoreLog: (await pgStore?.logs?.()) ?? '' }));
   throw error;
 } finally {
-  if (acp) {
-    await withTimeout(acp.close(), 'cleanup ACP Host').catch(() => {});
-    await withTimeout(wire?.reader, 'cleanup ACP reader').catch(() => {});
-    acp.free();
+  for (const [host, connection] of [[acp, wire], [slowHost, slowWire]]) {
+    if (host) {
+      await withTimeout(host.close(), 'cleanup ACP Host').catch(() => {});
+      await withTimeout(connection?.reader, 'cleanup ACP reader').catch(() => {});
+      host.free();
+    }
   }
   if (model) {
     model.closeAllConnections();
     await withTimeout(new Promise((done) => model.close(done)), 'close model', 5_000).catch(() => {});
   }
-  if (loom) await loom.stop();
+  if (pgStore) await pgStore.stop();
 }

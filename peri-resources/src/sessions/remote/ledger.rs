@@ -12,8 +12,8 @@
 
 use std::fmt;
 
+use super::sql::Value;
 use sha2::{Digest, Sha256};
-use turso_serverless::Value;
 
 use peri_acp_types::thread::ThreadId;
 
@@ -27,7 +27,7 @@ pub(super) const STATE_APPLIED: &str = "applied";
 /// 终态封闭：原请求确定从未生效，且不可能再生效。
 pub(super) const STATE_CLOSED: &str = "closed";
 
-pub(super) const CREATE_OP_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS peri_op_ledger (
+pub(super) const CREATE_OP_LEDGER_SQL: &str = "CREATE TABLE peri_op_ledger (
     operation_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     digest TEXT NOT NULL,
@@ -38,14 +38,14 @@ pub(super) const CREATE_OP_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS peri_o
 
 const QUALIFY_SQL: &str = "INSERT INTO peri_op_ledger
     (operation_id, kind, digest, state, receipt, updated_at)
-    VALUES (?1, ?2, ?3, 'applied', ?4, ?5)";
+    VALUES ($1, $2, $3, 'applied', $4, $5)";
 
 const CLOSURE_SQL: &str = "INSERT INTO peri_op_ledger
     (operation_id, kind, digest, state, receipt, updated_at)
-    VALUES (?1, ?2, ?3, 'closed', NULL, ?4)";
+    VALUES ($1, $2, $3, 'closed', NULL, $4)";
 
 const RESOLVE_SQL: &str =
-    "SELECT state, receipt, digest FROM peri_op_ledger WHERE operation_id = ?1";
+    "SELECT state, receipt, digest FROM peri_op_ledger WHERE operation_id = $1";
 
 /// 一次远端操作的内部身份；不接受外部构造。
 ///

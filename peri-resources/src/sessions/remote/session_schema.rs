@@ -1,49 +1,26 @@
-//! 远端会话 schema：直接说 canonical 形状（`sessions::canonical` 是唯一来源）。
-//!
-//! 远端不再有自己的会话表形状：`peri_sessions` / `peri_session_messages` 以及「meta 列 +
-//! 扁平绑定列」的混合形状随统一删除。远端下发的是与**本机 SQLite 逐字同一份** DDL
-//! （[`CREATE_TABLES`] / [`CREATE_INDEXES`]），因此两个 adapter 之间不再有表名或
-//! 列名映射，canonical 历史顺序也与本机一致地由 `messages.rowid` 承载（原先的 `ordinal`
-//! 列与它的索引一并删除）。
-//!
-//! 远端仍独有的是**执行器机制表**（不属于 canonical 会话 schema，本机不建）：
-//!
-//! | 表 | 承载 |
-//! | --- | --- |
-//! | `peri_store_meta` | 远端版本标记（服务端拒绝写 `PRAGMA user_version`，见 [`super::schema`]） |
-//! | `peri_op_ledger` | 幂等资格账本（本机用本地事务表达同一件事） |
-//!
-//! 初始化语句全部 `IF NOT EXISTS`，可重复执行；调用方只在**可写打开**且打开路径的只读判定
-//! （身份 + 形状探测，见 [`super::session_open`]）通过之后执行，已初始化时读回而不改写任何行。
+//! PostgreSQL uses the same logical tables, constraints and indexes as the
+//! local store. The driver-specific clauses below select 64-bit integers and
+//! an explicit insertion-order column instead of SQLite's implicit rowid.
 
 use super::sql::StatementSpec;
-use crate::sessions::canonical::{
-    CREATE_INDEXES, CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_TABLES,
-};
+use crate::sessions::canonical;
 
-/// 初始化本任务 schema 的语句集：建表段 + 索引段，**一条语句一个 spec**。
-///
-/// 远端执行器的语句单元就是一条语句，因此清单直接逐条展开，不把多句拼进一个请求。
-/// 两段的顺序有意义：`idx_threads_updated` 引用 `threads` 的列，索引必须晚于建表；
-/// 与本机 `sqlite_store::schema` 的「建表 → 补列 → 建索引」顺序同源。
 pub(super) fn initialization_plan() -> Vec<StatementSpec> {
-    CREATE_TABLES
+    canonical::PG_CREATE_TABLES
         .iter()
-        .chain(CREATE_INDEXES)
+        .chain(canonical::PG_CREATE_INDEXES)
         .map(|sql| StatementSpec::bare(sql))
         .collect()
 }
 
-pub(super) fn repair_plan(
-    missing_indexes: bool,
-    missing_close_intents: bool,
-) -> Vec<StatementSpec> {
-    let mut plan = Vec::new();
-    if missing_close_intents {
-        plan.push(StatementSpec::bare(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL));
-    }
-    if missing_indexes {
-        plan.extend(CREATE_INDEXES.iter().map(|sql| StatementSpec::bare(sql)));
-    }
-    plan
+/// Used by both the initial collision guard and the read-only catalog check.
+/// All names come from trusted DDL owned by the adapter.
+pub(super) fn reserved_objects() -> String {
+    canonical::CANONICAL_TABLES
+        .iter()
+        .copied()
+        .chain(["peri_store_meta", super::ledger::OP_LEDGER_TABLE])
+        .chain(canonical::INDEX_NAMES.iter().copied())
+        .collect::<Vec<_>>()
+        .join(",")
 }

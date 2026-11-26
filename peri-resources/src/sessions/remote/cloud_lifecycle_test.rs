@@ -15,21 +15,19 @@
 //! 只输出计数/类别/布尔；合成数据由本轮 run 派生，不含真实历史或项目内容。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_lifecycle_
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
+use super::sql::Value;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     ChildSnapshot, FrozenSnapshotBytes, FrozenState, SessionResourceErrorKind,
 };
 use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use peri_acp_types::thread::AgentStatus;
-use peri_acp_types::workspace::ResolvedWorkspace;
-use turso_serverless::Value;
 
 use super::cloud_tests::CloudTarget;
 use super::ledger::{OperationId, OperationIdentity};
@@ -40,13 +38,13 @@ use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 
 const COUNT_META_ROWS_SQL: &str = "SELECT COUNT(*) FROM peri_store_meta WHERE singleton = 0";
 const COUNT_RUN_LEDGER_ROWS_SQL: &str =
-    "SELECT COUNT(*) FROM peri_op_ledger WHERE operation_id LIKE ?1";
+    "SELECT COUNT(*) FROM peri_op_ledger WHERE operation_id LIKE $1";
 const SELECT_TRUNCATED_SQL: &str =
-    "SELECT truncated FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+    "SELECT truncated FROM messages WHERE thread_id = $1 AND message_id = $2";
 
 /// 实验一：生命周期行为（child resume / legacy 接纳 / 删树 / 撤销）在真引擎上的往返。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_lifecycle_round_trip() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-life");
@@ -74,7 +72,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .map_err(super::cloud_tests::failure)?;
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
-    let binding = super::cloud_tests::synth_binding();
+    let (_directory, workspace) = super::cloud_tests::workspace(&writer).await?;
     let root = super::cloud_tests::synth_thread(&format!("{run}-lc-root"));
     let child = super::cloud_tests::synth_thread(&format!("{run}-lc-child"));
     let parent = super::cloud_tests::synth_thread(&format!("{run}-lc-parent"));
@@ -82,13 +80,16 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     for session in [&root, &parent] {
         writer
-            .save_new_session(&super::cloud_tests::session_input(
-                session.as_str(),
-                &created_at,
-                &binding,
-                &frozen,
-                None,
-            ))
+            .save_new_session_in_workspace(
+                &super::cloud_tests::session_input(
+                    session.as_str(),
+                    &created_at,
+                    &workspace,
+                    &frozen,
+                    None,
+                ),
+                &workspace,
+            )
             .await
             .map_err(super::cloud_tests::failure)?;
     }
@@ -97,7 +98,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             target: super::cloud_tests::session_input(
                 child.as_str(),
                 &created_at,
-                &binding,
+                &workspace,
                 &frozen,
                 Some(root.as_str()),
             ),
@@ -115,7 +116,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             target: super::cloud_tests::session_input(
                 nested.as_str(),
                 &created_at,
-                &binding,
+                &workspace,
                 &frozen,
                 Some(parent.as_str()),
             ),
@@ -168,18 +169,10 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     )?;
 
     // Remote legacy adoption cannot mint present-day evidence for old history.
-    let workspace = ResolvedWorkspace {
-        project_id: binding.project_id,
-        workspace_id: binding.workspace_id,
-        cwd: PathBuf::from("/tmp/peri-cloud-synth"),
-        root: PathBuf::from("/tmp/peri-cloud-synth"),
-        relative_cwd: PathBuf::from("sub"),
-        discovery_snapshot: None,
-    };
     let rejected = writer
         .adopt_legacy_session(
             &root,
-            "/tmp/peri-cloud-synth",
+            workspace.cwd.to_str().expect("fixture workspace is UTF-8"),
             &workspace,
             &FrozenSnapshotBytes::new(format!("{{\"adopted\":\"{run}\"}}")),
         )
@@ -270,7 +263,7 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 ///
 /// 第二条分支同样重要：守卫若在健康路径上插入了行，所有正常写入都会失败。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_batch_guard_holds_on_real_engine() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-guard");
@@ -301,14 +294,18 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .session_data(StoreAccess::ReadWrite)
         .await
         .map_err(super::cloud_tests::failure)?;
+    let (_directory, workspace) = super::cloud_tests::workspace(&writer).await?;
     writer
-        .save_new_session(&super::cloud_tests::session_input(
-            root.as_str(),
-            &created_at,
-            &super::cloud_tests::synth_binding(),
-            &frozen,
-            None,
-        ))
+        .save_new_session_in_workspace(
+            &super::cloud_tests::session_input(
+                root.as_str(),
+                &created_at,
+                &workspace,
+                &frozen,
+                None,
+            ),
+            &workspace,
+        )
         .await
         .map_err(super::cloud_tests::failure)?;
     let entry = PersistedPayload::Message(BaseMessage::human("guarded entry"));

@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::sessions::remote::sql::Value;
 use chrono::{DateTime, Utc};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -22,7 +23,6 @@ use peri_acp_types::store::MessageFlags;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{ProjectId, SessionBinding, WorkspaceId};
-use turso_serverless::Value;
 
 use super::session_sql::{
     META_AGENT_STATUS, META_CANCEL_POLICY, META_CONFIG, META_CONTENT_SIZE,

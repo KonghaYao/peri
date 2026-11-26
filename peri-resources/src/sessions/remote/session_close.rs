@@ -1,10 +1,10 @@
 //! Durable close intent settlement without execution ownership.
 
+use crate::sessions::remote::sql::Value;
 use peri_acp_types::session_resources::{
     CloseSettlement, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::thread::ThreadId;
-use turso_serverless::Value;
 
 use super::super::mutation::RemoteStore;
 use super::super::sql::StatementSpec;
@@ -25,10 +25,10 @@ impl RemoteSessionData {
             std::slice::from_ref(id),
             vec![StatementSpec::new(
                 "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
-                    (SELECT 1 FROM threads t JOIN session_close_intents c ON c.thread_id = t.id WHERE t.id = ?1)",
+                    (SELECT 1 FROM threads t JOIN session_close_intents c ON c.thread_id = t.id WHERE t.id = $1)",
                 vec![Value::Text(id.clone())],
             ), StatementSpec::new(
-                "DELETE FROM session_close_intents WHERE thread_id = ?1",
+                "DELETE FROM session_close_intents WHERE thread_id = $1",
                 vec![Value::Text(id.clone())],
             )],
             id,
@@ -45,8 +45,8 @@ impl RemoteStore {
     ) -> SessionResourceResult<CloseSettlement> {
         let row = self
             .fetch_row(&StatementSpec::new(
-                "SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1),
-                    EXISTS (SELECT 1 FROM session_close_intents WHERE thread_id = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1),
+                    EXISTS (SELECT 1 FROM session_close_intents WHERE thread_id = $1)",
                 vec![Value::Text(id.clone())],
             ))
             .await?;

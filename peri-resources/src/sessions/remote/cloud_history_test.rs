@@ -15,7 +15,7 @@
 //! 只输出计数/类别/布尔；合成数据由本轮 run 派生，不含真实历史或项目内容。
 //!
 //! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
+//! PERI_TEST_POSTGRES_URL=<test-database-url> \
 //!   cargo test -p peri-resources --lib -- --ignored --nocapture --test-threads=1 cloud_history_
 //! ```
 
@@ -29,7 +29,7 @@ use crate::sessions::data::SessionDataPort;
 
 /// 实验：历史行为（追加/投影/compact/rewind/移除）在真引擎上的往返。
 #[tokio::test]
-#[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
+#[ignore = "requires PERI_TEST_POSTGRES_URL pointing to a dedicated PostgreSQL database"]
 async fn cloud_history_behaviors_round_trip() {
     let target = CloudTarget::load();
     let run = super::cloud_tests::unique_run_label("peri-hist");
@@ -59,14 +59,14 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     let root = super::cloud_tests::synth_thread(&format!("{run}-hist"));
     let created_at = chrono::Utc::now().to_rfc3339();
     let frozen = format!("{{\"frozen\":\"{run}\"}}");
-    let binding = super::cloud_tests::synth_binding();
+    let (_directory, workspace) = super::cloud_tests::workspace(&writer).await?;
 
     // 标题故意留空：自动标题规则只在 `title IS NULL` 时补一次。
     let mut new_session =
-        super::cloud_tests::session_input(root.as_str(), &created_at, &binding, &frozen, None);
+        super::cloud_tests::session_input(root.as_str(), &created_at, &workspace, &frozen, None);
     new_session.meta.title = None;
     writer
-        .save_new_session(&new_session)
+        .save_new_session_in_workspace(&new_session, &workspace)
         .await
         .map_err(super::cloud_tests::failure)?;
 
@@ -304,13 +304,16 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
     // 跨会话条目：拒绝，且不删别的会话的行。
     let other = super::cloud_tests::synth_thread(&format!("{run}-other"));
     writer
-        .save_new_session(&super::cloud_tests::session_input(
-            other.as_str(),
-            &created_at,
-            &binding,
-            &frozen,
-            None,
-        ))
+        .save_new_session_in_workspace(
+            &super::cloud_tests::session_input(
+                other.as_str(),
+                &created_at,
+                &workspace,
+                &frozen,
+                None,
+            ),
+            &workspace,
+        )
         .await
         .map_err(super::cloud_tests::failure)?;
     let other_message = PersistedPayload::Message(BaseMessage::human("other session entry"));

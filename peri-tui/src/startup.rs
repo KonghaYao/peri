@@ -98,16 +98,16 @@ pub(super) struct Cli {
     /// SQLite 会话数据库路径（默认 ~/.peri/threads/threads.db）
     #[arg(long = "db-path", visible_alias = "dbPath")]
     pub(super) db_path: Option<PathBuf>,
-    /// 会话存储定位：本机路径、远程 locator 或 env:<变量名>（与 --db-path 互斥）
+    /// 会话存储定位：本机路径、PostgreSQL DSN 或 env:<变量名>（与 --db-path 互斥）
     #[arg(long = "session-store", visible_alias = "sessionStore")]
     pub(super) session_store: Option<String>,
-    /// 远程会话存储的凭证来源（环境变量名，不接受 token 字面量）
+    /// 可选的 PostgreSQL 密码环境变量名；设置时覆盖 DSN 密码
     #[arg(
         long = "session-store-token-env",
         visible_alias = "sessionStoreTokenEnv"
     )]
     pub(super) session_store_token_env: Option<String>,
-    /// locator 形态无法唯一决定引擎时显式指定（turso / libsql）
+    /// 远程会话存储引擎（postgres / postgresql，默认由 DSN 指定）
     #[arg(long = "session-store-engine", visible_alias = "sessionStoreEngine")]
     pub(super) session_store_engine: Option<String>,
 

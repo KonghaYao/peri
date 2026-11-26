@@ -22,7 +22,6 @@ use async_trait::async_trait;
 
 use peri_acp_types::session_resources::SessionResourceResult;
 
-use super::connection::SdkTransport;
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::mutation::{RemoteStore, StoreAccess};
@@ -151,9 +150,9 @@ impl RemoteConnectionFactory {
 #[async_trait]
 impl ConnectionFactory for RemoteConnectionFactory {
     async fn connect(&self) -> SessionResourceResult<RemoteStore> {
-        let connection = super::connection::connect_sdk(&self.endpoint, &self.credential).await?;
+        let connection = super::connection::connect(&self.endpoint, &self.credential).await?;
         Ok(RemoteStore::new(
-            Arc::new(SdkTransport::new(connection)),
+            connection,
             self.access,
             self.gate.mint(),
             Arc::clone(&self.gate),

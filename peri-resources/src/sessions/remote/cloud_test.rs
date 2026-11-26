@@ -1,45 +1,24 @@
-//! 显式云端只读探测（默认 `#[ignore]`，不参与常规回归）。
-//!
-//! 本文件是凭证进入进程的唯一入口，只在本进程内解析操作者显式给出的 `.env`
-//! （`PERI_CLOUD_ENV_FILE`，默认仓库根的 `.env`）：不 `source`/`eval`、不起子进程、
-//! 不把变量注入其他进程环境、不修改 `.env`。
-//!
-//! 输出只允许：键名存在性、脱敏 engine/服务端特征、成功/失败分类。所有输出经 [`SafeOut`]
-//! 逐行校验，凭证字面量一旦出现即拒绝输出。键名由操作者用 `PERI_CLOUD_URL_KEY` /
-//! `PERI_CLOUD_TOKEN_KEY` 显式给出，本文件不内置默认名、别名或候选名。
-//!
-//! 两个探测都只发只读请求：不建表、不写数据、不初始化 schema。
-//!
-//! 显式执行（`--ignored`）时缺选择器或键**直接失败**，不静默跳过。
-//!
-//! ```text
-//! PERI_CLOUD_URL_KEY=<url 变量名> PERI_CLOUD_TOKEN_KEY=<token 变量名> \
-//!   cargo test -p peri-resources --lib -- --ignored --nocapture cloud_
-//! ```
+//! Lifecycle fixtures for a dedicated PostgreSQL integration database.
+//! Set PERI_TEST_POSTGRES_URL when explicitly running the ignored database tests.
 
-use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::sql::Value;
+use crate::sessions::local_port::LocalExecutionPort;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceError, SessionResourceResult,
 };
 use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
-use peri_acp_types::workspace::{ProjectId, SessionBinding, WorkspaceId};
-use turso_serverless::Value;
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 
 use super::ledger::{LedgerRow, OperationId, OperationIdentity};
 use super::mutation::{MutationOutcome, QualifiedMutation, RemoteStore, StoreAccess};
 use super::session_data::RemoteSessionData;
 use super::sql::StatementSpec;
-use super::{RemoteConnection, RemoteEndpoint, SessionStoreCredential};
-
-/// URL 环境变量**键名**的选择器（不是凭证来源）。
-pub(super) const URL_KEY_SELECTOR: &str = "PERI_CLOUD_URL_KEY";
-/// 凭证环境变量**键名**的选择器。
-pub(super) const TOKEN_KEY_SELECTOR: &str = "PERI_CLOUD_TOKEN_KEY";
+use super::{RemoteEndpoint, SessionStoreCredential};
 
 /// 输出缓冲：打印前校验每行不含凭证字面量。
 pub(super) struct SafeOut {
@@ -73,176 +52,9 @@ impl SafeOut {
     }
 }
 
-fn env_file_path() -> PathBuf {
-    match std::env::var_os("PERI_CLOUD_ENV_FILE") {
-        Some(path) => PathBuf::from(path),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env"),
-    }
-}
-
-/// 最小 dotenv 解析：只认 `KEY=VALUE`，剥一层对称引号；不做变量展开、不执行命令。
-fn parse_env_file(text: &str) -> BTreeMap<String, String> {
-    let mut entries = BTreeMap::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            continue;
-        }
-        let mut value = value.trim();
-        if value.len() >= 2 {
-            let bytes = value.as_bytes();
-            let quoted = (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-                || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'');
-            if quoted {
-                value = &value[1..value.len() - 1];
-            }
-        }
-        entries.insert(key.to_owned(), value.to_owned());
-    }
-    entries
-}
-
-pub(super) fn load_env() -> BTreeMap<String, String> {
-    let path = env_file_path();
-    let text = std::fs::read_to_string(&path).expect("cloud probe env file unreadable");
-    parse_env_file(&text)
-}
-
-/// 取操作者显式指定的两个键名对应的值。
-///
-/// 缺 selector 或缺键是**配置缺失**：显式执行时直接 panic，不静默跳过（跳过会被当成通过）。
-pub(super) fn required_credential_keys() -> (String, String) {
-    let url_key = std::env::var(URL_KEY_SELECTOR).unwrap_or_else(|_| {
-        panic!("cloud experiment requires {URL_KEY_SELECTOR} (name of the locator variable)")
-    });
-    let token_key = std::env::var(TOKEN_KEY_SELECTOR).unwrap_or_else(|_| {
-        panic!("cloud experiment requires {TOKEN_KEY_SELECTOR} (name of the token variable)")
-    });
-    (url_key, token_key)
-}
-
-pub(super) fn required_credentials(env: &BTreeMap<String, String>) -> (String, String) {
-    let (url_key, token_key) = required_credential_keys();
-    let missing = |key: &str| {
-        panic!("cloud experiment requires a non-empty `{key}` entry in the env file");
-    };
-    let url = env
-        .get(&url_key)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| missing(&url_key))
-        .clone();
-    let token = env
-        .get(&token_key)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| missing(&token_key))
-        .clone();
-    (url, token)
-}
-
-pub(super) fn scheme_class(raw: &str) -> &'static str {
-    let lower = raw.trim().to_ascii_lowercase();
-    if lower.starts_with("https://") {
-        "https"
-    } else if lower.starts_with("turso://") {
-        "turso"
-    } else if lower.starts_with("libsql://") {
-        "libsql"
-    } else {
-        "other"
-    }
-}
-
-/// 官方 HTTP 参考页：`turso://` / `libsql://` 换成 `https://` 即同一 base URL。
-pub(super) fn http_base_url(raw: &str) -> Result<url::Url, &'static str> {
-    let rewritten = match scheme_class(raw) {
-        "https" => raw.trim().to_owned(),
-        "turso" => raw.trim().replacen("turso://", "https://", 1),
-        "libsql" => raw.trim().replacen("libsql://", "https://", 1),
-        _ => return Err("unsupported_scheme"),
-    };
-    let url = url::Url::parse(&rewritten).map_err(|_| "unparsable_url")?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("userinfo_present");
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("query_or_fragment_present");
-    }
-    Ok(url)
-}
-
-pub(super) fn classify_engine(body: &str) -> &'static str {
-    let head = body.trim();
-    if head.is_empty() {
-        return "empty_body";
-    }
-    let lower = head.to_ascii_lowercase();
-    if lower.starts_with("sqld") {
-        "libsql_sqld"
-    } else if lower.contains("turso") {
-        "turso_engine"
-    } else if lower.contains("libsql") {
-        "libsql_engine_other"
-    } else {
-        "unclassified"
-    }
-}
-
-/// 从任意文本里抽第一个 `x.y.z` 形态的数字版本；抽不到就报 `unrecognized`。
-pub(super) fn numeric_version(body: &str) -> String {
-    let mut found = String::new();
-    let mut dots = 0;
-    for byte in body.bytes() {
-        let c = byte as char;
-        if c.is_ascii_digit() {
-            found.push(c);
-        } else if c == '.' && !found.is_empty() && dots < 2 {
-            found.push(c);
-            dots += 1;
-        } else {
-            if dots == 2 && found.ends_with(|c: char| c.is_ascii_digit()) {
-                return found;
-            }
-            found.clear();
-            dots = 0;
-        }
-    }
-    if dots == 2 && found.ends_with(|c: char| c.is_ascii_digit()) {
-        found
-    } else {
-        "unrecognized".to_owned()
-    }
-}
-
-pub(super) fn transport_class(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
-    } else if error.is_redirect() {
-        "redirect"
-    } else if error.is_decode() {
-        "decode"
-    } else if error.is_request() {
-        "request"
-    } else {
-        "other"
-    }
-}
-
-pub(super) fn unique_sentinel(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{prefix}-{nanos}")
+pub(super) fn test_url() -> String {
+    std::env::var("PERI_TEST_POSTGRES_URL")
+        .expect("set PERI_TEST_POSTGRES_URL to a dedicated test database")
 }
 
 /// 本轮唯一 run 标签：只用十六进制与短横线，供本轮对象命名（不作为身份判据）。
@@ -267,18 +79,15 @@ pub(super) struct CloudTarget {
 impl CloudTarget {
     /// 载入配置：缺文件、缺选择器、缺键、locator 形状不可用都直接 panic。
     pub(super) fn load() -> Self {
-        let env = load_env();
-        let (raw_url, token) = required_credentials(&env);
-        let credential = SessionStoreCredential::try_new(token.clone()).unwrap_or_else(|error| {
-            panic!("cloud experiment credential rejected: {error}");
-        });
-        let endpoint = RemoteEndpoint::parse(&raw_url, None).unwrap_or_else(|error| {
+        let raw_url = test_url();
+        let credential = SessionStoreCredential::default();
+        let endpoint = RemoteEndpoint::parse(&raw_url).unwrap_or_else(|error| {
             panic!("cloud experiment locator rejected: {error}");
         });
         Self {
             endpoint,
             credential,
-            redactions: vec![raw_url, token],
+            redactions: vec![raw_url],
         }
     }
 
@@ -309,10 +118,10 @@ impl CloudTarget {
     pub(super) async fn session_data(
         &self,
         access: StoreAccess,
-    ) -> SessionResourceResult<RemoteSessionData> {
+    ) -> SessionResourceResult<Arc<RemoteSessionData>> {
         RemoteSessionData::open(&self.endpoint, &self.credential, access)
             .await
-            .map(|(data, _initialization)| data)
+            .map(|(data, _initialization)| Arc::new(data))
     }
 }
 
@@ -332,17 +141,17 @@ pub(super) fn remote_error_class(error: &SessionResourceError) -> String {
 // 正是「收据不按 TTL 清理」。因此清理器里**没有**针对该表的删除/覆盖语句，收据是有意保留的
 // 空间成本，复核时报告保留条数（[`check_cleanup_kept_receipts`]）。
 
-pub(super) const DELETE_RUN_MESSAGES_SQL: &str = "DELETE FROM messages WHERE thread_id LIKE ?1";
+pub(super) const DELETE_RUN_MESSAGES_SQL: &str = "DELETE FROM messages WHERE thread_id LIKE $1";
 pub(super) const DELETE_RUN_BINDINGS_SQL: &str =
-    "DELETE FROM session_bindings WHERE thread_id LIKE ?1";
-pub(super) const DELETE_RUN_SESSIONS_SQL: &str = "DELETE FROM threads WHERE id LIKE ?1";
-pub(super) const COUNT_RUN_SESSIONS_SQL: &str = "SELECT COUNT(*) FROM threads WHERE id LIKE ?1";
+    "DELETE FROM session_bindings WHERE thread_id LIKE $1";
+pub(super) const DELETE_RUN_SESSIONS_SQL: &str = "DELETE FROM threads WHERE id LIKE $1";
+pub(super) const COUNT_RUN_SESSIONS_SQL: &str = "SELECT COUNT(*) FROM threads WHERE id LIKE $1";
 pub(super) const COUNT_RUN_MESSAGES_SQL: &str =
-    "SELECT COUNT(*) FROM messages WHERE thread_id LIKE ?1";
+    "SELECT COUNT(*) FROM messages WHERE thread_id LIKE $1";
 pub(super) const COUNT_RUN_BINDINGS_SQL: &str =
-    "SELECT COUNT(*) FROM session_bindings WHERE thread_id LIKE ?1";
+    "SELECT COUNT(*) FROM session_bindings WHERE thread_id LIKE $1";
 pub(super) const COUNT_RUN_LEDGER_SQL: &str =
-    "SELECT COUNT(*) FROM peri_op_ledger WHERE operation_id LIKE ?1";
+    "SELECT COUNT(*) FROM peri_op_ledger WHERE operation_id LIKE $1";
 
 /// 清理器的效果语句：只删本轮合成数据，**不碰收据**。
 ///
@@ -388,15 +197,29 @@ pub(super) fn failure(error: SessionResourceError) -> String {
     format!("unexpected failure: {}", remote_error_class(&error))
 }
 
-/// 合成一个绑定：远端只存绑定事实，不解析本机目录。
+/// Isolated guard fixtures only compare binding identity, without creating a workspace.
 pub(super) fn synth_binding() -> SessionBinding {
     SessionBinding {
-        schema_version: 1,
+        schema_version: peri_acp_types::workspace::SESSION_BINDING_VERSION,
         revision: 1,
-        project_id: ProjectId::new(),
-        workspace_id: WorkspaceId::new(),
-        cwd_relative_to_workspace: PathBuf::from("sub"),
+        project_id: peri_acp_types::workspace::ProjectId::new(),
+        workspace_id: peri_acp_types::workspace::WorkspaceId::new(),
+        cwd_relative_to_workspace: "sub".into(),
     }
+}
+
+/// Run the same workspace observation used by a native deployment. Keep the
+/// directory alive for the duration of the test so its evidence stays valid.
+pub(super) async fn workspace(
+    data: &Arc<RemoteSessionData>,
+) -> Result<(tempfile::TempDir, ResolvedWorkspace), String> {
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let execution = super::execution::RemoteExecution::new(Arc::clone(data), false);
+    let workspace = execution
+        .resolve_workspace(directory.path())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((directory, workspace))
 }
 
 /// 合成一组 flags（实验里只关心 truncated/excluded）。
@@ -416,7 +239,7 @@ pub(super) fn synth_thread(label: &str) -> ThreadId {
 pub(super) fn session_input(
     thread_id: &str,
     created_at: &str,
-    binding: &SessionBinding,
+    workspace: &ResolvedWorkspace,
     frozen: &str,
     parent: Option<&str>,
 ) -> NewSession {
@@ -428,13 +251,13 @@ pub(super) fn session_input(
                 "title-{}",
                 &thread_id[thread_id.len().saturating_sub(4)..]
             )),
-            cwd: "/tmp/peri-cloud-synth".to_owned(),
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
             parent_thread_id: parent.map(str::to_owned),
             hidden: false,
             cancel_policy: CancelPolicy::Cascade,
             snapshot_at_message_id: None,
         },
-        binding: binding.clone(),
+        binding: SessionBinding::from_workspace(workspace),
         frozen: FrozenSnapshotBytes::new(frozen),
     }
 }
@@ -565,215 +388,6 @@ pub(super) async fn run_counts(store: &RemoteStore, run: &str) -> Result<RunCoun
         bindings,
         ledger,
     })
-}
-
-/// 键名存在性报告：只列与引擎相关的键名，不输出任何取值。
-#[test]
-#[ignore = "显式 cloud 探测：需要已授权测试库的 .env，默认不跑"]
-fn cloud_env_key_names_report() {
-    let env = load_env();
-    let candidates: Vec<&str> = env
-        .keys()
-        .filter(|key| {
-            let upper = key.to_ascii_uppercase();
-            upper.contains("TURSO") || upper.contains("LIBSQL")
-        })
-        .map(String::as_str)
-        .collect();
-    let mut out = SafeOut::new(env.values().cloned().collect());
-    out.push(format!("env_keys_total={}", env.len()));
-    out.push(format!("engine_like_key_names={candidates:?}"));
-    for selector in [URL_KEY_SELECTOR, TOKEN_KEY_SELECTOR] {
-        out.push(format!(
-            "selector_present[{selector}]={}",
-            std::env::var_os(selector).is_some()
-        ));
-    }
-    out.flush();
-}
-
-/// 协议层只读探测：`GET /version` 与服务端特征 + `POST /v2/pipeline` 只读参数绑定回环。
-#[tokio::test]
-#[ignore = "显式 cloud 探测：需要已授权测试库的 .env，默认不跑"]
-async fn cloud_engine_read_only_probe() {
-    let env = load_env();
-    let (raw_url, token) = required_credentials(&env);
-    let mut out = SafeOut::new(vec![raw_url.clone(), token.clone()]);
-    out.push(format!("url_scheme_class={}", scheme_class(&raw_url)));
-
-    let base = match http_base_url(&raw_url) {
-        Ok(url) => url,
-        Err(class) => {
-            out.push(format!("url_shape={class}"));
-            out.flush();
-            return;
-        }
-    };
-    out.push("url_shape=ok".to_owned());
-    out.push(format!("token_length_class={}", token.len() / 16));
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            out.push(format!("client_build={}", transport_class(&error)));
-            out.flush();
-            return;
-        }
-    };
-
-    match base.join("version") {
-        Ok(endpoint) => match client.get(endpoint).bearer_auth(&token).send().await {
-            Ok(response) => {
-                out.push(format!(
-                    "version_http_status={}",
-                    response.status().as_u16()
-                ));
-                let body = response.text().await.unwrap_or_default();
-                out.push(format!("engine_class={}", classify_engine(&body)));
-                out.push(format!("server_version_numeric={}", numeric_version(&body)));
-            }
-            Err(error) => out.push(format!("version_transport={}", transport_class(&error))),
-        },
-        Err(_) => out.push("version_endpoint=join_failed".to_owned()),
-    }
-
-    let sentinel = unique_sentinel("peri-probe");
-    let request = serde_json::json!({
-        "requests": [
-            {
-                "type": "execute",
-                "stmt": {
-                    "sql": "SELECT ? AS probe_text, ? AS probe_int, ? AS probe_null",
-                    "args": [
-                        {"type": "text", "value": sentinel},
-                        {"type": "integer", "value": "9007199254740993"},
-                        {"type": "null"}
-                    ]
-                }
-            },
-            {"type": "close"}
-        ]
-    });
-    match base.join("v2/pipeline") {
-        Ok(endpoint) => match client
-            .post(endpoint)
-            .bearer_auth(&token)
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                out.push(format!(
-                    "pipeline_http_status={}",
-                    response.status().as_u16()
-                ));
-                let body: serde_json::Value =
-                    response.json().await.unwrap_or(serde_json::Value::Null);
-                let entry = &body["results"][0];
-                let kind = entry["type"].as_str().unwrap_or("malformed");
-                out.push(format!("pipeline_result_class={kind}"));
-                if kind == "ok" {
-                    let row = &entry["response"]["result"]["rows"][0];
-                    out.push(format!(
-                        "binding_text_roundtrip={}",
-                        row[0]["value"].as_str() == Some(sentinel.as_str())
-                    ));
-                    out.push(format!(
-                        "binding_int64_roundtrip={}",
-                        row[1]["value"].as_str() == Some("9007199254740993")
-                    ));
-                    out.push(format!(
-                        "binding_null_roundtrip={}",
-                        row[2]["type"].as_str() == Some("null") || row[2].is_null()
-                    ));
-                } else if kind == "error" {
-                    let code = entry["error"]["code"]
-                        .as_str()
-                        .filter(|code| {
-                            code.len() <= 40
-                                && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        })
-                        .unwrap_or("unclassified");
-                    out.push(format!("pipeline_error_code={code}"));
-                }
-            }
-            Err(error) => out.push(format!("pipeline_transport={}", transport_class(&error))),
-        },
-        Err(_) => out.push("pipeline_endpoint=join_failed".to_owned()),
-    }
-
-    out.flush();
-}
-
-/// 生产连接路径只读探测：用私有 `RemoteConnection`（已选定 SDK）连接并做只读回环。
-#[tokio::test]
-#[ignore = "显式 cloud 探测：需要已授权测试库的 .env，默认不跑"]
-async fn cloud_sdk_connection_read_only_probe() {
-    let env = load_env();
-    let (raw_url, token) = required_credentials(&env);
-    let credential = match SessionStoreCredential::try_new(token.clone()) {
-        Ok(credential) => credential,
-        Err(error) => {
-            println!("PROBE credential_error={error}");
-            return;
-        }
-    };
-    let mut out = SafeOut::new(vec![raw_url.clone(), token.clone()]);
-    let endpoint = match RemoteEndpoint::parse(&raw_url, None) {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            out.push(format!("endpoint_error={error}"));
-            out.flush();
-            return;
-        }
-    };
-    out.push(format!("engine={}", endpoint.engine().as_str()));
-    out.push(format!("host_domain_class={}", endpoint.host_class()));
-    out.push(format!("token_length_class={}", credential.length_class()));
-
-    let connection = match RemoteConnection::connect(&endpoint, &credential).await {
-        Ok(connection) => connection,
-        Err(error) => {
-            out.push(format!("sdk_connect_error_kind={:?}", error.kind()));
-            out.flush();
-            return;
-        }
-    };
-    out.push("sdk_connect=ok".to_owned());
-
-    let sentinel = unique_sentinel("peri-sdk-probe");
-    match connection
-        .bind_roundtrip(&sentinel, 9_007_199_254_740_993)
-        .await
-    {
-        Ok(roundtrip) => {
-            out.push(format!("sdk_binding_text_ok={}", roundtrip.text_ok));
-            out.push(format!("sdk_binding_int64_ok={}", roundtrip.int64_ok));
-            out.push(format!("sdk_binding_null_ok={}", roundtrip.null_ok));
-        }
-        Err(error) => out.push(format!("sdk_binding_error_kind={:?}", error.kind())),
-    }
-
-    match connection.engine_read_facts().await {
-        Ok(facts) => out.push(format!(
-            "sdk_sqlite_version_numeric={}",
-            facts
-                .sqlite_version
-                .as_deref()
-                .map(numeric_version)
-                .unwrap_or_else(|| "unsupported".to_owned())
-        )),
-        Err(error) => out.push(format!("sdk_read_facts_error_kind={:?}", error.kind())),
-    }
-
-    match connection.close().await {
-        Ok(()) => out.push("sdk_close=ok".to_owned()),
-        Err(error) => out.push(format!("sdk_close_error_kind={:?}", error.kind())),
-    }
-    out.flush();
 }
 
 // ─── 清理器的离线契约测试（不联网、不需要凭证）────────────────────────────────
