@@ -323,6 +323,24 @@ impl SwarmError {
         }))
     }
 
+    /// An official MCP `transport.type` outside the implemented range. Only
+    /// HTTP MCP servers can be executed by this deployment; `stdio` and any
+    /// unknown type fail closed with the transport path instead of a
+    /// misleading `server_url` report.
+    #[must_use]
+    pub fn unsupported_mcp_transport(transport: &str, field: &str) -> Self {
+        Self::new(
+            ErrorKind::Unprocessable,
+            ErrorCode::UnsupportedTool,
+            "MCP transport is not implemented by this deployment; only `http` is accepted",
+        )
+        .with_details(serde_json::json!({
+            "field": field,
+            "value": transport,
+            "supported": ["http"],
+        }))
+    }
+
     /// The opaque approval id is unknown for this session: never issued here,
     /// issued by a previous actor generation, or addressed to another session.
     #[must_use]
