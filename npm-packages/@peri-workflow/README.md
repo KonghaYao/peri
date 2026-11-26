@@ -71,7 +71,7 @@ export const meta = {
 }
 
 const research = await agent('Research quantum computing', {
-  agentType: 'web-researcher',
+  agentType: 'explorer',
 })
 
 const summary = await agent('Summarize the findings', {

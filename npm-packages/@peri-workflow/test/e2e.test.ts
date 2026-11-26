@@ -148,7 +148,7 @@ describe('JSON-RPC 模式（宿主模拟）', () => {
 
     const script = `export const meta = { name: 'e2e-demo', description: 'e2e test' }
 phase('run')
-const r = await agent('hello agent', { agentType: 'web-researcher' })
+const r = await agent('hello agent', { agentType: 'explorer' })
 return { answer: r }`
 
     s.send({

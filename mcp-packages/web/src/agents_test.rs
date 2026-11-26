@@ -12,13 +12,13 @@ use peri_acp_types::workspace_resources::META_KEY_SCOPE;
 use peri_acp_types::workspace_resources::MIME_MARKDOWN;
 use rmcp::model::ResourceContents;
 
-const WEB_RESEARCHER_URI: &str = "agent://builtin/web-researcher/agent.md";
+const EXPLORER_URI: &str = "agent://builtin/explorer/agent.md";
 
 #[test]
-fn web_researcher_is_the_only_shipped_agent_and_matches_its_frontmatter() {
-    assert_eq!(BUILTIN_AGENTS.len(), 1, "web 实例只发布 web-researcher");
+fn explorer_is_the_only_shipped_agent_and_matches_its_frontmatter() {
+    assert_eq!(BUILTIN_AGENTS.len(), 1, "web 实例只发布 explorer");
     let agent = &BUILTIN_AGENTS[0];
-    assert_eq!(agent.id, "web-researcher");
+    assert_eq!(agent.id, "explorer");
 
     let frontmatter =
         peri_mcp_common::agent_definition::frontmatter::frontmatter_json(agent.content)
@@ -36,7 +36,7 @@ fn web_researcher_is_the_only_shipped_agent_and_matches_its_frontmatter() {
             .get("disallowedTools")
             .and_then(|v| v.as_array())
             .is_some_and(|tools| tools.iter().any(|tool| tool == "Agent")),
-        "web-researcher 必须禁止递归派发 Agent"
+        "explorer 必须禁止递归派发 Agent"
     );
 }
 
@@ -45,8 +45,8 @@ fn list_projects_the_builtin_uri_and_metadata() {
     let resources = crate::agents::list_resources();
     assert_eq!(resources.len(), 1);
     let resource = &resources[0];
-    assert_eq!(resource.uri, WEB_RESEARCHER_URI);
-    assert_eq!(resource.name, "web-researcher");
+    assert_eq!(resource.uri, EXPLORER_URI);
+    assert_eq!(resource.name, "explorer");
     assert_eq!(resource.mime_type.as_deref(), Some(MIME_MARKDOWN));
     assert!(
         resource
@@ -74,13 +74,13 @@ fn list_projects_the_builtin_uri_and_metadata() {
         .expect("目录渲染依赖 frontmatter 投影");
     assert_eq!(
         frontmatter.get("name").and_then(|v| v.as_str()),
-        Some("web-researcher")
+        Some("explorer")
     );
 }
 
 #[test]
 fn read_returns_the_definition_verbatim_with_metadata() {
-    let contents = crate::agents::read(WEB_RESEARCHER_URI).expect("本实例定义可读");
+    let contents = crate::agents::read(EXPLORER_URI).expect("本实例定义可读");
     match contents {
         ResourceContents::TextResourceContents {
             text,
@@ -105,6 +105,22 @@ fn read_returns_the_definition_verbatim_with_metadata() {
 }
 
 #[test]
+fn prior_builtin_uri_reads_the_canonical_definition() {
+    let uri = "agent://builtin/web-researcher/agent.md";
+    let contents = crate::agents::read(uri).unwrap();
+    let ResourceContents::TextResourceContents {
+        text,
+        uri: returned,
+        ..
+    } = contents
+    else {
+        panic!("expected Markdown");
+    };
+    assert_eq!(returned, uri);
+    assert_eq!(text, peri_mcp_common::EXPLORER_AGENT);
+}
+
+#[test]
 fn read_rejects_non_agent_and_foreign_uris_without_leaking_the_definition() {
     assert_eq!(
         crate::agents::read("https://example.test/x").unwrap_err(),
@@ -116,9 +132,9 @@ fn read_rejects_non_agent_and_foreign_uris_without_leaking_the_definition() {
     );
     // 其他 scope 形状合法，但不归本实例提供。
     for uri in [
-        "agent://project/web-researcher/agent.md",
-        "agent://plugin/plug/web-researcher/agent.md",
-        "agent://user/web-researcher/agent.md",
+        "agent://project/explorer/agent.md",
+        "agent://plugin/plug/explorer/agent.md",
+        "agent://user/explorer/agent.md",
     ] {
         assert_eq!(
             crate::agents::read(uri).unwrap_err(),

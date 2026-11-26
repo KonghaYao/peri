@@ -1,6 +1,6 @@
 //! web 实例发布的 builtin Agent 定义资源面。
 //!
-//! `web-researcher` 的定义随 web 实例发布（`agent://builtin/web-researcher/agent.md`）：
+//! `explorer` 的定义随 web 实例发布（`agent://builtin/explorer/agent.md`）：
 //! 宿主 `McpAgentRegistry` 信任宿主绑定的 builtin 实例来源，因此该定义与 workspace
 //! 实例发布的 builtin Agent 在目录面同形（scope = builtin、id 保持裸名），web 实例
 //! 关闭时随实例一起不可发现。

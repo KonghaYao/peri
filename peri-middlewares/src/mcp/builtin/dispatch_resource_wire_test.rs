@@ -45,7 +45,7 @@ fn w4a_meta_cwd(dir: &tempfile::TempDir) -> String {
 
 /// W1 验收：`BuiltinServerHandler` 对 workspace 资源面的**完整转发**（`resources/list`、
 /// `resources/templates/list`、`skills/list|get`），以及各实例只声明/转发**自己的**资源面
-/// （web 声明并转发 `web-researcher` 定义；未接线的方法按 -32601 诚实拒绝，而不是伪装成
+/// （web 声明并转发 `explorer` 定义；未接线的方法按 -32601 诚实拒绝，而不是伪装成
 /// 空成功）。
 ///
 /// 证据边界（诚实声明）：资源输入由本夹具直接经 `with_resources` 装配（W1 的夹具形态，
@@ -154,7 +154,7 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
         .expect("modern 握手后 peer_info 必须是 Some");
     assert!(
         info.capabilities.resources.is_some(),
-        "web 必须声明 resources（web-researcher 定义随实例发布）"
+        "web 必须声明 resources（explorer 定义随实例发布）"
     );
     let web_resources = web_peer
         .list_all_resources()
@@ -165,19 +165,19 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
             .iter()
             .map(|resource| resource.uri.as_str())
             .collect::<Vec<_>>(),
-        vec!["agent://builtin/web-researcher/agent.md"],
+        vec!["agent://builtin/explorer/agent.md"],
         "dispatch 只能转发 web 自己的资源面"
     );
     let web_read = web_peer
         .read_resource(ReadResourceRequestParams::new(
-            "agent://builtin/web-researcher/agent.md",
+            "agent://builtin/explorer/agent.md",
         ))
         .await
         .expect("web 定义必须经 dispatch 可读");
     match web_read.contents.first() {
         Some(ResourceContents::TextResourceContents { text, .. }) => {
             assert!(
-                text.contains("name: web-researcher"),
+                text.contains("name: explorer"),
                 "读取必须转发到 web handler：{text:.80}"
             );
         }

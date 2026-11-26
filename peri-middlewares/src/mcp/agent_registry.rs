@@ -8,14 +8,14 @@
 //!
 //! - **本地来源**（project / plugin / builtin 三类）只认宿主绑定的资源来源：
 //!   `ConfigSource::Builtin { instance }` 且 `Connected`、未被 A24 关闭集关闭的
-//!   任一 builtin 实例（不限 `workspace`；web 实例发布的 `web-researcher` 即属此列），
+//!   任一 builtin 实例，
 //!   以及宿主显式选择的 `ConfigSource::WorkspaceRemote`。来源描述取自该实例资源
 //!   `_meta` 的 `io.peri/scope` / `io.peri/plugin`，**不信任任何 server 的文本
 //!   自称**：其他 server（含占用同名 `workspace` 的实例）上的同 scheme 资源一律
 //!   按远端处理。
 //! - **远端来源**：id = `mcp__{server}__{name}`，激活走严格 v1 规范化
 //!   （本地扩展字段清空、模型/轮数校验）与内容绑定批准。
-//! - **本地 id 保持裸名**（`coder`、`web-researcher` …）：`subagent_type` 的既有
+//! - **本地 id 保持裸名**（`coder`、`explorer` …）：`subagent_type` 的既有
 //!   取值不变；同名跨来源并存，选择优先级（E13 project → builtin → plugin）由
 //!   [`McpAgentRegistry::resolve_local`] 表达，**不做跨来源覆盖**。
 //!
@@ -50,6 +50,7 @@ use peri_mcp_core::agent_definition::ClaudeAgentFrontmatter;
 
 const MAX_AGENT_BYTES: usize = 256 * 1024;
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const LEGACY_WEB_RESEARCHER: &str = "web-researcher";
 
 /// 本地来源的 scope 优先级（E13：project → builtin → plugin）。
 ///
@@ -126,6 +127,13 @@ pub struct ActivatedMcpAgent {
     pub metadata: McpAgentMetadata,
     pub definition: ClaudeAgent,
     pub digest: String,
+}
+
+struct AgentEntries {
+    entries: Vec<McpAgentMetadata>,
+    rejected: Vec<RejectedLocalAgent>,
+    /// An explicit local definition owns this name even when its frontmatter cannot be parsed.
+    legacy_web_researcher_present: bool,
 }
 
 struct RejectedLocalAgent {
@@ -230,12 +238,13 @@ impl McpAgentRegistry {
 
     #[must_use]
     pub fn entries(&self) -> Vec<McpAgentMetadata> {
-        self.collect_entries().0
+        self.collect_entries().entries
     }
 
-    fn collect_entries(&self) -> (Vec<McpAgentMetadata>, Vec<RejectedLocalAgent>) {
+    fn collect_entries(&self) -> AgentEntries {
         let mut entries = Vec::new();
         let mut rejected = Vec::new();
+        let mut legacy_web_researcher_present = false;
         {
             let iterated_pool = self.pool.clients_visible_to(self.session_id.as_deref());
             for handle in iterated_pool {
@@ -286,6 +295,7 @@ impl McpAgentRegistry {
                         tracing::debug!(uri = %resource.uri, "本地 agent 资源缺 scope 元数据，不公开");
                         continue;
                     };
+                    legacy_web_researcher_present |= name == LEGACY_WEB_RESEARCHER;
                     let frontmatter = resource
                         .meta
                         .as_ref()
@@ -328,7 +338,11 @@ impl McpAgentRegistry {
             }
         }
         entries.sort_by(|a, b| (&a.origin, &a.name, &a.uri).cmp(&(&b.origin, &b.name, &b.uri)));
-        (entries, rejected)
+        AgentEntries {
+            entries,
+            rejected,
+            legacy_web_researcher_present,
+        }
     }
 
     /// 该句柄是否是**宿主绑定的**资源来源（身份判定，不含关闭位）。
@@ -422,25 +436,32 @@ impl McpAgentRegistry {
         id: &str,
         include_builtin: bool,
     ) -> Result<McpAgentMetadata, String> {
-        let (entries, rejected) = self.collect_entries();
-        let mut candidates: Vec<McpAgentMetadata> = entries
+        let snapshot = self.collect_entries();
+        // Old Workflow specifications and stored Agent thread titles can name the
+        // retired built-in. Keep exact project/plugin definitions (including their
+        // validation errors) ahead of this lookup. A custom explorer is never its target.
+        let legacy_fallback = include_builtin
+            && id == LEGACY_WEB_RESEARCHER
+            && !snapshot.legacy_web_researcher_present;
+        let target = if legacy_fallback { "explorer" } else { id };
+        let matches = |name: &str, source: &AgentSource| {
+            name == target
+                && match source.local_scope() {
+                    Some(ResourceScope::Builtin) => include_builtin,
+                    Some(_) => !legacy_fallback,
+                    None => false,
+                }
+        };
+        let selected = snapshot
+            .entries
             .into_iter()
-            .filter(|entry| entry.source.is_local() && entry.id == id)
-            .filter(|entry| {
-                include_builtin || entry.source.local_scope() != Some(ResourceScope::Builtin)
-            })
-            .collect();
-        candidates.sort_by_key(|entry| match &entry.source {
-            AgentSource::Local { scope, .. } => local_priority(*scope),
-            AgentSource::Remote => u8::MAX,
-        });
-        let selected = candidates.into_iter().next();
-        if let Some(rejection) = rejected
+            .filter(|entry| matches(&entry.id, &entry.source))
+            .min_by_key(|entry| entry.source.local_scope().map(local_priority));
+        if let Some(rejection) = snapshot
+            .rejected
             .iter()
             .filter(|rejection| {
-                rejection.id == id
-                    && (include_builtin
-                        || rejection.source.local_scope() != Some(ResourceScope::Builtin))
+                matches(&rejection.id, &rejection.source)
                     && selected
                         .as_ref()
                         .is_none_or(|entry| rejection.blocks(entry, include_builtin))
@@ -464,15 +485,17 @@ impl McpAgentRegistry {
     /// （与迁移前 `scan_agents_detailed(..., include_built_ins)` 一致）。
     #[must_use]
     pub fn local_catalog(&self, include_builtin: bool) -> Vec<McpAgentMetadata> {
-        let (entries, rejected) = self.collect_entries();
-        let mut entries: Vec<McpAgentMetadata> = entries
+        let snapshot = self.collect_entries();
+        let mut entries: Vec<McpAgentMetadata> = snapshot
+            .entries
             .into_iter()
             .filter(|entry| entry.source.is_local())
             .filter(|entry| {
                 include_builtin || entry.source.local_scope() != Some(ResourceScope::Builtin)
             })
             .filter(|entry| {
-                !rejected
+                !snapshot
+                    .rejected
                     .iter()
                     .any(|rejection| rejection.blocks(entry, include_builtin))
             })

@@ -432,8 +432,7 @@ fn test_capability_whitelist_execute_extra_tool_is_writes() {
 /// explorer 不再声明 tools 白名单：工具面继承父 Agent，只读由提示词弱约束。
 #[test]
 fn test_explorer_inherits_parent_tools() {
-    let content =
-        include_str!("../../../mcp-packages/workspace/src/resources/builtin/agents/explorer.md");
+    let content = include_str!("../../../mcp-packages/common/src/agents/explorer.md");
     let agent = agent_definition::parse_agent_file(content).expect("explorer fixture 必须可解析");
     assert_eq!(
         agent.frontmatter.tools,

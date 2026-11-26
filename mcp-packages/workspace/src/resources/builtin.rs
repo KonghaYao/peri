@@ -9,9 +9,7 @@
 //! - builtin Agent 恒以 `agent://builtin/{id}/agent.md` 公开（W5）：**是否可用**
 //!   由宿主按会话冻结开关（`built_in_subagents_enabled`）判定——provider 只提供
 //!   静态资产，不做启用/关闭策略（§5.1「server 不持策略」）；
-//! - `web-researcher` 的定义归属 web 实例（`mcp-packages/web/src/agents/`），
-//!   不在本表；宿主把宿主绑定的任何 builtin 实例都视为本地来源，两者在目录面
-//!   同形（`AgentSource::Local` + scope = builtin）。
+//! - workspace 与独立 web MCP 引用同一份 explorer 定义；按角色 ID 对外选择。
 
 use peri_acp_types::workspace_resources;
 use peri_acp_types::workspace_resources::ResourceScope;
@@ -97,7 +95,7 @@ pub static BUILTIN_AGENTS: &[BuiltinAgent] = &[
     },
     BuiltinAgent {
         id: "explorer",
-        content: include_str!("builtin/agents/explorer.md"),
+        content: peri_mcp_common::EXPLORER_AGENT,
     },
     BuiltinAgent {
         id: "general-purpose",

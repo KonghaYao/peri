@@ -111,8 +111,142 @@ fn set_closed_instances(pool: &Arc<McpClientPool>, instances: &[&str]) {
     .expect("上下文单次注入");
 }
 
+const EXPLORER_AGENT: &str =
+    r#"{"name":"explorer","description":"Builtin explorer","model":"haiku"}"#;
 const LIST_AGENT: &str = r#"{"name":"local","description":"Local agent","tools":"Read, Grep"}"#;
 const BUILTIN_AGENT: &str = r#"{"name":"coder","description":"Builtin coder","model":"sonnet"}"#;
+
+#[tokio::test]
+async fn legacy_web_researcher_activates_builtin_explorer_even_with_a_project_explorer() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join(".claude/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("explorer.md"),
+        "---\nname: explorer\ndescription: Custom explorer\n---\n\nProject persona.",
+    )
+    .unwrap();
+    let fixture = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let registry = &fixture.registry;
+    let project = registry.activate("explorer", true).await.unwrap();
+    assert_eq!(
+        project.metadata.source.local_scope(),
+        Some(ResourceScope::Project)
+    );
+    let alias = registry.activate("web-researcher", true).await.unwrap();
+    assert_eq!(alias.metadata.id, "explorer");
+    assert_eq!(alias.metadata.uri, "agent://builtin/explorer/agent.md");
+    assert_eq!(alias.definition.frontmatter.name, "explorer");
+    assert_ne!(alias.digest, project.digest);
+    let workflow = crate::assembly::default_workflow_middleware_factory_with_pool(Some(
+        Arc::clone(&fixture.pool),
+    ));
+    let definition = workflow
+        .resolve_agent_definition("web-researcher", dir.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        definition.prompt_overrides.unwrap().persona,
+        Some(alias.definition.system_prompt)
+    );
+    assert!(registry.activate("web-researcher", false).await.is_err());
+    assert!(!registry
+        .local_catalog(true)
+        .iter()
+        .any(|entry| entry.id == "web-researcher"));
+}
+
+#[test]
+fn exact_legacy_project_or_plugin_profile_precedes_the_alias() {
+    for (scope, plugin) in [
+        (ResourceScope::Project, None),
+        (ResourceScope::Plugin, Some("plug")),
+    ] {
+        let registry = McpAgentRegistry::new(pool_with(vec![(
+            "workspace".into(),
+            workspace_handle(vec![
+                agent_resource(ResourceScope::Builtin, None, "explorer", EXPLORER_AGENT),
+                agent_resource(scope, plugin, "web-researcher", LIST_AGENT),
+            ]),
+        )]));
+        for include_builtin in [true, false] {
+            let exact = registry
+                .resolve_local("web-researcher", include_builtin)
+                .unwrap();
+            assert_eq!(exact.id, "web-researcher");
+            assert_eq!(exact.source.local_scope(), Some(scope));
+        }
+    }
+}
+
+#[test]
+fn invalid_legacy_profile_preserves_exact_lookup_errors() {
+    for (frontmatter, message) in [
+        (UNKNOWN_MODEL_AGENT, "unsupported model tier"),
+        ("null", "cannot find agent definition"),
+    ] {
+        let registry = McpAgentRegistry::new(pool_with(vec![(
+            "workspace".into(),
+            workspace_handle(vec![
+                agent_resource(ResourceScope::Builtin, None, "explorer", EXPLORER_AGENT),
+                agent_resource(ResourceScope::Project, None, "web-researcher", frontmatter),
+            ]),
+        )]));
+        let error = registry.resolve("web-researcher").unwrap_err();
+        assert!(
+            error.contains(message) && error.contains("web-researcher"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn malformed_frontmatter_keeps_normal_exact_source_fallback() {
+    for id in ["custom", "web-researcher"] {
+        let registry = McpAgentRegistry::new(pool_with(vec![(
+            "workspace".into(),
+            workspace_handle(vec![
+                agent_resource(ResourceScope::Project, None, id, "null"),
+                agent_resource(ResourceScope::Plugin, Some("plug"), id, LIST_AGENT),
+                agent_resource(ResourceScope::Builtin, None, "explorer", EXPLORER_AGENT),
+            ]),
+        )]));
+        let exact = registry.resolve(id).unwrap();
+        assert_eq!(exact.id, id);
+        assert_eq!(exact.source.local_scope(), Some(ResourceScope::Plugin));
+    }
+}
+
+#[test]
+fn legacy_alias_requires_a_trusted_builtin_explorer() {
+    let registry = McpAgentRegistry::new(pool_with(vec![
+        (
+            "workspace".into(),
+            workspace_handle(vec![agent_resource(
+                ResourceScope::Project,
+                None,
+                "explorer",
+                LIST_AGENT,
+            )]),
+        ),
+        (
+            "external".into(),
+            handle(
+                "external",
+                None,
+                vec![agent_resource(
+                    ResourceScope::Builtin,
+                    None,
+                    "explorer",
+                    EXPLORER_AGENT,
+                )],
+            ),
+        ),
+    ]));
+    assert!(registry.resolve("explorer").is_ok());
+    assert!(registry.resolve("mcp__external__explorer").is_ok());
+    assert!(registry.resolve("web-researcher").is_err());
+}
 
 #[tokio::test]
 async fn invalid_project_model_blocks_same_name_builtin_and_plugin_activation() {
@@ -255,14 +389,11 @@ fn isolated_model_error_tracks_current_resources_and_face_closure() {
 
 #[test]
 fn local_entries_come_from_host_bound_resource_sources_only() {
-    let trusted = workspace_handle(vec![agent_resource(
-        ResourceScope::Project,
-        None,
-        "local",
-        LIST_AGENT,
-    )]);
-    // 另一个宿主绑定的 builtin 实例（web）同样提供本地来源：
-    // `web-researcher` 定义随 web 实例发布，id 保持裸名。
+    let trusted = workspace_handle(vec![
+        agent_resource(ResourceScope::Project, None, "local", LIST_AGENT),
+        agent_resource(ResourceScope::Builtin, None, "explorer", EXPLORER_AGENT),
+    ]);
+    // Two host-bound providers can publish the same built-in id.
     let web = handle(
         "web",
         Some(ConfigSource::Builtin {
@@ -271,8 +402,8 @@ fn local_entries_come_from_host_bound_resource_sources_only() {
         vec![agent_resource(
             ResourceScope::Builtin,
             None,
-            "web-researcher",
-            BUILTIN_AGENT,
+            "explorer",
+            EXPLORER_AGENT,
         )],
     );
     // 未带 host-assigned 来源的同名/外部 server 不被当作本地来源。
@@ -309,7 +440,7 @@ fn local_entries_come_from_host_bound_resource_sources_only() {
         .iter()
         .filter(|entry| entry.source.is_local())
         .collect();
-    assert_eq!(local.len(), 2, "宿主绑定的 builtin 实例都产生本地条目");
+    assert_eq!(local.len(), 3, "宿主绑定的 builtin 实例都产生本地条目");
     let local_ids: Vec<(&str, &str)> = local
         .iter()
         .map(|entry| (entry.id.as_str(), entry.origin.as_str()))
@@ -319,20 +450,29 @@ fn local_entries_come_from_host_bound_resource_sources_only() {
         "local ids: {local_ids:?}"
     );
     assert!(
-        local_ids.contains(&("web-researcher", "web")),
+        local_ids.contains(&("explorer", "web")) && local_ids.contains(&("explorer", "workspace")),
         "local ids: {local_ids:?}"
     );
     assert_eq!(
         local
             .iter()
-            .find(|entry| entry.id == "web-researcher")
-            .expect("web-researcher")
+            .find(|entry| entry.id == "explorer")
+            .expect("explorer")
             .source,
         AgentSource::Local {
             scope: ResourceScope::Builtin,
             plugin_name: None
         }
     );
+    let catalog = registry.local_catalog(true);
+    assert_eq!(
+        catalog
+            .iter()
+            .filter(|entry| entry.id == "explorer")
+            .count(),
+        1
+    );
+    assert!(!catalog.iter().any(|entry| entry.id == "web-researcher"));
     // 冒充实例与外部 server 的条目都按远端处理（id 带 `mcp__{server}__` 前缀）。
     let remote_ids: Vec<&str> = entries
         .iter()
@@ -373,7 +513,7 @@ fn local_catalog_follows_e13_priority_and_keeps_same_name_across_origins() {
     let builtin_local = agent_resource(ResourceScope::Builtin, None, "coder", BUILTIN_AGENT);
     let plugin_local = agent_resource(ResourceScope::Plugin, Some("plug"), "helper", LIST_AGENT);
     // 仅 builtin 来源存在的 id：验证 builtin 开关确实门控 builtin 来源。
-    let builtin_only = agent_resource(ResourceScope::Builtin, None, "explorer", BUILTIN_AGENT);
+    let builtin_only = agent_resource(ResourceScope::Builtin, None, "explorer", EXPLORER_AGENT);
     let pool = pool_with(vec![(
         "workspace".to_string(),
         workspace_handle(vec![
@@ -631,14 +771,14 @@ fn unknown_model_tier_entries_are_isolated_from_the_catalog() {
 }
 
 #[test]
-fn closed_web_instance_drops_web_researcher_instead_of_projecting_it_remotely() {
+fn closed_web_instance_drops_explorer_and_its_legacy_alias() {
     // F8 对非 workspace 的 builtin 实例同样成立：关闭的 web 实例不得把
-    // `web-researcher` 定义投影成 `mcp__web__*` 远端条目（否则关闭后仍可激活）。
+    // `explorer` 定义投影成 `mcp__web__*` 远端条目（否则关闭后仍可激活）。
     let resources = vec![agent_resource(
         ResourceScope::Builtin,
         None,
-        "web-researcher",
-        BUILTIN_AGENT,
+        "explorer",
+        EXPLORER_AGENT,
     )];
     let pool = pool_with(vec![(
         "web".to_string(),
@@ -654,6 +794,7 @@ fn closed_web_instance_drops_web_researcher_instead_of_projecting_it_remotely() 
 
     let registry = McpAgentRegistry::new(pool);
     assert!(registry.entries().is_empty(), "关闭实例 ⇒ 无任何条目");
-    assert!(registry.resolve("mcp__web__web-researcher").is_err());
+    assert!(registry.resolve("mcp__web__explorer").is_err());
+    assert!(registry.resolve("explorer").is_err());
     assert!(registry.resolve_local("web-researcher", true).is_err());
 }

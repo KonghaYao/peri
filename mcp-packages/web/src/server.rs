@@ -3,8 +3,8 @@
 //! Shared tool declaration and IF-D14 result mapping live in `peri_mcp_common`;
 //! host-side instance dispatch and lifecycle remain in `peri-middlewares`.
 //!
-//! 资源面（`resources/list|read`）发布 `web-researcher` 定义：
-//! `agent://builtin/web-researcher/agent.md`。宿主 Agent registry 只信任宿主绑定
+//! 资源面（`resources/list|read`）发布 `explorer` 定义：
+//! `agent://builtin/explorer/agent.md`。宿主 Agent registry 只信任宿主绑定
 //! 的 builtin 实例来源，因此定义随实例可用性一起开闭。
 
 use std::fmt;

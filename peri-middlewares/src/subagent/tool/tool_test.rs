@@ -318,8 +318,6 @@ pub(crate) fn with_agent_catalog(
 
 const LOCAL_AGENT_FM: &str =
     r#"{"name":"local-agent","description":"Local agent","model":"sonnet"}"#;
-const BUILTIN_AGENT_FM: &str =
-    r#"{"name":"explorer","description":"Builtin explorer","model":"haiku"}"#;
 
 #[tokio::test]
 async fn agent_definition_without_a_resource_face_reports_a_gap() {
@@ -335,20 +333,17 @@ async fn agent_definition_without_a_resource_face_reports_a_gap() {
 
 #[tokio::test]
 async fn built_in_policy_is_enforced_by_the_registry_catalog() {
-    use peri_acp_types::workspace_resources::ResourceScope;
-    // 只有 builtin 来源的定义：关闭 built-in policy 时不可加载；resume 放开。
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
-    let tool = with_agent_catalog(
-        tool_with_built_ins_disabled(cwd),
-        &[(ResourceScope::Builtin, "coder", BUILTIN_AGENT_FM)],
-    );
-    let error = tool.load_agent_def_for_resume("coder").await.unwrap_err();
-    assert!(
-        error.contains("cannot find agent definition 'coder'") || error.contains("not connected"),
-        "resume 允许 builtin 来源参与解析（正文激活需真实 peer）：{error}"
-    );
-    // 目录层：关闭位下 builtin 不进候选（建议列表不含 explorer）。
+    let fixture = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir.path()).await;
+    let tool = tool_with_built_ins_disabled(cwd)
+        .with_mcp_agents(Some(Arc::clone(&fixture.registry)), None);
+    for id in ["explorer", "web-researcher"] {
+        let error = tool.load_agent_def(id).await.unwrap_err();
+        assert!(error.contains("built-in agents are disabled"), "{error}");
+        let resumed = tool.load_agent_def_for_resume(id).await.unwrap();
+        assert_eq!(resumed.frontmatter.name, "explorer");
+    }
     let suggestions = tool.agent_error_with_suggestions("Error", Some("explor"));
     assert!(!suggestions.contains("explorer"), "{suggestions}");
 }

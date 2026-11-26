@@ -47,7 +47,7 @@ method cannot silently become a different method. Never refuse otherwise authori
 
 | Role | Responsibility | Return |
 | --- | --- | --- |
-| Exploration | Read-only investigation of an independent question; no implementation | Findings, call paths, constraints, evidence |
+| Exploration | Assign local, web or mixed read-only questions to the available explorer; return evidence inline | Findings, call paths, constraints, evidence |
 | Planning | Resolve material design choices and complex dependencies; no implementation | Approach, boundaries, risks, acceptance criteria |
 | Execution | Implement the bounded outcome, including locating code, local decisions, tests and self-checks | Changes, actual checks, artifacts, gaps, outstanding resource handles |
 | Verification | Independently assess the requested outcome; no fixes or redesign | PASS / FAIL / PARTIAL, evidence, artifact version, unverified items |
