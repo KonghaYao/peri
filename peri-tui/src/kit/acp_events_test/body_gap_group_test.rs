@@ -16,6 +16,8 @@ use super::serial;
 
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
 use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiNoteLevel};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn text(t: &str, id: &str) -> AcpEventData {
     AcpEventData::TextChunk(TuiTextChunk {
@@ -661,4 +663,147 @@ fn test_replay_phase_never_marks_a_working_group() {
         "回放阶段不得点亮 Working：items={:?}",
         snapshot.items
     );
+}
+
+// ---------------------------------------------------------------------------
+// 并发回归：手动折叠 vs 发布（A05 竞态）
+// ---------------------------------------------------------------------------
+
+/// 竞态夹具：正文 A + 过程段 + 正文 B → 组 [1]（默认折叠）。
+///
+/// 发布探针只认这组 `(session_id, request_id)`——同进程并发运行的其他测试的
+/// 发布不会消费掉探针。
+fn interleave_fixture() -> super::BridgeState {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[
+            text("正文 A", "m1"),
+            tool_started("t1"),
+            tool_ended("t1"),
+            text("正文 B", "m2"),
+        ],
+    );
+    state.active_session_id = "publication-interleave-test".into();
+    state.current_request_id = Some("publication-interleave-test".into());
+    state
+}
+
+fn clear_interleave_fixture() {
+    crate::kit::acp_events::render::disarm_publication_interleave_hook();
+    crate::kit::fold_overrides::clear();
+    crate::kit::acp_events::render::reset_body_gap_group_cache();
+}
+
+/// [A05 回归] 点击落在「构建完成、尚未取 VIEW_MODELS 写锁」之间时，发布必须
+/// 发现 generation 前进并重建，而不是用旧折叠结果整体覆盖点击。
+///
+/// 红（无重试）：发布用点击前的折叠结果整体覆盖 → 组回 Collapsed。
+/// 绿：第一次构建作废、重建一次，发布快照与覆盖表都保持 Expanded。
+#[test]
+#[serial]
+fn test_interleaved_fold_click_is_not_overwritten_by_publication() {
+    crate::kit::acp_events::render::disarm_publication_interleave_hook();
+    let mut state = interleave_fixture();
+    let group_idx = 1usize;
+    let snapshot = current_snapshot();
+    let group = group_at(&snapshot, group_idx).clone();
+    assert_eq!(group.fold, FoldState::Collapsed, "基线组默认折叠");
+    let group_key = group.key.clone();
+    let generation_before = snapshot.generation;
+
+    let builds = Arc::new(AtomicUsize::new(0));
+    let probe_builds = Arc::clone(&builds);
+    crate::kit::acp_events::render::arm_publication_interleave_hook(&state, move || {
+        // 每次构建后都会进入；只在第一次模拟点击（一次性交错）。
+        if probe_builds.fetch_add(1, Ordering::SeqCst) > 0 {
+            return;
+        }
+        // 与 `apply_fold_toggle` 一致：VM 写锁 → FOLD_OVERRIDES 写 → 当帧 COW
+        // set + recompute_hash → generation+1。
+        let view_models = VIEW_MODELS.state();
+        let mut clicked = view_models.write();
+        crate::kit::fold_overrides::insert(FoldKey::Group(group_key.clone()), FoldState::Expanded);
+        let Some(TuiRenderUnit::TuiCollapsedGroup(mut group)) =
+            clicked.items.get(group_idx).cloned()
+        else {
+            panic!("点击时组 [{group_idx}] 必须仍在快照中");
+        };
+        group.fold = FoldState::Expanded;
+        group.recompute_hash();
+        clicked
+            .items
+            .set(group_idx, TuiRenderUnit::TuiCollapsedGroup(group));
+        clicked.generation = clicked.generation.wrapping_add(1);
+    });
+
+    crate::kit::acp_events::push_view_models(&mut state);
+
+    let published = current_snapshot();
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    assert_eq!(
+        group_at(&published, group_idx).fold,
+        FoldState::Expanded,
+        "并发点击的展开态必须存活到发布快照：{:?}",
+        published.items
+    );
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "generation 冲突后必须重建一次（1 次重试）"
+    );
+    assert_eq!(
+        published.generation,
+        generation_before + 2,
+        "点击推进 1 次、发布再推进 1 次"
+    );
+    assert_eq!(state.generation, published.generation);
+    assert_eq!(
+        publication.generation, published.generation,
+        "TRANSCRIPT_PUBLICATION 必须与快照同代"
+    );
+    assert_eq!(
+        publication.previous_generation,
+        generation_before + 1,
+        "previous_generation 取成功构建的起点（点击后的 generation）"
+    );
+    assert!(
+        publication.changed_from <= group_idx,
+        "重建后 Transcript 必须重扫组槽位：changed_from={} group={group_idx}",
+        publication.changed_from
+    );
+
+    clear_interleave_fixture();
+}
+
+/// 无并发点击时不得多跑构建：一次发布只构建并提交一次（重试逻辑不侵蚀
+/// 正常路径）。
+#[test]
+#[serial]
+fn test_publication_builds_once_without_interleaved_click() {
+    crate::kit::acp_events::render::disarm_publication_interleave_hook();
+    let mut state = interleave_fixture();
+    let group_idx = 1usize;
+    let generation_before = current_snapshot().generation;
+
+    let builds = Arc::new(AtomicUsize::new(0));
+    let probe_builds = Arc::clone(&builds);
+    crate::kit::acp_events::render::arm_publication_interleave_hook(&state, move || {
+        probe_builds.fetch_add(1, Ordering::SeqCst);
+    });
+
+    crate::kit::acp_events::push_view_models(&mut state);
+
+    let published = current_snapshot();
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    assert_eq!(builds.load(Ordering::SeqCst), 1, "无并发点击时只构建一次");
+    assert_eq!(published.generation, generation_before + 1);
+    assert_eq!(publication.previous_generation, generation_before);
+    assert_eq!(
+        group_at(&published, group_idx).fold,
+        FoldState::Collapsed,
+        "无点击时组保持默认折叠"
+    );
+
+    clear_interleave_fixture();
 }
