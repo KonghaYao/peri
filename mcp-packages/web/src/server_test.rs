@@ -215,7 +215,7 @@ fn web_server_info_declares_tools_and_resources_capability_and_instance_name() {
     );
     assert!(
         info.capabilities.resources.is_some(),
-        "必须声明 resources 能力，否则宿主发现不到 web-researcher 定义"
+        "必须声明 resources 能力，否则宿主发现不到 explorer 定义"
     );
     let implementation = &info.server_info;
     assert_eq!(implementation.name, "peri-web-mcp");
@@ -597,9 +597,9 @@ async fn web_handler_with_instance_env_routes_tools_to_configured_endpoints() {
     pair.shutdown().await;
 }
 
-// ─── 资源面（web-researcher 定义）的 wire 证据 ───────────────────────────────
+// ─── 资源面（explorer 定义）的 wire 证据 ───────────────────────────────
 
-/// `resources/list` 发现 `web-researcher` 定义，`resources/read` 逐字返回正文
+/// `resources/list` 发现 `explorer` 定义，`resources/read` 逐字返回正文
 /// 与 `_meta`——宿主 Agent registry 的发现与激活两条路径都经真实 wire。
 #[tokio::test]
 async fn web_handler_resources_list_and_read_round_trip_over_wire() {
@@ -613,8 +613,8 @@ async fn web_handler_resources_list_and_read_round_trip_over_wire() {
     let listed = peer.list_resources(None).await.expect("resources/list");
     assert_eq!(listed.resources.len(), 1, "web 实例只发布一条定义");
     let resource = &listed.resources[0];
-    assert_eq!(resource.uri, "agent://builtin/web-researcher/agent.md");
-    assert_eq!(resource.name, "web-researcher");
+    assert_eq!(resource.uri, "agent://builtin/explorer/agent.md");
+    assert_eq!(resource.name, "explorer");
     assert_eq!(resource.mime_type.as_deref(), Some(MIME_MARKDOWN));
     let meta = resource.meta.as_ref().expect("资源必须带 _meta");
     assert_eq!(
@@ -638,14 +638,7 @@ async fn web_handler_resources_list_and_read_round_trip_over_wire() {
             meta,
             ..
         } => {
-            assert!(
-                text.contains("name: web-researcher"),
-                "读取必须返回定义原文：{text:.80}"
-            );
-            assert!(
-                text.contains("Web research specialist"),
-                "frontmatter description 必须在正文中"
-            );
+            assert_eq!(text, peri_mcp_common::EXPLORER_AGENT);
             assert_eq!(mime_type.as_deref(), Some(MIME_MARKDOWN));
             let meta = meta.expect("读取面同样投影 _meta");
             assert_eq!(

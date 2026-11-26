@@ -37,11 +37,10 @@ unlike definition `tools: []`. Use a nonempty allowlist to restrict a stage.
 | target | runs commands | why |
 | --- | --- | --- |
 | `coder` | yes | Inherits tools; excludes Agent |
-| `explorer` | yes | Inherits tools; excludes Agent; read-only comes from the prompt, not a tool allowlist |
+| `explorer` | yes | Inherits tools; excludes Agent; role uses only read-only local and Web tools and returns evidence inline |
 | `general-purpose` | yes | Inherits tools |
 | `plan` | yes | Inherits tools; excludes Agent; brief remains read-only |
 | `verification` | yes | Inherits tools; excludes Agent; do not modify the implementation |
-| `web-researcher` | yes | Inherits tools; excludes Agent |
 
 This table describes shipped definitions, not the current parent's complete permissions.
 It is checked against those definitions by `resources/builtin_skill_capability_test.rs`.
@@ -53,6 +52,7 @@ Do not widen permissions or claim unrun checks succeeded.
 Each assignment has one role and a fresh instance. Execution includes locating code,
 local decisions, test code, and self-checks. Independent verification uses a fresh
 verifier when risk or the user requires it. Planner and explorer are not implementers.
+Assign a local, web or mixed read-only investigation to one explorer. Provide the question and the evidence needed. Use a command-capable execution stage for measurements or file delivery.
 A pure investigation or acceptance-only request does not require implementation.
 
 ## Task, resource, and version boundaries

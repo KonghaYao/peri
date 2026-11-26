@@ -69,7 +69,7 @@ impl Default for WebMcpServer {
 impl ServerHandler for WebMcpServer {
     // 不覆写 `discover`（§10 R2：覆写会让 `tools/list` 被会话层拒绝）。
 
-    /// 能力位：tools（两个 Web 工具）+ resources（`web-researcher` 定义）。
+    /// 能力位：tools（两个 Web 工具）+ resources（`explorer` 定义）。
     ///
     /// **不复用** `peri_mcp_common::server_info`：它的固定形状是 tools-only。
     /// 资源能力随静态定义一起声明（「声明即实现」；未声明时客户端不会调用
@@ -102,7 +102,7 @@ impl ServerHandler for WebMcpServer {
         Ok(ListResourcesResult::with_all_items(agents::list_resources()))
     }
 
-    /// 读取 `agent://builtin/web-researcher/agent.md`。
+    /// 读取 `agent://builtin/explorer/agent.md`。
     ///
     /// 非法/非 agent URI → `-32602`；形状合法但不在本实例公开表 → `-32002`
     /// （与 workspace 资源面同口径；新协议版本下 SDK 按 SEP-2164 升级为 `-32602`）。

@@ -1,6 +1,9 @@
 //! Shared behavior used by the independently packaged builtin MCP instances.
 
 pub use peri_mcp_core::agent_definition;
+
+/// Canonical investigation role published by workspace and standalone web MCP.
+pub const EXPLORER_AGENT: &str = include_str!("agents/explorer.md");
 pub mod context_archive;
 pub mod failure;
 mod helpers;

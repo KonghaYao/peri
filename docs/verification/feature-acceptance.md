@@ -66,7 +66,7 @@
 | F-HISTORY-008 | 源码存在 | [契约](../design/peri-acp-protocol.md) | [源码](../../peri-acp/src/host/history_v2_adapter.rs)；[相关测试](../../peri-acp/src/host/history_v2_adapter_test.rs)；缺口：历史失效：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
 | F-HISTORY-009 | 源码存在 | [契约](../design/peri-acp-protocol.md) | [源码](../../peri-acp/src/host/history_v2_adapter.rs)；[相关测试](../../peri-acp/src/host/history_v2_adapter_inherited_test.rs)；缺口：继承历史索引：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
 | F-HISTORY-010 | 源码存在 | [契约](../design/peri-acp-protocol.md) | [源码](../../peri-acp/src/host/requests.rs)；[相关测试](../../peri-acp/src/host/requests_history_lifecycle_test.rs)；缺口：只读历史：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
-| F-TASK-001 | 源码存在 | [契约](../design/session-async-tasks.md) | [源码](../../peri-agent/src/session/subagent/background.rs)；[相关测试](../../peri-agent/src/session/subagent/background_registration_test.rs)；缺口：子 Agent 委派：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
+| F-TASK-001 | 源码存在 | [契约](../design/session-async-tasks.md) | [后台任务注册](../../peri-agent/src/session/subagent/background_registration_test.rs)、[explorer 及旧名解析](../../peri-middlewares/src/mcp/agent_registry_resource_test.rs)、[派工提示词](../../peri-middlewares/prompts/sections/11_subagent.md) | explorer 派工和交付已做场景模拟，后台任务注册待复验 |
 | F-TASK-002 | 源码存在 | [契约](../design/session-async-tasks.md) | [源码](../../peri-agent/src/session/subagent/background.rs)；[相关测试](../../peri-agent/src/session/subagent/child_runner_nested_test.rs)；缺口：并发子任务：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
 | F-TASK-003 | 源码存在 | [契约](../design/session-async-tasks.md) | [源码](../../peri-agent/src/session/subagent/background.rs)；[相关测试](../../peri-agent/src/session/subagent/parked_inbox_test.rs)；缺口：子任务 follow-up：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
 | F-TASK-004 | 源码存在 | [契约](../design/session-async-tasks.md) | [源码](../../peri-agent/src/session/subagent/background.rs)；[相关测试](../../peri-agent/src/session/subagent/resume_background_cases_test.rs)；缺口：子任务 resume：已有相关测试入口；精确断言覆盖和外置场景需对账 | 未复验 |
@@ -220,3 +220,7 @@
 | F-SWARM-010 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/bootstrap.rs)；[脚本](../../peri-swarm/scripts/provision_state_db.py)；[证据](peri-swarm-local-dev.md)；缺口：跨机部署、TLS 与 1000 Agent 规模未验证 | 本地启动序已记录；本次未重跑 |
 | F-SWARM-011 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/config.rs)、[bootstrap.rs](../../peri-swarm/src/bootstrap.rs)；[测试](../../peri-swarm/src/config_test.rs)、[bootstrap_test.rs](../../peri-swarm/src/bootstrap_test.rs)；[证据](peri-swarm-multi-replica-2026-11-21.md)；缺口：域名实际指向、双进程多副本、单 engine 节点、TLS 未验证 | 配置矩阵与 endpoint 私网校验单测、编译门结果见证据；M0 未执行；人工双进程矩阵未执行 |
 | F-SWARM-012 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/mod.rs)、[测试](../../peri-swarm/tests/it/session_resources_test.rs)；[证据](peri-swarm-session-resources-2026-11-21.md)、[官方默认值对齐](peri-swarm-official-defaults-2026-11-21.md)；缺口：真实 Loom 迁移、engine 上的 delete/update 未验证 | 契约测试覆盖 list/update/delete/turns、POST update 与显式 404；真实 `openai@7.60.0` SDK 已对进程内网关执行 create/retrieve/update/turns.list 探针；持久未完成 turn 的 502 准入与取消状态持久化有单测；本轮补充 `prompt_cache_options:{}` 默认 30m、官方会话默认字段与环境 `none` 归一化、`{}` update 与无 body 同为 no-op |
+
+### F-TASK-001 补充验收
+
+基线为 `a2c0149` 加本次补丁。在受控本地文件和网页工具上，Luna 将 14/14 个调查委派给 explorer，另 4/4 个已知位置查询或改代码的对照任务均选对执行者。四个交付任务覆盖本地追踪、网页查证、混合核对和网页不可用。首次 3/4 满足取证要求，同一子会话补回混合核对的源码定位后达到 4/4。该模拟未测生产流量、实际联网或后台任务生命周期。

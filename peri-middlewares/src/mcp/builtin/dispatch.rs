@@ -122,7 +122,7 @@ impl ServerHandler for BuiltinServerHandler {
     // **必须转发**：`resources/*`、`resources/templates/list`、`subscriptions/listen`
     // 与 `skills/*`（custom request）都由 rmcp 按 handler trait 方法分派，枚举不转发
     // 就等于这些能力在 builtin 链路上不存在（客户端会收到 `-32601` / 空 filter）。
-    // 当前 `workspace` 声明资源、订阅与 skills；`web` 声明资源（`web-researcher`
+    // 当前 `workspace` 声明资源、订阅与 skills；`web` 声明资源（`explorer`
     // 定义）；其余实例保持各实例自身的既有退化语义（无资源 ⇒ 默认空表 / `-32601`，
     // 无订阅 ⇒ `None`，无 custom ⇒ `-32601`），不新造第三种形态。
 

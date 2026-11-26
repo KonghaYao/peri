@@ -3,7 +3,7 @@
 //!
 //! 证据结构（正向与负向都可执行）：
 //! 1. 事实来源是定义本身：能力表每行由 shipped 定义现算——workspace 实例发布
-//!    [`BUILTIN_AGENTS`]，web 实例发布 `web-researcher`（`peri_mcp_web::BUILTIN_AGENTS`）；
+//!    [`BUILTIN_AGENTS`]，web 实例发布 `explorer`（`peri_mcp_web::BUILTIN_AGENTS`）；
 //! 2. Skill 侧只有一份可机读投影（`` | `id` | yes/no | … | ``）；缺行、多行、
 //!    取值非法、与定义冲突都判失败；
 //! 3. 负例证明判别力：同一 checker 对**篡改过的表**必须报错，不是恒绿断言；
@@ -87,17 +87,29 @@ fn capability_of(id: &str, content: &str) -> TargetCapability {
 /// shipped builtin Agent 的声明面能力（事实来源，不复制常量）。
 ///
 /// 定义按 provider 归属分仓：workspace 实例发布 coder / explorer /
-/// general-purpose / plan / verification，web 实例发布 web-researcher。
+/// general-purpose / plan / verification，web 实例发布 explorer。
 /// ultracode 的能力表覆盖两者，因此这里同时枚举两张静态表。
 fn builtin_targets() -> Vec<TargetCapability> {
-    BUILTIN_AGENTS
+    let sources = BUILTIN_AGENTS
         .iter()
-        .map(|agent| capability_of(agent.id, agent.content))
+        .map(|agent| (agent.id, agent.content))
         .chain(
             WEB_BUILTIN_AGENTS
                 .iter()
-                .map(|agent| capability_of(agent.id, agent.content)),
-        )
+                .map(|agent| (agent.id, agent.content)),
+        );
+    let mut unique = std::collections::BTreeMap::new();
+    for (id, content) in sources {
+        if let Some(previous) = unique.insert(id, content) {
+            assert_eq!(
+                previous, content,
+                "providers must agree on the definition of {id}"
+            );
+        }
+    }
+    unique
+        .into_iter()
+        .map(|(id, content)| capability_of(id, content))
         .collect()
 }
 

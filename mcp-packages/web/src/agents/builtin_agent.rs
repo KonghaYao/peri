@@ -14,8 +14,8 @@ pub struct BuiltinAgent {
 
 /// web 实例发布的 builtin Agent（顺序即 `resources/list` 的公开顺序）。
 pub static BUILTIN_AGENTS: &[BuiltinAgent] = &[BuiltinAgent {
-    id: "web-researcher",
-    content: include_str!("web-researcher.md"),
+    id: "explorer",
+    content: peri_mcp_common::EXPLORER_AGENT,
 }];
 
 /// 读取错误（由 handler 映射为 MCP 错误码）。
@@ -138,9 +138,14 @@ pub(crate) fn read(uri: &str) -> Result<ResourceContents, AgentResourceError> {
     if parsed.scope != ResourceScope::Builtin || parsed.plugin_name.is_some() {
         return Err(AgentResourceError::NotFound);
     }
+    // Keep previously issued standalone-web resource links readable.
+    let id = match parsed.name.as_str() {
+        "web-researcher" => "explorer",
+        name => name,
+    };
     let record = records()
         .into_iter()
-        .find(|record| record.agent_id == parsed.name.as_str())
+        .find(|record| record.agent_id == id)
         .ok_or(AgentResourceError::NotFound)?;
     let contents =
         ResourceContents::text(record.content.to_string(), uri).with_mime_type(MIME_MARKDOWN);
