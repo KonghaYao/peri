@@ -39,6 +39,10 @@ pub fn forward_cron_triggers(
                     page
                 }
                 Err(error) => {
+                    if is_permanent_cron_unavailable(&error) {
+                        tracing::debug!(%error, "cron MCP unavailable; stopping trigger polling");
+                        break;
+                    }
                     if !unavailable {
                         tracing::warn!(%error, "cron MCP trigger read failed; retaining pending delivery");
                     }
@@ -80,4 +84,64 @@ pub fn forward_cron_triggers(
 #[derive(serde::Deserialize)]
 struct TriggerPage {
     triggers: Vec<CronTrigger>,
+}
+
+fn is_permanent_cron_unavailable(error: &str) -> bool {
+    error.contains("capability `cron` is disabled")
+        || error.contains("MCP pool is closing")
+        || error.contains("MCP connection is stopping")
+        || error.contains("is disabled")
+        || error.contains("not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_acp_types::ports::McpPoolShutdownReport;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DisabledCronPool {
+        reads: AtomicUsize,
+        error_message: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl McpPoolPort for DisabledCronPool {
+        async fn shutdown(&self) -> McpPoolShutdownReport {
+            McpPoolShutdownReport::Complete {
+                settled_services: 0,
+                failed_services: 0,
+            }
+        }
+
+        fn snapshot(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn read_instance_resource(
+            &self,
+            _instance: &str,
+            _uri: &str,
+        ) -> Result<String, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(self.error_message.to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_cron_triggers_stops_immediately_on_permanent_unavailability() {
+        for error_message in ["capability `cron` is disabled", "MCP pool is closing"] {
+            let pool = Arc::new(DisabledCronPool {
+                reads: AtomicUsize::new(0),
+                error_message,
+            });
+            let cancel = CancellationToken::new();
+            let handle = forward_cron_triggers(pool.clone(), cancel.clone(), |_| true);
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+                .await
+                .expect("cron polling must exit instead of sleeping 5s in a loop")
+                .expect("task should complete cleanly");
+            assert_eq!(pool.reads.load(Ordering::SeqCst), 1);
+        }
+    }
 }
