@@ -76,6 +76,10 @@ struct McpToolBody {
     server_url: Option<Value>,
     #[serde(default)]
     headers: Option<Value>,
+    /// Official `transport` object (`openai@7.60.0`, `agents.d.ts:3726`).
+    /// Kept as a raw value so the normalizer names the offending nested path.
+    #[serde(default)]
+    transport: Option<Value>,
     #[serde(default)]
     require_approval: Option<Value>,
     #[serde(default)]
@@ -375,10 +379,18 @@ fn merge_agent_field(
 /// Normalize caller-declared tools into typed MCP declarations (`design §2.2`).
 ///
 /// Accepts the OpenAI Agents API MCP tool shape at both the flat and the nested
-/// `agent` position. Nothing is filtered by name, URL or credential policy:
-/// only shapes that cannot be represented as an [`McpToolSpec`] are rejected,
-/// and every rejection names its field path. Non-MCP tool types are an
-/// implementation gap reported as `unsupported_tool`, never silently dropped.
+/// `agent` position. The official `transport` object wins: `transport.type ==
+/// "http"` maps its `server_url`/`headers` onto [`McpToolSpec`] and its
+/// `authorization` becomes an `Authorization` header unless that header is
+/// already present; a value without an auth scheme gets the `Bearer` prefix,
+/// while `"Bearer ..."`/`"Basic ..."` is kept verbatim. The earlier flat
+/// `server_url`/`headers` shape remains as a deprecated alias; when both shapes
+/// carry a URL they must agree. `stdio` and unknown transport types are a
+/// stated gap (`unsupported_tool`), never a misleading `server_url` report. Nothing is filtered by name, URL or
+/// credential policy: only shapes that cannot be represented as an
+/// [`McpToolSpec`] are rejected, and every rejection names its field path.
+/// Non-MCP tool types are an implementation gap reported as `unsupported_tool`,
+/// never silently dropped.
 pub fn resolve_tools(body: &CreateSessionBody) -> Result<Vec<McpToolSpec>, SwarmError> {
     let flat = declared_tools(body.tools.as_ref(), "tools")?;
     let nested = match body.agent.as_ref() {
@@ -439,11 +451,52 @@ fn normalize_tool(prefix: &str, index: usize, value: &Value) -> Result<McpToolSp
         return Err(SwarmError::unsupported_tool(kind, &format!("{path}.type")));
     }
 
+    let transport = match body.transport.as_ref() {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(official_transport(&path, value)?),
+    };
+    let server_url = match &transport {
+        None => required_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?,
+        Some(transport) => {
+            let legacy =
+                optional_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?;
+            if let Some(legacy) = legacy {
+                if legacy != transport.server_url {
+                    return Err(invalid_tool(
+                        format!("{path}.transport"),
+                        "top-level `server_url` and `transport.server_url` disagree",
+                    ));
+                }
+            }
+            transport.server_url.clone()
+        }
+    };
+    // The official `transport.headers` object wins when both shapes supply
+    // headers; the flat `headers` field is the deprecated alias.
+    let mut headers = match transport
+        .as_ref()
+        .and_then(|transport| transport.headers.as_ref())
+    {
+        Some(headers) => normalize_headers(Some(headers), &format!("{path}.transport.headers"))?,
+        None => normalize_headers(body.headers.as_ref(), &format!("{path}.headers"))?,
+    };
     let mut spec = McpToolSpec::new(
         required_tool_string(body.server_label.as_ref(), &format!("{path}.server_label"))?,
-        required_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?,
+        server_url,
     );
-    spec.headers = normalize_headers(body.headers.as_ref(), &format!("{path}.headers"))?;
+    if let Some(authorization) = transport.and_then(|transport| transport.authorization) {
+        let has_authorization = headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("authorization"));
+        if !has_authorization {
+            headers.push(McpHeader {
+                name: "Authorization".to_owned(),
+                value: authorization_header_value(&authorization),
+            });
+            headers.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+    }
+    spec.headers = headers;
     spec.require_approval = verbatim_tool_value(
         body.require_approval.as_ref(),
         &format!("{path}.require_approval"),
@@ -462,20 +515,142 @@ fn invalid_tool(field: impl Into<String>, reason: &str) -> SwarmError {
     SwarmError::invalid_input(reason).with_details(json!({ "field": field.into() }))
 }
 
-fn required_tool_string(value: Option<&Value>, field: &str) -> Result<String, SwarmError> {
-    let Some(value) = value else {
+/// One official `McpTransportParam` entry (`agents.d.ts:3726`) after
+/// validation. Only `type: "http"` maps onto an [`McpToolSpec`]; this
+/// deployment has no process runtime for `stdio`.
+struct OfficialTransport {
+    server_url: String,
+    headers: Option<Value>,
+    authorization: Option<String>,
+}
+
+fn official_transport(path: &str, value: &Value) -> Result<OfficialTransport, SwarmError> {
+    let Some(object) = value.as_object() else {
         return Err(invalid_tool(
-            field,
-            "field is required by the MCP tool shape",
+            format!("{path}.transport"),
+            "transport must be an object in the OpenAI Agents API shape",
         ));
     };
+    let transport_path = format!("{path}.transport");
+    let kind = match object.get("type") {
+        Some(Value::String(kind)) => kind.as_str(),
+        Some(_) => {
+            return Err(invalid_tool(
+                format!("{transport_path}.type"),
+                "transport type must be a string",
+            ));
+        }
+        None => {
+            return Err(invalid_tool(
+                format!("{transport_path}.type"),
+                "transport must declare `type`",
+            ));
+        }
+    };
+    // `stdio` is part of the official union but cannot be executed here; an
+    // unknown transport type is equally explicit instead of a misleading
+    // `server_url` report.
+    if kind != "http" {
+        return Err(SwarmError::unsupported_mcp_transport(
+            kind,
+            &format!("{transport_path}.type"),
+        ));
+    }
+    let server_url_path = format!("{transport_path}.server_url");
+    let server_url = match optional_tool_string(object.get("server_url"), &server_url_path)? {
+        Some(url) => url,
+        None => {
+            return Err(invalid_tool(
+                server_url_path,
+                "field is required by the MCP transport shape",
+            ));
+        }
+    };
+    Ok(OfficialTransport {
+        server_url,
+        headers: match object.get("headers") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.clone()),
+        },
+        authorization: optional_tool_string(
+            object.get("authorization"),
+            &format!("{transport_path}.authorization"),
+        )?,
+    })
+}
+
+fn required_tool_string(value: Option<&Value>, field: &str) -> Result<String, SwarmError> {
+    optional_tool_string(value, field)?
+        .ok_or_else(|| invalid_tool(field, "field is required by the MCP tool shape"))
+}
+
+fn optional_tool_string(value: Option<&Value>, field: &str) -> Result<Option<String>, SwarmError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
     let Some(text) = value.as_str() else {
         return Err(invalid_tool(field, "field must be a string"));
     };
     if text.trim().is_empty() {
         return Err(invalid_tool(field, "field must not be empty"));
     }
-    Ok(text.to_owned())
+    Ok(Some(text.to_owned()))
+}
+
+/// Build the `Authorization` header value from official
+/// `transport.authorization`.
+///
+/// Official clients send both the bare token (Responses API: "provide the
+/// token here") and a complete credential (`"Bearer token"`, `"Basic ..."`;
+/// Agents API: "the authorization value sent to the MCP server"), so the
+/// `Bearer` prefix is only added when no auth scheme is present.
+fn authorization_header_value(authorization: &str) -> String {
+    if has_auth_scheme_prefix(authorization) {
+        authorization.to_owned()
+    } else {
+        format!("Bearer {authorization}")
+    }
+}
+
+/// Whether `value` starts with an HTTP auth scheme token (RFC 7235) followed
+/// by whitespace, e.g. `Bearer ` or `Basic `. Equivalent to the anchored
+/// pattern `^[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+`.
+fn has_auth_scheme_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let is_scheme_char = byte.is_ascii_alphabetic()
+            || (index > 0
+                && (byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                            | b'-'
+                    )));
+        if !is_scheme_char {
+            break;
+        }
+        index += 1;
+    }
+    index > 0
+        && bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
 }
 
 fn normalize_headers(value: Option<&Value>, field: &str) -> Result<Vec<McpHeader>, SwarmError> {

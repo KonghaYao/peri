@@ -1320,6 +1320,248 @@ fn deepwiki_tools() -> Value {
     }])
 }
 
+/// Official `openai@7.60.0` MCP tool shape (`agents.d.ts:2919`): the URL,
+/// headers and authorization live inside `transport` (`agents.d.ts:3726`).
+fn official_transport_tools() -> Value {
+    json!([{
+        "type": "mcp",
+        "server_label": "get-time",
+        "transport": {
+            "type": "http",
+            "server_url": "https://mcp.example.test/mcp",
+            "headers": { "X-Trace": "abc" },
+            "authorization": "caller-token"
+        },
+        "allowed_tools": ["get_time"]
+    }])
+}
+
+#[tokio::test]
+async fn create_accepts_the_official_sdk_transport_shape() {
+    let harness = harness_with_store();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01", "agent": { "tools": official_transport_tools() } })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+
+    let row = harness
+        .store
+        .swarm_get_session("agent-01")
+        .await
+        .expect("store read")
+        .expect("row");
+    let expected = McpToolSpec {
+        headers: vec![
+            McpHeader {
+                name: "Authorization".to_owned(),
+                value: "Bearer caller-token".to_owned(),
+            },
+            McpHeader {
+                name: "X-Trace".to_owned(),
+                value: "abc".to_owned(),
+            },
+        ],
+        allowed_tools: Some(json!(["get_time"])),
+        ..McpToolSpec::new("get-time", "https://mcp.example.test/mcp")
+    };
+    assert_eq!(row.mcp_tools, vec![expected], "官方形状归一化后逐字段落库");
+}
+
+#[tokio::test]
+async fn official_transport_and_flat_alias_normalize_to_one_declaration() {
+    let harness = harness_with_store();
+    let (status, _, created) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01", "tools": official_transport_tools() })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // 平铺形状保留为 deprecated alias；同一声明重放仍是幂等，不是身份冲突。
+    let (status, _, replayed) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "server_url": "https://mcp.example.test/mcp",
+                "headers": {
+                    "Authorization": "Bearer caller-token",
+                    "X-Trace": "abc"
+                },
+                "allowed_tools": ["get_time"]
+            }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed["created"], json!(false));
+    assert_eq!(replayed["rootSessionId"], created["rootSessionId"]);
+}
+
+#[tokio::test]
+async fn transport_authorization_is_idempotent_and_empty_is_rejected() {
+    let harness = harness_with_store();
+    for (logical_id, authorization, expected) in [
+        ("agent-token", "token", "Bearer token"),
+        ("agent-bearer", "Bearer token", "Bearer token"),
+        ("agent-basic", "Basic abc", "Basic abc"),
+    ] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions",
+            Some(json!({
+                "logicalId": logical_id,
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "get-time",
+                    "transport": {
+                        "type": "http",
+                        "server_url": "https://mcp.example.test/mcp",
+                        "authorization": authorization
+                    }
+                }]
+            })),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+
+        let row = harness
+            .store
+            .swarm_get_session(logical_id)
+            .await
+            .expect("store read")
+            .expect("row");
+        assert_eq!(
+            row.mcp_tools[0].headers.len(),
+            1,
+            "authorization 只能产生一条头：{authorization}"
+        );
+        assert_eq!(row.mcp_tools[0].headers[0].name, "Authorization");
+        assert_eq!(
+            row.mcp_tools[0].headers[0].value, expected,
+            "{authorization}"
+        );
+    }
+
+    for authorization in ["", "   "] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions",
+            Some(json!({
+                "logicalId": "agent-empty",
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "get-time",
+                    "transport": {
+                        "type": "http",
+                        "server_url": "https://mcp.example.test/mcp",
+                        "authorization": authorization
+                    }
+                }]
+            })),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+        assert_eq!(value["error"]["code"], json!("invalid_input"));
+        assert_eq!(
+            value["error"]["details"]["field"],
+            json!("tools[0].transport.authorization")
+        );
+    }
+}
+
+#[tokio::test]
+async fn disagreeing_flat_and_transport_urls_are_rejected_at_the_transport_path() {
+    let harness = harness_with_store();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "server_url": "https://legacy.example.test/mcp",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp"
+                }
+            }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert_eq!(value["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        value["error"]["details"]["field"],
+        json!("tools[0].transport")
+    );
+}
+
+#[tokio::test]
+async fn stdio_and_unknown_transports_are_rejected_at_the_transport_type() {
+    let harness = harness_with_store();
+    for (transport, expected) in [
+        (
+            json!({ "type": "stdio", "command": "uvx", "cwd": "/tmp" }),
+            "stdio",
+        ),
+        (
+            json!({ "type": "sse", "server_url": "https://mcp.test" }),
+            "sse",
+        ),
+    ] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions",
+            Some(json!({
+                "logicalId": "agent-01",
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "get-time",
+                    "transport": transport
+                }]
+            })),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+        assert_eq!(value["error"]["code"], json!("unsupported_tool"));
+        assert_eq!(
+            value["error"]["details"]["field"],
+            json!("tools[0].transport.type")
+        );
+        assert_eq!(value["error"]["details"]["value"], json!(expected));
+    }
+}
+
 #[tokio::test]
 async fn create_accepts_and_persists_caller_declared_mcp_tools() {
     let harness = harness_with_store();

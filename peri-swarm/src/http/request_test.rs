@@ -1,7 +1,9 @@
 use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
-use super::{resolve_submission, resolve_tools, CreateSessionBody, SubmitEventBody};
+use super::{
+    resolve_submission, resolve_tools, resolve_tools_value, CreateSessionBody, SubmitEventBody,
+};
 use crate::domain::{ErrorCode, ErrorKind, InputKind, InputMode};
 
 fn body(value: serde_json::Value) -> CreateSessionBody {
@@ -65,6 +67,266 @@ fn official_mcp_shape_is_accepted_at_the_agent_position() {
     assert_eq!(tool.require_approval, Some(json!("never")));
     assert_eq!(tool.allowed_tools, Some(json!(["read_wiki_structure"])));
     assert_eq!(tool.extra["defer_loading"], json!(true));
+}
+
+#[test]
+fn official_transport_shape_maps_onto_the_flat_spec() {
+    let tools = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "agent": {
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "headers": { "X-Trace": "abc" },
+                    "authorization": "caller-token"
+                },
+                "allowed_tools": ["get_time"]
+            }]
+        }
+    })))
+    .expect("official transport");
+
+    let tool = &tools[0];
+    assert_eq!(tool.server_label, "get-time");
+    assert_eq!(tool.server_url, "https://mcp.example.test/mcp");
+    assert_eq!(
+        tool.headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("Authorization", "Bearer caller-token"), ("X-Trace", "abc"),],
+        "authorization 补成 Bearer 头，headers 参与同一规范化排序"
+    );
+    assert_eq!(tool.allowed_tools, Some(json!(["get_time"])));
+    assert!(
+        !tool.extra.contains_key("transport"),
+        "transport 已被解析，不再落进 extra"
+    );
+}
+
+#[test]
+fn an_explicit_authorization_header_wins_over_transport_authorization() {
+    let tools = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "get-time",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp",
+                "headers": { "authorization": "Bearer explicit" },
+                "authorization": "ignored"
+            }
+        }]
+    })))
+    .expect("transport");
+
+    assert_eq!(tools[0].headers.len(), 1);
+    assert_eq!(tools[0].headers[0].name, "authorization");
+    assert_eq!(tools[0].headers[0].value, "Bearer explicit");
+}
+
+#[test]
+fn transport_authorization_only_gains_a_missing_bearer_scheme() {
+    for (authorization, expected) in [
+        ("token", "Bearer token"),
+        ("Bearer token", "Bearer token"),
+        ("Basic abc", "Basic abc"),
+        ("bearer token", "bearer token"),
+    ] {
+        let tools = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect("transport");
+
+        let authorization_headers = tools[0]
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authorization_headers.len(),
+            1,
+            "authorization 只能产生一条头：{authorization}"
+        );
+        assert_eq!(authorization_headers[0].value, expected, "{authorization}");
+        assert!(
+            !authorization_headers[0].value.contains("Bearer Bearer"),
+            "不应重复 Bearer 前缀：{authorization}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_transport_authorization_is_rejected() {
+    for authorization in ["", "   "] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect_err("empty authorization");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(field(&error), "tools[0].transport.authorization");
+        assert!(
+            error.message().contains("empty"),
+            "理由应写明不能为空：{}",
+            error.message()
+        );
+    }
+}
+
+#[test]
+fn flat_and_transport_server_urls_must_agree() {
+    let accepted = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "get-time",
+            "server_url": "https://mcp.example.test/mcp",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp"
+            }
+        }]
+    })))
+    .expect("same URL in both shapes");
+    assert_eq!(accepted[0].server_url, "https://mcp.example.test/mcp");
+
+    let error = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "agent": {
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "server_url": "https://legacy.example.test/mcp",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp"
+                }
+            }]
+        }
+    })))
+    .expect_err("disagreeing URLs");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "agent.tools[0].transport");
+}
+
+#[test]
+fn stdio_and_unknown_transports_are_a_stated_gap() {
+    for (transport, expected) in [
+        (
+            json!({ "type": "stdio", "command": "uvx", "cwd": "/tmp" }),
+            "stdio",
+        ),
+        (
+            json!({ "type": "sse", "server_url": "https://mcp.test" }),
+            "sse",
+        ),
+    ] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": transport
+            }]
+        })))
+        .expect_err("unsupported transport");
+        assert_eq!(error.code(), ErrorCode::UnsupportedTool, "{error:?}");
+        assert_eq!(error.kind(), ErrorKind::Unprocessable);
+        assert_eq!(field(&error), "tools[0].transport.type");
+        assert_eq!(error.details()["value"], json!(expected));
+        assert_eq!(error.details()["supported"], json!(["http"]));
+    }
+}
+
+#[test]
+fn a_malformed_transport_reports_its_nested_path() {
+    for (transport, expected) in [
+        (json!("http"), "tools[0].transport"),
+        (
+            json!({ "server_url": "https://mcp.test" }),
+            "tools[0].transport.type",
+        ),
+        (json!({ "type": 7 }), "tools[0].transport.type"),
+        (json!({ "type": "http" }), "tools[0].transport.server_url"),
+        (
+            json!({ "type": "http", "server_url": "" }),
+            "tools[0].transport.server_url",
+        ),
+        (
+            json!({
+                "type": "http",
+                "server_url": "https://mcp.test",
+                "headers": "X-Trace: abc"
+            }),
+            "tools[0].transport.headers",
+        ),
+        (
+            json!({
+                "type": "http",
+                "server_url": "https://mcp.test",
+                "authorization": 7
+            }),
+            "tools[0].transport.authorization",
+        ),
+    ] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": transport
+            }]
+        })))
+        .expect_err("malformed transport");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(field(&error), expected);
+    }
+}
+
+#[test]
+fn sessions_update_tools_accept_the_official_transport_shape() {
+    let tools = resolve_tools_value(
+        &json!([{
+            "type": "mcp",
+            "server_label": "get-time",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp",
+                "authorization": "caller-token"
+            },
+            "allowed_tools": ["get_time"]
+        }]),
+        "agent.tools",
+    )
+    .expect("update tools");
+
+    assert_eq!(tools[0].server_url, "https://mcp.example.test/mcp");
+    assert_eq!(tools[0].headers[0].name, "Authorization");
+    assert_eq!(tools[0].headers[0].value, "Bearer caller-token");
+    assert_eq!(tools[0].allowed_tools, Some(json!(["get_time"])));
 }
 
 #[test]
