@@ -129,7 +129,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 {
                     let q_idx = focused.min(au.questions.len() - 1);
                     // 行分布：0 空行 / 1 Tab / 2 分隔线 / 3 空行 / 问题 wrap 行 / 空行 / 选项区 / 自定义输入区
-                    let mut cur = 4u16;
+                    let mut cur =
+                        4u16 + elicitation_header_rows(pending_for_closure.as_ref(), wrap_width);
                     let question_text = if q.question.is_empty() {
                         q.header.clone()
                     } else {
@@ -716,4 +717,71 @@ fn url_host(url: &str) -> String {
 /// 展示时不带 query/fragment：server 可能把一次性 token 放进 query，避免泄漏。
 fn displayable_url(url: &str) -> String {
     url.split(['?', '#']).next().unwrap_or(url).to_string()
+}
+
+/// 外部 elicitation 在 Tab 之前额外渲染的行数；点击行映射必须与渲染同构。
+fn elicitation_header_rows(pending: Option<&AskUser>, wrap_width: usize) -> u16 {
+    let Some(presentation) = pending.and_then(|ask| ask.elicitation.as_ref()) else {
+        return 0;
+    };
+    match presentation {
+        peri_acp_types::event_data::ElicitationPresentation::Form { .. } => 2,
+        peri_acp_types::event_data::ElicitationPresentation::Url { message, .. } => {
+            let message_rows = if message.is_empty() {
+                0
+            } else {
+                wrap_text(&format!("  {message}"), wrap_width).len() as u16
+            };
+            // 空行 + 来源 + 标题 + 消息 + 域名 + 地址
+            5 + message_rows
+        }
+    }
+}
+
+#[cfg(test)]
+mod elicitation_header_rows_test {
+    use super::*;
+    use peri_acp_types::event_data::{AskUser, ElicitationPresentation};
+
+    fn ask(presentation: ElicitationPresentation) -> AskUser {
+        AskUser {
+            questions: Vec::new(),
+            elicitation: Some(presentation),
+        }
+    }
+
+    fn url_rows(message: &str, wrap_width: usize) -> u16 {
+        elicitation_header_rows(
+            Some(&ask(ElicitationPresentation::Url {
+                server: "s".into(),
+                tool: "t".into(),
+                message: message.into(),
+                url: "https://example.com".into(),
+                elicitation_id: String::new(),
+            })),
+            wrap_width,
+        )
+    }
+
+    #[test]
+    fn header_rows_match_the_rendered_prefix() {
+        assert_eq!(elicitation_header_rows(None, 80), 0);
+        assert_eq!(
+            elicitation_header_rows(
+                Some(&ask(ElicitationPresentation::Form {
+                    server: "s".into(),
+                    tool: "t".into(),
+                })),
+                80
+            ),
+            2
+        );
+        assert_eq!(url_rows("", 80), 5);
+        assert_eq!(url_rows("short", 80), 6);
+        let long = "x".repeat(200);
+        assert_eq!(
+            url_rows(&long, 80),
+            5 + wrap_text(&format!("  {long}"), 80).len() as u16
+        );
+    }
 }
