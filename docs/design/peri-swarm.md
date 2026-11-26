@@ -155,7 +155,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
   两者都不会被降级成 no-op。
 - `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、
-  `swarm_turns` 上清除该会话的行。共享环境的绑定转交给仍引用它的会话，最后一个引用删除后才移除绑定。PostgreSQL 实现把六条语句放在同一个写事务中，内存实现使用同一把锁。事务提交后网关停止 ACP host、移除进程内 channel，Rivet
+  `swarm_turns` 上清除该会话的行。共享环境的绑定转交给仍引用它的会话，最后一个引用删除后才移除绑定。PostgreSQL 实现先按会话的 hosted 环境对 binding 行取 `FOR UPDATE`（同一环境的并发删除因此串行），再把六条语句放在同一个写事务中，并清理指向已删除会话的悬挂 binding；内存实现使用同一把锁。事务提交后网关停止 ACP host、移除进程内 channel，Rivet
   actor 随后销毁，因此用同一 `logicalId` 重新 create 会得到新 `rootSessionId`、
   空 items 与空 turns。删除失败不返回成功，行仍可重试。
 - 官方 `sessions.turns.list` 按 `(created_at, turn_id)` 稳定全序分页；`after` 是

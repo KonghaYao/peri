@@ -84,6 +84,30 @@ const SESSION_LIST_DESC_PREFIX: &str = "SELECT logical_id, root_session_id, acto
 const SESSION_LIST_ASC_SUFFIX: &str = " ORDER BY s.logical_id ASC LIMIT $2";
 const SESSION_LIST_DESC_SUFFIX: &str = " ORDER BY s.logical_id DESC LIMIT $2";
 
+/// Environment id of one session, read before the binding lock. `NULL` when the
+/// session does not exist or its environment carries no id (for example `none`).
+pub(super) const SELECT_SESSION_ENV_ID_SQL: &str =
+    "SELECT environment_json::jsonb ->> 'id' FROM swarm_sessions WHERE logical_id = $1";
+
+/// Transaction-scoped row lock on one environment binding.
+///
+/// Two sessions of one hosted environment must not hand the binding to a
+/// session the other transaction is deleting, so every delete of such a session
+/// takes this lock first; the second deleter blocks and then re-reads under
+/// READ COMMITTED.
+pub(super) const LOCK_BINDING_SQL: &str =
+    "SELECT 1 FROM swarm_bindings WHERE logical_env_id = $1 FOR UPDATE";
+
+/// Remove a binding of this environment whose owner session no longer exists.
+///
+/// The hand-over above keeps the binding on a live session; a binding left
+/// pointing at a deleted session (out-of-band `DELETE`, restored dump) would
+/// otherwise survive forever. Scoped to the environment the delete already
+/// locked.
+pub(super) const DELETE_DANGLING_BINDING_SQL: &str = "DELETE FROM swarm_bindings b
+      WHERE b.logical_env_id = $1
+        AND NOT EXISTS (SELECT 1 FROM swarm_sessions s WHERE s.logical_id = b.logical_id)";
+
 pub(super) const DELETE_SESSION_SQL: &str = "DELETE FROM swarm_sessions WHERE logical_id = $1";
 pub(super) const DELETE_ITEMS_SQL: &str = "DELETE FROM swarm_items WHERE logical_id = $1";
 pub(super) const DELETE_INPUTS_SQL: &str = "DELETE FROM swarm_inputs WHERE logical_id = $1";

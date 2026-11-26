@@ -36,6 +36,9 @@ fn statements() -> Vec<(&'static str, &'static str, usize)> {
         ("SELECT_SESSION", SELECT_SESSION_SQL, 1),
         ("UPDATE_SESSION", UPDATE_SESSION_SQL, 4),
         ("PATCH_SESSION", PATCH_SESSION_SQL, 11),
+        ("SELECT_SESSION_ENV_ID", SELECT_SESSION_ENV_ID_SQL, 1),
+        ("LOCK_BINDING", LOCK_BINDING_SQL, 1),
+        ("DELETE_DANGLING_BINDING", DELETE_DANGLING_BINDING_SQL, 1),
         ("DELETE_SESSION", DELETE_SESSION_SQL, 1),
         ("DELETE_ITEMS", DELETE_ITEMS_SQL, 1),
         ("DELETE_INPUTS", DELETE_INPUTS_SQL, 1),
@@ -198,4 +201,20 @@ fn the_patch_statement_decides_each_field_independently() {
 fn the_placeholder_reader_sees_every_index() {
     assert_eq!(placeholders("SELECT $1, $2::text, '$3'"), vec![1, 2, 3]);
     assert!(placeholders("SELECT 'literal'").is_empty());
+}
+
+#[test]
+fn deleting_a_session_locks_its_environment_binding_first() {
+    // Both halves of the hand-over guard: which environment this session owns,
+    // and a row lock that makes two deleters of one environment take turns.
+    assert!(SELECT_SESSION_ENV_ID_SQL.contains("environment_json::jsonb ->> 'id'"));
+    assert!(SELECT_SESSION_ENV_ID_SQL.contains("WHERE logical_id = $1"));
+    assert!(LOCK_BINDING_SQL.contains("FROM swarm_bindings"));
+    assert!(LOCK_BINDING_SQL.contains("WHERE logical_env_id = $1"));
+    assert!(DELETE_DANGLING_BINDING_SQL.contains("b.logical_env_id = $1"));
+    assert!(DELETE_DANGLING_BINDING_SQL.contains("NOT EXISTS (SELECT 1 FROM swarm_sessions"));
+    assert!(
+        LOCK_BINDING_SQL.ends_with("FOR UPDATE"),
+        "the binding hand-over must be serialized by a row lock: {LOCK_BINDING_SQL}"
+    );
 }

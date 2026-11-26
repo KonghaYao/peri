@@ -10,10 +10,10 @@ use super::codec::{
     bind_binding, bind_session, bind_session_update, decode_session, patch_session_params,
 };
 use super::sql::{
-    session_list_sql, ATTACH_BINDING_SQL, DELETE_BINDINGS_SQL, DELETE_INPUTS_SQL, DELETE_ITEMS_SQL,
-    DELETE_SESSION_SQL, DELETE_TURNS_SQL, INSERT_SESSION_SQL, PATCH_SESSION_SQL,
-    REASSIGN_BINDINGS_SQL, SELECT_SESSION_SQL, UPDATE_SESSION_SQL, UPSERT_BINDING_SQL,
-    UPSERT_SESSION_SQL,
+    session_list_sql, ATTACH_BINDING_SQL, DELETE_BINDINGS_SQL, DELETE_DANGLING_BINDING_SQL,
+    DELETE_INPUTS_SQL, DELETE_ITEMS_SQL, DELETE_SESSION_SQL, DELETE_TURNS_SQL, INSERT_SESSION_SQL,
+    LOCK_BINDING_SQL, PATCH_SESSION_SQL, REASSIGN_BINDINGS_SQL, SELECT_SESSION_ENV_ID_SQL,
+    SELECT_SESSION_SQL, UPDATE_SESSION_SQL, UPSERT_BINDING_SQL, UPSERT_SESSION_SQL,
 };
 use super::{commit, rollback, SwarmStateStore};
 use crate::domain::SessionsWindow;
@@ -176,8 +176,23 @@ impl SwarmStateStore {
         // One transaction: a partial delete can never be reported as success.
         // Statements are ordered child-first for readability; the transaction is
         // what makes the set atomic.
-        let transaction = within_batch("delete_session", 6, async {
+        let transaction = within_batch("delete_session", 9, async {
             let mut transaction = self.begin("delete_session").await?;
+            // Serialize binding hand-over per hosted environment: without this
+            // lock two concurrent deletes of one environment can hand the binding
+            // to a session the other transaction is about to delete.
+            let environment_id: Option<String> = sqlx::query_scalar(SELECT_SESSION_ENV_ID_SQL)
+                .bind(logical_id.to_owned())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|error| classify("lock_binding", error))?;
+            if let Some(environment_id) = &environment_id {
+                sqlx::query(LOCK_BINDING_SQL)
+                    .bind(environment_id.clone())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| classify("lock_binding", error))?;
+            }
             for (operation, sql) in [
                 ("delete_items", DELETE_ITEMS_SQL),
                 ("delete_inputs", DELETE_INPUTS_SQL),
@@ -191,6 +206,15 @@ impl SwarmStateStore {
                     .execute(&mut *transaction)
                     .await
                     .map_err(|error| classify(operation, error))?;
+            }
+            // The hand-over above keeps the binding on a live session; this also
+            // clears a binding that already pointed at a missing one.
+            if let Some(environment_id) = environment_id {
+                sqlx::query(DELETE_DANGLING_BINDING_SQL)
+                    .bind(environment_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| classify("delete_dangling_binding", error))?;
             }
             Ok(transaction)
         })

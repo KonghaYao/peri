@@ -560,3 +560,165 @@ async fn hosted_session_requires_a_matching_binding() {
     store.close().await.expect("close");
     fixture.close().await;
 }
+
+// ── concurrent delete of one hosted environment ─────────────────────────────
+
+/// Two sessions of one hosted environment, both with rows a delete must carry.
+async fn seed_shared_environment(
+    fixture: &TestSchema,
+    store: &crate::store::SwarmStateStore,
+    run: usize,
+) -> (String, String, String) {
+    let first = format!("logical-a-{run}");
+    let second = format!("logical-b-{run}");
+    let environment = format!("logical-env-{run}");
+    for (logical_id, root) in [
+        (&first, format!("root-a-{run}")),
+        (&second, format!("root-b-{run}")),
+    ] {
+        let mut row = session(logical_id, "/workspace/a");
+        row.root_session_id = root;
+        row.environment = EnvironmentRef {
+            kind: EnvironmentKind::OpenAiHosted,
+            id: Some(environment.clone()),
+        };
+        store.swarm_upsert_session(row).await.expect("seed session");
+        store
+            .swarm_append_item(item(logical_id, 1, "i", "t"))
+            .await
+            .expect("seed item");
+        store
+            .swarm_put_input(input(logical_id, "input-1", "fp"))
+            .await
+            .expect("seed receipt");
+    }
+    store
+        .swarm_put_binding(binding(&environment, &first))
+        .await
+        .expect("seed binding");
+    fixture.execute("SELECT 1").await;
+    (first, second, environment)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn concurrent_deletes_of_one_environment_leave_no_dangling_binding() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = std::sync::Arc::new(fixture.store().await);
+
+    // Repeated rounds: the hand-over between the two deleters is a race window,
+    // and every round must end with both sessions, their rows and the binding
+    // gone. A dangling binding would make the next create reuse a dead session.
+    for run in 0..25 {
+        let (first, second, environment) = seed_shared_environment(&fixture, &store, run).await;
+        let left = {
+            let store = std::sync::Arc::clone(&store);
+            let first = first.clone();
+            tokio::spawn(async move { store.swarm_delete_session(&first).await })
+        };
+        let right = {
+            let store = std::sync::Arc::clone(&store);
+            let second = second.clone();
+            tokio::spawn(async move { store.swarm_delete_session(&second).await })
+        };
+        left.await.expect("join").expect("delete the first session");
+        right
+            .await
+            .expect("join")
+            .expect("delete the second session");
+        assert!(
+            store
+                .swarm_get_binding(&environment)
+                .await
+                .expect("binding")
+                .is_none(),
+            "round {run}: the binding outlived every session of its environment"
+        );
+        assert!(
+            store
+                .swarm_get_session(&first)
+                .await
+                .expect("session")
+                .is_none()
+                && store
+                    .swarm_get_session(&second)
+                    .await
+                    .expect("session")
+                    .is_none(),
+            "round {run}: both sessions are gone"
+        );
+        assert_eq!(fixture.count("swarm_items").await, 0, "round {run}");
+        assert_eq!(fixture.count("swarm_inputs").await, 0, "round {run}");
+    }
+
+    store.close().await.expect("close");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn a_foreign_writer_holding_the_binding_serializes_the_delete() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = std::sync::Arc::new(fixture.store().await);
+    let (first, second, environment) = seed_shared_environment(&fixture, &store, 0).await;
+
+    // A competing writer locks the environment binding and then removes the
+    // session that a naive hand-over would pick as the successor.
+    let mut competitor = fixture.pool().await.begin().await.expect("begin");
+    let locked = sqlx::query("SELECT 1 FROM swarm_bindings WHERE logical_env_id = $1 FOR UPDATE")
+        .bind(environment.clone())
+        .fetch_optional(&mut *competitor)
+        .await
+        .expect("lock the binding");
+    assert!(locked.is_some(), "the fixture owns the binding");
+
+    let deletion = {
+        let store = std::sync::Arc::clone(&store);
+        let second = second.clone();
+        tokio::spawn(async move { store.swarm_delete_session(&second).await })
+    };
+    // The delete must wait for the binding lock instead of handing the binding to
+    // a session that is already gone.
+    peri_time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !deletion.is_finished(),
+        "delete_session must wait for the binding row lock"
+    );
+
+    sqlx::query("DELETE FROM swarm_sessions WHERE logical_id = $1")
+        .bind(first.clone())
+        .execute(&mut *competitor)
+        .await
+        .expect("competitor deletes the successor");
+    competitor.commit().await.expect("commit");
+
+    deletion
+        .await
+        .expect("join")
+        .expect("delete the second session");
+    assert!(
+        store
+            .swarm_get_binding(&environment)
+            .await
+            .expect("binding")
+            .is_none(),
+        "the binding must not point at a deleted session"
+    );
+    assert!(store
+        .swarm_get_session(&first)
+        .await
+        .expect("session")
+        .is_none());
+    assert!(store
+        .swarm_get_session(&second)
+        .await
+        .expect("session")
+        .is_none());
+
+    store.close().await.expect("close");
+    fixture.close().await;
+}
