@@ -39,6 +39,7 @@ InputArea
   → SteerCommandKind / STEER_TX
   → steer_consumer
   → AcpTuiClient::ensure_session + session/input/enqueue
+  → 受理回执后仅独占队列的首条立即 session/input/dispatch（同一 input_id，仅一次）
   → Agent session runtime
 ```
 

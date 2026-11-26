@@ -109,8 +109,8 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
 }
 
 #[tokio::test]
-async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
-    let (mailbox, inbox) = make_mailbox();
+async fn test_enter_dispatch_during_model_request_cancels_and_stop_wins_replay() {
+    let (mailbox, _inbox) = make_mailbox();
     let cancel = CancellationToken::new();
     mailbox
         .attach_external_attempt(cancel.clone(), false)
@@ -123,13 +123,29 @@ async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
         .await
         .expect("submit");
     assert_eq!(receipt.results[0].state, UserInputState::Queued);
-    assert!(!cancel.is_cancelled());
-    assert!(inbox.queue().selected_input_ids().is_empty());
-    mailbox
-        .enqueue_at_tool_boundary(&input)
-        .await
-        .expect("same command");
+    assert!(!cancel.is_cancelled(), "入队本身只保存待发，不打断模型请求");
+    let dispatch = DispatchUserInputsRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: "enter-dispatch".into(),
+        input_ids: vec![input.input_id.clone()],
+    };
+    let dispatched = mailbox.dispatch(&dispatch).await.expect("dispatch");
+    assert_eq!(dispatched.results[0].state, UserInputState::Dispatching);
+    assert!(
+        cancel.is_cancelled(),
+        "流式期间 Enter 的立即发送必须打断当前模型请求"
+    );
     assert_eq!(mailbox.pending_steer_ids(&[]).len(), 1);
+    let replay = mailbox.dispatch(&dispatch).await.expect("same command");
+    assert_eq!(
+        (replay.results[0].input_id.as_str(), replay.results[0].state),
+        (
+            dispatched.results[0].input_id.as_str(),
+            dispatched.results[0].state
+        ),
+        "同一发送命令重放不得产生第二次发送"
+    );
     drop(model_request);
     mailbox.stop().await;
     mailbox
@@ -188,6 +204,103 @@ async fn enter_accepted_during_enqueue_does_not_bind_to_a_later_attempt() {
     assert_eq!(
         record_state(&mailbox, &input_id),
         Some((UserInputState::Queued, false))
+    );
+}
+
+/// [回归] 工具边界每次只抽取最旧的一条：多条排队输入不能同时放行，
+/// 否则会被同一个 Receive 合并进一次模型请求。
+#[tokio::test]
+async fn tool_boundary_selects_only_the_oldest_input() {
+    let (mailbox, _inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("active turn");
+    let first = make_input(&mailbox, "第一条");
+    let second = make_input(&mailbox, "第二条");
+    mailbox
+        .enqueue_at_tool_boundary(&first)
+        .await
+        .expect("enqueue first");
+    mailbox
+        .enqueue_at_tool_boundary(&second)
+        .await
+        .expect("enqueue second");
+
+    mailbox
+        .select_tool_boundary_inputs()
+        .await
+        .expect("boundary selection");
+    assert_eq!(
+        record_state(&mailbox, &first.input_id).map(|(state, _)| state),
+        Some(UserInputState::Dispatching),
+        "边界先放行最旧的一条"
+    );
+    assert_eq!(
+        record_state(&mailbox, &second.input_id),
+        Some((UserInputState::Queued, false)),
+        "同批其余输入保持待发"
+    );
+    let second_id = MessageId::from(
+        uuid::Uuid::parse_str(&second.input_id).expect("input id is a canonical uuid"),
+    );
+    assert!(
+        !mailbox.pending_steer_ids(&[]).contains(&second_id),
+        "退到 idle 的输入不得阻塞下一次模型请求"
+    );
+
+    // 已经排到 idle 的输入不会在同一个 attempt 的后续边界被再次抽取。
+    mailbox
+        .select_tool_boundary_inputs()
+        .await
+        .expect("second boundary selection");
+    assert_eq!(
+        record_state(&mailbox, &second.input_id),
+        Some((UserInputState::Queued, false)),
+        "剩余输入不能在同一个 attempt 内被再次选中"
+    );
+}
+
+/// [回归] 边界之后剩下的输入在下一次 idle 按 FIFO 逐条交接，
+/// 两次模型请求不会合并。
+#[tokio::test]
+async fn boundary_inputs_after_the_oldest_wait_for_the_next_idle() {
+    let (mailbox, _inbox) = make_mailbox();
+    let ticket = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("active turn");
+    let first = make_input(&mailbox, "第一条");
+    let second = make_input(&mailbox, "第二条");
+    mailbox
+        .enqueue_at_tool_boundary(&first)
+        .await
+        .expect("enqueue first");
+    mailbox
+        .enqueue_at_tool_boundary(&second)
+        .await
+        .expect("enqueue second");
+    mailbox
+        .select_tool_boundary_inputs()
+        .await
+        .expect("boundary selection");
+
+    // 第一条在本 attempt 内被 Receive 领取并交付。
+    let first_id = MessageId::from(
+        uuid::Uuid::parse_str(&first.input_id).expect("input id is a canonical uuid"),
+    );
+    mailbox.mark_claimed(&[first_id]).await;
+    mailbox
+        .mark_delivered(&[(first_id, MessageContent::text("第一条"))])
+        .await;
+    mailbox
+        .finish_attempt(&ticket, UserInputAttemptOutcome::Completed)
+        .await;
+
+    assert_eq!(
+        record_state(&mailbox, &second.input_id),
+        Some((UserInputState::Dispatching, false)),
+        "第二条必须等到下一次 idle 才交接"
     );
 }
 

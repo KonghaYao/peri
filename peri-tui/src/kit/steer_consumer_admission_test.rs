@@ -49,6 +49,7 @@ async fn test_admission_rejects_plugin_selections_without_negotiated_capability(
         epoch: 7,
         command_id: "command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: "input".into(),
             original_draft: "选择插件后发送".into(),
@@ -122,6 +123,7 @@ async fn test_capability_downgrade_keeps_bound_retry_unknown() {
         epoch: 7,
         command_id: "uncertain-command".into(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(UserInput {
             input_id: uuid::Uuid::now_v7().to_string(),
             original_draft: "选择插件后发送".into(),

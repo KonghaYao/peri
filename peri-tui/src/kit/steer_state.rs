@@ -30,6 +30,8 @@ pub(crate) struct SteerCommand {
     pub(crate) epoch: u64,
     pub(crate) command_id: String,
     pub(crate) generation: Option<String>,
+    /// 入队受理后自动跟进的发送选择；失败只保留待发送项，不回退为重新入队。
+    pub(crate) auto_dispatch: bool,
     pub(crate) kind: SteerCommandKind,
 }
 
@@ -41,6 +43,8 @@ struct SessionSteers {
     queued_at: HashMap<String, peri_time::Instant>,
     recovered: Vec<RecoveredInput>,
     delivered: HashSet<String>,
+    // 同一 input_id 只自动发送一次；重试沿用原 Dispatch 命令身份。
+    auto_dispatched: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
     direct_submissions: HashSet<String>,
     // 致命执行失败后结果未知的完整请求：保留原稿、附件与命令身份，等待服务端
@@ -238,6 +242,7 @@ impl SteerState {
         session.snapshot = None;
         session.queued_at.clear();
         session.direct_submissions.clear();
+        session.auto_dispatched.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
         }
@@ -306,6 +311,62 @@ impl SteerState {
             .entry(command.command_id.clone())
             .or_insert_with(peri_time::monotonic_now);
         session.pending.push(command);
+    }
+
+    /// 为刚受理的 Enqueue 生成紧随其后的 Dispatch：Enter 与 ↑ 共用同一发送
+    /// 选择，服务端再按 loop 阶段决定打断模型还是只放行 MQ。
+    ///
+    /// 只有「这一轮的第一条」才补发送选择：接收快照没有活跃执行，且队列里
+    /// 只有它自己。执行中的后续输入必须留在 `Queued`，否则多个 Enqueue 各自
+    /// 自动 Dispatch 会一起进入下一次 Receive，合并成同一个模型请求；它们由
+    /// 工具边界或下一次 idle 按 FIFO 逐条抽取。
+    ///
+    /// 同一 `input_id` 只生成一次，且必须沿用入队时绑定的 generation；失败
+    /// 只影响这次发送选择，入队成功的待发送项仍在队列中。
+    pub(crate) fn begin_auto_dispatch(&mut self, source: &SteerCommand) -> Option<SteerCommand> {
+        let SteerCommandKind::Enqueue(input) = &source.kind else {
+            return None;
+        };
+        let generation = source.generation.clone()?;
+        {
+            let session = self.sessions.get_mut(&source.session_id)?;
+            if session.epoch != source.epoch
+                || session
+                    .pending
+                    .iter()
+                    .any(|pending| pending.command_id == source.command_id)
+            {
+                return None;
+            }
+            // 服务端可能已按 idle 调度选中或摄取这条输入；只有仍在待发的
+            // 输入才需要补一次明确的发送选择。
+            let starts_turn = session.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.active_request_id.is_none()
+                    && snapshot
+                        .items
+                        .iter()
+                        .all(|item| item.input_id == input.input_id)
+                    && snapshot.items.iter().any(|item| {
+                        item.input_id == input.input_id && item.state == UserInputState::Queued
+                    })
+            });
+            if !starts_turn {
+                return None;
+            }
+            if !session.auto_dispatched.insert(input.input_id.clone()) {
+                return None;
+            }
+        }
+        let command = SteerCommand {
+            session_id: source.session_id.clone(),
+            epoch: source.epoch,
+            command_id: uuid::Uuid::now_v7().to_string(),
+            generation: Some(generation),
+            auto_dispatch: true,
+            kind: SteerCommandKind::Dispatch(vec![input.input_id.clone()]),
+        };
+        self.begin(command.clone());
+        Some(command)
     }
 
     pub(crate) fn pending_command(
@@ -550,6 +611,7 @@ impl SteerState {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         let inserted = session.delivered.insert(input_id.to_owned());
         session.direct_submissions.remove(input_id);
+        session.auto_dispatched.remove(input_id);
         session
             .unsettled
             .retain(|entry| entry.input.input_id != input_id);
@@ -793,6 +855,7 @@ pub(crate) fn enqueue(
         epoch,
         command_id: uuid::Uuid::now_v7().to_string(),
         generation: None,
+        auto_dispatch: false,
         kind: SteerCommandKind::Enqueue(input),
     };
     STEERS.state().write().begin(command.clone());
@@ -818,6 +881,7 @@ pub(crate) fn act(action: SteerQueueAction, draft_is_empty: bool) {
         generation: state
             .snapshot(&session_id, epoch)
             .map(|snapshot| snapshot.generation.clone()),
+        auto_dispatch: false,
         kind,
     };
     state.begin(command.clone());

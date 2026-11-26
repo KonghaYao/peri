@@ -81,8 +81,9 @@ impl UserInputMailbox {
         self.enqueue_with_policy(request, false).await
     }
 
-    /// Keep a TUI draft available for withdrawal or explicit dispatch until
-    /// the current attempt reaches its next post-tool Receive.
+    /// Enter submissions use this policy and are immediately followed by an
+    /// explicit dispatch; records stay withdrawable and boundary-selectable
+    /// until the current attempt reaches its next post-tool Receive.
     pub async fn enqueue_at_tool_boundary(
         &self,
         request: &EnqueueUserInputRequest,
@@ -676,19 +677,34 @@ impl UserInputMailbox {
     }
 
     /// Only Enter submissions belonging to this attempt cross this boundary.
+    ///
+    /// 每次边界只抽取最旧的一条：多条排队输入若同时放行，会被同一个 Receive
+    /// 合并进一次模型请求。其余同批输入解除与本 attempt 的边界绑定，按 FIFO
+    /// 留到下一次 idle，各自成轮；这样既不影响当前请求，也不会被
+    /// `pending_steer_ids` 再次拉回本次请求。
     pub(crate) async fn select_tool_boundary_inputs(&self) -> Result<(), UserInputQueueError> {
         let ids = {
             let mut state = self.state.lock();
-            let ticket = state.running_ticket();
-            let ids = state
-                .records
-                .iter()
-                .filter(|record| record.awaiting_tool_boundary(ticket))
-                .map(|record| record.input_id.clone())
-                .collect::<Vec<_>>();
-            super::state::promote_ids(&mut state, &ids)
+            let ticket = state.running_ticket().cloned();
+            let Some(oldest) = ticket.as_ref().and_then(|ticket| {
+                state
+                    .records
+                    .iter()
+                    .find(|record| record.awaiting_tool_boundary(Some(ticket)))
+                    .map(|record| record.input_id.clone())
+            }) else {
+                return Ok(());
+            };
+            for record in &mut state.records {
+                if record.input_id != oldest && record.awaiting_tool_boundary(ticket.as_ref()) {
+                    record.boundary_attempt = None;
+                }
+            }
+            super::state::promote_ids(&mut state, std::slice::from_ref(&oldest))
         };
-        self.try_send_ready_ids(&ids, false).await
+        // 发送选择已确认，立即消费 ready；否则残留的 ready 会挡住
+        // `promote_next`，让退到 idle 的其余输入无法被队首调度接手。
+        self.try_send_ready_ids(&ids, true).await
     }
 
     /// 发送一组 ready 记录；`clear_ready` 为 true 时同时消费运行期 ready 队列。
