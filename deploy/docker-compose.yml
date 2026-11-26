@@ -22,6 +22,10 @@ services:
       # 首次初始化时执行 10-create-state-db.sql，创建 peri_swarm_state。
       - ./init/postgres:/docker-entrypoint-initdb.d:ro
       - postgres-data:/var/lib/postgresql/data
+    ports:
+      # 宿主 loopback 的发布地址/端口；只给 DBX、DBeaver 这类 GUI 客户端直连调试，
+      # 容器网络内仍走 5432。不填就用 127.0.0.1:5432。
+      - "${POSTGRES_PUBLISH_HOST:-127.0.0.1}:${POSTGRES_PUBLISH_PORT:-5432}:5432"
     healthcheck:
       # 两个库都能连上才算健康，避免网关抢在状态库创建前启动。
       test:

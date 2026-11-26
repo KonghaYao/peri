@@ -8,7 +8,7 @@
 - `peri-swarm`：网关二进制（HTTP API + 进程内 ACP Host），默认 2 个副本
 - `nginx`：副本组前面的入口，负责 HTTP 转发与 SSE 透传
 
-> 本目录尚未启动验证；下面是首次启动前的准备和检查项。
+> 本机已按下面步骤启动并完成检查（2 副本 + nginx + 一次建/删会话）；换机器时按本文准备。
 
 ## 前置
 
@@ -53,7 +53,7 @@ cp config/peri-swarm/settings.example.json config/peri-swarm/settings.json
 docker compose up -d --build
 ```
 
-（本次没有执行。）
+若本机 buildkit 拉不到基础镜像或解析不了外网域名，改用文末的 host 网络预构建 + `--no-build`。
 
 ## 端口
 
