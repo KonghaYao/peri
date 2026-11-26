@@ -171,6 +171,7 @@ claude-blog-cn
 !scripts/test-install.py
 !scripts/test-cargo-patches.py
 !peri-swarm/scripts/provision_state_db.py
+!deploy/init/rivet-init.py
 build
 .tmp
 tmp/

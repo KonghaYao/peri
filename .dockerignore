@@ -5,3 +5,11 @@ spec/
 .claude/
 # Exclude compiled artifacts inside each crate
 **/target/
+
+# The deploy image builds with the repository root as context; keep local
+# secrets and worktrees out of the image layers.
+.worktrees/
+**/node_modules/
+.env
+.env.*
+deploy/config/peri-swarm/settings.json

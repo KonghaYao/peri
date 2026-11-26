@@ -1,0 +1,16 @@
+{
+  "storage": {
+    "log_directory": "/var/lib/rivet/log",
+    "auto_provision_partitions": 1,
+    "balancing": {
+      "enabled": false
+    }
+  },
+  "object_storage": {
+    "primary": {
+      "file_system": {
+        "path": "/var/lib/rivet/objects"
+      }
+    }
+  }
+}

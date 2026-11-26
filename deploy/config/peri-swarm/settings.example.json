@@ -1,0 +1,31 @@
+{
+  "config": {
+    "active_alias": "sonnet",
+    "providers": [
+      {
+        "id": "openai",
+        "type": "openai",
+        "apiKey": "REPLACE-WITH-PROVIDER-KEY",
+        "baseUrl": "https://api.openai.com/v1"
+      }
+    ],
+    "profiles": {
+      "fable": {
+        "provider": "openai",
+        "model": "REPLACE-WITH-MODEL-ID"
+      },
+      "opus": {
+        "provider": "openai",
+        "model": "REPLACE-WITH-MODEL-ID"
+      },
+      "sonnet": {
+        "provider": "openai",
+        "model": "REPLACE-WITH-MODEL-ID"
+      },
+      "haiku": {
+        "provider": "openai",
+        "model": "REPLACE-WITH-MODEL-ID"
+      }
+    }
+  }
+}

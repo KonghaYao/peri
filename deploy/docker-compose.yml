@@ -1,0 +1,163 @@
+# Peri Swarm 单机 Compose。
+#
+# postgres：Peri 会话库 + Swarm 状态库（同实例、不同库）
+# rivet-engine：独立运行的 Rivet 控制面
+# rivet-init：一次性创建 peri-swarm node pool
+# peri-swarm：网关二进制（HTTP API + 进程内 ACP Host），默认 2 个副本
+# nginx：副本组前面的入口，负责 HTTP 负载转发与 SSE 透传
+
+name: ${COMPOSE_PROJECT_NAME:-peri-swarm}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # initdb 超级用户；下面两个库都由它持有。
+      POSTGRES_USER: peri
+      # 必填；会被拼进两个 DSN，只支持 URL 安全字符（用 openssl rand -hex）。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      # Peri 会话库；状态库 peri_swarm_state 由 init 脚本另建。
+      POSTGRES_DB: peri_session
+    volumes:
+      # 首次初始化时执行 10-create-state-db.sql，创建 peri_swarm_state。
+      - ./init/postgres:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # 两个库都能连上才算健康，避免网关抢在状态库创建前启动。
+      test:
+        - CMD-SHELL
+        - >-
+          psql -U peri -d peri_session -c 'select 1' >/dev/null &&
+          psql -U peri -d peri_swarm_state -c 'select 1' >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+
+  rivet-engine:
+    image: rivetdev/engine:${RIVET_ENGINE_TAG:-latest}
+    environment:
+      # engine 没有 admin token 就拒绝启动；与 rivet-init、peri-swarm 共用。
+      RIVET__AUTH__ADMIN_TOKEN: ${RIVET_ADMIN_TOKEN:?set RIVET_ADMIN_TOKEN in deploy/.env}
+      # 日志目录；与 config/rivet/rivet.json 一致，防止镜像不读挂载的配置。
+      RIVET__STORAGE__LOG_DIRECTORY: /var/lib/rivet/log
+      # 对象存储目录；同上。
+      RIVET__OBJECT_STORAGE__PRIMARY__FILE_SYSTEM__PATH: /var/lib/rivet/objects
+    volumes:
+      # engine 配置文件（filesystem 存储、单节点、关闭自动分区均衡）。
+      - ./config/rivet/rivet.json:/etc/rivet/config.json:ro
+      - rivet-log:/var/lib/rivet/log
+      - rivet-objects:/var/lib/rivet/objects
+    restart: unless-stopped
+
+  rivet-init:
+    image: python:3.12-slim
+    entrypoint: ["python3", "/opt/rivet-init.py"]
+    environment:
+      # engine 地址；脚本在这里轮询 /health 并创建 pool。
+      RIVET_ENGINE_URL: http://rivet-engine:6420
+      # Bearer token；401/403 会立即失败，不进入重试。
+      RIVET_ADMIN_TOKEN: ${RIVET_ADMIN_TOKEN:?set RIVET_ADMIN_TOKEN in deploy/.env}
+      # 必须与 peri-swarm 的 PERI_SWARM_RIVET_POOL 一致。
+      RIVET_POOL: peri-swarm
+      # 必须与 peri-swarm 的 PERI_SWARM_RIVET_NAMESPACE 一致。
+      RIVET_NAMESPACE: default
+    volumes:
+      - ./init/rivet-init.py:/opt/rivet-init.py:ro
+    depends_on:
+      rivet-engine:
+        condition: service_started
+    restart: "no"
+
+  peri-swarm:
+    image: peri-swarm:local
+    build:
+      context: ..
+      dockerfile: deploy/images/Dockerfile
+      target: peri-swarm
+    environment:
+      # 容器内 HOME；machine-id 与 .peri/settings.json 落在下面的数据卷里。
+      HOME: /var/lib/peri-swarm
+      # 客户端 Bearer；每个 /v1 请求都要带。
+      PERI_SWARM_API_KEY: ${PERI_SWARM_API_KEY:?set PERI_SWARM_API_KEY in deploy/.env}
+      # 容器内必须绑 0.0.0.0，否则端口映射进不来。
+      PERI_SWARM_BIND: 0.0.0.0:8080
+      # 显式承认非 loopback 绑定；不设则启动直接拒绝。
+      PERI_SWARM_BIND_ALLOW_NON_LOOPBACK: "1"
+      # Peri 会话库 DSN（由 Peri 自己的会话存储使用）。
+      PERI_SWARM_SESSION_STORE: postgresql://peri:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/peri_session
+      # Swarm 状态库 DSN；必须是另一个数据库，指向 peri_session 会被拒绝。
+      PERI_SWARM_STATE_STORE: postgresql://peri:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/peri_swarm_state
+      # 存储引擎名，只接受 postgres / postgresql。
+      PERI_SWARM_STORE_ENGINE: postgres
+      # 外置 engine 地址；只支持 http，且必须写显式端口。
+      PERI_SWARM_RIVET_ENDPOINT: http://rivet-engine:6420
+      # 这个变量的值是“变量名”：网关按名字去环境里取 token。
+      PERI_SWARM_RIVET_TOKEN_ENV: PERI_SWARM_RIVET_TOKEN
+      # 实际 token 值；与 engine 的 admin token 相同。
+      PERI_SWARM_RIVET_TOKEN: ${RIVET_ADMIN_TOKEN:?set RIVET_ADMIN_TOKEN in deploy/.env}
+      # 与 rivet-init 创建 pool 时使用的 namespace 一致。
+      PERI_SWARM_RIVET_NAMESPACE: default
+      # 与 rivet-init 的 RIVET_POOL 一致。
+      PERI_SWARM_RIVET_POOL: peri-swarm
+      # 外置 engine 必须是 never：网关不会自己拉 engine。
+      PERI_SWARM_RIVET_ENGINE_SPAWN: never
+      # 禁止 rivetkit 客户端自动下载 engine 二进制。
+      RIVETKIT_ENGINE_AUTO_DOWNLOAD: "0"
+      # 每个会话的工作目录根；必须是绝对路径（entrypoint 负责创建）。
+      PERI_SWARM_WORKSPACE_ROOT: /var/lib/peri-swarm/workspace
+    # 容器内固定 8080；宿主侧用端口范围，Docker 会给每个副本分配一个空闲
+    # 端口，所以 --scale 不会互相抢端口。正常流量仍走 nginx 的容器网络。
+    expose:
+      - "8080"
+    ports:
+      - "${PERI_SWARM_PUBLISH_HOST:-127.0.0.1}:${PERI_SWARM_REPLICA_PORT_RANGE:-8100-8199}:8080"
+    deploy:
+      # 副本组：两个副本共享 engine、状态库和部署身份（同一 machine-id）。
+      replicas: 2
+    volumes:
+      # 持久化 machine-id、settings 副本和会话工作目录。
+      - peri-swarm-data:/var/lib/peri-swarm
+    secrets:
+      # 模型 provider 配置；entrypoint 复制到 $HOME/.peri/settings.json。
+      - swarm_settings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rivet-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      # 用 Docker DNS 动态解析 peri-swarm 副本，扩缩容后无需重启。
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      # 只发布到宿主机 loopback；TLS 和统一鉴权交给更外层入口。
+      - "${PERI_SWARM_PUBLISH_HOST:-127.0.0.1}:${PERI_SWARM_PORT:-8080}:80"
+    depends_on:
+      peri-swarm:
+        condition: service_started
+    restart: unless-stopped
+
+secrets:
+  swarm_settings:
+    # 本地文件；已被 .gitignore 忽略，不要提交。
+    file: ./config/peri-swarm/settings.json
+
+volumes:
+  postgres-data:
+  rivet-log:
+  rivet-objects:
+  peri-swarm-data:
