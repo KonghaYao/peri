@@ -31,7 +31,6 @@ jobs:
         outputs:
             docs_only: ${{ steps.classify.outputs.docs_only }}
             reason: ${{ steps.classify.outputs.reason }}
-            native_scope: ${{ steps.scope.outputs.args }}
         steps:
             - name: Checkout repository
               uses: actions/checkout@v7
@@ -53,18 +52,6 @@ jobs:
                   CI_HEAD_SHA: ${{ github.sha }}
               run: bash scripts/ci-classify-changes.sh
 
-            - name: Select affected native test packages
-              id: scope
-              if: github.event_name == 'pull_request' && steps.classify.outputs.docs_only != 'true'
-              env:
-                  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-                  # Only inspect manifests. Reuse the runner toolchain in this lightweight job.
-                  RUSTUP_TOOLCHAIN: stable
-              run: |
-                  args=$(bash scripts/changed-crate-args.sh --ci-pr "$PR_BASE_SHA")
-                  echo "args=$args" >> "$GITHUB_OUTPUT"
-                  echo "macOS/Windows Cargo selection: \`$args\`" >> "$GITHUB_STEP_SUMMARY"
-
     # 复用发布的锁定构建与摘要校验，只验证 pin，不上传发布归档所需的 Sidecar。
     workflow-sidecar:
         name: Workflow sidecar
@@ -80,8 +67,6 @@ jobs:
         needs: changes
         if: needs.changes.outputs.docs_only != 'true'
         runs-on: ${{ matrix.runner }}
-        env:
-            CI_CARGO_SCOPE: ${{ (matrix.os != 'ubuntu-latest' && needs.changes.outputs.native_scope) || '--workspace' }}
         # 冷缓存需要余量：实测 Windows 冷编译+测试约 40 分钟，macOS 约 34 分钟；热缓存远低于此值。
         timeout-minutes: 60
         strategy:
@@ -129,9 +114,7 @@ jobs:
 
             - name: Test CI test inventory parser
               if: runner.os == 'Linux'
-              run: |
-                  python3 scripts/test-ci-test-inventory.py
-                  python3 scripts/test-ci-pr-scope.py
+              run: python3 scripts/test-ci-test-inventory.py
 
             - name: Verify test inventory
               if: runner.os == 'Linux'
@@ -233,15 +216,7 @@ jobs:
             # `--profile ci` 提供单测试超时、50m 全局上限与不重试，见 .config/nextest.toml。
             # 执行范围与 scripts/ci-test-inventory.sh --check 相互校验。
             # ==================================================================
-            - name: Run affected package tests
-              if: env.CI_CARGO_SCOPE != '--workspace'
-              shell: bash
-              run: |
-                  read -r -a packages <<< "$CI_CARGO_SCOPE"
-                  cargo nextest run --locked --profile ci --no-tests=fail "${packages[@]}"
-
             - name: Run workspace tests (all targets except Compact adversarial suites)
-              if: env.CI_CARGO_SCOPE == '--workspace'
               shell: bash
               run: >-
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
@@ -251,28 +226,24 @@ jobs:
                   | package(=peri-agent) & binary(=compact_authority_projection_test))'
 
             - name: Run Compact adversarial suite (compact_pressure_adversarial_test)
-              if: env.CI_CARGO_SCOPE == '--workspace'
               shell: bash
               run: >-
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_pressure_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_adversarial_test)
-              if: env.CI_CARGO_SCOPE == '--workspace'
               shell: bash
               run: >-
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_session_manual_adversarial_test)
-              if: env.CI_CARGO_SCOPE == '--workspace'
               shell: bash
               run: >-
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
                   -E 'package(=peri-agent) & binary(=compact_session_manual_adversarial_test)'
 
             - name: Run Compact adversarial suite (compact_authority_projection_test)
-              if: env.CI_CARGO_SCOPE == '--workspace'
               shell: bash
               run: >-
                   cargo nextest run --locked --workspace --profile ci --no-tests=fail
@@ -281,11 +252,9 @@ jobs:
             # 三个历史排除包（peri-acp / peri-tui / peri-middlewares）经核查只有 text/json/ignore
             # 形态的 fence，没有可执行 Rust doctest。不加 --exclude 才能与 nextest 主调用共享同一份
             # resolver=3 特性投影，避免 doctest 触发依赖重编；inventory 的 doctest_excluded 同步为空。
-            - name: Run doctests for the selected packages
+            - name: Run doctests (all workspace packages)
               shell: bash
-              run: |
-                  read -r -a packages <<< "$CI_CARGO_SCOPE"
-                  cargo test --doc --locked "${packages[@]}"
+              run: cargo test --doc --locked --workspace
 
     # 离线录放业务回归：修复缺失补丁配置导致的缓存失效，与 Build (ubuntu-latest) 共享
     # 同一套 Linux 依赖缓存 + mold 链接器，同时保持并行执行不拉长 PR 端到端耗时。
