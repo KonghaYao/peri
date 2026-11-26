@@ -731,3 +731,25 @@ Bun：
 16. **输入受理与恢复**：receipt、user item 和 turn 不是一个原子提交；不能从同键重试的
     202 推断已执行。无 owner/lease/fencing 时不得让多个宿主同时服务同一 logicalId；
     即使部署支持节点放置，也未证明旧宿主已停止。
+
+## 9. 已批准目标：事件日志粒度与回放置位（未实施）
+
+> 状态：2026-11-26 裁决，**未实施**。落地进度、验收矩阵与证据边界见
+> [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md)。
+> 本节只写目标契约；现行行为仍由 §4.2 与代码描述。
+
+1. **持久化粒度按 item 折叠**：同一 assistant 文本流或推理流的 chunk 合并为一条 item 行，
+   turn 终止再写终态标记；不再为每个 chunk 分配 `seq`。`tool_call`、`tool_result`、
+   `approval` 保持一帧一行。`seq` 仍是唯一分页与续读游标，但不再逐 chunk 推进。
+2. **回放真源固定为 PostgreSQL 状态库**：跨进程重启与跨副本续读都依赖它；不引入 Redis
+   或第二个有状态存储。actor 内可有有界环形缓冲只服务短窗口续读，溢出仍发 `gap`，
+   不作为真相。
+3. **清理策略不变**：仍只有显式 `DELETE /v1/agents/sessions/{logicalId}` 级联删除。
+   保留期/TTL 是独立可选项，默认关闭，未批准实施。
+4. **不变项**：官方 15 种事件序列、`/items` 分页与 `after` 语义、审批
+   `pending`/`settled` 折叠、崩溃恢复的 initial input 幂等。
+5. **兼容与回退**：无 schema 变更；历史 chunk 行与新 item 行按 `seq` 单调共存，
+   回放不重写数据；回退只需恢复原写入路径。
+6. **已知代价**：回放不再逐 chunk 重播增量文本；实时流式不受影响。
+7. **取代关系**：实施完成后，§4.2 中「不能用 `id` 去重 delta 帧」等描述逐 chunk 行
+   的表述由本节第 1 条取代。
