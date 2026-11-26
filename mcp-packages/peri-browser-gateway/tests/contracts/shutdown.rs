@@ -47,14 +47,29 @@ async fn sse_resume_replays_a_reply_without_executing_the_write_twice() -> anyho
             }
         }
     };
-    drop(response);
-    gate.release.cancel();
+    // 先 attach 再放行引擎：rmcp 在投递回复的同一处删除该请求的 request-wise 通道，
+    // 投递之后再 resume 只能得到 200 + 空 body。“回复只出现在 resumed 流”
+    // 只有在回复投递前建立 resumed 流才是确定性的。
+    //
+    // attach 屏障不用 sleep：resume 会替换该请求的 sender（rmcp session/local.rs），
+    // 旧 POST SSE body 随之 EOF。旧 body 结束是可观测的“已被接管”证据；
+    // 固定等待既证明不了 attach 生效，也会在负载下重新引入同一竞态。
     let resumed = gateway
         .events(&id)
         .header("last-event-id", cursor)
         .send()
         .await?
         .error_for_status()?;
+    let attached = tokio::time::timeout(WAIT, async {
+        while response.chunk().await?.is_some() {}
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    match attached {
+        Ok(ended) => ended?,
+        Err(_) => anyhow::bail!("resume 未在 {WAIT:?} 内接管旧 POST 流：旧 SSE body 仍未结束"),
+    }
+    gate.release.cancel();
     let response = rpc(resumed).await?;
     assert_eq!(response["id"], request_id);
     assert_ne!(response["result"]["isError"], true);
