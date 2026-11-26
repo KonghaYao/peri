@@ -119,7 +119,9 @@ export PERI_SWARM_STATE_STORE='postgresql://peri:peri@127.0.0.1:55432/peri_swarm
   `swarm_meta(version=1, engine='postgres', contract='peri.swarm.postgres/v1')`。
 - **非空但没有 `swarm_meta`**：拒绝初始化（fail closed）。误把会话库填进
   `PERI_SWARM_STATE_STORE` 会得到「这是 Peri 会话库」的专门错误。
-- **版本/引擎/契约不匹配**：启动失败，不自动升级或重写身份行。已知版本只幂等修复缺表/缺索引。
+- **版本/引擎/契约不匹配**：启动失败，不自动升级或重写身份行。已知版本只重建派生对象（索引）；
+  **缺少权威表或列一律 fail closed**（重建空表会悄悄丢掉 items、幂等收据、turn 与绑定），
+  提示改用备份恢复或换空库重新导入。
 - DSN 的 `search_path` 必须解析到已存在的 schema（默认 `public`）；表建在 `current_schema()`。
 
 账号权限：会话库需要可建表/读写；状态库需要 `CREATE`（首次）以及表的读写权限。

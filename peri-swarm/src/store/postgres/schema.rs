@@ -231,6 +231,12 @@ pub(super) struct MetaRow {
 /// replicas opening the same empty database cannot both decide to initialize
 /// it. An existing `swarm_meta` is validated before any DDL runs, so a database
 /// written by a newer build is rejected without being touched.
+///
+/// Recovery is deliberately asymmetric: a missing **authoritative** table is a
+/// data-loss signal and fails closed (an empty `swarm_inputs` would silently
+/// drop every idempotency receipt), while derived objects (indexes) are
+/// re-created. `CREATE TABLE IF NOT EXISTS` therefore only runs on a fresh
+/// database.
 pub(super) async fn ensure_schema(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), SwarmStateError> {
@@ -242,13 +248,14 @@ pub(super) async fn ensure_schema(
     if relations.iter().any(|name| name == "swarm_meta") {
         let meta = read_meta(transaction).await?;
         require_supported_meta(&meta)?;
-        // Same version: re-apply the idempotent DDL to repair missing objects.
-        // The identity row is not rewritten by this path.
-        apply_ddl(transaction).await?;
+        // Same version: authoritative tables must already be there; only the
+        // derived indexes are repaired. The identity row is never rewritten.
+        verify_authoritative_tables(transaction).await?;
+        repair_derived_objects(transaction).await?;
     } else if !relations.is_empty() {
         return Err(adopt_refusal(&relations));
     } else {
-        apply_ddl(transaction).await?;
+        create_authoritative_schema(transaction).await?;
         pin_version(transaction).await?;
     }
     verify_shape(transaction).await
@@ -298,6 +305,15 @@ fn relation_list(relations: &[String]) -> String {
         names.push("…");
     }
     names.join(", ")
+}
+
+/// Authoritative tables the catalog does not own, in declaration order.
+fn missing_tables(tables: &[String]) -> Vec<&'static str> {
+    EXPECTED_COLUMNS
+        .iter()
+        .map(|(table, _)| *table)
+        .filter(|table| !tables.iter().any(|present| present == table))
+        .collect()
 }
 
 /// Columns this build requires but `actual` lacks, one `table.column` per entry.
@@ -366,13 +382,31 @@ async fn read_meta(
     })
 }
 
-async fn apply_ddl(
+/// Create the whole owned schema. Only a relation-free database reaches here.
+async fn create_authoritative_schema(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), SwarmStateError> {
     let mut statements = Vec::with_capacity(1 + CREATE_TABLE_SQL.len() + CREATE_INDEX_SQL.len());
     statements.push(CREATE_META_TABLE_SQL);
     statements.extend(CREATE_TABLE_SQL);
     statements.extend(CREATE_INDEX_SQL);
+    run_ddl(transaction, statements).await
+}
+
+/// Re-create only derived objects (indexes) of an already initialized database.
+///
+/// Authoritative tables are never re-created here: an empty `swarm_inputs`
+/// would drop every idempotency receipt while looking healthy.
+async fn repair_derived_objects(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<(), SwarmStateError> {
+    run_ddl(transaction, CREATE_INDEX_SQL.to_vec()).await
+}
+
+async fn run_ddl(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    statements: Vec<&'static str>,
+) -> Result<(), SwarmStateError> {
     for sql in statements {
         sqlx::query(sql)
             .execute(&mut **transaction)
@@ -380,6 +414,29 @@ async fn apply_ddl(
             .map_err(|error| schema_failure("apply ddl", error))?;
     }
     Ok(())
+}
+
+/// An initialized database must still own every authoritative table.
+///
+/// A missing table means rows were lost outside this build; re-creating it
+/// empty would silently accept a state database with no receipts or no item
+/// log, so this fails closed with the restore path instead.
+async fn verify_authoritative_tables(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<(), SwarmStateError> {
+    let tables = relation_names(transaction, TABLES_SQL).await?;
+    let missing = missing_tables(&tables);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(SwarmStateError::Schema(format!(
+        "swarm_meta says this database is initialized, but the authoritative table(s) {} are \
+         missing; this build never re-creates them empty because that would drop the persisted \
+         rows (items, idempotency receipts, turns, bindings). Restore the Swarm state database \
+         from a backup, or point PERI_SWARM_STATE_STORE at a fresh empty database and re-import \
+         (see peri-swarm/README.md#升级与回退状态库)",
+        missing.join(", ")
+    )))
 }
 
 async fn pin_version(
@@ -396,9 +453,9 @@ async fn pin_version(
     Ok(())
 }
 
-/// The six owned tables and the columns this build needs must exist after the
-/// idempotent DDL; otherwise the database was tampered with and the process
-/// must not start against it.
+/// The six owned tables and the columns this build needs must exist; otherwise
+/// the database was modified outside this build and the process must not start
+/// against it.
 async fn verify_shape(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), SwarmStateError> {
@@ -428,9 +485,9 @@ async fn verify_shape(
         return Ok(());
     }
     Err(SwarmStateError::Schema(format!(
-        "swarm state schema is incomplete after the idempotent DDL (missing: {}); the database was \
-         modified outside this build. Drop and re-create the empty state database, or restore it \
-         from a backup",
+        "swarm state schema is incomplete (missing: {}); the database was modified outside this \
+         build. Restore it from a backup, or point PERI_SWARM_STATE_STORE at a fresh empty \
+         database and re-import (see peri-swarm/README.md#升级与回退状态库)",
         problems.join(", ")
     )))
 }

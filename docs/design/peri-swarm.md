@@ -47,8 +47,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 - Peri 会话库在打开时检查 PostgreSQL schema，首次写打开在事务内初始化；未知或更高版本 fail closed。
 - Swarm 状态库自带 DDL 与版本判定，初始化在一个 `pg_advisory_xact_lock` 事务里完成：
   - 完全空的 schema：建 6 张表 + 2 个索引并写入 `swarm_meta` 身份行；
-  - 有 `swarm_meta`：校验 engine/contract/version，随后只做幂等修复（缺表/缺索引），
-    身份行不重写；列形状用 `information_schema` 复核，缺列直接失败；
+  - 有 `swarm_meta`：校验 engine/contract/version，身份行不重写；只重建派生对象（索引），
+    缺权威表或列一律 fail closed（重建空表会丢 items、幂等收据、turn 与绑定），列形状用
+    `information_schema` 复核；
   - 非空但无 `swarm_meta`：拒绝接管；命中 `peri_store_meta` 时给出「这是 Peri 会话库」
     的专门文案；
   - 版本更高或未知：`SchemaVersion{found,expected}` fail closed。

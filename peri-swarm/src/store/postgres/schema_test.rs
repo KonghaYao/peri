@@ -192,3 +192,24 @@ fn item_ids_are_not_unique_but_seq_is() {
     );
     assert!(CREATE_INDEX_SQL[0].contains("swarm_items_by_id ON swarm_items (logical_id, item_id)"));
 }
+
+#[test]
+fn a_missing_authoritative_table_is_reported_not_repaired() {
+    // `verify_authoritative_tables` runs on an initialized database; its input is
+    // the catalog. Only `swarm_meta` describes a schema this build may repair
+    // additively, so every other missing table is data loss.
+    let tables: Vec<String> = ["swarm_meta", "swarm_sessions", "swarm_items"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        super::missing_tables(&tables),
+        vec!["swarm_inputs", "swarm_bindings", "swarm_turns"],
+        "the missing tables are named instead of being re-created"
+    );
+    let complete: Vec<String> = EXPECTED_COLUMNS
+        .iter()
+        .map(|(table, _)| (*table).to_owned())
+        .collect();
+    assert!(super::missing_tables(&complete).is_empty());
+}

@@ -74,7 +74,7 @@ async fn first_open_creates_the_owned_schema() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires PERI_TEST_POSTGRES_URL"]
-async fn reopening_repairs_missing_objects_and_keeps_the_identity() {
+async fn reopening_repairs_derived_objects_and_keeps_the_identity() {
     let Some(fixture) = TestSchema::create().await else {
         return;
     };
@@ -82,18 +82,12 @@ async fn reopening_repairs_missing_objects_and_keeps_the_identity() {
     let identity = fixture.meta().await;
     store.close().await.expect("close");
 
-    // A dropped index and table are repaired by the idempotent DDL; the
-    // identity row is never rewritten.
-    fixture
-        .execute("DROP INDEX swarm_items_by_id; DROP TABLE swarm_inputs")
-        .await;
+    // A dropped index is a derived object: it is re-created. The identity row is
+    // never rewritten.
+    fixture.execute("DROP INDEX swarm_items_by_id").await;
     let store = fixture.store().await;
     assert_eq!(fixture.meta().await, identity, "identity is not rewritten");
     let tables = fixture.relations().await;
-    assert!(
-        tables.iter().any(|(_, name)| name == "swarm_inputs"),
-        "the missing table is re-created: {tables:?}"
-    );
     assert!(
         tables
             .iter()
@@ -101,6 +95,67 @@ async fn reopening_repairs_missing_objects_and_keeps_the_identity() {
         "the missing index is re-created: {tables:?}"
     );
     store.close().await.expect("close");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn a_missing_authoritative_table_fails_closed_instead_of_recreating_it() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = fixture.store().await;
+    store
+        .swarm_upsert_session(session("logical-1", "/workspace/a"))
+        .await
+        .expect("seed");
+    store
+        .swarm_put_input(input("logical-1", "input-1", "fp"))
+        .await
+        .expect("receipt");
+    store.close().await.expect("close");
+
+    // Dropping an authoritative table is data loss. Re-creating it empty would
+    // silently drop the idempotency receipt, so opening must fail.
+    fixture.execute("DROP TABLE swarm_inputs").await;
+    let error = SwarmStateStore::open(&fixture.config())
+        .await
+        .expect_err("a missing authoritative table must fail closed");
+    let SwarmStateError::Schema(detail) = &error else {
+        panic!("unexpected class: {error:?}");
+    };
+    assert!(detail.contains("swarm_inputs"), "{detail}");
+    assert!(detail.contains("Restore"), "{detail}");
+    assert!(
+        !fixture
+            .relations()
+            .await
+            .iter()
+            .any(|(_, name)| name == "swarm_inputs"),
+        "the open must not re-create the table"
+    );
+
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn a_missing_authoritative_column_fails_closed() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = fixture.store().await;
+    store.close().await.expect("close");
+    fixture
+        .execute("ALTER TABLE swarm_sessions DROP COLUMN metadata_json")
+        .await;
+    let error = SwarmStateStore::open(&fixture.config())
+        .await
+        .expect_err("a missing authoritative column must fail closed");
+    assert!(
+        matches!(&error, SwarmStateError::Schema(detail) if detail.contains("swarm_sessions.metadata_json")),
+        "{error:?}"
+    );
     fixture.close().await;
 }
 
