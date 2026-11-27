@@ -59,9 +59,19 @@ async fn bound_restore_preparation_does_not_request_active_history() {
         &cfg,
     )
     .await;
-    cfg.session_resources = Arc::new(FailingHistoryLoad {
+    // 生效的历史读取走 `cfg.controller` 持有的 resource port，不是 `cfg.session_resources`；
+    // 只替换后者时断言会空转。两个入口装同一份注入：任一历史读取都会失败。
+    let failing: Arc<dyn SessionResources> = Arc::new(FailingHistoryLoad {
         inner: cfg.session_resources.clone(),
     });
+    cfg.session_resources = Arc::clone(&failing);
+    cfg.controller = Arc::new(peri_controller::Controller::new(failing));
+    // 正控：同一 port 的 active history 读取确实失败，否则「未读历史」没有区分力。
+    assert!(
+        crate::dispatch::load_active_session_payloads(cfg.controller.as_ref(), &sid)
+            .await
+            .is_err()
+    );
     crate::host::requests::session_lifecycle::restore::prepare_existing(
         &json!({ "sessionId": sid }),
         &cfg,

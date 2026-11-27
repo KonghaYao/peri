@@ -274,7 +274,17 @@ async fn stop_and_close_interrupt_blocked_first_context_read() {
     .await
     .expect("close must acquire the per-session lock before its five-second timeout")
     .unwrap();
-    assert_eq!(interrupted.await.unwrap().unwrap_err().code, -32010);
+    // close 成功只说明注销成立；被打断的 prompt 仍必须自己在有界时间内收尾。
+    // 不释放 `:context-read` 闸门：能结束只能来自 close 的取消，而不是测试放行读取。
+    assert_eq!(
+        timeout(Duration::from_secs(3), interrupted)
+            .await
+            .expect("close must interrupt the parked context read")
+            .unwrap()
+            .unwrap_err()
+            .code,
+        -32010
+    );
     assert!(!sessions.lock().await.contains_key(&sid));
     let notifications =
         crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
