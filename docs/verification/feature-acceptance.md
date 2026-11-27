@@ -261,7 +261,7 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
    多帧与 receipt 交错，`limit=11` 从 `nextCursor=21` 续读与直接 `after=31` 的 answer 正文和 `turn_id` 一致。
 3. [请求预算](../../peri-swarm/tests/it/items_official_pagination_test.rs)：第 101 页才有投影时
    返回 `422 items_scan_limit`、无部分页或游标，第 100 页可成功；累计或单组超过 2000 行不返回残组。
-4. [读取失败](../../peri-swarm/src/service/official_items_test.rs)：第二存储页或 turn 历史读失败均整页
+4. [读取失败](../../peri-swarm/src/service/official_items_paging_test.rs)：第二存储页或 turn 历史读失败均整页
    返回 `502`；首页有投影不探页；空页游标不推进时返回扫描错误。
 5. [SDK 分页探针](../../peri-swarm/scripts/sdk_items_pagination_test.mjs)：升降序分别用原生 `nextCursor`、
    SDK `data` 末项 id 或交替游标遍历，官方 id 不重不漏；SDK 可重扫内部原始行。
@@ -269,14 +269,17 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
    `data` id 唯一且来自 `items`；有续页时 `nextCursor` 等于末组最大 `seq`，否则为 `null`。
    已用提取函数体的最小 harness 实际执行 `assertOfficialItems`：正常合并页不抛错、
    `data.length <= min(limit, rawItemCount)`、`nextCursor` 为末组最大 `seq`；未跑真实网关。
-7. [升序并发追加](../../peri-swarm/src/service/official_items_test.rs)：请求开始 `lastItemSeq=2`，
+7. [升序并发追加](../../peri-swarm/src/service/official_items_paging_test.rs)：请求开始 `lastItemSeq=2`，
    每次读页前追加一条独立 receipt；响应 200、只读 1 页、游标停在 2 且不追尾（上限为 100 页）。
-8. [组增长去重](../../peri-swarm/src/service/official_items_test.rs)：首读后向无正文 thought
+8. [组增长去重](../../peri-swarm/src/service/official_items_paging_test.rs)：首读后向无正文 thought
    追加第 4 帧并追加 answer 5；同一响应 `seq=[2,3,4,5]` 唯一。1000 行组增长后只新增 1 帧，
    重复行不把纳入量推到 2000 以上，也不误报 `items_scan_limit`。
-9. [SDK 重扫预算差异](../../peri-swarm/scripts/sdk_items_pagination_test.mjs)：SDK 用 `data`
-   末项续页会重扫内部原始行，预算边界上可能比原生游标更早触发 `items_scan_limit`；本轮在
-   Memory store 验证重扫行为，未在真实 2000 行边界或 Postgres/Compose/全链路 E2E 上实测。
+9. [SDK 重扫预算差异](../../peri-swarm/tests/it/items_official_pagination_test.rs)：
+   `official_pagination::openai_sdk_iterates_past_internal_only_pages`（`#[ignore]`，需 Node.js 与
+   `openai@7.60.0`）的脚本在 7 行 fixture 上让真实 SDK 迭代，断言 SDK 从 `data` 末项 id 续页
+   会重读内部 receipt 原始行（原始 `seq` 序列出现重复读取）；不覆盖纳入预算。
+   SDK 续页因此可能比原生 `nextCursor` 更早触发 `items_scan_limit` 属基于重扫行为的推断，
+   本轮未实测 2000 行预算边界，也未在真实 Postgres、Compose 或全链路 E2E 上验证。
 
 ### F-TASK-001 补充验收
 
