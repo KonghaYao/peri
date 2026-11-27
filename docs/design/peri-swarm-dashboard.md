@@ -16,7 +16,8 @@
 
 - 首次运行的凭据引导，以及已有配置的自动连接。
 - 单网关外壳：头部健康/刷新、侧栏导航、错误横幅、页脚提示、窄终端菜单。
-- Session log：轮询、状态过滤、客户端搜索、增量加载、详情跳转。
+- Session log：轮询、状态过滤、客户端搜索、增量加载、详情跳转；收到的列表在本地按
+  `last_active_at` 降序（同值按 `created_at` 降序，稳定）排序，最近活跃在前。
 - Session detail：Timeline / Turns / Info、审批、发消息、取消 turn、编辑、删除。
 - 创建 session 与会话编辑表单。
 - Settings：连接事实、测试连接、编辑凭据、退出登录、退出应用。
@@ -59,7 +60,7 @@ flowchart LR
 | Monitor | Core metrics | 空 | 本构建不做网关指标聚合 |
 | Monitor | Agent metrics | 空 | 仅逐会话提供 model/instructions/usage |
 | Monitor | Sandbox metrics | 空 | 仅逐会话报告 sandbox 类型/id |
-| Monitor | Session log | 已实现 | 默认页；列表、过滤、搜索、增量加载、详情 |
+| Monitor | Session log | 已实现 | 默认页；列表按最近活跃排序、过滤、搜索、增量加载、详情 |
 | Monitor | Request log | 空 | 网关不暴露服务器请求日志 |
 | Resources | Agents | 空 | 不把 agent 作为独立资源管理 |
 | Resources | Environment templates | 空 | 创建时可请求环境；无模板管理 |
@@ -155,6 +156,10 @@ flowchart LR
 等），`has_more` / `hasMore`、`nextCursor` / `next_cursor` 均接受。错误信封为
 `{"error":{"code","message","details"}}`。
 
+列表响应可能按 `logical_id desc` 排序，但 `logicalId` 是调用方任意字符串，不代表时间
+顺序。Dashboard 在 `SessionLogState::apply_page` 保存响应前做稳定降序排序：主键
+`last_active_at`，次级 `created_at`；两者都相同时保留网关返回顺序，不引入 id tie-break。
+
 ### 5.2 更新契约（`agent.model`，无 instructions）
 
 网关 `SessionUpdateParams` 使用 `deny_unknown_fields`，只接受：
@@ -219,7 +224,8 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 | `☰`（宽度 <80） | 打开窄终端菜单覆盖层 |
 | 列表行 | 打开会话详情 |
 | 状态 chips、搜索框 | 设置过滤；搜索框聚焦并按列宽映射光标 |
-| 工具栏/表单/详情按钮 | 执行对应动作（Refresh、Load more、Create、Send、Back 等） |
+| 工具栏/表单/详情按钮 | 执行对应动作（Refresh、Create、Send、Back 等） |
+| Session log 分页器 | 点击页码切换显示页；`‹ Prev`/`Next ›` 前后翻页，末页的 `Next ›` 先取更多会话；页码带预留固定宽度，翻页时 `Next ›` 不移动 |
 | 详情标签 | 切换 Timeline / Turns / Info |
 | 审批 Approve / Deny | 提交该请求的审批答复 |
 | Timeline 工具块 | 展开/折叠；Markdown 消息可直接阅读 |
@@ -241,6 +247,7 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 | `q` | 无文本字段且无覆盖层时退出 |
 | `Tab` / `Shift-Tab` | 在侧栏、内容、动作、字段之间移动焦点 |
 | 方向键 | 侧栏/列表/动作移动；详情页内容区左右切标签；非详情内容区 `←` 回到侧栏 |
+| `PgUp` / `PgDn` | Session log 内容区切换显示页；文本字段取得焦点时不拦截 |
 | `Enter` | 激活当前项/按钮；列表内打开选中会话 |
 | `Esc` | 返回/关闭覆盖层；列表有过滤时先清空过滤 |
 | `/` | 聚焦 Session log 搜索 |
@@ -286,11 +293,21 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 | 组件 | 用途 |
 | --- | --- |
 | `markdown` | Timeline 中的用户/助手消息 |
-| `textarea`（`TextAreaState` / `render_multiline_with_cursor`） | composer、instructions、高级 JSON 的编辑与光标 |
-| `button` | 按钮色调与统一绘制 |
+| `markdown::table` | Timeline 表格按主题绘制行 |
+| `textarea`（`TextAreaState` / `render_multiline_with_cursor`） | composer、instructions、高级 JSON 的编辑、光标与选区 |
+| `input`（`TextField`） | 单行输入、掩码、选区与水平窗口 |
+| `button`（`Button`） | 按钮色调与统一绘制；按 tone 选 chrome |
+| `tabs::tab_layout` | 详情页标签的可见文字与命中几何 |
+| `pagination`（`pagination_layout` / `render_pagination`） | Session log 分页器的固定宽度页码带、省略号、逐控件矩形与绘制；控件宽度取最大页码位数，页码带按最宽窗口预留 |
+| `spinner` | 加载帧与宿主动作文案的组合 |
 | `scrollbar::VerticalBar` | thumb 几何、轨道点击与拖拽，绘制与命中同源 |
 | `text` | 宽度安全截断 |
 | `peri-theme` | 与 TUI 一致的深色主题样式 |
+
+按钮视觉由 tone 单一决定：`Primary` 使用 `ButtonChrome::Filled`，画成反色填充块；
+`Secondary` 与 `Danger` 使用 `ButtonChrome::Plain`，只画标签文字（危险操作保留错误色）。
+筛选 chips 同样只画文字，选中项用背景色表示。默认界面不再出现 `[ label ]` 形式的
+方括号按钮。
 
 本地实现及原因：
 
@@ -299,8 +316,9 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
   时间线。
 - 覆盖层用本地 `dialogs` + `Layer`：需要“打开时捕获全部点击、背景不接收”的语义，
   `overlay::OverlayFrame` 只负责边框/title 几何，不提供输入捕获。
-- 不使用 `list_nav` / `panel_mouse`：侧栏导航、页面表格和详情标签的激活语义不同，且外壳
-  是全屏三栏而不是 TUI 面板覆盖层；逐帧 HitMap 已统一命中来源。
+- 不使用 `list_nav` 的动作分类 / `panel_mouse`：侧栏导航、页面表格和详情标签的激活语义
+  不同，且外壳是全屏三栏而不是 TUI 面板覆盖层；逐帧 HitMap 已统一命中来源。仅复用
+  `list_nav` 的数值辅助（`cycle_next` / `cycle_previous` / `clamp_selection`）。
 
 ## 12. 非目标
 
@@ -315,23 +333,41 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 
 ## 13. 验证与缺口
 
-本次文档变更实际执行（worktree `feat/peri-swarm-dashboard`）：
+本次未提交改动实际执行（组件复用、分页器与本地排序）：
 
 ```bash
-./scripts/cargo-rmcp-patched.sh check --locked -p peri-swarm-dashboard --all-targets
-./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm-dashboard
-./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm-dashboard --all-targets -- -D warnings
-cargo fmt --check
+./scripts/cargo-rmcp-patched.sh fmt --check
+./scripts/cargo-rmcp-patched.sh clippy -p peri-tui-components -p peri-swarm-dashboard --all-targets -- -D warnings
+./scripts/cargo-rmcp-patched.sh test -p peri-tui-components
+./scripts/cargo-rmcp-patched.sh test -p peri-swarm-dashboard
+./scripts/cargo-rmcp-patched.sh build -p peri-swarm-dashboard
 bash scripts/check-layer-imports.sh
 python3 scripts/check-feature-catalog.py
 bash scripts/check-file-size.sh
 git diff --check
+git status --short Cargo.lock
 ```
 
-结果：crate 单元/命中/渲染 smoke 测试 187 通过、0 失败、1 ignored（`live_gateway`）；
-check/clippy/fmt/layer-imports/catalog/diff 通过。`bash scripts/check-file-size.sh` 在本机
-`PATH` 缺少 `rg` 时无法启动；注入 VS Code 自带的 ripgrep 后执行，退出 1 的 67 个超限
-文件全部是仓库既有文件，没有本次新增/修改文件超过 1000 行（最大 993 行）。
+结果：`peri-tui-components` 548 个库测试（`pagination` 21 个）与 74 个 storybook 测试通过；
+dashboard 217 个单元/命中/渲染 smoke 测试通过、0 失败、1 ignored（`live_gateway`）；
+fmt/clippy/build/diff 通过，`Cargo.lock` 未变化。`bash scripts/check-file-size.sh` 在本机
+`PATH` 缺少 `rg` 时无法启动；注入 VS Code 自带的 ripgrep 后执行，退出 1 的 63 个超限
+文件全部是仓库既有文件，没有本次新增/修改文件超过 1000 行（最大 901 行）。分页器与本地
+排序另做了本地 120 条 stub 的 pty 走查（见下）；本轮未重跑真实网关冒烟。
+
+行为变化：
+
+- 分页控件宽度固定：每个页码控件占 `digits`（最大页码的十进制位数）列，标签居中；
+  省略号占 1 列。对给定 `page_count` 预留最宽窗口的列数（≤7 页全部显示；8 页为
+  7 个数字 + 1 个省略号；≥9 页为 7 个数字 + 2 个省略号，含单元间 1 列间距），实际
+  窗口在预留区内居中，因此 `Prev`、页码带和 `Next ›` 的列在翻页时不变。
+- 窄行仍回退为 `‹ Prev 5/20 Next ›`，当前页数字右对齐补齐到 `digits`，同一
+  `page_count` 下指示器宽度恒定；更窄时按原规则裁剪并保持 `rect` 与绘制文字一致。
+- `PaginationLayout.width` 表示整行实际占用的列数（从 `Prev` 左边到 `Next` 右边，
+  含预留空白）。
+- Session log 在 `apply_page` 收到数据后、保存前按 `last_active_at` 降序、`created_at`
+  降序稳定排序；时间完全相同保留网关返回顺序，不增加 id tie-break。页脚文案改为
+  `Newest activity first · N loaded`。
 
 真实网关只读冒烟（2026-11-27）：对本地 Compose 网关 `http://127.0.0.1:8080`，从
 `deploy/.env` 读取凭据且全程不打印 key，运行
@@ -346,17 +382,32 @@ check/clippy/fmt/layer-imports/catalog/diff 通过。`bash scripts/check-file-si
 - 首启 onboarding：Base URL 预填；API key 粘贴后显示为掩码，抓屏未出现明文；提交后经
   healthz + 鉴权列表校验，配置文件权限正确（目录 `0700`、文件 `0600`），进入 dashboard。
 - 列表与设置：显示 `● healthy`、真实 8 条会话与状态 chips；侧栏 Settings 的
-  `[ Test connection ]` 返回 “Connection OK in 4 ms”。
+  `Test connection`（填充块）返回 “Connection OK in 4 ms”。
 - 鼠标与键盘：侧栏切换、会话行打开详情、Timeline/Turns/Info 标签均在可见标签内点击
   生效；键盘 Left/Right 仍可循环切换。详情页渲染真实 Markdown 转录、工具块与推理。
-- 写路径：经 `[ Create ]` 在真实网关创建会话 `e2e-check-2711`；进入详情后用编辑表单把
-  model 改为 `stub-model` 并生效；`[ Delete ]` 打开确认覆盖层，面板外点击被吞掉，
-  `[ Delete session ]` 删除成功并刷新列表。走查后再次查询列表确认该会话已不存在
-  （8 条，`e2e-check-2711` 计数 0）。
+- 写路径：经 `Create`（填充块）在真实网关创建会话 `e2e-check-2711`；进入详情后用编辑
+  表单把 model 改为 `stub-model` 并生效；`Delete`（纯文字）打开确认覆盖层，面板外点击
+  被吞掉，`Delete session`（纯文字，危险色）删除成功并刷新列表。走查后再次查询列表确认
+  该会话已不存在（8 条，`e2e-check-2711` 计数 0）。
 - 走查发现并修复一个真实缺陷：详情页标签的点击区域相对绘制文字整体左移，越靠后的标签
   偏移越大（`Info` 偏移 5 列，实际不可点击）。修复为与 `Tabs` 渲染一致的左内边距 1 列、
   相邻标签间距 5 列，并新增回归测试 `tab_hit_regions_cover_the_drawn_labels`；修复后在
   真实终端按可见标签首列点击 Info/Turns/Timeline 均切换成功。
+- 按钮外观复核（重建后，tmux 140×40 / 79×24）：Session log 的 `New session` 为反色填充
+  块，`Refresh` 与筛选 chips 为纯文字；Settings 的 `Test connection`、
+  详情页 `Edit`/`Send` 为填充块，`Back`/`Refresh`/`Delete` 为纯文字。抓屏中不再出现
+  `[ ... ]` 方括号按钮；点击填充块最后一列仍能命中。
+- 固定宽度分页器与本地排序 pty 走查（重建后，tmux 140×40）：数据源为本机
+  `127.0.0.1:18082` 的临时只读 stub（120 条会话，按 `limit` 返回，`limit < 120` 时
+  `has_more = true`，数据按最旧→最新返回），未使用网关凭据。Dashboard 把收到的 120 条
+  按最近活跃倒序：第 1 页 `sess-120..111`，第 12 页 `sess-010..001`。12 页时页脚显示
+  `‹ Prev 1 … 10 11 12 Next ›`，用 `PgDn`/`PgUp` 走完全部 12 页，`Next ›` 始终在同一列
+  （第 61 列），当前页为 2 列宽的 accent 填充块；在第 5 页点 `Next ›` 只发一次
+  `limit=100`，落到第 6 页；在第 10 页点 `Next ›` 只发一次 `limit=150`，落到第 11 页
+  并显示 12 页；末页 `Next ›` 为暗色，点击后只有既有的轮询请求。切换 status chip 与
+  输入搜索都回到第 1 页，清空搜索后第 1 页仍为 `sess-120`。
+
+以上分页器走查使用本地 stub，未连接真实网关。
 
 明确缺口：
 
@@ -364,6 +415,7 @@ check/clippy/fmt/layer-imports/catalog/diff 通过。`bash scripts/check-file-si
   记录，未人工走查发送消息、审批与退出登录，真实 401/409/502 错误信封仍未验证。
 - 没有像素快照；渲染测试只证明不 panic、关键控件存在、命中区域与状态变化一致。
 - 未验证 500 条上限下的实际滚动/渲染性能，也未验证长时间轮询的稳定性。
+- 分页器位于可滚动内容内：终端高度不足时（如 79×24）需要滚动到表格底部才能看到。
 - 未做 release 构建与发布产物验证。
-- `check-file-size.sh` 退出 1 仅因为仓库既有超限文件（67 个）；本次新增/修改文件均低于
-  1000 行，未计入该结果。
+- `check-file-size.sh` 退出 1 仅因为仓库既有超限文件（63 个）；本次新增/修改文件均低于
+  1000 行（最大 901 行），未计入该结果。
