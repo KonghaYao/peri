@@ -333,7 +333,7 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 | P1 | 会话状态 | `requires_action`（等待一个或多个必需动作；四类：`mcp_approval_request`、`computer_use_approval_request`、`function_call`、`environment_connection`） | 只有声明了 `require_approval` 的 MCP 绑定产生 `requires_action`：`required_actions` 每条为官方嵌套形状 `{type:"mcp_approval_request",request_id,turn_id,request:{type:"mcp_tool_call",server_label,name,arguments,message}}`（`name`/`arguments` 缺失时为 `null`，host 给空工具名也投影 `null`；来源无法归属时 `server_label` 为 `""`，`message` 说明来源未知）；答复接受官方 `{request_id,response:{type:"mcp_tool_call",decision}}`（保留顶层 `decision`/`requestId` 扩展别名），回到原挂起 `session/prompt`、不新建 turn；待办结算/过期/turn 结束/actor 丢失后快照清空，硬崩溃遗留的 pending 行在恢复时结算为 `actor_lost`（turn 已结束则 `turn_ended`）；ACP `subscribe` 与生产 actor `GET /events` 共用同一 backlog 装配（先结算过期、再回放、最后追加当前快照，同一 `event_id` 幂等）；结算行落库失败返回 `503 required_action_settlement_failed` 且待办保持可答复；子 agent 继承父会话声明的审批范围，来源无法归属且无审批通道时 `PolicyDenied`，范围存在但子链无 broker 时同样 `PolicyDenied`，不静默执行。`AskUserQuestion` 仍走 ACP `elicitation/create`，不映射官方动作 | `require_approval` 只有网关扩展接受，纯官方 SDK 客户端无法声明审批，因此该状态不会被纯官方入参触发；其余三类动作（`computer_use`/`function_call`/`environment_connection`）本地没有事实；`AskUserQuestion` 没有官方类型 |
 | P1 | agent 子字段 | `agent` 是嵌套对象，必需字段含 `id`、`name`、`tools`、`multi_agent`、`reasoning`、`service_tier`、`text`（`compaction` / `experimental` 可选）；`model` 是 string | REST `agent` 只有 `model`（可空）/ `instructions`，没有 `id`；SSE `agent.session.*` 的 agent 有固定 `id: "root"` / `model`（可空）/ `instructions`，缺 `name` / `tools` / `multi_agent` / `reasoning` / `service_tier` / `text` | REST 与 SSE 都不能保证 `model` 是非空 string；REST 还缺 `id`；`name` / `tools` / `text` 可用默认值或投影补齐（schema 可新增）；subagent 调度、多 agent 配置、推理与 service tier 仍缺运行时事实 |
 | P1 | `sessions.update` 未支持字段 | `agent.reasoning`、`agent.service_tier`、`review`，以及 `agent.tools` 中的函数/内置工具 | 这些字段 → `400 invalid_request`；函数/内置工具 → `422 unsupported_tool`；`agent.model:null` → `400` | 本地没有 reasoning、service tier 与 review 的执行语义；`agent.tools` 只有 MCP 注入通道，没有函数或内置工具运行时 |
-| P1 | items 形状 | `AgentSessionItem` 联合包含消息、推理、多种工具与 subagent 调用 | `data` 投影 `message`、`reasoning`、`function_call`、`function_call_output`；`items` 保留原始行（新数据每条目一行，历史数据可能包含逐帧 delta）。原始页无投影时 `data` 前探后续页；原始游标语义不变 | 不伪造审批、子 agent 等条目；MCP 调用与结果以 `call_id` 关联，不发 `mcp_call`。完整的原始行遍历应使用 `nextCursor`，不要用 SDK 的 `data` 游标 |
+| P1 | items 形状 | `AgentSessionItem` 联合包含消息、推理、多种工具与 subagent 调用 | `data` 投影 `message`、`reasoning`、`function_call`、`function_call_output`；`items` 保留原始行（新数据每条目一行，历史数据可能包含逐帧 delta）。原始页无投影时继续扫描，`items` 与原始游标一起前进到首个有投影的页或末尾 | 不伪造审批、子 agent 等条目；MCP 调用与结果以 `call_id` 关联，不发 `mcp_call`。完整的原始行遍历应使用 `nextCursor`，不要用 SDK 的 `data` 游标 |
 | P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 16 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.delta` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 17 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、reasoning 4 种；文本 delta 已实现但**不持久化**：实时逐 chunk，回放只有一条全文，事件 id 跨投递不一致；reasoning delta 尚未实现；环境与工具增量没有运行时事实 |
 | P1 | 环境投影 | `Environment.EnvironmentResourceOpenAIHosted` 必需字段含 `capability_directories`、`files`、`network`、`packages`、`plugins`、`skills`（`container_size`、`desktop` 可选）；`AgentSession.environment` 必填 | hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 来自绑定记录的 `last_run_id`（可能是上次预留值，与当前 state 不一致）；SSE `agent.session.*` 的 `OfficialSession` 携带同一 `{type,id}` 投影（未知环境为 `{"type":"none"}`，不造 id） | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `capability_directories` / `files` / `network` / `packages` / `plugins` / `skills` 没有同步通道 |
 | P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 网关不做 token 记账；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
@@ -469,7 +469,7 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 | --- | --- | --- |
 | 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
 | assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 新数据**仅实时**：不落库、无 `seq`，`items.list` 和回放不会返回；按 `messageId` 聚合。对应的官方 `output_text.delta` 实时逐 chunk、回放一条全文 |
-| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行投影按 `messageId` 聚合：最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
+| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行按 `itemId` 整组读取并投影：最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 
@@ -494,15 +494,18 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
   归属，每个参与投影的原始页最多回扫 8 次，每次最多读 10 页原始行。超过任一上限后，
   受影响的条目只在 `items`，不伪造 `turn_id`；缺口过多时可减小 `limit` 或用 `afterSeq`
   分段读取。
-- `limit` 仍按条目计并限制整页聚合行预算（1..=500，默认 200）；始终完整返回已选条目的
-  原始行，所以 `items.length` 可能超过 `limit`。`has_more` 与 `hasMore` 同值，按原始条目计。
-- `nextCursor` 是页尾条目的最大 `seq`，下一页传给 `after` / `afterSeq`。`after` 也接受
-  `itim_...`，请求时解析为该条目当前最大 `seq`，会越过此时已追加的帧；要按最后看过的帧续读
-  用 `afterSeq=<seq>`。传 `cursor` 会得到 `400 invalid_query`。默认 `order=desc`，`after`
-  表示更旧；升序需显式 `order=asc`。
-- SDK 自动翻页用最后一个 `data[].id`；原始页无投影时，`data` 前探第一个有投影的后续页，
-  但 `items` 和原始游标不变。需要全量原始条目时，用 `nextCursor`/`afterSeq` 翻页并读
-  `items`；不要用 `data` 的末项或是否为空决定原始分页。
+- `limit` 按条目计，也限制每次存储读取的聚合行预算（1..=500，默认 200）。每个存储页只投影
+  一次：扫到首个非空 `data` 就返回；一直没有投影时，确证到尾才返回空 `data`。`items` 纳入
+  所有扫描到的整组，按 `seq` 随 `order` 排序，行数可能超过 `limit`；`data` 不超过 `limit`。
+- `has_more` 与 `hasMore` 同值。`nextCursor` 仅在还有条目时给出，是最后纳入组的最大 `seq`。
+  数字游标 `afterSeq` / `after` 和 `after=itim_...` 都按组最大 `seq` 排他；后者用请求时的
+  组最大 `seq`，会越过此时已追加的帧。传 `cursor` 会得到 `400 invalid_query`。
+  默认 `order=desc`（`after` 指向更旧的组），升序需显式 `order=asc`。
+- 单次请求最多读 100 个存储页（含首页）、纳入 2000 条原始行，不截断条目组。超出预算或
+  游标无法推进时返回 `422 items_scan_limit`，可减小 `limit` 或从更近的游标重试；上游读取
+  失败返回 `502 upstream_unavailable`。两类错误均不返回部分页或游标。
+- SDK 用最后一个 `data[].id`，与 `nextCursor` 覆盖同一批可投影条目；SDK 可能重扫该 id
+  之后的内部行。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读 `items`。
 - `POST /events` 的用户输入在原始行中是 `kind=message`。事件 `Idempotency-Key` 的非 UUID 值
   按 `UUIDv5(namespace, logicalId + "\0" + key)` 派生；键区分大小写、不 trim，空头视为缺省。
   UUID 键按**字面**文本原样使用（花括号、无连字符、大写等非规范写法都接受），同一逻辑键

@@ -32,6 +32,7 @@ pub enum ErrorCode {
     AgentError,
     CursorTooOld,
     ConflictingCursor,
+    ItemsScanLimit,
     McpModeUnsupported,
     UnsupportedEnvironment,
     UnsupportedTool,
@@ -72,6 +73,7 @@ impl ErrorCode {
             Self::AgentError => "agent_error",
             Self::CursorTooOld => "cursor_too_old",
             Self::ConflictingCursor => "conflicting_cursor",
+            Self::ItemsScanLimit => "items_scan_limit",
             Self::McpModeUnsupported => "mcp_mode_unsupported",
             Self::UnsupportedEnvironment => "unsupported_environment",
             Self::UnsupportedTool => "unsupported_tool",
@@ -320,6 +322,15 @@ impl SwarmError {
             ErrorKind::BadRequest,
             ErrorCode::ConflictingCursor,
             "afterSeq, after and Last-Event-ID disagree",
+        )
+    }
+
+    #[must_use]
+    pub fn items_scan_limit() -> Self {
+        Self::new(
+            ErrorKind::Unprocessable,
+            ErrorCode::ItemsScanLimit,
+            "item scan budget exhausted; reduce limit or retry from a closer cursor",
         )
     }
 

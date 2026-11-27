@@ -226,7 +226,7 @@ async fn a_truly_truncated_completion_only_moves_the_boundary_through_its_persis
 }
 
 #[tokio::test]
-async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
+async fn orphan_and_internal_rows_are_retained_until_the_first_projection() {
     let store = MemorySwarmStore::new();
     append(
         &store,
@@ -259,14 +259,20 @@ async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
     let first = page(&store, ItemOrder::Asc, None, 3).await;
     assert_eq!(first["data"].as_array().unwrap().len(), 1);
     assert_eq!(first["data"][0]["id"], "itim_open");
-    assert_eq!(first["items"].as_array().unwrap().len(), 3);
-    assert_eq!(first["has_more"], true);
-    assert_eq!(first["nextCursor"], 3);
+    assert_eq!(first["data"][0]["turn_id"], turn_id_for_item("itim_open"));
+    let raw_ids: Vec<_> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["itemId"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        raw_ids,
+        ["itim_orphan", "itim_tool", "itim_receipt", "itim_open"]
+    );
+    assert_eq!(first["has_more"], false);
+    assert_eq!(first["nextCursor"], Value::Null);
     assert_eq!(first["lastItemSeq"], 900);
-    let second = page(&store, ItemOrder::Asc, first["nextCursor"].as_u64(), 3).await;
-    assert_eq!(second["data"][0]["turn_id"], turn_id_for_item("itim_open"));
-    assert_eq!(second["has_more"], false);
-    assert_eq!(second["nextCursor"], Value::Null);
 }
 
 #[tokio::test]
@@ -432,10 +438,19 @@ async fn a_dangling_call_in_a_terminal_turn_is_incomplete() {
     assert_eq!(call_status(&running), "in_progress");
 }
 
-/// 记录 `swarm_items_before` 调用次数的 store 包装（M-5 的回扫成本上限）。
+#[derive(Clone, Copy, PartialEq)]
+enum ReadFault {
+    FollowupPage,
+    TurnHistory,
+    StalledCursor,
+}
+
+/// 记录回扫与探页调用，并能在指定读取处注入故障。
 struct CountingStore {
     inner: MemorySwarmStore,
     items_before: std::sync::atomic::AtomicUsize,
+    item_pages: std::sync::atomic::AtomicUsize,
+    fault: Option<ReadFault>,
 }
 
 impl CountingStore {
@@ -443,11 +458,17 @@ impl CountingStore {
         Self {
             inner: MemorySwarmStore::new(),
             items_before: std::sync::atomic::AtomicUsize::new(0),
+            item_pages: std::sync::atomic::AtomicUsize::new(0),
+            fault: None,
         }
     }
 
     fn items_before_calls(&self) -> usize {
         self.items_before.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn item_page_calls(&self) -> usize {
+        self.item_pages.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -532,6 +553,11 @@ impl crate::store::SwarmStore for CountingStore {
     ) -> Result<Vec<SwarmItemRow>, crate::store::StoreError> {
         self.items_before
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fault == Some(ReadFault::TurnHistory) {
+            return Err(crate::store::StoreError::Unavailable(
+                "test history read failure".into(),
+            ));
+        }
         self.inner
             .swarm_items_before(logical_id, before, limit)
             .await
@@ -544,9 +570,22 @@ impl crate::store::SwarmStore for CountingStore {
         after: Option<u64>,
         limit: u32,
     ) -> Result<crate::store::SwarmItemPage, crate::store::StoreError> {
-        self.inner
+        let index = self
+            .item_pages
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if index == 1 && self.fault == Some(ReadFault::FollowupPage) {
+            return Err(crate::store::StoreError::Unavailable(
+                "test second page failure".into(),
+            ));
+        }
+        let mut page = self
+            .inner
             .swarm_item_page(logical_id, order, after, limit)
-            .await
+            .await?;
+        if self.fault == Some(ReadFault::StalledCursor) && page.has_more {
+            page.next_cursor = after;
+        }
+        Ok(page)
     }
 
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, crate::store::StoreError> {
@@ -627,6 +666,105 @@ impl crate::store::SwarmStore for CountingStore {
         logical_id: &str,
     ) -> Result<bool, crate::store::StoreError> {
         self.inner.swarm_has_open_turn(logical_id).await
+    }
+}
+
+async fn list_fault_fixture(
+    store: &CountingStore,
+    order: ItemOrder,
+    after: Option<u64>,
+) -> Result<ItemPage, SwarmError> {
+    item_page(
+        store,
+        &LogicalId::parse("agent-01").unwrap(),
+        ItemsWindow {
+            order,
+            after,
+            after_id: None,
+            limit: 1,
+        },
+        4,
+    )
+    .await
+}
+
+async fn fault_fixture(fault: ReadFault) -> CountingStore {
+    let store = CountingStore {
+        fault: Some(fault),
+        ..CountingStore::new()
+    };
+    user(&store.inner, 1, "itim_opener").await;
+    for seq in 2..=4 {
+        append(
+            &store.inner,
+            seq,
+            &format!("itim_receipt_{seq}"),
+            ItemKind::Receipt,
+            json!({}),
+            false,
+        )
+        .await;
+    }
+    store
+}
+
+#[tokio::test]
+async fn an_already_projectable_first_page_does_not_probe() {
+    let store = fault_fixture(ReadFault::FollowupPage).await;
+    let page = list_fault_fixture(&store, ItemOrder::Asc, None)
+        .await
+        .unwrap();
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(page.next_cursor, Some(1));
+    assert!(page.has_more);
+    assert_eq!(store.item_page_calls(), 1);
+}
+
+#[tokio::test]
+async fn a_second_page_read_failure_returns_only_a_502_error() {
+    let store = fault_fixture(ReadFault::FollowupPage).await;
+    let error = list_fault_fixture(&store, ItemOrder::Asc, Some(1))
+        .await
+        .unwrap_err();
+    assert_eq!(store.item_page_calls(), 2);
+    assert_store_read_error(error, "item_page").await;
+}
+
+#[tokio::test]
+async fn a_turn_history_read_failure_returns_only_a_502_error() {
+    let store = fault_fixture(ReadFault::TurnHistory).await;
+    let error = list_fault_fixture(&store, ItemOrder::Asc, Some(1))
+        .await
+        .unwrap_err();
+    assert_eq!(store.items_before_calls(), 1);
+    assert_store_read_error(error, "items_before").await;
+}
+
+async fn assert_store_read_error(error: SwarmError, operation: &str) {
+    use axum::response::IntoResponse;
+
+    let response = error.into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "upstream_unavailable");
+    assert_eq!(body["error"]["details"]["operation"], operation);
+    assert!(body.get("nextCursor").is_none());
+    assert!(body.get("items").is_none());
+    assert!(body.get("data").is_none());
+}
+
+#[tokio::test]
+async fn an_empty_page_with_a_stalled_cursor_fails_in_both_orders() {
+    for (order, after) in [(ItemOrder::Asc, 1), (ItemOrder::Desc, 4)] {
+        let store = fault_fixture(ReadFault::StalledCursor).await;
+        let error = list_fault_fixture(&store, order, Some(after))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ItemsScanLimit);
+        assert_eq!(store.item_page_calls(), 1);
     }
 }
 

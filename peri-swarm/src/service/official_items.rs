@@ -22,37 +22,53 @@ const MAX_TURN_LOOKBACK_PAGES: usize = 10;
 /// 该组及其后续组只留在 `items`，不把猜测写进官方 `turn_id`。
 const MAX_TURN_LOOKBACKS: usize = 8;
 
+const MAX_ITEM_PAGE_READS: usize = 100;
+const MAX_SELECTED_RAW_ROWS: usize = 2000;
+
 pub(crate) async fn item_page(
     store: &dyn SwarmStore,
     logical_id: &LogicalId,
     window: ItemsWindow,
     last_item_seq: u64,
 ) -> Result<ItemPage, SwarmError> {
-    let after = resolve_window_after(store, logical_id, &window).await?;
+    let mut cursor = resolve_window_after(store, logical_id, &window).await?;
     let logical_id = logical_id.as_str();
-    let page = store
-        .swarm_item_page(logical_id, window.order, after, window.limit)
-        .await
-        .map_err(|error| store_failure("item_page", error))?;
-    let items: Vec<_> = page.rows.iter().map(|row| row.to_view()).collect();
-    let (next_cursor, has_more) = (page.next_cursor, page.has_more);
-    let mut data = project_page(store, logical_id, &page, &items).await?;
-    let mut scan = page;
-    // 官方 SDK 在 data 为空时不会用 nextCursor 继续；只前探 data，不移动原始页。
-    while data.is_empty() && scan.has_more {
-        let Some(cursor) = scan.next_cursor else {
-            break;
-        };
-        if window.order == ItemOrder::Asc && cursor >= last_item_seq {
-            // 升序不追着并发追加的条目继续扫描。
-            break;
-        }
-        scan = store
-            .swarm_item_page(logical_id, window.order, Some(cursor), window.limit)
+    let mut items = Vec::new();
+    let mut reads = 0;
+    let (mut data, next_cursor, has_more) = loop {
+        let page = store
+            .swarm_item_page(logical_id, window.order, cursor, window.limit)
             .await
             .map_err(|error| store_failure("item_page", error))?;
-        let rows: Vec<_> = scan.rows.iter().map(|row| row.to_view()).collect();
-        data = project_page(store, logical_id, &scan, &rows).await?;
+        reads += 1;
+        if items.len() + page.rows.len() > MAX_SELECTED_RAW_ROWS {
+            return Err(SwarmError::items_scan_limit());
+        }
+        let rows: Vec<_> = page.rows.iter().map(|row| row.to_view()).collect();
+        // 每个存储页独立投影；前面已经确认没有投影的页不再消耗回扫预算。
+        let data = project_page(store, logical_id, &page, &rows).await?;
+        items.extend(rows);
+        if !data.is_empty() || !page.has_more {
+            break (data, page.next_cursor, page.has_more);
+        }
+        let next = page
+            .next_cursor
+            .filter(|&next| {
+                cursor.is_none_or(|previous| match window.order {
+                    ItemOrder::Asc => next > previous,
+                    ItemOrder::Desc => next < previous,
+                })
+            })
+            .ok_or_else(SwarmError::items_scan_limit)?;
+        if reads == MAX_ITEM_PAGE_READS {
+            return Err(SwarmError::items_scan_limit());
+        }
+        cursor = Some(next);
+    };
+    // 各页按组最大 seq 选入，多帧组的早期帧可能和其他页交错。
+    items.sort_unstable_by_key(|row| row.seq);
+    if window.order == ItemOrder::Desc {
+        items.reverse();
     }
     reconcile_calls(&mut data, window.order);
     Ok(ItemPage::new(
@@ -73,7 +89,7 @@ async fn project_page(
     rows: &[ItemView],
 ) -> Result<Vec<OfficialSessionItem>, SwarmError> {
     let mut mapped = project_items(store, logical_id, rows).await?;
-    // store 已按条目的最大 seq 排列；投影所选的完成行不一定是该最大 seq。
+    // 按组最大 seq 的顺序取投影；每个 item_id 只会从映射中移除一次。
     Ok(page
         .items
         .iter()
