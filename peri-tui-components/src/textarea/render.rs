@@ -1,7 +1,12 @@
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use ratatui::widgets::{Block, Paragraph, Widget};
 use unicode_width::UnicodeWidthChar;
+
+use super::state::TextAreaState;
 
 /// 计算字符串前 char_idx 个字符的显示列宽度（CJK 字符占 2 列）。
 pub fn display_width_before(s: &str, char_idx: usize) -> usize {
@@ -402,4 +407,56 @@ pub fn render_multiline_with_cursor(options: TextAreaRenderOptions<'_>) -> Vec<L
     }
 
     result
+}
+
+/// 绘制带边框的多行输入区，并返回焦点态光标的 buffer 坐标。
+///
+/// 选区直接取 `state.selection_range()`，渲染与光标定位共用
+/// [`wrap_text`] / [`viewport_window`] 的口径。`rect` 小于 3×2 时不绘制，
+/// 返回 `None`；未聚焦时只绘制内容。
+pub fn render_text_area_with_cursor(
+    buf: &mut Buffer,
+    rect: Rect,
+    state: &TextAreaState,
+    focused: bool,
+    border_style: Style,
+    styles: TextAreaStyles,
+    placeholder: Option<&str>,
+) -> Option<Position> {
+    if rect.height < 3 || rect.width < 2 {
+        return None;
+    }
+    let block = Block::bordered().border_style(border_style);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+    if inner.is_empty() {
+        return None;
+    }
+    let lines = render_multiline_with_cursor(TextAreaRenderOptions {
+        text: &state.text,
+        cursor: state.cursor,
+        selection_range: state.selection_range(),
+        placeholder,
+        styles,
+        max_width: usize::from(inner.width),
+        viewport_height: usize::from(inner.height),
+        show_cursor: focused,
+    });
+    Paragraph::new(lines).render(inner, buf);
+    if !focused {
+        return None;
+    }
+    let wrapped = wrap_text(&state.text, state.cursor, usize::from(inner.width.max(1)));
+    let (start, _) = viewport_window(
+        wrapped.total_visual_rows,
+        wrapped.cursor_visual_row,
+        usize::from(inner.height.max(1)),
+    );
+    let row = wrapped.cursor_visual_row.saturating_sub(start);
+    Some(Position::new(
+        inner
+            .x
+            .saturating_add(u16::try_from(wrapped.cursor_visual_col).unwrap_or(0)),
+        inner.y.saturating_add(u16::try_from(row).unwrap_or(0)),
+    ))
 }

@@ -737,3 +737,108 @@ fn test_cjk_delete_no_cursor_ghost() {
         );
     }
 }
+
+// ── 选区扩展 ──────────────────────────────────────────
+
+#[test]
+fn test_extend_right_keeps_anchor_and_grows_selection() {
+    let mut s = TextAreaState::default();
+    s.insert_str("hello");
+    s.cursor = 0;
+    s.cursor_right_extend();
+    s.cursor_right_extend();
+    assert_eq!(s.selection_start, Some(0));
+    assert_eq!(s.cursor, 2);
+    assert_eq!(s.selection_range(), Some((0, 2)));
+}
+
+#[test]
+fn test_extend_left_produces_reverse_selection_range() {
+    let mut s = TextAreaState::default();
+    s.insert_str("abcdef");
+    s.cursor = 5;
+    s.cursor_right_extend();
+    assert_eq!((s.cursor, s.selection_range()), (6, Some((5, 6))));
+    s.cursor_left_extend();
+    assert_eq!((s.cursor, s.selection_range()), (5, None));
+    s.cursor_left_extend();
+    assert_eq!((s.cursor, s.selection_range()), (4, Some((4, 5))));
+}
+
+#[test]
+fn test_word_extend_moves_by_word_and_preserves_anchor() {
+    let mut s = TextAreaState::default();
+    s.insert_str("hello world next");
+    s.cursor = 0;
+    s.cursor_word_right_extend();
+    assert_eq!((s.cursor, s.selection_start), (6, Some(0)));
+    s.cursor_word_right_extend();
+    assert_eq!((s.cursor, s.selection_range()), (12, Some((0, 12))));
+    s.cursor_word_left_extend();
+    assert_eq!((s.cursor, s.selection_range()), (6, Some((0, 6))));
+}
+
+#[test]
+fn test_select_all_covers_text_and_empty_text_clears_selection() {
+    let mut s = TextAreaState::default();
+    s.insert_str("abc");
+    s.cursor = 1;
+    s.select_all();
+    assert_eq!((s.cursor, s.selection_range()), (3, Some((0, 3))));
+
+    let mut empty = TextAreaState::default();
+    empty.select_all();
+    assert_eq!((empty.cursor, empty.selection_range()), (0, None));
+
+    empty.insert_str("x");
+    empty.select_all();
+    empty.clear();
+    empty.select_all();
+    assert_eq!(empty.selection_range(), None);
+}
+
+#[test]
+fn test_plain_motion_still_cancels_selection() {
+    let mut s = TextAreaState::default();
+    s.insert_str("abc");
+    s.select_all();
+    s.cursor_left();
+    assert_eq!(s.selection_range(), None);
+    s.select_all();
+    s.cursor_home();
+    assert_eq!(s.selection_range(), None);
+}
+
+#[test]
+fn test_line_extend_home_end_and_up_down() {
+    let mut s = TextAreaState::default();
+    s.insert_str("abc\ndef");
+    s.cursor = 5;
+    assert!(s.cursor_line_up_extend());
+    assert_eq!((s.cursor, s.selection_range()), (1, Some((1, 5))));
+    assert!(s.cursor_line_down_extend());
+    assert_eq!((s.cursor, s.selection_range()), (5, None));
+
+    let mut s = TextAreaState::default();
+    s.insert_str("abc\ndef");
+    s.cursor = 5;
+    s.cursor_line_home_extend();
+    assert_eq!((s.cursor, s.selection_range()), (4, Some((4, 5))));
+
+    let mut s = TextAreaState::default();
+    s.insert_str("abc\ndef");
+    s.cursor = 4;
+    s.cursor_line_end_extend();
+    assert_eq!((s.cursor, s.selection_range()), (7, Some((4, 7))));
+}
+
+#[test]
+fn test_home_end_extend_span_the_document() {
+    let mut s = TextAreaState::default();
+    s.insert_str("abc\ndef");
+    s.cursor = 5;
+    s.cursor_home_extend();
+    assert_eq!((s.cursor, s.selection_range()), (0, Some((0, 5))));
+    s.cursor_end_extend();
+    assert_eq!((s.cursor, s.selection_range()), (7, Some((5, 7))));
+}
