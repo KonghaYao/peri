@@ -119,11 +119,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/v1/agents/sessions/{logical_id}/subagents",
-            get(handlers::unsupported_resource),
+            get(handlers::list_subagents),
         )
         .route(
             "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}",
-            get(handlers::unsupported_resource),
+            get(handlers::get_subagent),
         )
         .route(
             "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}/items",

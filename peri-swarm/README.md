@@ -337,7 +337,7 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 | P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 16 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.delta` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 17 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、reasoning 4 种；文本 delta 已实现但**不持久化**：实时逐 chunk，回放只有一条全文，事件 id 跨投递不一致；reasoning delta 尚未实现；环境与工具增量没有运行时事实 |
 | P1 | 环境投影 | `Environment.EnvironmentResourceOpenAIHosted` 必需字段含 `capability_directories`、`files`、`network`、`packages`、`plugins`、`skills`（`container_size`、`desktop` 可选）；`AgentSession.environment` 必填 | hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 来自绑定记录的 `last_run_id`（可能是上次预留值，与当前 state 不一致）；SSE `agent.session.*` 的 `OfficialSession` 携带同一 `{type,id}` 投影（未知环境为 `{"type":"none"}`，不造 id） | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `capability_directories` / `files` / `network` / `packages` / `plugins` / `skills` 没有同步通道 |
 | P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 网关不做 token 记账；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
-| P1 | 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名） | 持久化表可以新增；真正的缺口是 traces/artifacts/subagent 没有产生源，turns items 也没有官方结构映射 |
+| P1 | 未映射资源 | `turns/{id}/items`、`subagents/{id}/items`、`subagents/{id}/turns*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；`subagents` 的 list/retrieve 已按官方页型实现，`subagents/{id}` 的 items/turns 仍不可用 | 官方 item 的 `turn_id` 是必需字段，而子 agent 的逐轮 turn 没有持久化；traces/artifacts 没有产生源；turns items 也没有官方结构映射 |
 | P2 | MCP 工具形状 | `agent.tools[].transport`：`{type:"http", server_url, headers?, authorization?}` 或 `{type:"stdio", command, cwd, ...}`；`allowed_tools` 在调用侧过滤工具 | 接受官方 `transport` 形状：`transport.type="http"` 映射为内部 `server_url`/`headers`，`transport.authorization` 在缺少同名 `Authorization` 头时写入该头——值没有 auth scheme 前缀时补 `Bearer`，已带 `Bearer`/`Basic` 等前缀则原样使用（不会出现 `Bearer Bearer`），空值 → `400 invalid_input`；平铺 `server_url`/`headers` 保留为 deprecated alias（两种形状的 URL 不一致 → `400 invalid_input`，`details.field` 指向 `transport`；一致则接受）。`transport.type="stdio"` 与未知类型 → `422 unsupported_tool`（`details.field` 指向 `transport.type`，`details.value` 是收到的类型）。`require_approval` 经宿主审批通道强制执行（产生 `requires_action`）；`allowed_tools` 只记录在 ACP `_meta`，未在调用侧强制过滤 | 本部署没有 stdio 进程运行时；`allowed_tools` 没有消费方，不能当作安全边界 |
 | P2 | `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 网关只有 root agent，子 agent 维度不存在，没有可过滤的 agent 标识 |
 | P2 | turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 还含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 见「turn 用量与错误」行；不产生 `queued` / `waiting` | 没有子 agent 调度与 `queued` / `waiting` 排队状态；turn 只由单会话串行执行产生 |
@@ -424,8 +424,12 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 - turns 在 `begin_turn` 写入 `in_progress`，终态在 `finish_turn` 更新；pending 输入不落 turn
   行；取消（`stop_reason="cancelled"`）持久为 `cancelled`，实时官方帧是 `turn.completed`
   + `status="cancelled"`（不发送 `agent.session.turn.cancelled`）。
+- 官方 `sessions.subagents.list/retrieve` 读 Peri 子线程树：`id` 是 thread id、`session_id`
+  是 `logicalId`、直接子会话的 `parent_agent_id` 为 `root`、nested 保留父 thread id；
+  含 nested 与 closed，不含 root；`instructions` 恒 `null`。`order` 默认 `desc`，
+  按 `(opened_at, id)` 分页，非法 `after` → `400 invalid_query`。
 - 未映射的官方资源一律显式 `404` + `unsupported_contract`（`details.resource`）：
-  `traces`、`artifacts`（含 `content`）、`subagents`、`subagents/{id}/items`、
+  `traces`、`artifacts`（含 `content`）、`subagents/{id}/items`、
   `subagents/{id}/turns*`、`turns/{id}/items`。Bearer 校验先于 404。
 
 ### SSE 语义

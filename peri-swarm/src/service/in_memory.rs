@@ -19,9 +19,10 @@ use crate::domain::{
     new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
     ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
     InputSubmission, ItemKind, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
-    OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, SessionPage, SessionState,
-    SessionStatus, SessionView, SessionsWindow, StreamEvent, SwarmError, TurnEvent, TurnPage,
-    TurnStatus, TurnView, TurnsWindow,
+    OfficialEvent, OfficialMessageItem, OfficialSession, OfficialSubagent, OfficialTurn,
+    SessionPage, SessionState, SessionStatus, SessionView, SessionsWindow, StreamEvent,
+    SubagentPage, SubagentsWindow, SwarmError, TurnEvent, TurnPage, TurnStatus, TurnView,
+    TurnsWindow,
 };
 use crate::store::{
     store_failure, InputPut, StoreError, SwarmInputRow, SwarmItemRow, SwarmSessionPatch,
@@ -1160,6 +1161,27 @@ impl SwarmService for InMemorySwarmService {
     ) -> Result<OfficialTurn, SwarmError> {
         self.require_session(logical_id).await?;
         super::get_turn_from_store(self.store.as_ref(), logical_id.as_str(), turn_id).await
+    }
+
+    /// The in-memory fake owns no Peri session store, so a known session has no
+    /// subagents. It still validates the window (limit/order/after) the same way
+    /// the actor path does.
+    async fn list_subagents(
+        &self,
+        logical_id: &LogicalId,
+        window: SubagentsWindow,
+    ) -> Result<SubagentPage, SwarmError> {
+        self.require_session(logical_id).await?;
+        super::subagents::subagent_page(Vec::new(), logical_id.as_str(), "", &window)
+    }
+
+    async fn get_subagent(
+        &self,
+        logical_id: &LogicalId,
+        subagent_id: &str,
+    ) -> Result<OfficialSubagent, SwarmError> {
+        self.require_session(logical_id).await?;
+        super::subagents::subagent_by_id(Vec::new(), logical_id.as_str(), "", subagent_id)
     }
 
     async fn accept_input(

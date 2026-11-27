@@ -7,7 +7,8 @@ use axum::Json;
 
 use super::error::{from_bytes_rejection, from_json_rejection, from_query_rejection};
 use super::request::{
-    self, CreateSessionBody, EventsQuery, ItemsQuery, SessionsQuery, SubmitEventBody, TurnsQuery,
+    self, CreateSessionBody, EventsQuery, ItemsQuery, SessionsQuery, SubagentsQuery,
+    SubmitEventBody, TurnsQuery,
 };
 use super::{sse, AppState};
 use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SessionDeleted, SwarmError};
@@ -186,6 +187,30 @@ pub async fn get_turn(
     let logical_id = LogicalId::parse(&logical_id)?;
     let turn = state.service().get_turn(&logical_id, &turn_id).await?;
     Ok(Json(turn).into_response())
+}
+
+pub async fn list_subagents(
+    State(state): State<AppState>,
+    Path(logical_id): Path<String>,
+    query: Result<Query<SubagentsQuery>, QueryRejection>,
+) -> Result<Response, SwarmError> {
+    let logical_id = LogicalId::parse(&logical_id)?;
+    let Query(query) = query.map_err(from_query_rejection)?;
+    let window = request::resolve_subagents_window(&query)?;
+    let page = state.service().list_subagents(&logical_id, window).await?;
+    Ok(Json(page).into_response())
+}
+
+pub async fn get_subagent(
+    State(state): State<AppState>,
+    Path((logical_id, subagent_id)): Path<(String, String)>,
+) -> Result<Response, SwarmError> {
+    let logical_id = LogicalId::parse(&logical_id)?;
+    let subagent = state
+        .service()
+        .get_subagent(&logical_id, &subagent_id)
+        .await?;
+    Ok(Json(subagent).into_response())
 }
 
 /// Registered official resource the gateway cannot map.
