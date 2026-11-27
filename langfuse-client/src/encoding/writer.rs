@@ -24,7 +24,7 @@ use crate::spool::{
 };
 
 /// 暂存描述信息版本；与 native 适配器的 `DESCRIPTOR_VERSION` 同代（契约 §5.2）。
-/// 该常量定义在 native 独占模块（WASM 目标不编译），这里是跨平台编码路径唯一需要它的位置。
+/// 该常量定义在 native 独占模块，这里是编码路径唯一需要它的位置。
 const DESCRIPTOR_VERSION: u16 = 1;
 
 /// 描述信息与原子更新空间的预留（契约 §4、native 的 `MAX_DESCRIPTOR_BYTES`）。

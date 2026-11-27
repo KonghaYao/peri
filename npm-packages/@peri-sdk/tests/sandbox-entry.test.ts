@@ -6,7 +6,7 @@ const hasDist = await Bun.file(resolve(dist, "index.js")).exists();
 const entryTest = hasDist ? test : test.skip;
 
 entryTest("non-sandbox bundles do not reference peri-sandbox, sandbox-runtime or better-sqlite3", async () => {
-  for (const file of ["index.js", "portable.js", "wasm.js", "view.js", "observe.js"]) {
+  for (const file of ["index.js", "portable.js", "view.js", "observe.js"]) {
     const source = await Bun.file(resolve(dist, file)).text();
     expect(source, `${file} must not reference peri-sandbox`).not.toContain("peri-sandbox");
     expect(source, `${file} must not reference sandbox-runtime`).not.toContain("@anthropic-ai/sandbox-runtime");

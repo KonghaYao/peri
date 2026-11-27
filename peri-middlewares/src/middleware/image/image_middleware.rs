@@ -1,4 +1,3 @@
-#[cfg(any(not(target_os = "emscripten"), target_os = "emscripten"))]
 use super::reader;
 use super::{
     async_trait, hook_state, AgentResult, Arc, BaseMessage, CompressorPipeline, ContentBlock,

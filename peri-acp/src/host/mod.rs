@@ -36,7 +36,6 @@ mod lifecycle;
 mod workspace;
 /// session 级交互装配（idle 准入规则链 / 交互门取用）；见模块文档。
 mod workspace_interaction;
-#[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
 // 关闭报告的遥测载荷：`AcpHostShutdownReport::TelemetryFailed` 携带的终态与计数快照。
@@ -125,29 +124,21 @@ mod server_loop;
 mod session_endpoint;
 mod shutdown;
 pub mod stage_builder;
-#[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
 mod task_scope;
 use host_telemetry as telemetry;
 /// Workflow agent 装配面薄壳（session 级运行时创建，见模块文档）。
-/// `not(emscripten)`：本地 workflow 运行时随 `peri-mcp-workflow` 目标依赖移出
-/// 构建面（wasm 产物不打包 workflow），该目标不提供 workflow 装配面。
-#[cfg(not(target_os = "emscripten"))]
 pub mod session_workflow_chain;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]
 mod unify_wire_baseline_tests;
 mod user_input;
-#[cfg(not(target_os = "emscripten"))]
 pub use session_workflow_chain as workflow_agent;
 /// 宿主侧 workflow 任务消费者（P3 就绪与订阅接线，design `workflow-mcp` §5.5）。
-/// `not(emscripten)`：依赖 builtin `workflow` 实例面（同目标段依赖 `peri-mcp-workflow`）。
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) mod workflow_consumer;
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(test)]
 #[path = "workflow_consumer_test.rs"]
 mod workflow_consumer_tests;
-#[cfg(not(target_os = "emscripten"))]
 mod workflow_projection;
 // wave 3（AW3-11 session 级 seam）**发送端**用例：会话环境装配产出的 per-session
 // `TaskManager` + session 级 `on_bg_complete` 送进 builtin `workspace` 实例上下文，
@@ -180,7 +171,6 @@ pub(crate) use acp_server_config::SharedSessions;
 pub use acp_server_config::run_acp_server;
 
 // 此 crate 内入口别名仅供 native stdio 装配使用。
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) use acp_server_config::run_acp_server_with_sessions;
 
 #[cfg(test)]

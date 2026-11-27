@@ -2,13 +2,6 @@ use std::future::Future;
 use std::time::Duration;
 
 pub use std::time::Instant;
-
-#[cfg(target_os = "emscripten")]
-#[path = "timer/delay.rs"]
-mod delay;
-#[cfg(target_os = "emscripten")]
-use delay as js;
-
 #[cfg(test)]
 #[path = "timer_test.rs"]
 mod tests;

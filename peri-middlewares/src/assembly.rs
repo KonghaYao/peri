@@ -15,8 +15,6 @@ mod hooks;
 mod mcp;
 mod preparation;
 mod prompt;
-// Emscripten：workflow 装配随依赖段（Cargo.toml 同目标 cfg 段）一并移出，不设 wasm 变体。
-#[cfg(not(target_os = "emscripten"))]
 mod workflow;
 
 // builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到宿主构造的上下文
@@ -25,9 +23,7 @@ mod workflow;
 pub use crate::mcp::builtin::context::{
     BuiltinContextError, BuiltinInstanceContext, CronInstanceInput,
 };
-#[cfg(not(target_os = "emscripten"))]
 pub use peri_mcp_workflow::WorkflowInstanceInput;
-#[cfg(not(target_os = "emscripten"))]
 pub use workflow::{
     default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
     WorkflowAgentMiddlewareFactory,

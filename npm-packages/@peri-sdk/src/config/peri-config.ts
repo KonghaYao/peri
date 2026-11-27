@@ -1,4 +1,4 @@
-/** Peri 的启动设置文档；WASM 部署经 ACP 启动对象传入。 */
+/** Peri 的启动设置文档；由宿主经 ACP 启动对象传入。 */
 export interface PeriConfig {
   $schema?: string;
   config: {

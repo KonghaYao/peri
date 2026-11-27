@@ -1,5 +1,3 @@
-#![cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
-
 //! 真实磁盘 spool 的恢复与生命周期断言（契约 §5.2、§8 的 `tests/spool_recovery.rs` 行）。
 //!
 //! 覆盖五件事，全部落在真实文件系统状态与真实进程上，不看进程内部字段、不以「只判 Ok」代替：

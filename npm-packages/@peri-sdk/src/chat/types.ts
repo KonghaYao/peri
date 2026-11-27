@@ -10,9 +10,6 @@ import type {
     ReadPayloadOptions, ToolPayloadReadRef, ToolPayloadResponse,
 } from "../payload/reader";
 import type { Transport } from "../transport/types";
-import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
-import type { WasmRuntimePoolSnapshot } from "../wasm/runtime-pool";
-import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
 import type { WorkspaceRef } from "../workspace/types";
 import type { ChatObservation } from "../contracts/observability";
@@ -126,23 +123,19 @@ export interface ChatTransportFactoryOptions {
     agentConfig?: unknown;
 }
 
-export type ChatRuntime =
-    | {
-          kind: "wasm";
-          moduleUrl?: string | URL;
-          moduleFactory?: PeriWasmModuleFactory;
-          /** Manager 级默认 WASM env；`createChat({ runtime })` 按字段合并覆盖。 */
-          env?: Readonly<Record<string, string>>;
-          /** Manager 级诊断回调；per-chat 未提供时沿用。 */
-          onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
-      }
-    | {
-          kind: "transport";
-          factory: (
-              path: string,
-              options?: ChatTransportFactoryOptions,
-          ) => Transport | Promise<Transport>;
-      };
+/**
+ * Chat 的运行实例来源：宿主注入的 transport 工厂。
+ *
+ * 每次激活调用 `factory(path, options)`；`factory.close()` 成功即停止证明，
+ * 失败保留原因供重试。
+ */
+export interface ChatRuntime {
+    kind: "transport";
+    factory: (
+        path: string,
+        options?: ChatTransportFactoryOptions,
+    ) => Transport | Promise<Transport>;
+}
 
 /**
  * 关闭/启动的有界等待预算；单一权威，调用方不再各自发明超时。
@@ -192,12 +185,6 @@ export interface ChatCreateOptions {
      * `shutdownChatTimeoutMs` stays Manager-scoped.
      */
     lifecycle?: ChatLifecycleOptions;
-    /** Per-chat WASM runtime settings; env is merged over chatConfig.runtime.env. */
-    runtime?: {
-        env?: Readonly<Record<string, string>>;
-        /** Overrides the Manager diagnostic handler for this chat's runtime. */
-        onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
-    };
     /** Passed to each PeriInstance; no Manager default. */
     payloadBudgets?: PeriInstanceOptions["payloadBudgets"];
 }
@@ -230,8 +217,6 @@ export interface ChatManager {
     closeChat(id: string): Promise<void>;
     /** 先封新准入，再聚合清理；可重试。 */
     shutdown(): Promise<void>;
-    /** 只读 WASM 运行后端快照；transport runtime 返回空快照。 */
-    runtimeSnapshot?(): WasmRuntimePoolSnapshot;
     /**
      * 只读 Chat 观测快照，按 chatId 稳定排序；不启动运行后端。
      *

@@ -7,7 +7,6 @@ use super::{
     McpClientPool, McpServiceWrapper, McpToolBridge, Mutex, OAuthStatus, Peer, RoleClient,
     TaskManager, TickCloseOutcome, ToolCallError, Value, BUILTIN_CONVERGE_TIMEOUT,
 };
-#[cfg(not(target_os = "emscripten"))]
 use peri_agent::tools::BaseTool as _;
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -62,7 +61,6 @@ impl CrossFixture {
         });
         // workflow 的 session 级槽位：分派身份需要它存在（运行时由会话旧链在
         // session/new 绑定；本夹具不驱动编排，槽位保持未绑定）。
-        #[cfg(not(target_os = "emscripten"))]
         let ctx = ctx.with_workflow(WorkflowInstanceInput::slot());
         Self {
             ctx,

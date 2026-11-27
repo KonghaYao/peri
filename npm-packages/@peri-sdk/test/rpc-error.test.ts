@@ -14,7 +14,7 @@ let bundledClose: typeof import("../src/agent/session-close");
 beforeAll(async () => {
     bundleRoot = await mkdtemp(join(tmpdir(), "peri-rpc-error-"));
     const sourceRoot = join(import.meta.dir, "../src");
-    // 独立构建 transport 与控制面，重现主入口和 /wasm 各自内联 RpcError 的边界。
+    // 独立构建 transport 与控制面，重现主入口和 /portable 各自内联 RpcError 的边界。
     const builds = await Promise.all([
         Bun.build({
             entrypoints: [join(sourceRoot, "transport/rpc-error.ts")],

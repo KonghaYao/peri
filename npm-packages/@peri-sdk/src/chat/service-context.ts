@@ -1,10 +1,5 @@
-import type {
-    WasmRuntimeAcquireOptions,
-    WasmRuntimeLease,
-} from "../wasm/runtime-pool";
 import type { PeriInstancePort } from "../agent/port";
 import type { ChatDatabase, ChatFact } from "../contracts/chat";
-import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
 import type { WorkspaceRef } from "../workspace/types";
 import type {
@@ -20,26 +15,13 @@ export interface ChatInstanceContext {
     readonly path: string;
     /** 该 Chat 独立组合、冻结后的 agentConfig（含 Manager store）。 */
     readonly agentConfig: unknown;
-    /** 该 Chat 独立的序列化快照；WASM 启动配置按 Chat 独立。 */
-    readonly agentConfigJson: string;
     readonly sessionInit: ChatSessionInit;
     readonly runtime: ChatRuntime;
-    /** 该 Chat 的 WASM env（Manager 默认 + per-chat 合并）。 */
-    readonly runtimeEnv?: Readonly<Record<string, string>>;
-    /** 该 Chat 的 WASM 诊断回调。 */
-    readonly onRuntimeDiagnostic?: (
-        kind: WasmRuntimeDiagnosticKind,
-        error: unknown,
-    ) => void;
     /** 该 Chat 的载荷预算；未配置时 PeriInstance 使用自身默认值。 */
     readonly payloadBudgets?: PeriInstanceOptions["payloadBudgets"];
     readonly signal: AbortSignal;
     readonly database: ChatDatabase;
     readonly lifecycle: Required<ChatLifecycleOptions>;
-    /** 仅 runtime.kind === "wasm" 可用；租约由 PeriInstance 关闭并检查 confirmed。 */
-    acquireWasmRuntime(
-        options?: WasmRuntimeAcquireOptions,
-    ): Promise<WasmRuntimeLease>;
 }
 
 export type ChatInstanceFactory = (
@@ -71,13 +53,7 @@ export interface ChatServiceOptions {
     readonly sessionInit: ChatSessionInit;
     /** 该 Chat 独立组合、冻结后的 agentConfig（含 Manager store）。 */
     readonly agentConfig: unknown;
-    readonly agentConfigJson: string;
     readonly runtime: ChatRuntime;
-    readonly runtimeEnv?: Readonly<Record<string, string>>;
-    readonly onRuntimeDiagnostic?: (
-        kind: WasmRuntimeDiagnosticKind,
-        error: unknown,
-    ) => void;
     readonly payloadBudgets?: PeriInstanceOptions["payloadBudgets"];
     readonly database: ChatDatabase;
     readonly ownership: SessionOwnership;
@@ -85,9 +61,6 @@ export interface ChatServiceOptions {
     readonly lifecycle?: ChatLifecycleOptions;
     /** Manager 默认装配真实 PeriInstance；测试注入 fake port。 */
     readonly instanceFactory: ChatInstanceFactory;
-    acquireWasmRuntime(
-        options?: WasmRuntimeAcquireOptions,
-    ): Promise<WasmRuntimeLease>;
     onClosed(chatId: string): void;
 }
 

@@ -1,6 +1,4 @@
-#[cfg(not(target_os = "emscripten"))]
 use super::builtin_mcp;
-#[cfg(not(target_os = "emscripten"))]
 use super::process;
 #[cfg(test)]
 use super::OAuthStatus;
@@ -11,7 +9,6 @@ use super::{
     McpServiceWrapper, OAuthFlowEvent, OAuthFlowKey, PendingMcpNotification, PendingOAuthCallback,
     ResourceContents, ServiceShutdownState, SkillMetadata, SystemReadinessTracker,
 };
-#[cfg(not(target_os = "emscripten"))]
 use super::{TickGuard, BUILTIN_TICK_INTERVAL};
 
 /// 远端 workspace 启动后一次性资源重发现的上界（S9a3a）。
@@ -43,7 +40,6 @@ pub struct McpClientPool {
     pub(in crate::mcp) plugin_face_closed: std::sync::atomic::AtomicBool,
     pub(super) shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     /// Includes failed handshakes until their actual process tree and stderr have drained.
-    #[cfg(not(target_os = "emscripten"))]
     pub(super) processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
     /// Static transports reconnect in the same session directory used for initial discovery.
     pub(crate) execution_cwd: std::sync::OnceLock<std::path::PathBuf>,
@@ -275,7 +271,6 @@ impl McpClientPool {
             // 默认不关闭：只有会话装配注入的冻结策略才置真（M6）。
             plugin_face_closed: std::sync::atomic::AtomicBool::new(false),
             shared_services: parking_lot::Mutex::new(Vec::new()),
-            #[cfg(not(target_os = "emscripten"))]
             processes: parking_lot::Mutex::new(Vec::new()),
             execution_cwd: std::sync::OnceLock::new(),
             lifecycle: std::sync::atomic::AtomicU8::new(0),
@@ -666,7 +661,6 @@ impl McpClientPool {
             instance, &context, env,
         )?;
         // 注册表名判定（不写第二张实例名字表）：只有 `cron` 有 tick 驱动语义。
-        #[cfg(not(target_os = "emscripten"))]
         if builtin_mcp::find(instance).is_some_and(|registered| registered.name == "cron") {
             if let Some(cron) = context.cron.as_ref().filter(|cron| cron.tick_enabled) {
                 let scheduler = Arc::clone(&cron.scheduler);
@@ -676,7 +670,6 @@ impl McpClientPool {
             }
         }
         // v5 单出口：cron 能力启用且宿主开启 tick 时，仍由 pool 的唯一 spawn 点驱动。
-        #[cfg(not(target_os = "emscripten"))]
         if builtin_mcp::is_v5_server_name(instance) {
             let cron_enabled = crate::mcp::builtin::router::RouterTemplate::host_capabilities(
                 env,

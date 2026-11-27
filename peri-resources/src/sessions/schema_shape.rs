@@ -891,7 +891,6 @@ pub(super) fn group_columns(
 }
 
 /// 本机读取一条列形状语句（[`CURRENT_COLUMNS_SQL`] / [`INPUT_COLUMNS_SQL`]）。
-#[cfg(not(target_os = "emscripten"))]
 pub(super) async fn read_local_columns(
     connection: &mut sqlx::SqliteConnection,
     sql: &'static str,

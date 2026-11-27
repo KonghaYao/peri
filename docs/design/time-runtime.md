@@ -1,7 +1,7 @@
 # 时间能力边界
 
-> 状态：已批准目标设计。原生实现已落地；Emscripten 后端的宿主验证路径见
-> [peri-time 代码索引](../code-index/peri-time.md)。
+> 状态：已批准目标设计。原生实现已落地；Emscripten 后端已于 2026-11-24 移除，
+> 本文保留移除前的目标语义。入口见 [peri-time 代码索引](../code-index/peri-time.md)。
 >
 > Scope：Peri 自身的时钟读取、日历解释、进程内计时和有界等待。时间值的持久化
 > schema、cron 业务规则、上层 SDK 的执行所有权和各协议字段仍由所属领域定义。
@@ -10,8 +10,8 @@
 ## 目标与边界
 
 Peri 通过一个底层 `peri-time` crate 消费时间能力。它提供稳定的 Rust 接口，按编译目标
-选取底层实现；上层不直接选择 Tokio、Chrono 或 JS timer。这个边界服务于同一套
-Agent、ACP 和 Resources 业务语义，不建立第二套 WASM 业务实现。
+选取底层实现；上层不直接选择 Tokio 或 Chrono。同一套 Agent、ACP 和 Resources
+业务语义共享这一接口。
 
 `peri-time` 只依赖标准库时间类型和所选平台库，不依赖 `peri-acp-types`、Agent、ACP、
 Middleware、Resources 或具体业务配置。`peri-acp-types` 保留时间字段的契约类型，
@@ -24,7 +24,6 @@ Middleware、Resources 或具体业务配置。`peri-acp-types` 保留时间字�
 flowchart LR
     Business[Agent / ACP / Middleware / Resources] --> API[peri-time 公共能力]
     API --> Native[原生实现：系统时钟 + Tokio timer]
-    API --> Emscripten[Emscripten 实现：系统 UTC 时钟 + JS event loop timer]
     Business --> Policy[领域规则：日期冻结 / 超时 / 错误分类]
 ```
 
@@ -37,7 +36,7 @@ flowchart LR
 | 能力 | 值与用途 | 不变量 |
 | --- | --- | --- |
 | UTC 墙钟 | 创建、更新、事件与持久化时间戳；对外序列化为带时区的 RFC 3339 值 | 跨实例可交换；系统时钟可能跳变，不用于测量耗时或保证唯一性 |
-| 日历日期 | 展示和会话 prompt 的日期；由已选时区约定从墙钟解释 | 原生部署沿用本机日历日期，Emscripten 沿用已验证的 UTC 日期；会话创建时冻结，恢复读取快照 |
+| 日历日期 | 展示和会话 prompt 的日期；由已选时区约定从墙钟解释 | 部署沿用本机日历日期；会话创建时冻结，恢复读取快照 |
 | 单调时间 | 进程内耗时、deadline、sleep 与 timeout | 不序列化，不跨实例比较；到期取消等待本身不证明外部副作用未发生 |
 
 时间戳、日期与 deadline 不互相替代。跨实例执行所有权、恢复与接管由 `peri-sdk` 管理，Peri 不维护执行租约；本机
@@ -49,11 +48,10 @@ flowchart LR
 公共接口使用标准库 `SystemTime`、`Instant`、`Duration` 和模块自有的 `CalendarDate`
 与 `CalendarConvention`。最小能力是 `now_wall()`、`calendar_date(at, convention)`、
 `format_utc_rfc3339(at)`、`monotonic_now()`、`sleep(duration)`、`timeout(duration, future)`
-及基于绝对单调 deadline 的等待。原生装配选择 `HostLocal` 日历约定，Emscripten
-装配选择 `Utc`；读取当前时间与解释日期是两个操作，测试可传入确定的 `SystemTime`。
+及基于绝对单调 deadline 的等待。装配选择 `HostLocal` 日历约定；读取当前时间与
+解释日期是两个操作，测试可传入确定的 `SystemTime`。
 `timeout` 返回明确的到期类型，不吞掉被等待 future 的错误，也不对调用方业务错误分类。
-函数签名按现有 async `Send` 要求确定，不能让 WASM 后端削弱原本可由 Tokio task
-持有的 future。
+函数签名按现有 async `Send` 要求确定，保持 future 可由 Tokio task 持有。
 
 Chrono 或其他候选库只出现在 `peri-time` 实现内；需要保持既有 wire／存储形状时，
 所属 adapter 做显式转换。已有公开契约中的 `chrono::DateTime` 是迁移约束，不能
@@ -64,28 +62,22 @@ Chrono 或其他候选库只出现在 `peri-time` 实现内；需要保持既有
 避免把机器本地时间和 UTC 时间戳藏在同一个字符串入口。已有持久字段的格式迁移须按
 各字段的兼容义务单独评估，不能借时间模块替换静默改写旧值。
 
-原生实现可继续使用 Chrono 的 UTC／Local 和 Tokio timer。Emscripten 保留已验证的
-UTC 日历与 `setTimeout`／`clearTimeout` 计时实现。若选择其他支持目标平台的库，
+原生实现继续使用 Chrono 的 UTC／Local 和 Tokio timer。若选择其他支持目标平台的库，
 只替换 `peri-time` 的实现及 Cargo target 依赖，不让新库类型越过公共接口。
-`time` 可在目标编译与宿主测试后评估为日历实现；`web-time` 的上游支持范围明确
-排除 Emscripten，不能作为当前目标的后端。
-`wasm32-unknown-unknown` 与 `wasm32-unknown-emscripten` 分别判定支持情况，不能凭
-笼统的“支持 WASM”替代 Emscripten 宿主验证。
+`time` 可在目标编译与宿主测试后评估为日历实现。
 
 有界等待必须满足：成功时返回原 future 的结果；到期时停止轮询并丢弃该 future；
 调用方取消时释放 timer；timer 先到与任务先完成的竞争只产生一个结果。若同次轮询
 两者都已就绪，先采纳业务 future 的结果，以保持原生 Tokio `timeout` 的既有行为；
-零时长也允许已就绪的 future 完成，未就绪则到期。亚毫秒正预算向上取整到 JS
-timer 毫秒，不能提前到期。超出 JS 单次 timer 上限的预算分段等待，不得截短总
-预算。重复轮询和调用方取消不得留下活跃 timer。
+零时长也允许已就绪的 future 完成，未就绪则到期。重复轮询和调用方取消不得留下
+活跃 timer。
 `interval` 已因生产用例（TUI 快照轮询、cron 事件、MCP 运行时 tick）进入公共接口；
 带偏移时区及 cron 计算仍只在对应生产用例接入时进入。
 
 ## 使用边界
 
-- Agent、ACP、Middleware、Resources、Workflow 和面向 WASM 的 MCP 路径中，凡是
-  决定生产行为的时间读取或等待，都经 `peri-time`；测试夹具里的 Tokio timeout
-  可继续用作外层防挂死保护。
+- Agent、ACP、Middleware、Resources 和 Workflow 中，凡是决定生产行为的时间读取
+  或等待，都经 `peri-time`；测试夹具里的 Tokio timeout 可继续用作外层防挂死保护。
 - 部署或协议已经提供时间值时，领域规则消费该值，不再自行读取当前时间。
   冻结 prompt、持久化历史和恢复路径沿用已有快照及协议值。
 - 各层保留自己的时间预算常量、关闭顺序和失败语义；`peri-time` 不拥有远端请求、
@@ -95,12 +87,9 @@ timer 毫秒，不能提前到期。超出 JS 单次 timer 上限的预算分段
 
 ## 验证合同
 
-时间模块的原生与 Emscripten 后端共用行为合同：完成、到期、外层取消、竞争、零
-预算和长预算；确认底层 timer 被清理。原生端验证 Tokio runtime 下的行为；WASM
-端沿现有 `peri-wasm` 宿主验收路径覆盖 Node、Bun 和本地 `workerd`，不把 native
-单元测试代替 WASM 结果。日历合同覆盖 UTC 跨日边界、原生本机日期、Emscripten
-UTC 日期和会话恢复沿用冻结值。远端写超时的测试还要证明原有“结果不确定”分类
-不因更换 timer 而退化为“确定失败”。
+时间模块的行为合同：完成、到期、外层取消、竞争、零预算和长预算；确认底层
+timer 被清理。原生端验证 Tokio runtime 下的行为。日历合同覆盖 UTC 跨日边界、
+原生本机日期和会话恢复沿用冻结值。远端写超时的测试还要证明原有“结果不确定”
+分类不因更换 timer 而退化为“确定失败”。
 
-代码入口、目标测试命令与 Emscripten 宿主验证见
-[peri-time 代码索引](../code-index/peri-time.md)。
+代码入口与验证合同见 [peri-time 代码索引](../code-index/peri-time.md)。

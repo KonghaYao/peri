@@ -74,7 +74,6 @@ async fn deployment_plugin_absence_stays_closed_across_restore() {
         .contains(peri_middlewares::assembly::PLUGIN_FACE_CLOSED_KEY));
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 #[serial]
 async fn restored_deployment_source_limits_keep_plugin_hooks_and_builtin_mcp() {

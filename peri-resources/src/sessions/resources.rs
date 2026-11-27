@@ -15,7 +15,6 @@ use lifecycle_credentials as oauth_credentials;
 
 use session_resources_impl::Path;
 
-#[cfg(not(target_os = "emscripten"))]
 use session_resources_impl::PathBuf;
 
 use session_resources_impl::Arc;
@@ -24,6 +23,7 @@ use session_resources_impl::{
     BindingRecheck, BindingState, ExecutionAvailability, FrozenState, NewSession,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
+
 #[cfg(test)]
 use session_resources_impl::{ChildSnapshot, FrozenSnapshotBytes};
 
@@ -35,18 +35,12 @@ use session_resources_impl::ThreadId;
 use session_resources_impl::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
 use session_resources_impl::SessionDataPort;
-
-#[cfg(target_os = "emscripten")]
-use session_resources_impl::execution_failure;
-
 use session_resources_impl::{invalid_input, not_found};
 
 use session_resources_impl::LocalExecutionPort;
 
-#[cfg(not(target_os = "emscripten"))]
 use session_resources_impl::execution_failure;
 
-#[cfg(not(target_os = "emscripten"))]
 use session_resources_impl::{LocalExecution, ReadOnlyThreadStoreError};
 
 use session_resources_impl::MutationGate;

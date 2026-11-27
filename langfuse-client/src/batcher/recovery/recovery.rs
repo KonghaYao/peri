@@ -243,19 +243,10 @@ pub(in crate::batcher) async fn encode_batch(
         counters.account_payload(payload.raw_len, payload.wire_len);
         Ok(payload)
     };
-    // 无线程目标（WASM/emscripten 未启用 pthread）派生 worker 线程必失败，而 `task::spawn_blocking`
-    // 没有 tokio 给 `fs` 那样的内联 shim，只会 abort 整个模块：就地编码。批次受 `max_wire_bytes`
-    // 约束，是有界同步工作；native 保持 blocking 池，行为与错误映射不变。
-    #[cfg(any(target_arch = "wasm32", target_os = "emscripten"))]
-    {
-        job()
-    }
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
-    {
-        tokio::task::spawn_blocking(job).await.map_err(|_| {
-            LangfuseError::IngestionApi("OTLP batch encoding job did not complete".into())
-        })?
-    }
+    // 批次受 `max_wire_bytes` 约束，是有界同步工作；blocking 池保持行为与错误映射不变。
+    tokio::task::spawn_blocking(job).await.map_err(|_| {
+        LangfuseError::IngestionApi("OTLP batch encoding job did not complete".into())
+    })?
 }
 
 /// 一次发送周期：live 批次与恢复对象共用，只有 `Delivered` 才能被当成交付。文件路径先把终态写入

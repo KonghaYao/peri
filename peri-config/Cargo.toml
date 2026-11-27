@@ -12,14 +12,8 @@ thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 url.workspace = true
+peri-mcp-config.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 serial_test.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-peri-mcp-config.workspace = true
-
-[target.'cfg(target_os = "emscripten")'.dependencies]
-uuid.workspace = true
-dirs.workspace = true

@@ -2,7 +2,6 @@
 //!
 //! 这是「第二份形状事实源」的守门测试——`CURRENT_TABLES` 与 canonical DDL 的一致性由
 //! [`declared_current_shape_matches_a_fresh_database`] 断言，DDL 改动而声明未跟上会失败。
-#![cfg(not(target_os = "emscripten"))]
 
 use super::{
     ActualColumn, DroppedTable, InputTable, TableShape, CURRENT_COLUMNS_SQL, DROPPED_COLUMNS_SQL,

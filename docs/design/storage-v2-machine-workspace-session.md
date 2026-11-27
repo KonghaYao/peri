@@ -147,7 +147,6 @@ Workspace 身份，也不参与执行准入（v15 删除了与 `discovery.root_i
 `--session-store-token-env PERI_PG_PASSWORD` 一起使用时，从命名环境变量读取数据库密码。
 首次写打开在一个事务内初始化 PostgreSQL 表、操作账本与 store 身份。
 只读打开要求已有匹配的 schema。历史顺序存储在显式的 64 位消息序号中。
-WASM 通过部署指定的 PostgreSQL HTTP 接口执行相同语句。
 
 两端共享 SessionDataPort 和可移植的参数化 SQL。共享查询采用 SQLx SQLite 和
 PostgreSQL 都识别的 `$1` 序号绑定。方言差异（例如 JSON 操作、数据库目录与

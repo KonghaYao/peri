@@ -28,7 +28,6 @@ members = [
     "langfuse-client",
     "peri-js-runtime",
     "peri-workflow",
-    "peri-wasm",
 ]
 resolver = "3"
 
@@ -44,18 +43,6 @@ strip = "symbols"
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
-
-[profile.cf-wasm-size]
-inherits = "release"
-opt-level = "z"
-lto = "thin"
-codegen-units = 16
-
-[profile.cf-wasm-speed]
-inherits = "release"
-opt-level = 3
-lto = "thin"
-codegen-units = 16
 
 [profile.dev]
 debug = 1

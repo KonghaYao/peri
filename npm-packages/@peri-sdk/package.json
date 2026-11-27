@@ -2,7 +2,7 @@
   "name": "@peri-code/sdk",
   "version": "0.0.0",
   "type": "module",
-  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM runtime",
+  "description": "Peri ACP host SDK over host-injected transports",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -24,14 +24,6 @@
     "./portable": {
       "types": "./dist/entries/portable.d.ts",
       "import": "./dist/portable.js"
-    },
-    "./wasm": {
-      "types": "./dist/entries/wasm.d.ts",
-      "import": "./dist/wasm.js"
-    },
-    "./wasm-node": {
-      "types": "./dist/entries/wasm-node.d.ts",
-      "import": "./dist/wasm-node.js"
     },
     "./view": {
       "types": "./dist/entries/view.d.ts",
@@ -75,19 +67,13 @@
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "build:ts": "bun run scripts/build.ts --no-wasm",
-    "build:workers": "bun examples/workers/build-worker.mjs",
     "openui:spec": "bun scripts/generate-openui-spec.ts",
     "openui:check": "bun scripts/generate-openui-spec.ts --check",
     "prebuild": "bun run openui:check",
-    "prebuild:ts": "bun run openui:check",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json && tsc --noEmit -p tsconfig.type-tests.json",
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
-    "db:dev": "bun -e \"import { PostgresStorage } from './src/storage/native-postgres-storage'; const store = new PostgresStorage({ url: process.env.PERI_STORAGE_URL, httpEndpoint: process.env.PERI_STORAGE_HTTP_ENDPOINT }); try { await store.listSessions(); } finally { await store.close(); }\"",
-    "demo:wasm": "bun run examples/demo/demo-wasm.ts",
-    "test:wasm": "bun run build && bun test tests/wasm-acp-integration.test.ts tests/wasm-transport.test.ts",
-    "smoke:workers": "bun examples/workers/smoke.mjs"
+    "db:dev": "bun -e \"import { PostgresStorage } from './src/storage/native-postgres-storage'; const store = new PostgresStorage({ url: process.env.PERI_STORAGE_URL, httpEndpoint: process.env.PERI_STORAGE_HTTP_ENDPOINT }); try { await store.listSessions(); } finally { await store.close(); }\""
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
@@ -100,8 +86,7 @@
     "peri-sandbox": "file:../peri-sandbox",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "typescript": "^7.0.2",
-    "wrangler": "4.152.0"
+    "typescript": "^7.0.2"
   },
   "peerDependencies": {
     "react": ">=18",

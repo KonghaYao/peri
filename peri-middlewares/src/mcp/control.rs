@@ -30,6 +30,7 @@ pub(crate) struct PoolControl {
     slots: parking_lot::Mutex<HashMap<String, Arc<ServerSlot>>>,
     projections: parking_lot::Mutex<Vec<ProjectionBinding>>,
 }
+
 #[derive(Default)]
 pub(crate) struct ServerSlot {
     pub(crate) operation: Arc<tokio::sync::Mutex<()>>,
@@ -37,7 +38,6 @@ pub(crate) struct ServerSlot {
     pub(crate) stopped: AtomicBool,
     pub(crate) transient: AtomicBool,
     pub(crate) services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
-    #[cfg(not(target_os = "emscripten"))]
     pub(crate) processes: parking_lot::Mutex<Vec<Arc<super::client::process::McpProcessOwner>>>,
     /// 当前进行中的首次加载 attempt；`None` 表示可发起下一次显式加载。
     pub(crate) load_attempt: parking_lot::Mutex<Option<Arc<LoadAttempt>>>,
@@ -238,7 +238,6 @@ impl McpClientPool {
                 tracing::warn!(server = name, "MCP failed attempt service cleanup failed");
             }
         }
-        #[cfg(not(target_os = "emscripten"))]
         {
             let processes = slot.processes.lock().clone();
             for process in processes {
@@ -589,7 +588,6 @@ impl McpClientPool {
         }
         slot.services.lock().retain(|s| !s.is_stopped());
         self.close_builtin_task(name).await;
-        #[cfg(not(target_os = "emscripten"))]
         {
             let processes = slot.processes.lock().clone();
             for process in processes {

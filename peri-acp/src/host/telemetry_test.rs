@@ -1,4 +1,3 @@
-#![cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 //! 宿主遥测装配与关闭报告保有的真实生命周期回归（契约 §3.6、§5.2、§7 P4b、§8）。
 //!
 //! 每个用例都驱动**真实的** [`crate::host::AcpHostHandle`] 与真实 `LangfuseShutdownOwner`：

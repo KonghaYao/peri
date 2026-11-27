@@ -20,7 +20,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 futures.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 uuid.workspace = true
 sha2.workspace = true
 tracing.workspace = true
@@ -31,6 +31,7 @@ parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
 peri-acp-types = { path = "../peri-acp-types" }
 sysinfo.workspace = true
+peri-resources = { path = "../peri-resources" }
 
 [dev-dependencies]
 libc = "0.2"
@@ -38,7 +39,3 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 url.workspace = true
 peri-acp-types = { path = "../peri-acp-types", features = ["test-support"] }
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }
-peri-resources = { path = "../peri-resources" }

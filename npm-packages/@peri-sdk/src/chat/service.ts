@@ -1,5 +1,4 @@
 import { SessionOwnershipConflictError } from "./ownership";
-import type { WasmRuntimeLease } from "../wasm/runtime-pool";
 import {
     PayloadReadError,
     type ReadPayloadOptions,
@@ -67,7 +66,6 @@ import type {
     SendReceipt,
     SessionReadyResult,
 } from "./types";
-import type { WasmRuntimeAcquireOptions } from "../wasm/runtime-pool";
 
 /**
  * 单个 Chat 的操作句柄。
@@ -84,18 +82,12 @@ export class ChatService implements ChatServiceContract {
     private readonly workspace: ChatServiceOptions["workspace"];
     /** 由 workspace 与 sessionPath 派生的新会话 cwd。 */
     private readonly sessionCwd: string;
-    private readonly agentConfigJson: string;
     private readonly runtime: ChatServiceOptions["runtime"];
-    private readonly runtimeEnv?: ChatServiceOptions["runtimeEnv"];
-    private readonly onRuntimeDiagnostic?: ChatServiceOptions["onRuntimeDiagnostic"];
     private readonly payloadBudgets?: ChatServiceOptions["payloadBudgets"];
     private readonly database: ChatServiceOptions["database"];
     private readonly ownership: ChatServiceOptions["ownership"];
     private readonly index: ChatServiceOptions["index"];
     private readonly instanceFactory: ChatInstanceFactory;
-    private readonly acquireWasmRuntime: (
-        options?: WasmRuntimeAcquireOptions,
-    ) => Promise<WasmRuntimeLease>;
     private readonly onClosedHandler: (chatId: string) => void;
     private readonly lifecycleOptions: Required<ChatLifecycleOptions>;
 
@@ -126,21 +118,14 @@ export class ChatService implements ChatServiceContract {
         this.agentConfig = options.agentConfig;
         this.workspace = options.workspace;
         this.sessionCwd = options.sessionCwd;
-        this.agentConfigJson = options.agentConfigJson;
         this.runtime = options.runtime;
-        this.runtimeEnv = options.runtimeEnv;
-        this.onRuntimeDiagnostic = options.onRuntimeDiagnostic;
         this.payloadBudgets = options.payloadBudgets;
         this.database = options.database;
         this.ownership = options.ownership;
         this.index = options.index;
         this.instanceFactory = options.instanceFactory;
-        this.acquireWasmRuntime = options.acquireWasmRuntime;
         this.onClosedHandler = options.onClosed;
-        this.lifecycleOptions = resolveChatLifecycle(
-            this.runtime.kind,
-            options.lifecycle,
-        );
+        this.lifecycleOptions = resolveChatLifecycle(options.lifecycle);
         this.candidateContext = {
             chatId: this.id,
             database: this.database,
@@ -196,9 +181,6 @@ export class ChatService implements ChatServiceContract {
 
     /**
      * 只读观测投影；不启动运行后端、不改变绑定或队列。
-     *
-     * ChatService 不知道 WASM 运行池；`ChatManager.observe()` 会按 chatId
-     * 合并池中的实例信息。
      */
     observe(): ChatObservation {
         return buildChatObservation({
@@ -209,7 +191,6 @@ export class ChatService implements ChatServiceContract {
             bindingRevision: this.state.bindingRevision,
             mcpSource: this.mcpSource,
             sessionInit: this.sessionInit,
-            runtimeKind: this.runtime.kind,
             port: this.active?.port,
             pendingInputs: this.inputs.size,
         });
@@ -910,17 +891,12 @@ export class ChatService implements ChatServiceContract {
                 chatId: this.id,
                 path,
                 agentConfig: this.agentConfig,
-                agentConfigJson: this.agentConfigJson,
                 sessionInit: this.sessionInit,
                 runtime: this.runtime,
-                runtimeEnv: this.runtimeEnv,
-                onRuntimeDiagnostic: this.onRuntimeDiagnostic,
                 payloadBudgets: this.payloadBudgets,
                 signal: controller.signal,
                 database: this.database,
                 lifecycle: this.lifecycleOptions,
-                acquireWasmRuntime: (options) =>
-                    this.acquireWasmRuntime(options),
             });
         } catch (error) {
             this.startupControllers.delete(controller);

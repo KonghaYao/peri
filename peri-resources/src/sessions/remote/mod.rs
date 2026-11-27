@@ -4,10 +4,10 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(test)]
 #[path = "full_remote_test.rs"]
 mod full_remote_tests;
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(test)]
 mod postgres_fixture;
 
 mod composition;

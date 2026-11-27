@@ -9,17 +9,10 @@ pub enum CalendarConvention {
 }
 
 impl CalendarConvention {
-    /// Native hosts retain their local calendar; Emscripten uses UTC.
+    /// Hosts use their local calendar.
     #[must_use]
     pub const fn deployment_default() -> Self {
-        #[cfg(target_os = "emscripten")]
-        {
-            Self::Utc
-        }
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            Self::HostLocal
-        }
+        Self::HostLocal
     }
 }
 

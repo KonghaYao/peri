@@ -20,7 +20,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client"] }
-tokio = { workspace = true, features = ["test-util"] }
-
-[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["test-util", "net"] }

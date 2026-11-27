@@ -14,9 +14,8 @@ Workspace git ref 更新由 `workspace/src/workspace/workspace_mcp_server.rs` �
 
 ## Package 路由
 
-Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MCP；builtin 工具 package 不进入
-`peri-wasm` 依赖图。配置数据面以 `ConfigurationClient` 为入口（`local` 进程内 duplex、`connect_tcp`
-远程），在专用线程上同步转发；`install_client` 允许宿主注入实现。原生目标使用跨进程写锁及现有 server。
+配置数据面以 `ConfigurationClient` 为入口（`local` 进程内 duplex、`connect_tcp`
+远程），在专用线程上同步转发；`install_client` 允许宿主注入实现。本地部署使用跨进程写锁及现有 server。
 
 配置数据面还提供 `ConfigurationClient::read_environment`（`ReadEnvironment`）：
 只按名称读取 provider 环境，缺省与非法名称/编码区分，不回落计算宿主。

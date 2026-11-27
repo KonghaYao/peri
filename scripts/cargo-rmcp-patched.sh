@@ -72,61 +72,9 @@ if [[ "$patch_present" != yes ]]; then
     exit 1
 fi
 
-# Hyper's default DNS resolver uses spawn_blocking, unavailable on Emscripten.
-# The target-specific patch routes hostname lookups through Tokio's async DNS fd.
-hyper_patch_file="$repo_root/patches/hyper-util-0.1.21-emscripten-dns.patch"
-hyper_patch_sha256="$(sha256_file "$hyper_patch_file")"
-hyper_cache_dir="$repo_root/target/peri-hyper-util-patches/$hyper_patch_sha256"
-hyper_crate_dir="$hyper_cache_dir/hyper-util-0.1.21"
-if [[ ! -f "$hyper_crate_dir/.peri-patch-sha256" ]]; then
-    mkdir -p "$hyper_cache_dir"
-    staging_dir="$(mktemp -d "$hyper_cache_dir/staging.XXXXXXXX")"
-    trap 'rm -rf "$staging_dir"' EXIT
-    curl --fail --location --silent --show-error \
-        "https://static.crates.io/crates/hyper-util/hyper-util-0.1.21.crate" \
-        -o "$staging_dir/hyper-util.crate"
-    actual_sha256="$(sha256_file "$staging_dir/hyper-util.crate")"
-    if [[ "$actual_sha256" != "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff" ]]; then
-        echo "hyper-util 0.1.21 archive checksum mismatch" >&2
-        exit 1
-    fi
-    tar -xzf "$staging_dir/hyper-util.crate" -C "$staging_dir"
-    if command -v patch >/dev/null 2>&1; then
-        patch --dry-run --batch -p1 -d "$staging_dir/hyper-util-0.1.21" < "$hyper_patch_file" >/dev/null
-        patch --batch -p1 -d "$staging_dir/hyper-util-0.1.21" < "$hyper_patch_file"
-    else
-        git init -q "$staging_dir/hyper-util-0.1.21"
-        git -C "$staging_dir/hyper-util-0.1.21" apply --check "$hyper_patch_file"
-        git -C "$staging_dir/hyper-util-0.1.21" apply "$hyper_patch_file"
-    fi
-    printf '%s\n' "$hyper_patch_sha256" > "$staging_dir/hyper-util-0.1.21/.peri-patch-sha256"
-    if [[ -f "$hyper_crate_dir/.peri-patch-sha256" ]]; then
-        : # Another invocation finished first; reuse its cache.
-    else
-        # Replace interrupted or partial caches instead of leaving them in place.
-        rm -rf "$hyper_crate_dir"
-        mv "$staging_dir/hyper-util-0.1.21" "$hyper_crate_dir"
-    fi
-    rm -rf "$staging_dir"
-    trap - EXIT
-fi
-if [[ "$(cat "$hyper_crate_dir/.peri-patch-sha256")" != "$hyper_patch_sha256" ]]; then
-    echo "patched hyper-util cache is incomplete; move $hyper_cache_dir aside and retry" >&2
-    exit 1
-fi
-if command -v patch >/dev/null 2>&1; then
-    patch_present=$(patch --dry-run --batch -R -p1 -d "$hyper_crate_dir" < "$hyper_patch_file" >/dev/null 2>&1 && echo yes || echo no)
-else
-    patch_present=$(git -C "$hyper_crate_dir" apply --reverse --check "$hyper_patch_file" >/dev/null 2>&1 && echo yes || echo no)
-fi
-if [[ "$patch_present" != yes ]]; then
-    echo "patched hyper-util cache does not contain the expected patch; move $hyper_cache_dir aside and retry" >&2
-    exit 1
-fi
-
 python_bin=""
-# `command -v` 会命中目录（如 emsdk 根下的 python/），也可能命中未配置版本的
-# mise shim；两者都不可执行。逐个探测，优先 python3，最后回退系统解释器。
+# `command -v` 可能命中目录，也可能命中未配置版本的 mise shim；两者都不可执行。
+# 逐个探测，优先 python3，最后回退系统解释器。
 for candidate in python3 python /usr/bin/python3; do
     path="$(command -v "$candidate" 2>/dev/null || true)"
     if [[ -n "$path" && -f "$path" && -x "$path" ]] &&
@@ -140,26 +88,21 @@ if [[ -z "$python_bin" ]]; then
     exit 1
 fi
 cargo_crate_dir="$crate_dir"
-hyper_cargo_crate_dir="$hyper_crate_dir"
 cargo_config_file="$config_file"
 if command -v cygpath >/dev/null 2>&1; then
     cargo_crate_dir="$(cygpath -w "$crate_dir")"
-    hyper_cargo_crate_dir="$(cygpath -w "$hyper_crate_dir")"
     # Git Bash launches a native cargo.exe, which needs the config path in the
     # same Windows form as the patched crate paths inside that config.
     cargo_config_file="$(cygpath -w "$config_file")"
 fi
-"$python_bin" - "$cargo_crate_dir" "$hyper_cargo_crate_dir" "$config_file" <<'PY'
+"$python_bin" - "$cargo_crate_dir" "$config_file" <<'PY'
 import json
 import pathlib
 import sys
 
-pathlib.Path(sys.argv[3]).write_text(
+pathlib.Path(sys.argv[2]).write_text(
     '[patch.crates-io]\n'
     + 'rmcp = { path = ' + json.dumps(sys.argv[1]) + ' }\n'
-    + 'hyper-util = { path = ' + json.dumps(sys.argv[2]) + ' }\n'
-    + 'mio = { git = "https://github.com/guybedford/mio", tag = "1.2.3-cf.emscripten" }\n'
-    + 'tokio = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscripten" }\n'
 )
 PY
 

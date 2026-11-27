@@ -8,7 +8,7 @@ import { queueGenerationOf, rejectedQueueSnapshot, SessionQueueStaleError } from
 /**
  * 单个 Session 的纯 ACP 客户端。
  *
- * 传输由调用方注入（WASM 宿主租约或自定义 transport）；本类只做 `initialize`、
+ * 传输由调用方注入（自定义 transport）；本类只做 `initialize`、
  * `session/new|load`、输入队列命令、取消、翻页请求、`session/close` 与原始诊断流。
  * 它不 claim、不关闭宿主、不做 Yjs 投影，也不依赖 Agent/展示门面。
  */

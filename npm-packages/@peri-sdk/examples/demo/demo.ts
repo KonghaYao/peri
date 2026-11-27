@@ -1,11 +1,13 @@
-/** Bun HTTP demo：ChatManager 为每个 Session 装配独立 WASM 实例，不启动 Peri 或 Workspace 子进程。 */
+/** Bun HTTP demo：ChatManager + 宿主注入的 ACP transport，每个 Session 独立装配。 */
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
     BareHarnessConfig,
     ChatManager,
     PostgresStorage,
+    type ChatTransportFactoryOptions,
     type PeriConfig,
+    type Transport,
 } from "../../src/entries/index";
 import { createDemoApp } from "./chat-demo";
 import { DemoKvStorage } from "./demo-storage";
@@ -15,11 +17,23 @@ if (!configuredWorkspace) throw new Error("PERI_WORKSPACE is required");
 const workspace = await realpath(configuredWorkspace);
 const workspaceMcpUrl = Bun.env.PERI_WORKSPACE_MCP_URL;
 if (!workspaceMcpUrl) throw new Error("PERI_WORKSPACE_MCP_URL is required; provide an external HTTP Workspace");
-const wasmModuleUrl = Bun.env.PERI_WASM_MODULE_URL ?? resolve(import.meta.dir, "../../dist/wasm/peri-wasm.js");
-const wasmEnv = Object.fromEntries(
-    Object.entries(Bun.env).filter((entry): entry is [string, string] =>
-        entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined),
-);
+// transport 由宿主提供：模块需导出 createTransport(path, options)，返回一条已连接的 ACP transport。
+const transportModuleSpecifier = Bun.env.PERI_ACP_TRANSPORT_MODULE;
+if (!transportModuleSpecifier) {
+    throw new Error(
+        "PERI_ACP_TRANSPORT_MODULE is required; export createTransport(path, options) from a host transport module",
+    );
+}
+const transportModule = await import(transportModuleSpecifier) as {
+    createTransport?: (
+        path: string,
+        options?: ChatTransportFactoryOptions,
+    ) => Transport | Promise<Transport>;
+};
+const createTransport = transportModule.createTransport;
+if (typeof createTransport !== "function") {
+    throw new Error(`${transportModuleSpecifier} must export createTransport(path, options)`);
+}
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
 const databaseUrl = Bun.env.PERI_STORAGE_URL;
 if (!databaseUrl) throw new Error("PERI_STORAGE_URL must identify the PostgreSQL database");
@@ -79,12 +93,12 @@ const manager = new ChatManager({
     store: {
         storage: database.storageConfig,
         // 本地 demo 固定 UUID；生产必须持久化并复用，不要每次启动随机。
-        machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
+        machineId: Bun.env.PERI_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
     },
     database,
     kv: new DemoKvStorage(),
     chatConfig: {
-        runtime: { kind: "wasm", moduleUrl: wasmModuleUrl, env: wasmEnv },
+        runtime: { kind: "transport", factory: createTransport },
         session: {
             instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
             mcpServers: {

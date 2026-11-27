@@ -120,25 +120,23 @@ impl McpClientPool {
         self.shared_services
             .lock()
             .retain(|service| !service.is_stopped());
-        #[cfg(not(target_os = "emscripten"))]
         self.processes
             .lock()
             .retain(|process| !process.is_stopped());
         if let Some(slot) = self.existing_server_slot(server_name) {
             slot.services.lock().retain(|service| !service.is_stopped());
-            #[cfg(not(target_os = "emscripten"))]
             slot.processes
                 .lock()
                 .retain(|process| !process.is_stopped());
         }
     }
 
-    #[cfg(all(test, not(target_os = "emscripten")))]
+    #[cfg(test)]
     pub(crate) fn retained_service_count(&self) -> usize {
         self.shared_services.lock().len()
     }
 
-    #[cfg(all(test, not(target_os = "emscripten")))]
+    #[cfg(test)]
     pub(crate) fn retained_process_count(&self) -> usize {
         self.processes.lock().len()
     }
@@ -431,7 +429,6 @@ impl McpClientPool {
         self.oauth_event_callback.write().take();
         self.pending_oauth_callbacks.lock().clear();
         self.active_oauth_flows.lock().clear();
-        #[cfg(not(target_os = "emscripten"))]
         for process in self.processes.lock().iter() {
             process.begin_close();
         }
@@ -591,19 +588,12 @@ impl McpClientPool {
         // 随之按「有界等待 → 未收敛才 abort」收口。非 builtin pool 这里是空操作。
         // 三张表（builtin supervisors / shared services / processes）互不共享锁，
         // 收口并行进行；单项上限不再逐组逐项累加。
-        #[cfg(not(target_os = "emscripten"))]
         let (_, unfinished_shared, process_unfinished) = tokio::join!(
             self.close_builtin_tasks(),
             self.close_shared_services(),
             self.close_processes()
         );
-        #[cfg(target_os = "emscripten")]
-        let (_, unfinished_shared) =
-            tokio::join!(self.close_builtin_tasks(), self.close_shared_services());
-        #[cfg(not(target_os = "emscripten"))]
         let unfinished_processes = unfinished_shared + process_unfinished;
-        #[cfg(target_os = "emscripten")]
-        let unfinished_processes = unfinished_shared;
         let report = match (report, unfinished_processes) {
             (report, 0) => report,
             (

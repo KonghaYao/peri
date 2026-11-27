@@ -284,7 +284,6 @@ async fn acp_mcp_gateway_cancel_targets_outer_request_and_settles_without_reply(
     client.close();
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 async fn acp_mcp_stdio_cancel_uses_official_envelope() {
     use agent_client_protocol_schema::v1::{

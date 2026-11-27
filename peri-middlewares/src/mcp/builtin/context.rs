@@ -19,20 +19,14 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-#[cfg(not(target_os = "emscripten"))]
 use std::sync::Arc;
 
-#[cfg(not(target_os = "emscripten"))]
 use parking_lot::Mutex;
-#[cfg(not(target_os = "emscripten"))]
 use peri_acp_types::builtin_mcp;
 use thiserror::Error;
 
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_cron::CronScheduler;
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workflow::WorkflowInstanceInput;
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceResourcesInput};
 
 /// 实例上下文注入的 typed 语义错误（A33）。
@@ -54,7 +48,6 @@ pub enum BuiltinContextError {
 /// `scheduler` 是组合根持有的**同一份** scheduler（`Arc::ptr_eq` 可观察，本 crate 内不得
 /// 另建一份）；`tick_enabled` 是宿主 `drive_cron_tick` 的投影——只有它为真时 pool 的
 /// 唯一 spawn 点才为该代 transport 挂 tick（A32），print / stdio 路径保持无 tick 差异。
-#[cfg(not(target_os = "emscripten"))]
 pub struct CronInstanceInput {
     /// 组合根构造的 scheduler（与 `CronSchedulerPort` 装配侧同一份 `Arc`）。
     pub scheduler: Arc<Mutex<CronScheduler>>,
@@ -62,7 +55,6 @@ pub struct CronInstanceInput {
     pub tick_enabled: bool,
 }
 
-#[cfg(not(target_os = "emscripten"))]
 impl Debug for CronInstanceInput {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
@@ -71,10 +63,6 @@ impl Debug for CronInstanceInput {
             .finish_non_exhaustive()
     }
 }
-
-#[cfg(target_os = "emscripten")]
-#[derive(Debug)]
-pub struct CronInstanceInput;
 
 /// 宿主装配构造并注入 pool 的 builtin 实例上下文（IF-P3-04）。
 ///
@@ -91,10 +79,8 @@ pub struct BuiltinInstanceContext {
     /// `InstanceInputMissing`）：只有会话级装配提供它（顶层三路径不产生会话，也就没有
     /// 编排状态与消费者）。`Some` 而槽位未绑定时实例照常装配——工具/资源调用以明确
     /// 错误收敛「运行时尚未绑定」，不伪装成实例缺失。
-    #[cfg(not(target_os = "emscripten"))]
     pub workflow: Option<WorkflowInstanceInput>,
     /// 遗留测试输入槽。生产 dispatcher 不读取它；Workspace 自己持有 Bash 任务。
-    #[cfg(not(target_os = "emscripten"))]
     pub workspace: Option<WorkspaceInstanceInput>,
     /// `workspace` 实例的**资源面**输入（`WorkspaceMcpServer::with_resources` 的装配输入）。
     ///
@@ -106,7 +92,6 @@ pub struct BuiltinInstanceContext {
     /// `McpClientPool::run_initialize` 之前随本上下文一次注入，dispatch 只读不改、
     /// 不读配置、不派生根（AW3-11 模式）。资源根列表（skills / agents / builtin
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
-    #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<WorkspaceResourcesInput>,
     /// A24 关闭集：能力开关（v5 能力名或迁移期旧键）命中的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
@@ -142,11 +127,8 @@ impl BuiltinInstanceContext {
         Self {
             cwd: cwd.into(),
             cron: None,
-            #[cfg(not(target_os = "emscripten"))]
             workflow: None,
-            #[cfg(not(target_os = "emscripten"))]
             workspace: None,
-            #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
             closed: BTreeSet::new(),
             skills_face_closed: false,
@@ -154,7 +136,6 @@ impl BuiltinInstanceContext {
     }
 
     /// 提供 `cron` 实例输入。
-    #[cfg(not(target_os = "emscripten"))]
     #[must_use]
     pub fn with_cron(mut self, input: CronInstanceInput) -> Self {
         self.cron = Some(input);
@@ -162,7 +143,6 @@ impl BuiltinInstanceContext {
     }
 
     /// 提供 `workflow` 实例输入（会话装配注入的运行时槽位；见 [`Self::workflow`]）。
-    #[cfg(not(target_os = "emscripten"))]
     #[must_use]
     pub fn with_workflow(mut self, input: WorkflowInstanceInput) -> Self {
         self.workflow = Some(input);
@@ -170,7 +150,6 @@ impl BuiltinInstanceContext {
     }
 
     /// 仅供旧装配测试；生产 Workspace 不使用此输入。
-    #[cfg(not(target_os = "emscripten"))]
     #[must_use]
     pub fn with_workspace(mut self, input: WorkspaceInstanceInput) -> Self {
         self.workspace = Some(input);
@@ -182,7 +161,6 @@ impl BuiltinInstanceContext {
     /// 未调用 = 资源面未接线（[`Self::workspace_resources`] 的诚实口径）；本 builder
     /// 只表达「装配期已产出该输入」，不改变 `instance_input_ready`——资源面缺失是
     /// 「未支持」而不是「实例不可装配」（`workspace` 落 `Some(_) => true` 分支）。
-    #[cfg(not(target_os = "emscripten"))]
     #[must_use]
     pub fn with_workspace_resources(mut self, input: WorkspaceResourcesInput) -> Self {
         self.workspace_resources = Some(input);
@@ -221,7 +199,6 @@ impl BuiltinInstanceContext {
     /// `require_known_builtin_instance` 收口 `UnknownInstance`，本返回值不会掩盖它。
     /// 注册表将来新增「不需要额外输入」的实例时默认落 `true` 分支——缺 handler 仍由
     /// `HandlerNotWired` 诚实收口，不伪装成「输入缺失」。
-    #[cfg(not(target_os = "emscripten"))]
     pub(crate) fn instance_input_ready(&self, instance: &str) -> bool {
         // 平台能力平面先行：非注册实例一律不可装配（native 侧等价于注册表查询）。
         if !crate::platform::builtin_instance_supported(instance) {
@@ -233,12 +210,6 @@ impl BuiltinInstanceContext {
             Some(_) => true,
             None => false,
         }
-    }
-
-    #[cfg(target_os = "emscripten")]
-    pub(crate) fn instance_input_ready(&self, instance: &str) -> bool {
-        // 平台能力平面：Emscripten 不托管任何进程内实例，故恒为 false。
-        crate::platform::builtin_instance_supported(instance)
     }
 }
 

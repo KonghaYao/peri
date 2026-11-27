@@ -13,7 +13,7 @@ export type InstanceDescriptor = {
     instanceId: string;
     generationId: string;
     /** 实例停止证据的来源；进程 PID 证明不属于 SDK 契约。 */
-    proofRoute: { kind: "wasmHost" | "external"; reference: string };
+    proofRoute: { kind: "external"; reference: string };
 };
 export type InstanceStoppedProof = {
     kind: "instanceStopped";

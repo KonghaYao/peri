@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-#[cfg(not(target_os = "emscripten"))]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,9 +6,7 @@ use std::time::Duration;
 use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::react::ReactLLM;
 use peri_agent::messages::BaseMessage;
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_common::shell::ShellExecutionGuard;
-#[cfg(not(target_os = "emscripten"))]
 use tokio::io::AsyncWriteExt;
 
 use crate::hooks::output_parser;
@@ -18,7 +15,6 @@ use crate::hooks::types::HookAction;
 use crate::hooks::types::HookInput;
 use crate::hooks::types::HookType;
 use crate::hooks::types::RegisteredHook;
-#[cfg(not(target_os = "emscripten"))]
 use crate::hooks::variables;
 
 /// Execute a command hook (shell script).
@@ -36,7 +32,6 @@ pub async fn execute_command_hook(
 }
 
 /// Execute in the session directory and retain process-tree cleanup ownership.
-#[cfg(not(target_os = "emscripten"))]
 pub async fn execute_command_hook_owned(
     hook: &HookType,
     input: &HookInput,
@@ -227,20 +222,6 @@ pub async fn execute_command_hook_owned(
             tracing::warn!(timeout_secs, "Command hook timed out");
             HookAction::Allow
         }
-    }
-}
-
-#[cfg(target_os = "emscripten")]
-pub async fn execute_command_hook_owned(
-    _hook: &HookType,
-    _input: &HookInput,
-    _registered: &RegisteredHook,
-    _task_manager: Option<&dyn TaskManager>,
-) -> HookAction {
-    let reason = "Command hooks require a process-capable host and are unsupported on WASM";
-    tracing::error!(reason, "Command hook capability rejected");
-    HookAction::Block {
-        reason: reason.to_string(),
     }
 }
 
@@ -503,7 +484,6 @@ pub async fn execute_agent_hook(
 /// 检测已移除的 `$ARGUMENTS` / `${ARGUMENTS}` 命令文本替换写法。
 ///
 /// 命中即返回可定位的 token，由 command hook 在执行前转成迁移错误（零进程）。
-#[cfg(not(target_os = "emscripten"))]
 fn legacy_arguments_token(command: &str) -> Option<&'static str> {
     if command.contains("${ARGUMENTS}") {
         Some("${ARGUMENTS}")

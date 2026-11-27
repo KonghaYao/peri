@@ -71,7 +71,6 @@ use crate::mcp::tool_bridge::McpToolBridge;
 use crate::mcp::transport::{require_known_builtin_instance, TransportConfig, TransportKind};
 use crate::mcp::ToolCallError;
 use peri_mcp_cron::{CronScheduler, CronTrigger};
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workflow::WorkflowInstanceInput;
 use peri_mcp_workspace::{
     ResourceRoot, ResourceScope, WorkspaceInstanceInput, WorkspaceMcpServer,

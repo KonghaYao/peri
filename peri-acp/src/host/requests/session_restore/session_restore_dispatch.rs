@@ -246,8 +246,6 @@ pub(crate) async fn prepare_existing(
         // 会话构造（`ensure_session_with_task_manager` → `build_session`）时才
         // 产生；先构造会让 workflow 链永久拿不到技能面（J5：不回退磁盘）。
         // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
-        // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
-        #[cfg(not(target_os = "emscripten"))]
         let workflow_chain = match frozen.as_ref() {
             Some(frozen) if !super::super::workflow_face_closed(frozen) => Some(
                 super::super::create_session_workflow_chain(local, &cwd, id, frozen),
@@ -258,7 +256,6 @@ pub(crate) async fn prepare_existing(
         // 绑定失败按会话初始化失败处理（design §6.2）：环境已定稿且由本作用域唯一持有，
         // 失败必须排空它（`shutdown_bootstrapped_environment` 保留原错误原因），不发布
         // 半可用会话。
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(chain) = workflow_chain.as_ref() {
             // 消费者接线等待 MCP 初始化终态；激活必须先于 attach（与 session/new
             // 同序），否则池初始化永远等不到 activation。
@@ -303,7 +300,6 @@ pub(crate) async fn prepare_existing(
                 frozen,
                 recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
-                // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
                 title: None,
                 tags: Vec::new(),
             }),

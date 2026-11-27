@@ -2,8 +2,7 @@
  * @peri-code/sdk 主入口：Chat 控制面、展示契约与运行后端装配类型。
  *
  * 运行实例由 `ChatManager` 按激活装配；旧业务门面已删除。
- * 浏览器安全展示出口见 `/view`，WASM 运行后端表面见 `/wasm` 与
- * `/wasm-node`，无进程装配入口见 `/portable`。
+ * 浏览器安全展示出口见 `/view`，无进程装配入口见 `/portable`。
  */
 
 export * from "./chat";

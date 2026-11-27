@@ -35,18 +35,16 @@ pub(crate) use restore::{
     handle_metadata, handle_resume, handle_resume_shared, rollback_unused_restore_publication,
     RestorePublication,
 };
+
 #[cfg(test)]
 pub(crate) use restore::{
     cleanup_unpublished_restore, publication_test_hook, rollback_restore_publication,
 };
 
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use session_lifecycle_dispatch::create_session_workflow_chain;
 
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use session_lifecycle_dispatch::workflow_face_closed;
 
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use session_lifecycle_dispatch::attach_session_workflow;
 
 pub(crate) use session_lifecycle_dispatch::handle_initialize;

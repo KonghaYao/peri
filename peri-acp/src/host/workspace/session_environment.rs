@@ -65,13 +65,10 @@ pub(crate) struct SessionEnvironment {
     pub(super) builtin_closed: std::collections::BTreeSet<String>,
     /// builtin `workflow` 实例的运行时槽位（会话就绪后绑定，见
     /// [`Self::bind_workflow_runtime`]）；`None` = 本环境未注入该槽位。
-    #[cfg(not(target_os = "emscripten"))]
     pub(super) workflow_input: Option<peri_mcp_workflow::WorkflowInstanceInput>,
     /// 宿主侧 workflow 任务消费者（P3 接线；随会话关闭收口，design §5.5）。
-    #[cfg(not(target_os = "emscripten"))]
     pub(super) workflow_consumer:
         parking_lot::Mutex<Option<crate::host::workflow_consumer::WorkflowTaskConsumer>>,
-    #[cfg(not(target_os = "emscripten"))]
     pub(super) workflow_projection:
         parking_lot::Mutex<Option<crate::host::workflow_projection::WorkflowProjection>>,
 }
@@ -316,13 +313,11 @@ impl SessionEnvironment {
         // - `disable_bundled`：只从本次选中的配置来源投影；无可信配置时关闭。
         // - 缺根（目录不存在）交给 provider 既有语义处理（缺失目录 = 空批）。
         // - Agent 项目/插件根与指令面（`peri-instruction://`）由同一 provider 装配。
-        #[cfg(not(target_os = "emscripten"))]
         let disable_bundled = configuration
             .config_source
             .resource_configuration()
             .map(|resources| resources.disable_bundled_skills)
             .unwrap_or(true);
-        #[cfg(not(target_os = "emscripten"))]
         let workspace_resources = super::super::workspace_resources::workspace_resources_input(
             &cwd,
             plugins,
@@ -344,12 +339,10 @@ impl SessionEnvironment {
         // （`prepared.build_frozen_after_activation` 在本环境装配之后），投影取自
         // 同一份选中的配置来源——它与随后冻结的值同源，装配期只读一次。
         // 本层不回退当轮 `peri_config`。生效项在这里记录一次（flag id + 来源层），供诊断。
-        #[cfg(not(target_os = "emscripten"))]
         let beta_flags = match frozen {
             Some(frozen) => frozen.v2_frozen().beta_flags.clone(),
             None => configuration.config_source.beta_flags(),
         };
-        #[cfg(not(target_os = "emscripten"))]
         for (id, origin) in beta_flags.enabled() {
             tracing::info!(flag = %id, origin = ?origin, "beta flag enabled for session");
         }
@@ -365,7 +358,6 @@ impl SessionEnvironment {
         // session/new / restore / fork 构造（其执行依赖来自该时点才冻结的会话数据，
         // 早于本点不可得），环境装配返回后经 `bind_workflow_runtime` 绑定**同一份**
         // 实例——MCP 面与旧链共享同一状态（`Arc::ptr_eq` 可观察）。
-        #[cfg(not(target_os = "emscripten"))]
         let workflow_input = peri_mcp_workflow::WorkflowInstanceInput::slot();
         let input = assemble::HostAssemblyInput {
             provider: configuration.provider.clone(),
@@ -393,11 +385,8 @@ impl SessionEnvironment {
                 || configuration.builtin_assembly_mode(),
                 |frozen| frozen.v2_frozen().builtin_assembly_mode,
             )),
-            #[cfg(not(target_os = "emscripten"))]
             workspace_input: None,
-            #[cfg(not(target_os = "emscripten"))]
             workspace_resources: Some(workspace_resources),
-            #[cfg(not(target_os = "emscripten"))]
             workflow_input: Some(workflow_input.clone()),
             builtin_closed,
             skills_face_closed,
@@ -625,11 +614,8 @@ impl SessionEnvironment {
             task_manager,
             #[cfg(test)]
             builtin_closed: closed_for_test,
-            #[cfg(not(target_os = "emscripten"))]
             workflow_input: Some(workflow_input),
-            #[cfg(not(target_os = "emscripten"))]
             workflow_consumer: parking_lot::Mutex::new(None),
-            #[cfg(not(target_os = "emscripten"))]
             workflow_projection: parking_lot::Mutex::new(None),
         })))
     }
@@ -730,7 +716,6 @@ impl SessionEnvironment {
     ///
     /// `None` = 本环境没有 canonical 调用入口（无 MCP 装配）：consumer 侧以
     /// `tool_unavailable` 收敛，不伪造成功。
-    #[cfg(not(target_os = "emscripten"))]
     pub(crate) fn workflow_tool_invoker(
         &self,
     ) -> Option<Arc<dyn peri_acp_types::workflow::WorkflowToolInvoker>> {
@@ -770,7 +755,6 @@ impl SessionEnvironment {
         // 新任务发布；F6 `CloseGate` 的宿主接线点），随后停止消费者——停止领取新任务、
         // 取消在飞执行并有界等待收口（②③）；订阅随消费者句柄 drop 注销，均先于
         // 池关闭与订阅释放（④⑤由下方 task_owner / pool 关闭承担）。
-        #[cfg(not(target_os = "emscripten"))]
         {
             let projection = self
                 .workflow_projection

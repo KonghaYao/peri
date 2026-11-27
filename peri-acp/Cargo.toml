@@ -53,7 +53,7 @@ agent-client-protocol = { version = "3.5", features = ["unstable"] }
 # 避免上游特性组合变动时静默丢失。
 # elicitation 自 schema 1.12 起已稳定，不再需要 `unstable_elicitation`。
 agent-client-protocol-schema = { version = "=1.12.0", features = ["unstable_mcp_over_acp"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -69,6 +69,12 @@ dirs.workspace = true
 url.workspace = true
 sha2.workspace = true
 base64 = { version = "0.23.1", features = ["alloc"] }
+peri-mcp-common.workspace = true
+peri-mcp-credentials.workspace = true
+peri-process = { path = "../peri-process" }
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true
+peri-mcp-workflow.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
@@ -90,12 +96,3 @@ rmcp = { workspace = true, features = ["client", "transport-async-rw", "server"]
 # 特性只在本 crate 的测试构建生效，不进生产 API 面。
 peri-middlewares = { path = "../peri-middlewares", features = ["test-support"] }
 peri-acp-types = { path = "../peri-acp-types", features = ["test-support"] }
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-peri-mcp-common.workspace = true
-peri-mcp-credentials.workspace = true
-peri-process = { path = "../peri-process" }
-tokio = { workspace = true, features = ["full"] }
-peri-mcp-cron.workspace = true
-peri-mcp-workspace.workspace = true
-peri-mcp-workflow.workspace = true

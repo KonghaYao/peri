@@ -325,7 +325,6 @@ async fn dropped_run_settles_child_to_cancelled_and_stopped() {
     assert_eq!(meta.work_state, WorkState::Stopped);
 }
 
-#[cfg(not(target_os = "emscripten"))]
 mod sqlite_recovery {
     use std::path::Path;
     use std::sync::Arc;

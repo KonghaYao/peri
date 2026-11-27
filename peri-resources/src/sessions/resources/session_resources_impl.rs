@@ -6,7 +6,6 @@ use super::oauth_credentials;
 
 pub(super) use std::collections::HashMap;
 pub(super) use std::path::Path;
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use std::path::PathBuf;
 pub(super) use std::sync::Arc;
 pub(super) use std::time::Duration;
@@ -39,13 +38,9 @@ pub(super) use peri_acp_types::workspace::{
 };
 
 pub(super) use super::super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
-#[cfg(target_os = "emscripten")]
-pub(super) use super::super::failure::execution_failure;
 pub(super) use super::super::failure::{invalid_input, not_found};
 pub(super) use super::super::local_port::LocalExecutionPort;
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use super::super::sqlite_store::execution_failure;
-#[cfg(not(target_os = "emscripten"))]
 pub(super) use super::super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
 
 pub(super) use super::claim::ChildResumeClaimHandle;

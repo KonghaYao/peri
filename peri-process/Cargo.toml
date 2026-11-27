@@ -7,7 +7,7 @@ description = "Local subprocess tree ownership and cleanup evidence"
 
 [dependencies]
 peri-time = { path = "../peri-time" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -20,6 +20,3 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }

@@ -16,9 +16,7 @@
 pub mod mpsc;
 pub mod request_router;
 pub use request_router as router;
-#[cfg(not(target_os = "emscripten"))]
 pub mod stdio_transport;
-#[cfg(not(target_os = "emscripten"))]
 pub use stdio_transport as stdio;
 pub mod types;
 pub mod wire_bridge;

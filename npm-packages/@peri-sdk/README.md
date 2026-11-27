@@ -18,8 +18,9 @@ SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地
 
 `@peri-code/sdk` 是宿主侧 ACP / Chat SDK；它不实现 Swarm 的 OpenAI HTTP 客户端。
 调用 [Peri Swarm](../../peri-swarm/README.md#node-sdk-同会话追问与续读) 时使用 npm
-`openai`。两者与 Agent CLI 独立版本化。SDK 以 [npm 版本](https://www.npmjs.com/package/%40peri-code/sdk?activeTab=versions)
-和 `sdk-v*` tag 为准，仓库 `package.json` 的版本占位不是已发布版本。
+`openai`。两者与 Agent CLI 独立版本化。Emscripten/WASM 构建链移除后，`sdk-v*`
+发布工作流已删除，`@peri-code/sdk` 不再产生新的 npm 版本；仓库内用 `bun run build`
+构建本地产物，`package.json` 的版本占位不是已发布版本。
 
 ```bash
 bun add @peri-code/sdk
@@ -39,7 +40,7 @@ import {
   type PeriConfig, type KvStorage,
 } from "@peri-code/sdk";
 
-// 1. 原生 SDK 支持 PostgreSQL DSN。WASM 经可信的 Neon SQL-over-HTTP 端点访问同一数据库。
+// 1. 默认走 PostgreSQL 线协议；需要 SQL-over-HTTP 时提供可信的 Neon/代理端点。
 // 托管 Neon 的端点可自动推导；自托管代理请设置 PERI_STORAGE_HTTP_ENDPOINT。
 const storeConnection = {
   url: process.env.PERI_STORAGE_URL!,
@@ -91,20 +92,10 @@ const manager = new ChatManager({
   kv,
   chatConfig: {
     runtime: {
-      kind: "wasm",
-      // peri-wasm.js 位置（string | URL）；推荐 new URL("./peri-wasm.js", import.meta.url)，无可用 import.meta.url（如 workerd）时传绝对 URL 或 moduleFactory。
-      moduleUrl: process.env.PERI_WASM_MODULE_URL!,
-      // 只把遥测变量交给 WASM；未配置 Langfuse 时删除整个 env。
-      ...(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY
-        ? {
-            env: {
-              LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY,
-              LANGFUSE_SECRET_KEY: process.env.LANGFUSE_SECRET_KEY,
-              LANGFUSE_BASE_URL: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com",
-            },
-          }
-        : {}),
-      onDiagnostic: (kind, error) => console.error("[peri]", kind, error),
+      kind: "transport",
+      // 宿主提供 ACP transport：factory 收到 path、signal、chatId 与 per-chat agentConfig。
+      // openAcpTransport 由部署方实现（stdio、WebSocket 或云函数均可），SDK 只消费 Transport 接口。
+      factory: (path, options) => openAcpTransport(path, options),
     },
   },
 });
@@ -159,15 +150,15 @@ await database.close(); // Manager 不关闭注入的 database
 | 构造 | 必填 | 可选 |
 | --- | --- | --- |
 | `ChatManager` | `store`、`database`、`kv`、`chatConfig.runtime` | `chatConfig.session`、`chatConfig.lifecycle` |
-| `createChat` | `workspace`、`agent` | `sessionPath`、`session`、`lifecycle`、`runtime`、`payloadBudgets` |
+| `createChat` | `workspace`、`agent` | `sessionPath`、`session`、`lifecycle`、`payloadBudgets` |
 
 - `store.storage` 是 Peri 写侧 Store，`database` 是 SDK 只读会话目录；`PostgresStorage` 同时提供（实例给 `database`，`storageConfig` 给 `store.storage`）。
 - `database` 的连接归宿主所有：`manager.shutdown()` 只结算 Chat，不关闭注入实例；同一进程内重建 Manager 前必须调用 `database.close()`（如 `PostgresStorage.close()`），否则旧连接会一直保留。
 - `kv` 只需 `getItem`/`setItem`/`removeItem`；`unstorage` 的 `Storage` 直接满足。进程内 memory 只适合单进程，多实例必须换共享 driver 并由路由层串行化。
-- `machineId` 是宿主持久化的执行环境身份，不是 session/workspace id；每个 WASM 实例只使用一个 `machineId`。
+- `machineId` 是宿主持久化的执行环境身份，不是 session/workspace id；每个 Chat 实例只使用一个 `machineId`。
 - per-chat `agent.cwd` 由 `workspace.runtimePath` 派生；`agent` 顶层不能声明 `storage`/`machineId`（由 Manager 注入）；每个 Chat 独立深拷贝。
 - `session` 整体覆盖 Manager 默认值，不做字段合并；cwd 越出 `workspace.runtimePath` 以 `workspace_mismatch` 拒绝。
-- 生命周期默认 `shutdownChatTimeoutMs`：wasm 30s，transport 15s。
+- 生命周期默认 `shutdownChatTimeoutMs`：15s。
 
 ## 核心概念
 
@@ -261,7 +252,7 @@ const chat = manager.createChat({
 
 ## 沙箱生命周期（可选，server-side / host runtime）
 
-`@peri-code/sdk/sandbox` 是独立的 server-side（宿主运行时）子入口，提供 `SandboxAdapter` 契约、`SandboxManager` + `SandboxHandle` 三层：SDK 只定义契约与按 `sandboxId` 的资源注册表，具体 sandbox 实现由宿主通过 `adapter` 注入。它不是 daemon、control socket 或 SQLite registry，也不感知 session；sandbox 状态只存在于 manager 跟踪的 handle 和 adapter 自己的持久化数据中。主入口、`/portable`、`/wasm`、`/view` 不加载它；SDK 核心不 import、不动态 import、也不声明任何 adapter 的 peer 依赖。
+`@peri-code/sdk/sandbox` 是独立的 server-side（宿主运行时）子入口，提供 `SandboxAdapter` 契约、`SandboxManager` + `SandboxHandle` 三层：SDK 只定义契约与按 `sandboxId` 的资源注册表，具体 sandbox 实现由宿主通过 `adapter` 注入。它不是 daemon、control socket 或 SQLite registry，也不感知 session；sandbox 状态只存在于 manager 跟踪的 handle 和 adapter 自己的持久化数据中。主入口、`/portable`、`/view` 不加载它；SDK 核心不 import、不动态 import、也不声明任何 adapter 的 peer 依赖。
 
 该入口要求宿主运行时为 Node 22.12+ 或 Bun；浏览器、WASM、Edge 不可用。当前只支持 macOS / Linux；Linux 需要可用的 systemd user session，Windows 不支持。
 
@@ -404,7 +395,7 @@ interface SandboxAdapterInstance {
 }
 ```
 
-`peri-sandbox` 的 `createPeriSandboxAdapter()` 返回 `{ id: sandboxId, hostPath: workspacePath, runtimePath: workspacePath }`；本地 sandbox 两个路径相同，未来若 WASM 运行时路径不同，由 adapter 自己决定。Adapter 返回的 `sandboxId` 必须与请求一致，`workspace.runtimePath` 必须是绝对路径，`mcpServer` 必须是 loopback HTTP descriptor；否则 `start()` 失败并关闭已返回的实例。
+`peri-sandbox` 的 `createPeriSandboxAdapter()` 返回 `{ id: sandboxId, hostPath: workspacePath, runtimePath: workspacePath }`；本地 sandbox 两个路径相同，远程 sandbox 可让两者不同，由 adapter 自己决定。Adapter 返回的 `sandboxId` 必须与请求一致，`workspace.runtimePath` 必须是绝对路径，`mcpServer` 必须是 loopback HTTP descriptor；否则 `start()` 失败并关闭已返回的实例。
 
 **`SandboxHandle`**
 
@@ -435,7 +426,7 @@ interface SandboxAdapterInstance {
 
 ## 观测快照（只读轮询）
 
-`@peri-code/sdk/observe` 把 `ChatManager.observe()` 与可选的 `SandboxManager.snapshot()` 组合成一次纯数据快照。读取不启动 WASM/ACP/sandbox、不改变绑定或队列；SDK 不提供 SSE/WebSocket 订阅，调用方按自己的节奏轮询。
+`@peri-code/sdk/observe` 把 `ChatManager.observe()` 与可选的 `SandboxManager.snapshot()` 组合成一次纯数据快照。读取不启动 ACP/sandbox、不改变绑定或队列；SDK 不提供 SSE/WebSocket 订阅，调用方按自己的节奏轮询。
 
 ```ts
 import { observeBackend } from "@peri-code/sdk/observe";
@@ -478,8 +469,6 @@ tracker.snapshot(); // revision / complete / rootRunning / activeInternalTasks /
 | --- | --- |
 | `@peri-code/sdk` | Chat 控制面、展示契约、活动投影、config/storage 读取工具 |
 | `@peri-code/sdk/view` | 浏览器安全展示出口；需要打包包内 Yjs 依赖 |
-| `@peri-code/sdk/wasm` | 平台无关的 WASM ACP 运行后端、loader 与 transport |
-| `@peri-code/sdk/wasm-node` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
 | `@peri-code/sdk/sandbox` | server-side（Node 22.12+ / Bun）；`SandboxAdapter` 契约 + `SandboxManager` 多实例注册表 + `SandboxHandle`；实现由宿主注入，SDK 不加载具体 adapter，session 由调用方组装并在 `createChat` 传入 |
 | `@peri-code/sdk/observe` | 只读观测快照：`observeBackend({ chats, sandboxes? })`；组合 Chat/Sandbox 状态与安全 endpoint，不启动实例、不新增存储 |
@@ -681,9 +670,6 @@ next = Button("展开阻塞项", @ToAssistant("展开阻塞项并给出处理建
 - [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
 - [Ownership 模型](OWNERSHIP-MODEL.md)
 - [代码索引](../../docs/code-index/peri-ts-sdk.md)
-- [本地 Workers 探针](../../peri-wasm/README.md#local-cloudflare-workers-check)：验证
-  `startWasmRuntime` + `moduleFactory` 和 ACP 路径；不等于 Hosted Workers 部署或 Chat 全链路验收。
-- [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="wasm"`。
-- [demo-wasm.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。
+- [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="transport"`，由 `PERI_ACP_TRANSPORT_MODULE` 注入宿主 transport。
 
-两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+示例通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。

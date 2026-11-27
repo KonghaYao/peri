@@ -15,9 +15,7 @@ use crate::types::TraceBody;
 
 /// 文件正文 + 真实 TCP 断连的发送用例（需求「文件流重试」、契约 §8 P2）。
 ///
-/// native 目标才有的暂存读泵与 TCP 服务端都在这里，非 native 目标不编译本模块
-/// （WASM/emscripten 只有有界内存路径，见 `client_body.rs`）。
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
+/// native 暂存读泵与 TCP 服务端都在这里，相关用例随本模块一起编译。
 mod native_file_body {
     use std::sync::Arc;
     use std::time::Duration;

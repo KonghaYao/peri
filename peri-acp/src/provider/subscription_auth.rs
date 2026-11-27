@@ -6,7 +6,6 @@ use std::sync::Arc;
 use peri_model::{ModelError, ModelResult, ProtocolErrorKind, RequestAuth, RequestCredential};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(target_os = "emscripten"))]
 pub use peri_mcp_credentials::model_auth::{
     AccountStatus, AuthError, AuthResult, ChatGptAuthManager, LogoutOutcome, PendingLogin,
 };
@@ -17,32 +16,19 @@ pub(super) fn request_auth(
     subject: String,
     client_id: String,
 ) -> Arc<dyn RequestAuth> {
-    #[cfg(not(target_os = "emscripten"))]
     let reference = peri_mcp_credentials::model_auth::chatgpt_credential_ref(&subject, &client_id);
-    #[cfg(target_os = "emscripten")]
-    let reference = {
-        let _ = (store, account, subject, client_id);
-        "unsupported-native-auth".to_owned()
-    };
-    #[cfg(not(target_os = "emscripten"))]
     let manager = ChatGptAuthManager::try_new(store, account)
         .map(|manager| manager.with_expected_identity(subject, client_id))
         .map_err(|error| error.to_string());
-    Arc::new(SubscriptionAuth {
-        reference,
-        #[cfg(not(target_os = "emscripten"))]
-        manager,
-    })
+    Arc::new(SubscriptionAuth { reference, manager })
 }
 
 struct SubscriptionAuth {
     reference: String,
-    #[cfg(not(target_os = "emscripten"))]
     manager: Result<ChatGptAuthManager, String>,
 }
 
 impl SubscriptionAuth {
-    #[cfg(not(target_os = "emscripten"))]
     fn manager(&self) -> ModelResult<&ChatGptAuthManager> {
         self.manager.as_ref().map_err(|error| auth_error(error))
     }
@@ -59,31 +45,11 @@ impl RequestAuth for SubscriptionAuth {
     }
 
     fn validate_endpoint(&self, endpoint: &url::Url) -> ModelResult<()> {
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            self.manager()?.validate_endpoint(endpoint)
-        }
-        #[cfg(target_os = "emscripten")]
-        {
-            let _ = endpoint;
-            Err(auth_error(
-                "ChatGPT plan credentials require a native credentials MCP capability",
-            ))
-        }
+        self.manager()?.validate_endpoint(endpoint)
     }
 
     async fn credential(&self, cancellation: CancellationToken) -> ModelResult<RequestCredential> {
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            self.manager()?.credential(cancellation).await
-        }
-        #[cfg(target_os = "emscripten")]
-        {
-            let _ = cancellation;
-            Err(auth_error(
-                "ChatGPT plan credentials require a native credentials MCP capability",
-            ))
-        }
+        self.manager()?.credential(cancellation).await
     }
 
     async fn refresh_after_unauthorized(
@@ -91,33 +57,16 @@ impl RequestAuth for SubscriptionAuth {
         rejected: &RequestCredential,
         cancellation: CancellationToken,
     ) -> ModelResult<bool> {
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            self.manager()?
-                .refresh_after_unauthorized(rejected, cancellation)
-                .await
-        }
-        #[cfg(target_os = "emscripten")]
-        {
-            let _ = (rejected, cancellation);
-            Err(auth_error(
-                "ChatGPT plan credentials require a native credentials MCP capability",
-            ))
-        }
+        self.manager()?
+            .refresh_after_unauthorized(rejected, cancellation)
+            .await
     }
 
     fn cancellation_token(&self) -> Option<CancellationToken> {
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            self.manager
-                .as_ref()
-                .ok()
-                .and_then(RequestAuth::cancellation_token)
-        }
-        #[cfg(target_os = "emscripten")]
-        {
-            None
-        }
+        self.manager
+            .as_ref()
+            .ok()
+            .and_then(RequestAuth::cancellation_token)
     }
 }
 
