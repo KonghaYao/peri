@@ -440,26 +440,124 @@ fn storage_args_keep_only_the_explicit_whitelist() {
 
     assert_eq!(
         super::storage_args(args.map(std::ffi::OsString::from)),
-        argv(&[
+        Some(argv(&[
             "--db-path",
             "/tmp/threads.db",
-            "--session-store",
-            "postgres://host/db",
+            "--session-store=postgres://host/db",
             "--sessionStoreEngine",
             "postgres",
             "--session-store-token-env",
             "PERI_STORE_TOKEN",
-            "--sessionStore",
-            "/tmp/other.db",
-        ])
+            "--sessionStore=/tmp/other.db",
+        ]))
     );
 }
 
 #[test]
-fn storage_args_skip_a_missing_value() {
+fn storage_args_keep_the_equals_form_as_one_element() {
+    let args = ["--db-path=-threads.db"];
+
+    assert_eq!(
+        super::storage_args(args.map(std::ffi::OsString::from)),
+        Some(argv(&["--db-path=-threads.db"]))
+    );
+}
+
+#[test]
+fn storage_args_reject_a_missing_value() {
     let args = ["--db-path", "--model", "sonnet", "--dbPath"];
 
-    assert!(super::storage_args(args.map(std::ffi::OsString::from)).is_empty());
+    assert_eq!(
+        super::storage_args(args.map(std::ffi::OsString::from)),
+        None,
+        "缺值或以 - 开头的值都不能拼出可解析的恢复命令"
+    );
+    assert_eq!(
+        super::storage_args([std::ffi::OsString::from("--dbPath")]),
+        None,
+        "命令行末尾的 --opt 同样缺值"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_args_reject_a_non_utf8_value() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let args = [
+        std::ffi::OsString::from("--db-path"),
+        std::ffi::OsString::from_vec(b"/tmp/\xff.db".to_vec()),
+    ];
+
+    assert_eq!(
+        super::storage_args(args),
+        None,
+        "非 UTF-8 的值无法写进恢复命令"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_args_reject_a_non_utf8_equals_form() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let args = [std::ffi::OsString::from_vec(
+        b"--db-path=/tmp/\xff.db".to_vec(),
+    )];
+
+    assert_eq!(
+        super::storage_args(args),
+        None,
+        "非 UTF-8 的 --opt=value 整段无法保留"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_args_ignore_unrelated_non_utf8_arguments() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let args = [
+        std::ffi::OsString::from_vec(b"--model=\xff".to_vec()),
+        std::ffi::OsString::from("--db-path"),
+        std::ffi::OsString::from("/tmp/threads.db"),
+        std::ffi::OsString::from_vec(b"positional\xff".to_vec()),
+    ];
+
+    assert_eq!(
+        super::storage_args(args),
+        Some(argv(&["--db-path", "/tmp/threads.db"])),
+        "与白名单无关的非 UTF-8 参数应被忽略"
+    );
+}
+
+#[test]
+fn missing_storage_args_report_falls_back_to_clear() {
+    let previous = ResumeCommand {
+        argv: argv(&["/usr/local/bin/peri", "--resume", "abc"]),
+        cwd: None,
+    };
+    let mut reported = Some(previous);
+    let mut writer = TestWriter::new();
+    let command = super::report_command("def", None);
+
+    assert!(command.is_none(), "存储参数不可表示时没有恢复命令");
+    super::emit_report(
+        &mut writer,
+        &mut reported,
+        sender(),
+        command.as_ref(),
+        &no_env,
+        true,
+    )
+    .expect("a missing command after a report falls back to clear");
+
+    let expected = super::format_clear(sender()).expect("the clear fixture has a token");
+    assert_eq!(
+        String::from_utf8(writer.bytes).expect("sequences are ASCII"),
+        expected
+    );
+    assert!(reported.is_none(), "clear 之后终端不再持有命令");
 }
 
 #[test]

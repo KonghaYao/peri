@@ -409,11 +409,12 @@ token 并从进程环境删除，此后创建的子进程（MCP server、shell �
 - 上报时机：`ACTIVE_SESSION_ID` 变化且非空时，AppShell effect 上报
   `ESC ] 7577 ; pid=…:time=…:argv=…[:cwd=…]:mac=… ESC \`（ST 结尾）。命令为
   `[current_exe, "--resume", <session id>]`；启动命令行显式给出的 `--db-path` /
-  `--session-store*` 白名单参数按原拼写与值追加（`--opt=value` 规范化为
-  `--opt value`），cwd 取发送时的绝对路径。相同命令去重，
+  `--session-store*` 白名单参数按原拼写与值追加（`--opt=value` 保留原样，
+  `--opt value` 保持两个参数），cwd 取发送时的绝对路径。相同命令去重，
   会话切换或新建会话后重新上报。
 - 协议无法承载的命令不上报：argv 为空、超过 64 个参数、序列超过 2048 字节、argv[0]
-  既非裸命令名也非绝对路径、cwd 相对、元素含控制字符。若终端已持有旧命令，改发
+  既非裸命令名也非绝对路径、cwd 相对、元素含控制字符；显式存储参数缺值、非 UTF-8
+  或值以 `-` 开头时整条命令同样不可承载（不能悄悄丢掉该参数）。若终端已持有旧命令，改发
   `clear=1`，避免重启后恢复过期命令。
 - 清除语义：正常退出（`/exit`、两次 Ctrl+C）发 `clear=1`；终端本来没有本进程记录时
   （如启动早期失败）不发。收到 SIGTERM 时

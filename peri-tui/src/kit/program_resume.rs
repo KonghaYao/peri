@@ -10,7 +10,7 @@
 //! 继承，也不写进任何日志或序列以外的输出。序列以 ST（`ESC \`）结尾，与 OSC 7501
 //! 保持一致。
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -71,7 +71,8 @@ impl Sender<'_> {
 /// 进程级上报状态：token 与启动命令行里显式给出的存储参数只在这里保存。
 struct ResumeState {
     token: String,
-    storage_args: Vec<String>,
+    /// `None`：显式存储参数无法忠实表示，恢复命令不可上报。
+    storage_args: Option<Vec<String>>,
     /// 终端当前持有的命令；None 表示终端没有本进程的记录。
     reported: Option<ResumeCommand>,
 }
@@ -116,7 +117,7 @@ pub fn report(session_id: &str) {
         storage_args,
         reported,
     } = &mut *state;
-    let command = resume_command(session_id, storage_args);
+    let command = report_command(session_id, storage_args.as_deref());
     let mut stdout = std::io::stdout().lock();
     let sender = Sender::now(token.as_str());
     if let Err(error) = emit_report(
@@ -169,22 +170,26 @@ fn take_token() -> Option<String> {
 
 /// 从启动命令行挑出显式给出的存储参数，保留原拼写与值。
 ///
-/// 支持 `--opt value` 与 `--opt=value` 两种写法（后者规范化为两个参数）；
-/// `--opt` 后紧跟 `-` 开头的参数视为缺值。白名单以外的参数（含 `--resume`）
-/// 与环境变量值都不携带。
-fn storage_args(args: impl IntoIterator<Item = OsString>) -> Vec<String> {
+/// `--opt value` 保留两个参数；`--opt=value` 保留为单个参数，不拆分。
+/// 显式白名单参数无法忠实表示时返回 `None`：`--opt` 缺值、`value` 非 UTF-8，
+/// 或 `value` 以 `-` 开头（原命令无法被 clap 解析，防御性放弃）。`--opt=value`
+/// 整段非 UTF-8 且命中白名单名时同样返回 `None`。白名单以外的参数（含 `--resume`）
+/// 与环境变量值都不携带，与白名单无关的非 UTF-8 参数直接忽略。
+fn storage_args(args: impl IntoIterator<Item = OsString>) -> Option<Vec<String>> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut kept = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         index += 1;
         let Some(text) = arg.to_str() else {
+            if has_storage_equals_prefix(arg) {
+                return None;
+            }
             continue;
         };
-        if let Some((name, value)) = text.split_once('=') {
+        if let Some((name, _)) = text.split_once('=') {
             if STORAGE_ARG_NAMES.contains(&name) {
-                kept.push(name.to_owned());
-                kept.push(value.to_owned());
+                kept.push(text.to_owned());
             }
             continue;
         }
@@ -192,16 +197,29 @@ fn storage_args(args: impl IntoIterator<Item = OsString>) -> Vec<String> {
             continue;
         }
         let Some(value) = args.get(index).and_then(|value| value.to_str()) else {
-            continue;
+            return None;
         };
         if value.starts_with('-') {
-            continue;
+            return None;
         }
         kept.push(text.to_owned());
         kept.push(value.to_owned());
         index += 1;
     }
-    kept
+    Some(kept)
+}
+
+/// 非 UTF-8 参数是否以白名单名加 `=` 开头；只做 ASCII 字节比较，不影响其它参数。
+fn has_storage_equals_prefix(arg: &OsStr) -> bool {
+    let bytes = arg.as_encoded_bytes();
+    STORAGE_ARG_NAMES.iter().any(|name| {
+        bytes.len() > name.len() && bytes.starts_with(name.as_bytes()) && bytes[name.len()] == b'='
+    })
+}
+
+/// 组装上报命令；显式存储参数无法忠实表示时不生成命令（`report` 改发 clear）。
+fn report_command(session_id: &str, storage_args: Option<&[String]>) -> Option<ResumeCommand> {
+    resume_command(session_id, storage_args?)
 }
 
 /// 组装恢复命令：`[current_exe, --resume, <session>] + 显式存储参数`。
