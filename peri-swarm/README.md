@@ -466,7 +466,7 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 | --- | --- | --- |
 | 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
 | assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 新数据**仅实时**：不落库、无 `seq`，`items.list` 和回放不会返回；按 `messageId` 聚合 |
-| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行投影按 `messageId` 聚合：最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
+| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行投影按 `messageId` 聚合：最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 

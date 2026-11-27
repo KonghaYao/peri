@@ -2305,8 +2305,9 @@ fn child_error(error: ChildError) -> SwarmError {
     }
 }
 
-/// Queue handoff failures are always `503 queue_unavailable`; a missing
-/// capability keeps its own diagnostic in `details.operation`.
+/// Queue handoff failures are always `503 queue_unavailable`; `details.operation`
+/// stays the method that failed, and a missing capability is flagged in
+/// `details.reason` (`capability_not_negotiated`).
 ///
 /// The host's reply is **not** echoed: an ACP message may embed provider
 /// payloads or credentials (the same policy as

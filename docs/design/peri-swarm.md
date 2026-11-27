@@ -852,3 +852,9 @@ Bun：
 7. **取代关系**：本节第 1 条已取代 §4.2 中逐 chunk 行的表述（“不能用 `id` 去重
    delta 帧”等）；§4.2 现在描述合并行与实时 delta 的现行契约，历史多行数据只在
    §4.2.2 保留说明。
+
+**2026-11-26 追加裁决（C=2，实施待定）**：实时与回放都发送官方 delta 事件，包括
+`agent.session.turn.output_text.delta` 与 `agent.session.turn.reasoning_summary_text.delta`。
+持久化方式尚未裁决——恢复逐 chunk 行、新增 delta 表（需要 schema 批准）或在回放时
+合成——因此**当前实现仍是本节第 6 条「回放不再逐 chunk 重播增量文本」**。本段只记录
+目标，不改变 §4.2 与 §9 第 1、6 条的现行契约，也不表示已实施。

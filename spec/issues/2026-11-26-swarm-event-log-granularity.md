@@ -1,18 +1,27 @@
-# Peri Swarm 事件日志粒度与回放置位（版本变更提案）
+# Peri Swarm 事件日志粒度与回放置位（已实施，验收未完成）
 
-> 状态：**已裁决（2026-11-26），未实施**。目标契约已并入
-> [peri-swarm.md §9](../../docs/design/peri-swarm.md)；本 issue 只承载落地进度与验收。
-> 按 `DOC-HISTORY-001`，实施与验收完成后删除本文件。
+> 状态：**已实施（2026-11-26），验收部分完成**。落地提交
+> `877a638e2`（契约与 README 同步）、`530c137ea`（合并行落库失败可见、恢复行不归属旧 turn）、
+> `56897e6ff`（取消 turn 的完成行落库失败不改判 failed）；合并基线 `6f935edf6`
+> （`feat/deploy-compose`）。验收记录见
+> [Agents API 兼容与 item 粒度验收](../../docs/verification/peri-swarm-agents-compat-item-granularity-2026-11-26.md)；
+> 本文件保留实施进度与**未验证项**，未验证项不构成验收。
+>
+> 按 `DOC-HISTORY-001`，全部验收完成后再删除本文件。
 >
 > 裁决：① 接受回放丢失 chunk 级增量；② `thought` 保留为自定义 item，但按 item 合并；
 > ③ 回放真源固定为 PostgreSQL，不引入 Redis，actor 内 ring 只做热尾。
 >
-> 现行契约（未实施前仍有效）为
-> [peri-swarm.md](../../docs/design/peri-swarm.md)「回放与游标」章节与
-> [peri-swarm/README.md](../../peri-swarm/README.md)「官方 SDK 差异」「事件流」章节。
+> 实施结果：turn 终止时按 item 合并 assistant 文本与推理流；`tool_call`/`tool_result`/
+> `approval` 仍逐帧落库；新数据的回放按合并行拼装；取消 turn 的完成行落库失败仍保持
+> `cancelled`。
 >
-> 基线：`origin/main` `99260a79d`。本文写在 `feat/deploy-compose` 分支上，内容与部署改动无关。
-> 证据：本机单机 Compose（2 副本 + PostgreSQL）实测，2026-11-26。
+> 现行契约：[peri-swarm.md §9](../../docs/design/peri-swarm.md#9-已批准目标事件日志粒度与回放置位已实施)
+> 与 §4.2；`peri-swarm/README.md`「官方 SDK 差异」「事件流」已同步。
+>
+> 基线：`origin/main` `99260a79d`；实施与合并发生在 `feat/deploy-compose`，部署改动不在本 issue 范围。
+> 证据：本机单机 Compose（2 副本 + PostgreSQL）实测，2026-11-26；来源为实施/部署报告，
+> 未在本 issue 重跑。
 
 ## 1. 问题
 
@@ -116,26 +125,55 @@ compact 标记与 rewind 删行，不能承担「已投递位置」；网关也�
 
 实施范围限定在写入粒度与回放拼装；不改表结构、不改官方事件序列、不加 TTL。
 
+### 7.1 实施结果（2026-11-26）
+
+| 提交 | 内容 |
+| --- | --- |
+| `877a638e2` | 本文改为已实施；`docs/design/peri-swarm.md` §4.2 与 `peri-swarm/README.md` 改按合并行描述 |
+| `530c137ea` | 完成组按存储批次提交、失败可见；恢复期 `recovered` 行不归属旧 turn；部分失败时已提交批次先广播 |
+| `56897e6ff` | 取消 turn 的完成行落库失败不再改判 `failed`；只记录 warn，终态与持久行保持 `cancelled` |
+
+最终行为：
+
+- turn 终止时按 item 合并：同一 assistant 文本流与推理流各写一条 `complete:true` 行；
+  实时 chunk 仍逐帧广播、不落库、不带 `seq`。
+- `tool_call`、`tool_result`、`approval` 仍逐帧落库；审批保持 `pending`/`settled` 两帧。
+- 新数据的回放按合并行拼装；历史多行 item 仍按 `seq` 逐行发 `item` 帧，官方投影按
+  `itemId` 折叠（§4.2.2）。
+- 未持久化的完成组让非取消 turn 以 `turn.failed` 收尾；已提交批次先广播。
+- 取消 turn 的完成行落库失败只记录日志，实时终态仍是
+  `turn.completed(status="cancelled")`，持久 turn 行为 `cancelled`，会话回到 `idle`。
+- 恢复期写入的 `payload.recovered=true` 行只作为自定义 `item` 回放，不投影官方帧、
+  不归属前后 turn。
+
 ## 8. 契约变更与迁移
 
 - **无 schema 变更**：仍用 `swarm_items` 现有列与主键；只改写入粒度与回放拼装方式。
 - **旧数据可读**：历史 chunk 行与新 item 行按 `seq` 单调共存，回放不需重写数据。
 - **无版本门禁**：不需要提升状态库 contract 版本；读取路径向后兼容。
 - **回退**：恢复原写入路径即可，期间写入的 item 行仍可被旧代码按帧回放。
-- 裁决并实现后，同步更新 `docs/design/peri-swarm.md`「回放与游标」、
+- 裁决并实施后，已同步更新 `docs/design/peri-swarm.md`「回放与游标」、
   `peri-swarm/README.md` 的「事件类型」「回放」章节与 `docs/verification/` 验收记录。
 
-## 9. 验收矩阵（实现阶段使用）
+## 9. 验收矩阵（实施后状态）
 
-| ID | 必须观察的行为 | 证据要求 |
-| --- | --- | --- |
-| ILOG-1 | 单 turn item 行数 ≤ item 数 + 常量 | 计数断言，覆盖纯文本、含工具、含审批三类 turn |
-| ILOG-2 | `afterSeq=0` 回放顺序与实时一致 | 同一 turn 的实时帧与回放帧逐条比对 |
-| ILOG-3 | 断线重连按游标补齐，不重复、不丢 turn 终态 | 订阅中断 → 带 `Last-Event-ID` 重连 |
-| ILOG-4 | 审批折叠：已结算不复活，过期先结算 | 崩溃注入 + 重连回放 |
-| ILOG-5 | 崩溃恢复不重复执行 initial input | `last_seq` 边界用例 |
-| ILOG-6 | 官方 15 种事件序列不变 | 与基线录制帧比对 |
-| ILOG-7 | 溢出 ring 后仍发 `gap` 并可续读 | 慢消费者用例 |
+| ID | 必须观察的行为 | 证据要求 | 当前状态 |
+| --- | --- | --- | --- |
+| ILOG-1 | 单 turn item 行数 ≤ item 数 + 常量 | 计数断言，覆盖纯文本、含工具、含审批三类 turn | 用例覆盖；真实单 turn 观察到 3 行（2 `message` + 1 `thought`） |
+| ILOG-2 | `afterSeq=0` 回放顺序与实时一致 | 同一 turn 的实时帧与回放帧逐条比对 | 进程内用例覆盖；线上未实测 |
+| ILOG-3 | 断线重连按游标补齐，不重复、不丢 turn 终态 | 订阅中断 → 带 `Last-Event-ID` 重连 | 进程内 mid-turn 重放用例覆盖；真实部署 `afterSeq` 断线重连未实测 |
+| ILOG-4 | 审批折叠：已结算不复活，过期先结算 | 崩溃注入 + 重连回放 | 进程内用例覆盖；真实崩溃注入未跑 |
+| ILOG-5 | 崩溃恢复不重复执行 initial input | `last_seq` 边界用例 | 进程内持久半态用例覆盖；真实进程 kill 未在本轮跑 |
+| ILOG-6 | 官方 15 种事件序列不变 | 与基线录制帧比对 | 用例覆盖；真实 turn 观察到 `created → turn.created → turn.in_progress → item.done → turn.completed → idle` |
+| ILOG-7 | 溢出 ring 后仍发 `gap` 并可续读 | 慢消费者用例 | 进程内用例覆盖；线上慢消费者未实测 |
+
+## 9.1 实施后仍未验证（2026-11-26）
+
+- **历史多行 item 的真实 SSE 回放未实测**：只在既有数据上核对过一条 10 行 thought 的
+  `/items` 折叠结果；没有含 ≥2 个 complete 帧的条目，无法复现两代 complete 的历史形状。
+- **`afterSeq` 断线重连未在真实部署中断线重测**：目前只有进程内 mid-turn 重放用例。
+- **审批折叠未在真实宿主或崩溃注入下实测**：`pending`/`settled` 与过期先结算由进程内用例覆盖。
+- 上述结果只证明所列用例覆盖的路径，不构成部署验收。
 
 ## 10. 未验证与证据边界
 
