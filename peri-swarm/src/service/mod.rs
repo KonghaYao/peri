@@ -807,8 +807,10 @@ impl OfficialReplay {
         )));
     }
 
-    /// Assistant completion frames: the item, its one output text part and the
-    /// done item, all keyed by the persisted row `seq`.
+    /// Assistant completion frames: the item, its one output text part, one
+    /// full-text delta and the done frames, all keyed by the persisted row
+    /// `seq`. Replay has no original chunk boundaries, so the single delta is
+    /// the whole item text; its id therefore cannot match the live chunk ids.
     fn push_assistant_item(
         &self,
         item: &crate::domain::ItemView,
@@ -820,14 +822,25 @@ impl OfficialReplay {
     ) {
         let message =
             OfficialMessageItem::assistant(&item.item_id, turn_id, text).with_phase(Some(phase));
-        out.push(StreamEvent::Official(OfficialEvent::turn_item_added(
-            item.seq,
-            &self.logical_id,
-            turn_id,
-            message.clone(),
-        )));
+        out.push(StreamEvent::Official(
+            OfficialEvent::turn_assistant_item_added(
+                &item.item_id,
+                &self.logical_id,
+                turn_id,
+                message.clone(),
+            ),
+        ));
         out.push(StreamEvent::Official(
             OfficialEvent::turn_content_part_added(
+                &item.item_id,
+                &self.logical_id,
+                turn_id,
+                output_index,
+                text,
+            ),
+        ));
+        out.push(StreamEvent::Official(
+            OfficialEvent::turn_output_text_delta_replay(
                 item.seq,
                 &self.logical_id,
                 turn_id,

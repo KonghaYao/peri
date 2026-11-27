@@ -58,6 +58,8 @@
 - 实时路径不经过数据库：帧经 actor 内 `broadcast` 通道投递；落库与回放只服务于
   冷重连、跨重启/跨副本恢复与幂等判定。
 - 官方事件只发 15 种，reasoning 不在其中；`thought` 仅作为网关自定义 item 暴露。
+  事件流的官方 `output_text.delta` 由后续 C 改动补充（实时逐 chunk、回放一条全文），
+  不改变本节的持久化粒度。
 
 ## 4. 拆成三个独立量
 
@@ -136,7 +138,8 @@ compact 标记与 rewind 删行，不能承担「已投递位置」；网关也�
 最终行为：
 
 - turn 终止时按 item 合并：同一 assistant 文本流与推理流各写一条 `complete:true` 行；
-  实时 chunk 仍逐帧广播、不落库、不带 `seq`。
+  实时 chunk 仍逐帧广播、不落库、不带 `seq`。事件流的官方 `output_text.delta` 由后续
+  C 改动补充（实时逐 chunk、回放一条全文），持久化粒度不变。
 - `tool_call`、`tool_result`、`approval` 仍逐帧落库；审批保持 `pending`/`settled` 两帧。
 - 新数据的回放按合并行拼装；历史多行 item 仍按 `seq` 逐行发 `item` 帧，官方投影按
   `itemId` 折叠（§4.2.2）。
@@ -164,7 +167,7 @@ compact 标记与 rewind 删行，不能承担「已投递位置」；网关也�
 | ILOG-3 | 断线重连按游标补齐，不重复、不丢 turn 终态 | 订阅中断 → 带 `Last-Event-ID` 重连 | 进程内 mid-turn 重放用例覆盖；真实部署 `afterSeq` 断线重连未实测 |
 | ILOG-4 | 审批折叠：已结算不复活，过期先结算 | 崩溃注入 + 重连回放 | 进程内用例覆盖；真实崩溃注入未跑 |
 | ILOG-5 | 崩溃恢复不重复执行 initial input | `last_seq` 边界用例 | 进程内持久半态用例覆盖；真实进程 kill 未在本轮跑 |
-| ILOG-6 | 官方 15 种事件序列不变 | 与基线录制帧比对 | 用例覆盖；真实 turn 观察到 `created → turn.created → turn.in_progress → item.done → turn.completed → idle` |
+| ILOG-6 | 官方 15 种事件序列不变 | 与基线录制帧比对 | 用例覆盖；真实 turn 观察到 `created → turn.created → turn.in_progress → item.done → turn.completed → idle`；后续 C 追加 `output_text.delta` 后为 16 种，持久化粒度不变 |
 | ILOG-7 | 溢出 ring 后仍发 `gap` 并可续读 | 慢消费者用例 | 进程内用例覆盖；线上慢消费者未实测 |
 
 ## 9.1 实施后仍未验证（2026-11-26）

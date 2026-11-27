@@ -1231,6 +1231,8 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1267,14 +1269,15 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
     let OfficialEvent::TurnCompleted {
         turn_id: completed_turn,
         ..
-    } = &official[9]
+    } = &official[11]
     else {
-        panic!("the terminal names the turn: {:?}", official[9]);
+        panic!("the terminal names the turn: {:?}", official[11]);
     };
     assert_eq!(completed_turn, turn_id, "completed closes the created turn");
 
-    // ILOG-6: replay rebuilds the same official frames — same types, same
-    // `event_id`s, same order — so a reconnect cannot rename a turn or an item.
+    // ILOG-6: replay rebuilds the same official frames. Live chunk deltas and
+    // the single replay delta deliberately differ in `event_id`, so identity
+    // parity excludes only those delta frames.
     let replay = service
         .replay_after(&logical, EventCursor::START)
         .await
@@ -1289,6 +1292,7 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
     let identities = |events: &[OfficialEvent]| {
         events
             .iter()
+            .filter(|event| !matches!(event, OfficialEvent::TurnOutputTextDelta { .. }))
             .map(|event| (event.event_type(), event.event_id().to_owned()))
             .collect::<Vec<_>>()
     };
@@ -1296,6 +1300,18 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
         identities(&replayed),
         identities(&official),
         "replay names the same turns and items as the live stream"
+    );
+    let replay_deltas: Vec<_> = replayed
+        .iter()
+        .filter_map(|event| match event {
+            OfficialEvent::TurnOutputTextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replay_deltas,
+        [format!("{TURN_PREFIX}0").as_str()],
+        "replay has no chunk boundaries: one delta carries the full text"
     );
 
     let reports = service.shutdown_all().await;
@@ -1400,6 +1416,7 @@ async fn replay_matches_live_frames() {
     let identities = |events: &[OfficialEvent]| {
         events
             .iter()
+            .filter(|event| !matches!(event, OfficialEvent::TurnOutputTextDelta { .. }))
             .map(|event| (event.event_type(), event.event_id().to_owned()))
             .collect::<Vec<_>>()
     };
@@ -1407,6 +1424,18 @@ async fn replay_matches_live_frames() {
         identities(&live_official),
         identities(&replay_official),
         "the official frames replay with the same ids, in the same order"
+    );
+    let replay_deltas: Vec<_> = replay_official
+        .iter()
+        .filter_map(|event| match event {
+            OfficialEvent::TurnOutputTextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replay_deltas,
+        [format!("{TURN_PREFIX}0").as_str()],
+        "replay sends one full-text delta, not the live chunk boundaries"
     );
 }
 

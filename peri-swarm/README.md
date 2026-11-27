@@ -334,7 +334,7 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 | P1 | agent 子字段 | `agent` 是嵌套对象，必需字段含 `id`、`name`、`tools`、`multi_agent`、`reasoning`、`service_tier`、`text`（`compaction` / `experimental` 可选）；`model` 是 string | REST `agent` 只有 `model`（可空）/ `instructions`，没有 `id`；SSE `agent.session.*` 的 agent 有固定 `id: "root"` / `model`（可空）/ `instructions`，缺 `name` / `tools` / `multi_agent` / `reasoning` / `service_tier` / `text` | REST 与 SSE 都不能保证 `model` 是非空 string；REST 还缺 `id`；`name` / `tools` / `text` 可用默认值或投影补齐（schema 可新增）；subagent 调度、多 agent 配置、推理与 service tier 仍缺运行时事实 |
 | P1 | `sessions.update` 未支持字段 | `agent.reasoning`、`agent.service_tier`、`review`，以及 `agent.tools` 中的函数/内置工具 | 这些字段 → `400 invalid_request`；函数/内置工具 → `422 unsupported_tool`；`agent.model:null` → `400` | 本地没有 reasoning、service tier 与 review 的执行语义；`agent.tools` 只有 MCP 注入通道，没有函数或内置工具运行时 |
 | P1 | items 形状 | `AgentSessionItem` 联合包含消息、推理、多种工具与 subagent 调用 | `data` 投影 `message`、`reasoning`、`function_call`、`function_call_output`；`items` 保留原始行（新数据每条目一行，历史数据可能包含逐帧 delta）。`data` 可以为空，`nextCursor` / `after` 语义不变 | 不伪造审批、子 agent 等条目；MCP 调用与结果以 `call_id` 关联，不发 `mcp_call`。空 `data` 页会使官方 SDK 停止自动翻页，仍可用网关 `nextCursor` 继续 |
-| P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 15 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 18 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、文本 delta、reasoning 4 种；文本 delta 需把 `item.added` 前移到首 chunk 并保留回放同一性；环境与工具增量没有运行时事实 |
+| P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 16 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.delta` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 17 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、reasoning 4 种；文本 delta 已实现但**不持久化**：实时逐 chunk，回放只有一条全文，事件 id 跨投递不一致；reasoning delta 尚未实现；环境与工具增量没有运行时事实 |
 | P1 | 环境投影 | `Environment.EnvironmentResourceOpenAIHosted` 必需字段含 `capability_directories`、`files`、`network`、`packages`、`plugins`、`skills`（`container_size`、`desktop` 可选）；`AgentSession.environment` 必填 | hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 来自绑定记录的 `last_run_id`（可能是上次预留值，与当前 state 不一致）；SSE `agent.session.*` 的 `OfficialSession` 携带同一 `{type,id}` 投影（未知环境为 `{"type":"none"}`，不造 id） | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `capability_directories` / `files` / `network` / `packages` / `plugins` / `skills` 没有同步通道 |
 | P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 网关不做 token 记账；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
 | P1 | 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名） | 持久化表可以新增；真正的缺口是 traces/artifacts/subagent 没有产生源，turns items 也没有官方结构映射 |
@@ -432,17 +432,20 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 
 | 场景 | 帧 | 终止 |
 | --- | --- | --- |
-| 实时（先开流，再 POST） | 自定义 `item`（用户输入先于 `turn.started`）+ 实时 `delta`（无 `seq`，不落库）+ 自定义 `turn`（`started` → `completed` \| `failed`）+ 官方 `agent.session.turn.created` → `turn.item.added` → `turn.completed` \| `turn.failed` → `agent.session.idle` \| `failed`；可能有 `gap` | 原生客户端看 `turn.state`；官方 SDK 看 `agent.session.idle` / `agent.session.failed` |
-| 回放（显式 `after`/`afterSeq`/`Last-Event-ID`） | 自定义 `item` + 同一套官方帧，没有自定义 `turn` 帧，也不重播实时 `delta`；新写入的数据只给合并后的最终 item，历史多行 item 会按 `seq` 逐行发出 `item` 帧（客户端按 `itemId` 自行折叠）；可能有 `gap` | 官方 SDK 在 turn 终态后的 `agent.session.idle` 结束；原生客户端看 `payload.complete === true` |
+| 实时（先开流，再 POST） | 自定义 `item`（用户输入先于 `turn.started`；assistant chunk 仍发自定义 `item` + 自定义 `delta`）+ 自定义 `turn`（`started` → `completed` \| `failed`）+ 官方 `agent.session.turn.created` → `turn.item.added` → 首 chunk `content_part.added` → 每 chunk `output_text.delta` → 终态 `output_text.done`/`content_part.done`/`item.done` → `turn.completed` \| `turn.failed` → `agent.session.idle` \| `failed`；可能有 `gap` | 原生客户端看 `turn.state`；官方 SDK 看 `agent.session.idle` / `agent.session.failed` |
+| 回放（显式 `after`/`afterSeq`/`Last-Event-ID`） | 自定义 `item` + 同一套官方帧，没有自定义 `turn` 帧，也不重播实时 `delta`；每条 assistant 完成行合成**一条全文** `output_text.delta`（没有原始 chunk 边界）；新写入的数据只给合并后的最终 item，历史多行 item 会按 `seq` 逐行发出 `item` 帧（客户端按 `itemId` 自行折叠）；可能有 `gap` | 官方 SDK 在 turn 终态后的 `agent.session.idle` 结束；原生客户端看 `payload.complete === true` |
 | 无游标订阅 | 不读历史，只收订阅之后的实时帧 | 同上；要补历史必须显式给游标（`afterSeq=0` 回放全部） |
 | `after` 等于/超过末尾 | 只有心跳 | 不会自行关闭；用客户端超时、`AbortController` 或 `items.list` |
 | 心跳 | `{ "lastItemSeq": N }` | 只由持久化 item 推进（长 turn 期间可能整轮不变）；无 `seq`、无 `state`；不是本流已投递的位置 |
 
 - 实时帧序不是「先 `turn.started`」：用户输入的自定义 `item` 先到，官方 `turn.created`
   随后；不要收到 `turn.started`/`turn.created` 就清空已到达的帧。
-- assistant/thought 的实时 `delta` 帧没有 `id:`、不落库，也不能用于续读；同一
+- assistant/thought 的自定义 `delta` 帧没有 `id:`、不落库，也不能用于续读；同一
   `(agentId, messageId, kind)` 的合并行在 turn 终止时只落一次（`complete:true`），
-  answer 与 reasoning 共享 `messageId` 时是两条 item。
+  answer 与 reasoning 共享 `messageId` 时是两条 item。assistant 另有官方
+  `output_text.delta`：实时逐 chunk，回放一条全文，二者的 `event_id` 不同；thought
+  不发官方 reasoning delta。首 chunk 的官方 `item.added`/`content_part.added` 在实时
+  发出，回放从完成行重建；两者按 `itemId` 派生同一 id。自定义 `item` 帧仍保留。
 - `POST /events` 是接收语义：202 只表示 receipt、用户 item 与 turn 预留已持久化，turn 在
   后台执行；失败在流上以 `turn.failed`/`session.failed` 出现。要观察本轮先开流再 POST；
   `ack.lastItemSeq` 已包含用户输入，不能用它开流补看本轮。
@@ -465,7 +468,7 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 | 帧 | payload | 聚合与终止 |
 | --- | --- | --- |
 | 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
-| assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 新数据**仅实时**：不落库、无 `seq`，`items.list` 和回放不会返回；按 `messageId` 聚合 |
+| assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 新数据**仅实时**：不落库、无 `seq`，`items.list` 和回放不会返回；按 `messageId` 聚合。对应的官方 `output_text.delta` 实时逐 chunk、回放一条全文 |
 | assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行投影按 `messageId` 聚合：最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
@@ -553,9 +556,10 @@ stateDiagram-v2
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 宿主在 turn 中退出后，历史查询返回已存状态。下一条新用户输入触发原会话恢复；同步中断的旧 turn 记录为失败，Peri 按持久 MQ 恢复待处理工作。
-- 新写入的回放不逐 chunk 重播增量：assistant/thought 只有 turn 终止时的合并行，
-  `delta` 帧仅实时可见；历史逐 chunk 行仍按 `seq` 逐行发出 `item` 帧，客户端按
-  `itemId` 自行折叠。依赖增量文本重放的客户端需自行缓存实时帧。
+- 新写入的回放不保留原始 chunk 边界：assistant 只有 turn 终止时的合并行，回放由该行
+  合成一条全文官方 `output_text.delta`；实时仍逐 chunk。`delta` 的自定义 `item` 帧仅
+  实时可见；历史逐 chunk 行仍按 `seq` 逐行发出 `item` 帧，客户端按 `itemId` 自行折叠。
+  实时与回放的 delta `event_id` 不保证一致，跨重连去重不能依赖它。
 - turn 执行中崩溃会丢失该 turn 尚未写入的 assistant/thought 文本（已落库的
   user/tool/approval 行不受影响）；恢复从最后一行继续，不重建在途文本。
 - 合并 payload 超过 1 MiB（`MAX_PAYLOAD_BYTES`）时按 `{_truncated:true,

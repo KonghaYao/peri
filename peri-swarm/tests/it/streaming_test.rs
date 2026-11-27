@@ -671,7 +671,7 @@ async fn unknown_agent_subscribe_returns_404_json() {
 }
 
 #[tokio::test]
-async fn official_frames_stream_in_sdk_order_and_replay_identically() {
+async fn official_frames_stream_in_sdk_order_and_replay_one_full_text_delta() {
     let harness = harness(60_000);
     create_session(&harness).await;
 
@@ -706,11 +706,26 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
     let user_added = live
         .find("\"event_id\":\"evt_item_1_added\"")
         .expect("user item added");
+    let assistant_id = frames(&live)
+        .iter()
+        .find_map(|(event, value)| {
+            (event == "agent.session.turn.item.added"
+                && value["item"]["role"] == json!("assistant"))
+            .then(|| {
+                value["item"]["id"]
+                    .as_str()
+                    .expect("assistant id")
+                    .to_owned()
+            })
+        })
+        .expect("assistant item added");
     let assistant_added = live
-        .find("\"event_id\":\"evt_item_2_added\"")
+        .find(&format!("\"event_id\":\"evt_item_{assistant_id}_added\""))
         .expect("assistant item added");
     let part_added = live
-        .find("\"event_id\":\"evt_item_2_part_added\"")
+        .find(&format!(
+            "\"event_id\":\"evt_item_{assistant_id}_part_added\""
+        ))
         .expect("content part added");
     let text_done = live
         .find("\"event_id\":\"evt_item_2_text_done\"")
@@ -781,15 +796,58 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
     let replayed = read_complete(response.into_body(), "event: agent.session.idle").await;
+    let live_ids = official_ids(&live);
+    let replay_ids = official_ids(&replayed);
+    assert!(
+        live_ids
+            .iter()
+            .all(|(kind, _)| kind != "agent.session.turn.output_text.delta"),
+        "the completion-only fake has no live chunk, so no live delta: {live}"
+    );
+    let without_delta: Vec<_> = replay_ids
+        .iter()
+        .filter(|(kind, _)| kind != "agent.session.turn.output_text.delta")
+        .cloned()
+        .collect();
     assert_eq!(
-        official_ids(&live),
-        official_ids(&replayed),
-        "live and replay must carry the same official identities"
+        live_ids, without_delta,
+        "live and replay carry the same official identities outside the replay delta"
     );
     assert_eq!(
-        official_ids(&live).len(),
+        live_ids.len(),
         11,
         "session/turn progress, created, 2 items, 4 completion frames, completed, idle"
+    );
+    assert_eq!(
+        replay_ids.len(),
+        12,
+        "replay adds exactly one full-text delta: {replay_ids:?}"
+    );
+    let replay_frames = frames(&replayed);
+    let delta_at = replay_frames
+        .iter()
+        .position(|(event, _)| event == "agent.session.turn.output_text.delta")
+        .expect("replay delta");
+    assert_eq!(replay_frames[delta_at].1["item_id"], json!(assistant_id));
+    assert_eq!(
+        replay_frames[delta_at].1["delta"],
+        json!("fake-echo: hello"),
+        "no original chunk boundaries survive replay"
+    );
+    let part_added_at = replay_frames
+        .iter()
+        .position(|(event, value)| {
+            event == "agent.session.turn.content_part.added"
+                && value["item_id"] == json!(assistant_id)
+        })
+        .expect("replay part added");
+    let text_done_at = replay_frames
+        .iter()
+        .position(|(event, _)| event == "agent.session.turn.output_text.done")
+        .expect("replay text done");
+    assert!(
+        part_added_at < delta_at && delta_at < text_done_at,
+        "{replayed}"
     );
 }
 
