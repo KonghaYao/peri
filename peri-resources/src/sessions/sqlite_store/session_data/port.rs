@@ -22,6 +22,7 @@ use crate::sessions::sqlite_store::session_data::strict_thread_root_on;
 use crate::sessions::sqlite_store::session_data::thread_root_on;
 use crate::sessions::sqlite_store::session_data::BindingRowState;
 use crate::sessions::sqlite_store::session_data::ThreadRootFailure;
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 
 use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 
@@ -200,10 +201,7 @@ impl SessionDataPort for SqliteSessionData {
         let payloads = context::load_active_payloads_on(&mut tx, id)
             .await
             .map_err(super::read_failure)?;
-        let flags = compaction::load_active_flags_on(&mut tx, id)
-            .await
-            .map_err(super::read_failure)?;
-        let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
+        let state = context::load_transcript_restore_state_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(super::read_failure)?;
         tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
@@ -211,10 +209,28 @@ impl SessionDataPort for SqliteSessionData {
             meta,
             binding,
             frozen,
-            inherited,
+            inherited: state.inherited,
             payloads,
-            flags,
+            flags: state.own_flags,
         })
+    }
+
+    async fn load_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<TranscriptRestoreState> {
+        let mut tx = self
+            .database
+            .pool
+            .begin()
+            .await
+            .map_err(|error| super::map_sqlx(&error))?;
+        self.require_session(&mut tx, id).await?;
+        let state = context::load_transcript_restore_state_on(&mut tx, id, THREAD_META_COLUMNS)
+            .await
+            .map_err(super::read_failure)?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
+        Ok(state)
     }
 
     async fn load_frozen_state(&self, id: &ThreadId) -> SessionResourceResult<FrozenState> {
@@ -245,15 +261,21 @@ impl SessionDataPort for SqliteSessionData {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| super::map_sqlx(&error))?;
-        let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
-            .await
-            .map_err(super::read_failure)?;
         let state = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
-            BindingRowState::Absent if meta.parent_thread_id.is_some() => {
-                BindingState::ExternalOrUnregistered
+            BindingRowState::Absent => {
+                let parent: Option<String> =
+                    sqlx::query_scalar("SELECT parent_thread_id FROM threads WHERE id = ?1")
+                        .bind(id.as_str())
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(|e| super::map_sqlx(&e))?;
+                if parent.is_some() {
+                    BindingState::ExternalOrUnregistered
+                } else {
+                    BindingState::Missing
+                }
             }
-            BindingRowState::Absent => BindingState::Missing,
         };
         tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(state)
@@ -295,6 +317,13 @@ impl SessionDataPort for SqliteSessionData {
         byte_budget: usize,
     ) -> SessionResourceResult<HistoryPage> {
         self.read_history_page(id, cursor, limit, byte_budget).await
+    }
+
+    async fn initial_history_anchor(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        self.read_initial_history_anchor(id).await
     }
 
     async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
@@ -365,6 +394,12 @@ impl SessionDataPort for SqliteSessionData {
             read_ticket,
         )
         .await
+    }
+
+    fn own_history_body_reader(
+        &self,
+    ) -> Option<&dyn peri_acp_types::session_resources::OwnHistoryBodyReader> {
+        Some(self)
     }
 
     async fn load_history_body_chunk(

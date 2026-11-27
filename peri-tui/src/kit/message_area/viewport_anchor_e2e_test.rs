@@ -204,7 +204,7 @@ impl RelocationProbe {
 /// 因此这里显式断言。
 ///
 /// `prepare` 的参数与 `message_area/mod.rs` 的生产调用一致（同一份 grid / context /
-/// reset，`scroll_y` 取当帧视口事实，`merge_epoch` 取 `HISTORY_PREPEND_EPOCH`）。
+/// reset，`scroll_y` 取当帧视口事实，并入代数取该帧的发布元数据）。
 fn publish_then_relocate(
     state: &mut BridgeState,
     token: &str,
@@ -231,7 +231,6 @@ fn publish_then_relocate(
         reset,
         0,
         10,
-        crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
     );
     let epoch_before = crate::kit::atoms::HISTORY_PREPEND_EPOCH.get();
     // 视口顶行落在锚点单元内（`within_unit` 行），这样「单元内位移」参与判据，不能退化成 0。
@@ -265,7 +264,6 @@ fn publish_then_relocate(
         reset,
         scroll_y,
         10,
-        crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
     );
     let relocation = transcript
         .take_prepend_relocation()

@@ -119,6 +119,7 @@ GenUI 按钮在有效的左键 Down 上立即分发动作。按下态仅属于�
    迟到页整页丢弃并归还预留，不合并、不留下半页。
 5. bridge 通过一次释放/接纳事务把新段并入 `committed`，登记 `DisplayLedger`、`ResidentIndex`、
    段边界游标与 `WINDOW_UNIT_KEYS`，随后只发布一次快照。
+   V1 向上滚轮或 Ctrl+Up/Home 进入距页首一个视口时，在驻留正文低于预取门槛且无在途或待并页请求时预读一页，已有缺口优先。页首按需读取；上一张更早页成功发布可见内容并推进游标后，下一次上滚可立即续读。自动触发、空页、重复游标和失败重试仍保留退避。
 6. `peri/history_committed` 到达后按 `checkpointId` 幂等封印 durable 段；通知丢失时下一次
    `history.open` 的 `committedTail` 是唯一重新对齐入口。
 

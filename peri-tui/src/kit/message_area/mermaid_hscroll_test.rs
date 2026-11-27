@@ -104,7 +104,6 @@ impl Harness {
             0,
             0,
             40,
-            0,
         );
         self.transcript
             .warm_visible(&self.snapshot, &mut self.caches, 0, 40);
@@ -120,7 +119,6 @@ impl Harness {
             0,
             0,
             40,
-            0,
         );
         self.transcript
             .warm_visible(&self.snapshot, &mut self.caches, 0, 40);

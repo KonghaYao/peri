@@ -12,6 +12,7 @@ mod footer;
 mod genui_action;
 pub(crate) mod grid;
 mod handlers;
+pub(crate) mod history_layout;
 mod hits;
 mod image_action;
 mod inline_image_draw;

@@ -38,6 +38,39 @@ use serial_test::serial;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[tokio::test]
+#[serial]
+async fn bound_restore_preparation_does_not_request_active_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, _bridge) = crate::host::requests::tests::make_server_config_with_bridge(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &tmp,
+    )
+    .await;
+    let mut sessions = HashMap::new();
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    cfg.session_resources = Arc::new(FailingHistoryLoad {
+        inner: cfg.session_resources.clone(),
+    });
+    crate::host::requests::session_lifecycle::restore::prepare_existing(
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+    )
+    .await
+    .expect("preparing a bound session should only need its binding");
+}
+
 /// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；
 /// 写一次接纳本身不回滚。
 #[tokio::test]

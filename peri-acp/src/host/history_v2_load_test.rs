@@ -314,6 +314,7 @@ async fn session_load_v2_initial_returns_page_and_window_continues() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (fixture, _cfg, client, task) = v2_fixture(&tmp).await;
     let sid = fixture.sid.clone();
+    fixture.sessions.lock().await.remove(&sid);
 
     let response = client
         .send_request(
@@ -338,6 +339,14 @@ async fn session_load_v2_initial_returns_page_and_window_continues() {
     assert_eq!(initial["kind"], "initial");
     assert_eq!(initial["requestKey"], "1");
     assert_eq!(initial["executionReady"], true);
+    {
+        let states = fixture.sessions.lock().await;
+        assert_eq!(
+            states[&sid].context_ownership,
+            crate::host::ContextOwnership::Deferred
+        );
+        assert!(states[&sid].history_payloads.is_empty());
+    }
     assert!(
         initial["runtimeGeneration"]
             .as_str()

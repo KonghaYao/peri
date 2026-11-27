@@ -37,18 +37,59 @@ impl VisibilityCache {
         Self::default()
     }
 
+    /// A single storage snapshot supplies both the cache key and the JSON. No
+    /// answer is recorded until the canonical visibility parser reaches EOF.
+    pub(super) fn inspect(
+        &self,
+        entry_id: MessageId,
+        reader: &mut dyn std::io::BufRead,
+    ) -> peri_acp_types::session_resources::SessionResourceResult<bool> {
+        use peri_acp_types::history_window::HistoryWindowError;
+        let prefix = reader
+            .fill_buf()
+            .map_err(|error| HistoryWindowError::ReadFailed {
+                detail: format!("history audience prefix could not be read: {error}"),
+            })?;
+        let key = (entry_id, digest(prefix));
+        if let Some(visible) = self.lookup_key(&key) {
+            return Ok(visible);
+        }
+        self.note_full_scan();
+        let visible =
+            peri_acp_types::history_page_visibility::history_body_displayable_to_client_buffered(
+                reader,
+            )
+            .map_err(|error| {
+                if error.is_io() {
+                    HistoryWindowError::ReadFailed {
+                        detail: "history audience body could not be read".to_owned(),
+                    }
+                } else {
+                    HistoryWindowError::anchor_unavailable("history audience could not be verified")
+                }
+            })?;
+        self.store_key(key, visible);
+        Ok(visible)
+    }
+
     /// 前缀摘要与条目身份都匹配时返回已缓存的可见性结论。
     pub(super) fn lookup(&self, entry_id: MessageId, prefix: &[u8]) -> Option<bool> {
-        let key = (entry_id, digest(prefix));
+        self.lookup_key(&(entry_id, digest(prefix)))
+    }
+
+    fn lookup_key(&self, key: &(MessageId, [u8; 32])) -> Option<bool> {
         match self.state.entries.lock() {
-            Ok(entries) => entries.get(&key).copied(),
+            Ok(entries) => entries.get(key).copied(),
             Err(_) => panic!("visibility cache mutex must remain unpoisoned"),
         }
     }
 
     /// 记录一次完整解析的结论；容量到上限时整体清空。
     pub(super) fn store(&self, entry_id: MessageId, prefix: &[u8], visible: bool) {
-        let key = (entry_id, digest(prefix));
+        self.store_key((entry_id, digest(prefix)), visible);
+    }
+
+    fn store_key(&self, key: (MessageId, [u8; 32]), visible: bool) {
         let mut entries = match self.state.entries.lock() {
             Ok(entries) => entries,
             Err(_) => panic!("visibility cache mutex must remain unpoisoned"),

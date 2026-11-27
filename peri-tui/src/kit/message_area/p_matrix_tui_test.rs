@@ -214,7 +214,6 @@ impl RenderProbe {
             0,
             0,
             40,
-            0,
         );
         (
             self.transcript.retained_bytes(),

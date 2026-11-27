@@ -6,6 +6,26 @@
 //!
 //! 公开路径由父模块 `pub use` 保持为 `peri_acp_types::session_resources::*`。
 
+/// An inspection can stop after the first buffer (a cache hit) or read to EOF.
+/// It runs outside the async scheduler and must not retain the reader.
+pub type HistoryBodyInspection =
+    Box<dyn FnOnce(&mut dyn std::io::BufRead) -> super::SessionResourceResult<bool> + Send>;
+
+/// Sequential access to one own entry under a validated, fixed committed tail.
+/// The first buffer holds up to HISTORY_WINDOW_DEFAULT_CHUNK_SIZE bytes, or the
+/// whole entry if shorter. Subsequent reads stay in the same storage snapshot.
+#[async_trait::async_trait]
+pub trait OwnHistoryBodyReader: Send + Sync {
+    async fn inspect(
+        &self,
+        thread: &crate::thread::ThreadId,
+        entry: crate::messages::MessageId,
+        tail: &crate::history_window::HistoryCommittedTail,
+        read_ticket: &crate::history_window::HistoryReadTicket,
+        inspection: HistoryBodyInspection,
+    ) -> super::SessionResourceResult<bool>;
+}
+
 use crate::history_page::{HistoryEntryRole, HistoryPageItem};
 use crate::history_window::{
     HistoryCheckpoint, HistoryCommittedTail, HistoryInheritedWindow, HistorySource,

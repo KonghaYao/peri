@@ -9,18 +9,19 @@ mod reads;
 mod writes;
 
 pub(super) use reads::{
-    active_entry_positions_statement, history_page_body_statement, history_page_bounds_statement,
-    history_page_rows_statement, history_segment_anchor_statement, history_segment_head_statement,
+    active_entry_positions_statement, active_flags_statement, history_anchor_rows_statement,
+    history_page_body_statement, history_page_bounds_statement, history_page_rows_statement,
+    history_segment_anchor_statement, history_segment_head_statement,
     history_segment_next_statement, history_segment_tail_statement, inherited_context_statement,
     page_statement_for_archive, rewind_candidate_body_statement, rewind_candidate_rows_statement,
-    select_active_messages_statement, select_children_statement, select_frozen_statement,
-    select_interrupted_tree_statement, select_message_flags_statement, select_messages_statement,
-    select_meta_statement, select_root_statement, select_session_statement, select_tree_statement,
-    select_working_tree_statement, FACT_BINDING_VERSION, FACT_FROZEN, FACT_INHERITED,
-    META_AGENT_STATUS, META_CANCEL_POLICY, META_CONFIG, META_CONTENT_SIZE,
-    META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD, META_HIDDEN, META_ID, META_MESSAGE_COUNT,
-    META_PARENT, META_SNAPSHOT_AT, META_TITLE, META_UPDATED_AT, META_WORK_STATE,
-    PAGE_BINDING_VERSION,
+    select_active_messages_statement, select_binding_statement, select_children_statement,
+    select_frozen_statement, select_interrupted_tree_statement, select_message_flags_statement,
+    select_messages_statement, select_meta_statement, select_root_statement,
+    select_session_statement, select_tree_statement, select_working_tree_statement,
+    FACT_BINDING_VERSION, FACT_FROZEN, FACT_INHERITED, META_AGENT_STATUS, META_CANCEL_POLICY,
+    META_CONFIG, META_CONTENT_SIZE, META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD,
+    META_HIDDEN, META_ID, META_MESSAGE_COUNT, META_PARENT, META_SNAPSHOT_AT, META_TITLE,
+    META_UPDATED_AT, META_WORK_STATE, PAGE_BINDING_VERSION,
 };
 pub(super) use writes::{
     commit_frozen_statement, context_usage_statement, insert_message_statement,

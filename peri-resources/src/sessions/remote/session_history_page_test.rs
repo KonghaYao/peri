@@ -117,6 +117,13 @@ pub(super) async fn remote_with_history(history: &[PersistedPayload]) -> RemoteS
 /// `None` 表示 SQL NULL：创建 API 总是写非空值，这里在建会话后用 SQL 改成 NULL，
 /// 模拟尚未持久化快照的 legacy 会话。
 async fn remote_fixture(frozen: Option<&str>, history: &[PersistedPayload]) -> RemoteSessionData {
+    remote_fixture_with_pool(frozen, history).await.0
+}
+
+async fn remote_fixture_with_pool(
+    frozen: Option<&str>,
+    history: &[PersistedPayload],
+) -> (RemoteSessionData, sqlx::PgPool) {
     // 单连接足够：每个测试自己顺序使用这条夹具，不必与全量测试集的并行度抢连接。
     let pool = crate::sessions::remote::postgres_fixture::test_pool().await;
     for statement in super::session_schema::initialization_plan() {
@@ -170,7 +177,55 @@ async fn remote_fixture(frozen: Option<&str>, history: &[PersistedPayload]) -> R
     if !history.is_empty() {
         data.append_history(&id, history).await.unwrap();
     }
-    data
+    (data, fixture_pool)
+}
+
+#[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn remote_initial_history_anchor_validates_only_the_needed_own_rows() {
+    let hidden = PersistedPayload::Message(BaseMessage::system("identity"));
+    let visible = BaseMessage::human("legacy 界\0".repeat(4000));
+    let tail = PersistedPayload::Message(BaseMessage::human("unused"));
+    let messages = [
+        hidden.clone(),
+        PersistedPayload::Message(visible.clone()),
+        tail.clone(),
+    ];
+    let (data, pool) = remote_fixture_with_pool(Some("{}"), &messages).await;
+    let id = PAGE_SESSION.to_owned();
+    sqlx::query("UPDATE messages SET message_id = upper(message_id) WHERE message_id = $1")
+        .bind(hidden.id().as_uuid().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Large legacy message bodies can carry JSON escapes unavailable to PostgreSQL jsonb.
+    sqlx::query("UPDATE messages SET role = 'system', content = $1 WHERE message_id = $2")
+        .bind(serde_json::to_string(&visible).unwrap())
+        .bind(visible.id().as_uuid().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let truncated =
+        r#"{"version":1,"type":"message","message":{"role":"user","content":"unfinished"#;
+    sqlx::query("UPDATE messages SET content = $1 WHERE message_id = $2")
+        .bind(truncated)
+        .bind(tail.id().as_uuid().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (bounds, anchor) = data.initial_history_anchor(&id).await.unwrap();
+    assert_eq!(bounds.range_head, Some(hidden.id()));
+    assert_eq!(anchor, Some(visible.id()));
+    sqlx::query("UPDATE messages SET content = $1 WHERE message_id = $2")
+        .bind(truncated)
+        .bind(visible.id().as_uuid().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        data.initial_history_anchor(&id).await.unwrap_err().kind(),
+        SessionResourceErrorKind::Corrupt { .. }
+    ));
 }
 
 #[tokio::test]
@@ -506,3 +561,36 @@ async fn remote_frozen_state_rejects_unknown_thread() {
 
 #[path = "session_archive_test.rs"]
 mod archive_tests;
+
+#[tokio::test]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn remote_transcript_restore_returns_active_own_projections() {
+    let history = messages(2);
+    let data = remote_with_history(&history).await;
+    let id = PAGE_SESSION.to_owned();
+    let truncated = MessageFlags {
+        truncated: true,
+        ..MessageFlags::default()
+    };
+    let excluded = MessageFlags {
+        excluded: true,
+        ..MessageFlags::default()
+    };
+    data.apply_message_projections(
+        &id,
+        &[
+            (history[0].id(), truncated.clone()),
+            (history[1].id(), excluded),
+        ],
+    )
+    .await
+    .unwrap();
+    let state = data.load_transcript_restore_state(&id).await.unwrap();
+    assert!(state.inherited.payloads.is_empty());
+    assert_eq!(state.own_flags, [(history[0].id(), truncated)].into());
+    let missing = data
+        .load_transcript_restore_state(&"missing-session".to_owned())
+        .await
+        .unwrap_err();
+    assert!(matches!(missing.kind(), SessionResourceErrorKind::NotFound));
+}

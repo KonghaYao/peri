@@ -44,7 +44,6 @@ fn genui_semantic_copy_skips_chrome_in_resident_and_cold_history() {
         0,
         0,
         80,
-        0,
     );
     let rendered = index.materialize(0).unwrap();
     let all_text: String = (0..rendered.len())

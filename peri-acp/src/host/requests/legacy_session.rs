@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::plugin::McpServerConfig;
-use peri_acp_types::session_resources::ActiveSessionSnapshot;
 use peri_acp_types::session_resources::BindingState;
 use peri_acp_types::session_resources::FrozenSnapshotBytes;
 use peri_acp_types::session_resources::FrozenState;
@@ -50,16 +49,16 @@ pub(super) async fn resolve_saved_workspace(
 }
 
 /// 读取接纳后的持久 frozen 字节（write-once 后唯一事实源）。
-/// 只消费 frozen：读有效视图，不加载 own 正文。
+/// 只读取 frozen 列，避免为了元数据装入历史正文。
 async fn persisted_frozen_bytes(
     resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     id: &str,
 ) -> Result<String, AcpError> {
-    let snapshot = resources
-        .load_active_snapshot(&id.to_owned())
+    let frozen = resources
+        .load_frozen_state(&id.to_owned())
         .await
         .map_err(workspace::resource_error)?;
-    match snapshot.frozen {
+    match frozen {
         FrozenState::Present(bytes) => Ok(bytes.into_string()),
         FrozenState::LegacyAbsent => Err(AcpError::new(
             -32603,
@@ -90,7 +89,7 @@ async fn drain_on_failure(
 
 /// 恢复前的 legacy 准备：已绑定会话返回 `None`。
 ///
-/// 绑定分类与 frozen 状态来自门面的一次一致读取。调用方先确认机器环境可执行（
+/// 先检查绑定，只有尚未接纳的会话才读取元数据与 write-once frozen。调用方先确认机器环境可执行（
 /// 只读存储与远端执行环境在更早的资格检查被拒，不会走到本函数）。无 frozen 的
 /// legacy 会话按保存的 cwd 接纳：先装配资源环境并读取内容，再以**定稿 frozen +
 /// binding** 作为一次 write-once 接纳；竞争输家读取 winner 字节重新定格。
@@ -105,20 +104,22 @@ pub(super) async fn prepare_for_restore(
 ) -> Result<Option<LegacyAdoption>, AcpError> {
     let resources = cfg.session_resources.clone();
     let id = session_id.to_owned();
-    // 接纳只消费 meta/binding/frozen：读有效视图，不加载 own 正文。
-    let snapshot = resources
-        .load_active_snapshot(&id)
+    let binding = resources
+        .load_session_binding(&id)
         .await
         .map_err(workspace::resource_error)?;
-    let meta = snapshot.meta.clone();
-    if matches!(snapshot.binding, BindingState::Bound(_)) {
+    if matches!(binding, BindingState::Bound(_)) {
         return Ok(None);
     }
+    let meta = resources
+        .load_session_meta(&id)
+        .await
+        .map_err(workspace::resource_error)?;
     let _ = expected_cwd;
     // 子会话的归属继承自父会话：子会话自己没有可重建的归属（父链就是它的归属
     // 证据），由父会话的已成立绑定决定它能否在本机执行。
     if let Some(parent_id) = meta.parent_thread_id.clone() {
-        return prepare_child_for_restore(cfg, &snapshot, &parent_id, effective_servers)
+        return prepare_child_for_restore(cfg, &meta, &parent_id, effective_servers)
             .await
             .map(Some);
     }
@@ -129,7 +130,11 @@ pub(super) async fn prepare_for_restore(
     // - 无 frozen 的历史会话：迁移期可能只留下没有执行证据的归组行，先按保存 cwd 的
     //   当前观测证据重建归属（幂等、可重跑）；证据不足时如实失败（历史仍可读），
     //   不静默改绑。
-    let workspace = match snapshot.frozen {
+    let frozen = resources
+        .load_frozen_state(&id)
+        .await
+        .map_err(workspace::resource_error)?;
+    let workspace = match frozen {
         FrozenState::Present(_) => resolve_saved_workspace(cfg, &meta).await?,
         FrozenState::LegacyAbsent => resources
             .relink_unbound_session(&meta.id)
@@ -137,7 +142,7 @@ pub(super) async fn prepare_for_restore(
             .map_err(workspace::resource_error)?,
     };
     let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
-    match snapshot.frozen {
+    match frozen {
         // frozen 已存在但绑定缺失：接纳只补绑定并保持既有字节（write-once），随后
         // 按 winner 字节重新定格输入（不重建、不覆盖）。未知版本的唯一错误权威是
         // 解码器（`FrozenSnapshotError::UnsupportedVersion`），存储层不表达它。
@@ -274,18 +279,17 @@ pub(super) async fn prepare_for_restore(
 /// 也不为子会话临时装配环境（子会话的冻结输入就是父的已持久字节，不需要重建）。
 async fn prepare_child_for_restore(
     cfg: &AcpServerConfig,
-    snapshot: &ActiveSessionSnapshot,
+    meta: &ThreadMeta,
     parent_id: &str,
     effective_servers: HashMap<String, McpServerConfig>,
 ) -> Result<LegacyAdoption, AcpError> {
     let resources = cfg.session_resources.clone();
-    let meta = &snapshot.meta;
     let parent_thread_id = ThreadId::from(parent_id.to_owned());
-    let parent = resources
-        .load_active_snapshot(&parent_thread_id)
+    let binding = resources
+        .load_session_binding(&parent_thread_id)
         .await
         .map_err(workspace::resource_error)?;
-    let BindingState::Bound(_) = &parent.binding else {
+    let BindingState::Bound(_) = binding else {
         return Err(workspace::workspace_error(
             WorkspaceError::UnverifiedParentBinding,
         ));
@@ -297,7 +301,11 @@ async fn prepare_child_for_restore(
         )
         .await
         .map_err(workspace::resource_error)?;
-    let parent_frozen = match parent.frozen {
+    let parent_frozen = match resources
+        .load_frozen_state(&parent_thread_id)
+        .await
+        .map_err(workspace::resource_error)?
+    {
         FrozenState::Present(bytes) => bytes,
         // 父会话有绑定却没有 frozen：没有可继承的冻结输入（绑定与 frozen 一起成立），
         // 这里如实失败，不按当前目录重冻。

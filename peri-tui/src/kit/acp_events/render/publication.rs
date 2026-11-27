@@ -12,7 +12,12 @@ use crate::kit::tui_render_unit::TuiDivider;
 use crate::kit::tui_render_unit::TuiNoteLevel;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiTodoSummary;
+use crate::kit::tui_render_unit::same_render_unit;
+
+#[path = "history_group.rs"]
+mod history_group;
 use fluent_bundle::FluentValue;
+use history_group::{group_prepended_page, rebuild_grouped_suffix};
 // These replaceable derived snapshots are committed through whole-value assignments.
 use parking_lot::Mutex;
 
@@ -41,6 +46,7 @@ const PUBLICATION_BUILD_RETRIES: usize = 3;
 /// 比对 generation，冲突就丢弃本轮构建重建（上限 [`PUBLICATION_BUILD_RETRIES`]）。
 /// 锁序恒为 `VIEW_MODELS → FOLD_OVERRIDES`，与点击一致（见 [`build_publication_snapshot`]）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    let reset = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     // ── 一次性 housekeeping：每次发布只执行一次，快照构建重试不得重复执行 ──
     super::super::subagent_preview::enforce(state);
     super::super::display_retention::enforce(state);
@@ -71,12 +77,17 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 构建段内若再嵌套 `FOLD_OVERRIDES → VIEW_MODELS` 就构成 ABBA。
     let mut build_start_generation = view_models.read().generation;
     let mut retries = 0usize;
-    loop {
+    let committed = loop {
         let (items, changed_from) = build_publication_snapshot(state);
+        let page =
+            crate::kit::message_area::history_layout::measure_page(build_start_generation, &items);
         // [测试] 构建完成、尚未取写锁——交错点可确定性地模拟并发点击。
         #[cfg(test)]
         run_publication_interleave_hook(state);
         let mut published = view_models.write();
+        if crate::kit::atoms::BRIDGE_RESET_COUNTER.get() != reset {
+            break false;
+        }
         if published.generation == build_start_generation {
             commit_publication(
                 state,
@@ -85,7 +96,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
                 changed_from,
                 build_start_generation,
             );
-            break;
+            crate::kit::message_area::history_layout::publish(published.generation, page);
+            break true;
         }
         drop(published);
         if retries >= PUBLICATION_BUILD_RETRIES {
@@ -95,6 +107,9 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
             let mut published = view_models.write();
             let fallback_start_generation = published.generation;
             let (items, changed_from) = build_publication_snapshot(state);
+            if crate::kit::atoms::BRIDGE_RESET_COUNTER.get() != reset {
+                break false;
+            }
             commit_publication(
                 state,
                 &mut published,
@@ -102,10 +117,16 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
                 changed_from,
                 fallback_start_generation,
             );
-            break;
+            crate::kit::message_area::history_layout::publish(published.generation, None);
+            break true;
         }
         retries += 1;
         build_start_generation = view_models.read().generation;
+    };
+    if !committed {
+        state.folded_history.invalidate();
+        invalidate_structural_caches();
+        return;
     }
     tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
     super::super::history_window::settle_after_publication(state);
@@ -233,6 +254,8 @@ fn commit_publication(
             generation: state.generation,
             previous_generation,
             changed_from,
+            prepend_epoch: crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
         };
     let snapshot = ViewModelsSnapshot {
         items,
@@ -332,7 +355,29 @@ pub(super) fn decorated_history(
         return (cached.decorated.clone(), cached.has_prompt);
     }
     let mut decorated = history.clone();
-    let has_prompt = insert_turn_dividers(&mut decorated, 0, false);
+    let has_prompt = if let Some((cached, end)) = cache.as_ref().and_then(|cached| {
+        crate::kit::tui_render_unit::prepended_len(&cached.raw, history).map(|end| (cached, end))
+    }) {
+        decorated.split_off(end);
+        let earlier_prompt = insert_turn_dividers(&mut decorated, 0, false);
+        let mut old = cached.decorated.clone();
+        if earlier_prompt
+            && cached.has_prompt
+            && let Some(first) = old.iter().position(is_visible_user_prompt)
+        {
+            let suffix = old.split_off(first);
+            decorated.append(old);
+            decorated.push_back(TuiRenderUnit::TuiDivider(TuiDivider {
+                label: None,
+                content_hash: 0,
+            }));
+            old = suffix;
+        }
+        decorated = crate::kit::tui_render_unit::prepend_units(decorated, old);
+        earlier_prompt || cached.has_prompt
+    } else {
+        insert_turn_dividers(&mut decorated, 0, false)
+    };
     if history.len() > 1024 {
         let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
         let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
@@ -676,26 +721,6 @@ pub(crate) fn reset_body_gap_group_cache() {
     *BODY_GAP_GROUP_CACHE.lock() = None;
 }
 
-/// 分组身份比较——变体 + content_hash；assistant 气泡补 message_id（折叠键
-/// 身份变化也必须重建组）。
-fn same_group_entry(a: &TuiRenderUnit, b: &TuiRenderUnit) -> bool {
-    if std::mem::discriminant(a) != std::mem::discriminant(b)
-        || a.content_hash() != b.content_hash()
-    {
-        return false;
-    }
-    match (a, b) {
-        (TuiRenderUnit::TuiAssistantBubble(x), TuiRenderUnit::TuiAssistantBubble(y)) => {
-            x.message_id == y.message_id
-        }
-        (TuiRenderUnit::TuiToolCard(x), TuiRenderUnit::TuiToolCard(y)) => x.tool_id == y.tool_id,
-        (TuiRenderUnit::TuiSystemReminder(x), TuiRenderUnit::TuiSystemReminder(y)) => {
-            x.reminder_id == y.reminder_id
-        }
-        _ => true,
-    }
-}
-
 /// 切点在新输入下是否仍稳定（见 [`GroupCutAnchor`]）。
 fn cut_stable(
     anchor: GroupCutAnchor,
@@ -712,52 +737,6 @@ fn cut_stable(
     }
 }
 
-/// 重建 `[input_base..]` 后缀的分组输出（追加到 `grouped`，切点追加到 `cuts`）。
-fn rebuild_grouped_suffix(
-    suffix: im::Vector<TuiRenderUnit>,
-    input_base: usize,
-    grouped: &mut im::Vector<TuiRenderUnit>,
-    cuts: &mut Vec<GroupCut>,
-    overrides: &std::collections::HashMap<FoldKey, FoldState>,
-    detail_hashes: &std::collections::HashSet<u64>,
-) {
-    // 单游标推进：正文段与过程段共享同一个迭代器，避免对每段重复 skip 开头。
-    let mut iter = suffix.iter().enumerate().peekable();
-    while let Some((offset, unit)) = iter.next() {
-        if is_body_unit(unit, detail_hashes) {
-            grouped.push_back(unit.clone());
-            // 正文逐条透传：每个边界都是稳定切点，尾部变化时可就近复用前缀。
-            cuts.push(GroupCut {
-                input: input_base + offset + 1,
-                output: grouped.len(),
-                anchor: GroupCutAnchor::AfterBody,
-            });
-            continue;
-        }
-        let mut run = vec![unit.clone()];
-        let mut consumed = offset + 1;
-        while let Some((next_offset, next)) = iter.peek() {
-            if is_body_unit(next, detail_hashes) {
-                break;
-            }
-            run.push((**next).clone());
-            consumed = next_offset + 1;
-            iter.next();
-        }
-        cuts.push(GroupCut {
-            input: input_base + offset,
-            output: grouped.len(),
-            anchor: GroupCutAnchor::AfterBody,
-        });
-        grouped.push_back(build_collapsed_group(run, overrides));
-        cuts.push(GroupCut {
-            input: input_base + consumed,
-            output: grouped.len(),
-            anchor: GroupCutAnchor::AfterGroup,
-        });
-    }
-}
-
 /// 正文空档分组：把每个「正文段落之间的连续过程单元」替换为一张折叠组。
 ///
 /// 返回分组输出的稳定前缀长度（`changed_from`）：`[0, changed_from)` 的槽位
@@ -770,12 +749,12 @@ pub(super) fn group_body_gaps(
 ) -> usize {
     let input = items.clone();
     let aux = body_gap_aux_fingerprint(overrides, detail_hashes, active_turn);
-    let cache = BODY_GAP_GROUP_CACHE.lock();
+    let mut cache = BODY_GAP_GROUP_CACHE.lock();
     let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
         Some(cached) if cached.aux == aux => {
             let common = cached.input.len().min(input.len());
             let d = (0..common)
-                .find(|&i| !same_group_entry(&cached.input[i], &input[i]))
+                .find(|&i| !same_render_unit(&cached.input[i], &input[i]))
                 .unwrap_or(common);
             if d == input.len() && d == cached.input.len() {
                 // 输入逐条一致——整段复用（O(1) 引用计数）。
@@ -783,6 +762,21 @@ pub(super) fn group_body_gaps(
                 drop(cache);
                 *items = grouped;
                 return items.len();
+            }
+            if input.len() > cached.input.len()
+                && d < common
+                && let Some((mut grouped, cuts)) =
+                    group_prepended_page(cached, &input, overrides, detail_hashes)
+            {
+                mark_working_group(&mut grouped, 0, active_turn);
+                *items = grouped.clone();
+                *cache = Some(BodyGapGroupCache {
+                    input,
+                    grouped,
+                    cuts,
+                    aux,
+                });
+                return 0;
             }
             match cached
                 .cuts
@@ -954,15 +948,21 @@ pub fn push_view_models_for_reset() {
     // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
-    *BODY_GAP_GROUP_CACHE.lock() = None;
+    invalidate_structural_caches();
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,
     };
     let view_models = VIEW_MODELS.state();
     let mut published_snapshot = view_models.write();
-    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() = Default::default();
+    *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() =
+        crate::kit::atoms::TranscriptPublication {
+            prepend_epoch: crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        };
     *published_snapshot = snapshot;
+    crate::kit::message_area::history_layout::reset();
 }
 
 use crate::kit::atoms::FOLD_OVERRIDES;

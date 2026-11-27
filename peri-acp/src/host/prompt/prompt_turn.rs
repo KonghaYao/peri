@@ -1,5 +1,6 @@
 //! Implementation of the APIs re-exported by the parent module.
 
+use super::effective_context::{ensure_resident_context, mark_reload_required};
 use super::executor;
 use super::info;
 use super::models;
@@ -323,6 +324,7 @@ pub(super) async fn run_prompt_attempt(
             {
                 return Ok(outcome::PromptOutcome {
                     response: Value::Null,
+                    unstarted: true,
                     execution_binding: None,
                 });
             }
@@ -356,18 +358,42 @@ pub(super) async fn run_prompt_attempt(
             )
             .await?;
     }
-    // 上一轮提交结果不确定时，热态只有会话身份。下一次使用前从权威存储恢复
-    // 有效上下文；恢复失败保持 ReloadRequired，不用空集合冒充“空会话”。
+    // 窗口浏览尚未读取执行正文；首次 prompt/续跑与异常恢复共用权威有效上下文。
     //
     // 放在 start/run-started 之后：续跑没有请求作用域响应，提前失败也必须由
     // `finish_early` 发出终止通知，否则调度器与 TUI 永远等不到本轮结束。
-    ensure_resident_context(
+    let Some(generation) = ensure_resident_context(
         sessions,
         &session_id,
         controller,
         session_resources.as_ref(),
     )
-    .await?;
+    .await?
+    else {
+        if let Some(run) = &input_ticket {
+            use peri_acp_types::event::EventSink;
+            TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
+                .push_done(&session_id, "cancelled", Some(&input_attempt.id))
+                .await;
+            run.mark_terminal_delivered();
+        } else {
+            notifications
+                .finish_early(&session_id, "cancelled", deployment, transport)
+                .await;
+        }
+        user_input_mailbox
+            .finish_attempt(
+                &input_attempt,
+                peri_agent::session::user_input_mailbox::UserInputAttemptOutcome::Interrupted,
+            )
+            .await;
+        input_attempt_guard.disarm();
+        return Ok(outcome::PromptOutcome {
+            response: prompt_wire_response(None, executor::PromptStopReason::Cancelled, 0)?,
+            unstarted: true,
+            execution_binding: None,
+        });
+    };
     // activation 监听器必须在移交正文**之前**建立：它是可失败的启动步骤，
     // 失败时 Host 仍持有有效上下文，下一次使用不受影响。
     if let Some(sender) = &cont_tx {
@@ -414,6 +440,12 @@ pub(super) async fn run_prompt_attempt(
             return Err(AcpError::new(
                 -32010,
                 "Session is closing before prompt execution",
+            ));
+        }
+        if state.session_generation != generation || !state.owns_effective_context() {
+            return Err(AcpError::new(
+                -32010,
+                "Session context changed before prompt execution",
             ));
         }
         state.cancel_token = Some(cancel.clone());
@@ -744,85 +776,9 @@ pub(super) async fn run_prompt_attempt(
     }
     Ok(outcome::PromptOutcome {
         response,
+        unstarted: false,
         execution_binding,
     })
-}
-
-/// ReloadRequired 热态在下次使用前从权威存储恢复有效上下文。
-///
-/// `HandedOff` 表示正文在在途执行器里，Host 不得把它当成空会话，也不能
-/// 同时再装入一份副本；此路径按“会话忙”拒绝。
-pub(in super::super) async fn ensure_resident_context(
-    sessions: &SharedSessions,
-    session_id: &str,
-    controller: &peri_controller::Controller,
-    resources: &dyn peri_acp_types::session_resources::SessionResources,
-) -> Result<(), AcpError> {
-    let (thread_id, needs_reload) = {
-        let mut sessions = sessions.lock().await;
-        let state = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        super::super::ownership::mark_stale_if_dead(state);
-        match state.context_ownership {
-            super::super::ContextOwnership::Resident => (state.thread_id.clone(), false),
-            super::super::ContextOwnership::ReloadRequired => (state.thread_id.clone(), true),
-            super::super::ContextOwnership::HandedOff => {
-                return Err(AcpError::new(
-                    -32010,
-                    "Session context is owned by an in-flight prompt",
-                ))
-            }
-        }
-    };
-    // 读取快照不能证明可写：先等待旧 mutation 结清，并检查 gate 的 sticky Unknown。
-    // Resident 也检查，防止其他持久化路径已失效而 Host 尚未收到执行结果。
-    // 不在普通 prompt 中清除 uncertainty；只有显式恢复确认后才允许重新接纳。
-    if let Err(error) = resources.drain_persistence(&thread_id).await {
-        tracing::warn!(session_id, %error, "持久化尚未结清，拒绝开始新一轮执行");
-        mark_reload_required(sessions, session_id).await;
-        return Err(AcpError::new(
-            -32010,
-            format!("Session persistence is not settled; explicit persistence recovery is required before retrying: {error}"),
-        ));
-    }
-    if !needs_reload {
-        return Ok(());
-    }
-    let payloads = crate::dispatch::load_active_session_payloads(controller, &thread_id).await?;
-    let restored_memory = {
-        let mut sessions = sessions.lock().await;
-        let mut restored_memory = None;
-        if let Some(state) = sessions.get_mut(session_id) {
-            if state.context_ownership == super::super::ContextOwnership::ReloadRequired {
-                if peri_agent::session::memory_probe::observations_enabled() {
-                    restored_memory =
-                        Some(peri_agent::session::memory_probe::payload_set_snapshot(
-                            &payloads,
-                            payloads.capacity(),
-                        ));
-                }
-                state.history_payloads = payloads;
-                state.context_ownership = super::super::ContextOwnership::Resident;
-            }
-        }
-        restored_memory
-    };
-    if let Some(snapshot) = restored_memory {
-        peri_agent::session::memory_probe::log_payload_set("host_restore", session_id, &snapshot);
-    }
-    Ok(())
-}
-
-/// 执行发起失败后把热态标记为不可继续；正文已被移交，不能凭旧副本伪造成结果。
-pub(super) async fn mark_reload_required(sessions: &SharedSessions, session_id: &str) {
-    let mut sessions = sessions.lock().await;
-    if let Some(state) = sessions.get_mut(session_id) {
-        state.history_payloads.clear();
-        state.context_ownership = super::super::ContextOwnership::ReloadRequired;
-        state.cancel_token = None;
-        super::super::history_window::invalidate(state);
-    }
 }
 
 pub(in super::super) async fn finish_prompt_turn(

@@ -652,14 +652,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         input_ticket,
     )
     .await;
-    let (result, prediction_execution) = match outcome {
-        Ok(outcome) => (Ok(outcome.response), outcome.execution_binding),
-        Err(error) => (Err(error), None),
+    let (result, prediction_execution, unstarted) = match outcome {
+        Ok(outcome) => (
+            Ok(outcome.response),
+            outcome.execution_binding,
+            outcome.unstarted,
+        ),
+        Err(error) => (Err(error), None, false),
     };
 
-    // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
-    // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
-    if matches!(&result, Ok(Value::Null)) {
+    // Attachment was superseded or the user stopped a deferred read before handoff.
+    if unstarted {
         // queued input 的 ticket 被 Stop 撤销时 attachment 返回 `Null`：停止意图已经
         // 落库，但本轮此前提交的 `working` 还留着，会让 thread 被当作可恢复工作。
         // 取消事实必须在回滚准入清除令牌之前读取。

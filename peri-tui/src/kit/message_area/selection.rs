@@ -72,6 +72,15 @@ pub(super) struct SlotLines {
 }
 
 impl SlotLines {
+    pub(super) fn from_entry(entry: &crate::kit::entry_render_cache::EntryRenderCache) -> Self {
+        (match entry.markdown_lines().stable_overlay() {
+            Some((start, stable)) => Self::composite(Arc::clone(entry.lines()), start, stable),
+            None => Self::single(Arc::clone(entry.lines())),
+        })
+        .with_genui_ranges(&entry.markdown_lines().genui_ranges)
+        .with_fold_hits(Arc::clone(entry.fold_hits()))
+    }
+
     pub(super) fn single(lines: Arc<Vec<Line<'static>>>) -> Self {
         let end = lines.len();
         Self::from_parts(vec![SlotLinePart {

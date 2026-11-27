@@ -20,13 +20,13 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
 
     // 离顶端 5 行：未贴边，不派发。
     assert!(!event::request_older_page_at_scroll_facts(
-        false, 5, 100, 20
+        false, 5, 100, 20, true
     ));
     assert!(rx.lock().try_recv().is_err(), "未贴边不派发任何请求");
 
     // 滚轮落地后 offset=0：贴向前边界，必须派发一次。
     assert!(
-        event::request_older_page_at_scroll_facts(false, 0, 100, 20),
+        event::request_older_page_at_scroll_facts(false, 0, 100, 20, true),
         "贴向前边界 → 派发取页"
     );
     let request = rx.lock().try_recv().expect("one dispatched request");
@@ -36,7 +36,7 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
     assert_eq!(request.limit, crate::kit::history_paging::PAGE_LIMIT);
     // 相同 cursor 已在途 → 后续滚动事件合并为 no-op（REQ-C01-2）。
     assert!(!event::request_older_page_at_scroll_facts(
-        false, 0, 100, 20
+        false, 0, 100, 20, true
     ));
     assert!(rx.lock().try_recv().is_err(), "在途请求只派发一次");
 }
@@ -66,6 +66,38 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     assert!(crate::kit::atoms::HISTORY_WINDOW_TX.set(tx).is_ok());
+
+    // The content-change effect keeps its original edge; only an upward gesture
+    // with spare window budget can prefetch, and the real consumer coalesces it.
+    crate::kit::atoms::HISTORY_WINDOW_PAGING
+        .state()
+        .write()
+        .before_cursor = Some("earlier".into());
+    let saved_stats = crate::kit::atoms::HISTORY_WINDOW_STATS.get();
+    crate::kit::atoms::HISTORY_WINDOW_STATS
+        .state()
+        .write()
+        .can_prefetch = false;
+    assert!(!event::prefetch_older_page_on_approach(false, 15, 100, 20));
+    crate::kit::atoms::HISTORY_WINDOW_STATS
+        .state()
+        .write()
+        .can_prefetch = true;
+    assert!(!event::prefetch_older_page_on_approach(false, 21, 100, 20));
+    assert!(!event::prefetch_older_page_on_approach(true, 15, 100, 20));
+    assert!(!crate::kit::history_paging::viewport_at_forward_boundary(
+        false, 15, 100, 20
+    ));
+    assert!(event::prefetch_older_page_on_approach(false, 15, 100, 20));
+    assert!(!event::prefetch_older_page_on_approach(false, 12, 100, 20));
+    take_before_request(&mut rx, "earlier");
+    assert!(rx.try_recv().is_err());
+    check_continued_upward_scroll(&mut rx);
+    crate::kit::atoms::HISTORY_WINDOW_STATS.set(saved_stats);
+    crate::kit::atoms::HISTORY_WINDOW_PAGING
+        .state()
+        .write()
+        .last_request_at = None;
 
     assert!(event::request_newer_page_at_scroll_facts(
         false, 80, 100, 20
@@ -183,6 +215,128 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
     crate::kit::history_page_consumer::reset_window_paging_state();
 }
 
+fn take_before_request(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::kit::history_page_consumer::WindowConsumerRequest,
+    >,
+    expected: &str,
+) -> String {
+    use crate::kit::{
+        history_page_consumer::WindowConsumerRequest, history_paging::WindowPageCursor,
+    };
+    match rx.try_recv().expect("before page request") {
+        WindowConsumerRequest::Page {
+            context,
+            cursor: WindowPageCursor::Before(cursor),
+            ..
+        } if cursor == expected => context.request_id,
+        other => panic!("expected before {expected}, got {other:?}"),
+    }
+}
+
+fn check_continued_upward_scroll(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        crate::kit::history_page_consumer::WindowConsumerRequest,
+    >,
+) {
+    use crate::kit::{atoms, history_page_consumer as consumer, history_paging};
+    use std::time::Instant;
+
+    let epoch = atoms::HISTORY_PREPEND_EPOCH.get();
+    let publication = atoms::TRANSCRIPT_PUBLICATION.get();
+    let paging = atoms::HISTORY_WINDOW_PAGING.state();
+    let scroll = || event::request_older_page_at_scroll_facts(false, 0, 100, 20, true);
+    let settle = |next: &str, returned_item: bool, displayed: bool| {
+        let in_flight = paging.read().in_flight.clone().expect("claimed before");
+        let item = history_paging::WindowPageItem {
+            source: crate::kit::history_window::HistorySource::Own,
+            entry_id: "s1:test-page-item".into(),
+            position: Some(1),
+            oversize: false,
+            sub_items: Vec::new(),
+            descriptor: None,
+            descriptor_only: false,
+        };
+        let page = history_paging::WindowPageResponse {
+            session_id: "s1".into(),
+            identity: in_flight.context.identity.clone(),
+            read_ticket: "ticket-1".into(),
+            committed_tail: None,
+            checkpoint_id: None,
+            before_cursor: Some(next.into()),
+            after_cursor: None,
+            items: returned_item.then_some(item).into_iter().collect(),
+            body_descriptors: Vec::new(),
+            descriptor_only_items: 0,
+            inherited: None,
+            inherited_unsupported: false,
+            reopen_required: false,
+        };
+        let outcome = consumer::settle_window_response(&in_flight, &page);
+        if returned_item {
+            assert!(matches!(outcome, consumer::WindowSettlement::Accepted(_)));
+            assert!(
+                !scroll(),
+                "pending publication must hold the only page slot"
+            );
+            if displayed {
+                let next_epoch = atoms::HISTORY_PREPEND_EPOCH.get().wrapping_add(1);
+                atoms::HISTORY_PREPEND_EPOCH.set(next_epoch);
+                atoms::TRANSCRIPT_PUBLICATION.state().write().prepend_epoch = next_epoch;
+            }
+            assert!(consumer::finish_window_merge(&in_flight.context.request_id) > 0);
+        } else {
+            assert_eq!(outcome, consumer::WindowSettlement::AcceptedEmpty);
+        }
+        paging.write().last_request_at = Some(Instant::now());
+    };
+    settle("before-2", true, true);
+    assert!(
+        !consumer::request_window_older_page_if_due(),
+        "idle content updates retain their cooldown"
+    );
+    assert!(!event::request_older_page_at_scroll_facts(
+        false, 0, 100, 20, false
+    ));
+    assert!(
+        scroll(),
+        "an explicit upward gesture immediately gets the new cursor"
+    );
+    take_before_request(rx, "before-2");
+    assert!(
+        !scroll(),
+        "additional gestures coalesce while the RPC is in flight"
+    );
+
+    // Each stalled path must wait, even when there is a different cursor on the wire.
+    for (next, has_item, visible) in [
+        ("before-2", true, true),
+        ("hidden", true, false),
+        ("empty", false, false),
+    ] {
+        settle(next, has_item, visible);
+        assert!(!scroll());
+        assert!(rx.try_recv().is_err());
+        paging.write().last_request_at = None;
+        assert!(scroll(), "normal retry becomes eligible after the cooldown");
+        take_before_request(rx, next);
+    }
+    let failed = paging
+        .read()
+        .in_flight
+        .as_ref()
+        .unwrap()
+        .context
+        .request_id
+        .clone();
+    consumer::fail_window_request(&failed, "transient failure", false);
+    paging.write().last_request_at = Some(Instant::now());
+    assert!(!scroll());
+    assert!(rx.try_recv().is_err());
+    atoms::HISTORY_PREPEND_EPOCH.set(epoch);
+    atoms::TRANSCRIPT_PUBLICATION.set(publication);
+}
+
 #[test]
 #[serial]
 fn test_scroll_away_from_top_does_not_dispatch() {
@@ -197,11 +351,11 @@ fn test_scroll_away_from_top_does_not_dispatch() {
 
     // 浏览态、视口离顶端很远 → 不派发。
     assert!(!event::request_older_page_at_scroll_facts(
-        false, 40, 200, 20
+        false, 40, 200, 20, true
     ));
     // 跟随态且内容超一屏（看的是尾部）→ 不派发。
     assert!(!event::request_older_page_at_scroll_facts(
-        true, 180, 200, 20
+        true, 180, 200, 20, true
     ));
     assert!(
         crate::kit::history_paging::tests::pages_channel()

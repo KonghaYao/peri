@@ -55,7 +55,10 @@ fn real_viewport_publishes_window_identity_and_survives_width_change() {
     let grid = GridSpec::grid_for(80);
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         grid,
         grid.line_width(),
@@ -64,7 +67,6 @@ fn real_viewport_publishes_window_identity_and_survives_width_change() {
         0,
         0,
         2,
-        0,
     );
     let viewport = crate::kit::atoms::WINDOW_VIEWPORT
         .state()
@@ -84,7 +86,10 @@ fn real_viewport_publishes_window_identity_and_survives_width_change() {
     let narrow = GridSpec::grid_for(40);
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         narrow,
         narrow.line_width(),
@@ -93,7 +98,6 @@ fn real_viewport_publishes_window_identity_and_survives_width_change() {
         0,
         0,
         2,
-        0,
     );
     let viewport = crate::kit::atoms::WINDOW_VIEWPORT
         .state()
@@ -125,7 +129,10 @@ fn structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes() {
     let grid = GridSpec::grid_for(80);
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         grid,
         grid.line_width(),
@@ -134,7 +141,6 @@ fn structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes() {
         0,
         0,
         2,
-        0,
     );
     assert!(transcript.retained_bytes() > 0);
 
@@ -143,7 +149,10 @@ fn structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes() {
     snapshot.generation = 2;
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         grid,
         grid.line_width(),
@@ -152,7 +161,6 @@ fn structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes() {
         0,
         0,
         2,
-        0,
     );
     assert_eq!(transcript.retained_bytes(), 0);
     assert_eq!(crate::kit::atoms::TUI_RENDER_CACHE_BYTES.get(), 0);
@@ -175,7 +183,10 @@ fn structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget() {
     let grid = GridSpec::grid_for(80);
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         grid,
         grid.line_width(),
@@ -184,7 +195,6 @@ fn structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget() {
         0,
         0,
         2,
-        0,
     );
     let old_lines =
         std::sync::Arc::downgrade(caches[0].lines.as_ref().expect("rendered slot lines"));
@@ -192,7 +202,10 @@ fn structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget() {
     crate::kit::atoms::STRUCTURAL_EPOCH.set(old_epoch + 1);
     transcript.prepare(
         &snapshot,
-        &TranscriptPublication::default(),
+        &TranscriptPublication {
+            structural_epoch: crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+            ..Default::default()
+        },
         &mut caches,
         grid,
         grid.line_width(),
@@ -201,7 +214,6 @@ fn structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget() {
         0,
         0,
         2,
-        0,
     );
     assert!(
         old_lines.upgrade().is_none(),

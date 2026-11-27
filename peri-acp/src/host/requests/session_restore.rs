@@ -17,10 +17,39 @@ use crate::host::notify;
 use crate::host::prepared::PreparedSessionInputs;
 use crate::host::workspace;
 use crate::host::workspace::BindingCheck;
-use crate::host::AcpServerConfig;
 use crate::host::SessionState;
+use crate::host::{AcpServerConfig, ContextOwnership};
 use crate::session::frozen_snapshot;
 use crate::transport::types::AcpError;
+
+/// Window browsing reads display pages from storage. Legacy load, resume and fork
+/// retain their existing eager execution-context semantics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestoreContext {
+    Immediate,
+    OnFirstPrompt,
+}
+
+impl RestoreContext {
+    /// Reconcile ownership for this restore mode and report whether the store must be read.
+    fn prepare_live_context(self, state: &mut SessionState) -> bool {
+        match state.context_ownership {
+            ContextOwnership::HandedOff => false,
+            // An explicit load after an uncertain write must still validate the stored context.
+            ContextOwnership::ReloadRequired => true,
+            ContextOwnership::Deferred => self == Self::Immediate,
+            ContextOwnership::Resident if state.history_payloads.is_empty() => {
+                // A new empty host may have received canonical writes from another producer.
+                // Defer the reconciliation until use, unless a turn already owns admission.
+                if self == Self::OnFirstPrompt && state.cancel_token.is_none() {
+                    state.context_ownership = ContextOwnership::Deferred;
+                }
+                self == Self::Immediate
+            }
+            ContextOwnership::Resident => false,
+        }
+    }
+}
 
 #[path = "legacy_session.rs"]
 mod legacy_session;
@@ -29,13 +58,15 @@ mod legacy_session;
 mod fork_shared;
 #[path = "session_restore/load_shared.rs"]
 mod load_shared;
+#[path = "session_restore/shared_preparation.rs"]
+mod shared_preparation;
 pub(crate) use fork_shared::handle_fork_shared;
-#[cfg(test)]
-pub(crate) use load_shared::rollback_restore_publication;
-#[cfg(test)]
-pub(crate) use load_shared::{cleanup_unpublished_restore, publication_test_hook};
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
-pub(crate) use load_shared::{rollback_unused_restore_publication, RestorePublication};
+#[cfg(test)]
+pub(crate) use shared_preparation::rollback_restore_publication;
+#[cfg(test)]
+pub(crate) use shared_preparation::{cleanup_unpublished_restore, publication_test_hook};
+pub(crate) use shared_preparation::{rollback_unused_restore_publication, RestorePublication};
 
 pub(crate) use session_restore_dispatch::assemble_for_recovery;
 

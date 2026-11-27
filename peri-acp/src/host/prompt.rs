@@ -20,6 +20,7 @@ use tracing::info;
 
 use peri_agent::session::exec::executor_helpers::CommandLookupFn;
 
+mod effective_context;
 mod model_factories;
 use model_factories as models;
 mod prompt_outcome;
@@ -44,7 +45,7 @@ pub(crate) use prompt_turn::approve_scheduled_trigger;
 pub(crate) use prompt_turn::run_prompt;
 
 #[cfg(test)]
-pub(super) use prompt_turn::ensure_resident_context;
+pub(super) use effective_context::ensure_resident_context;
 
 #[cfg(test)]
 pub(super) use prompt_turn::finish_prompt_turn;

@@ -12,7 +12,9 @@
 //! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
 mod download_progress;
+mod transcript;
 pub use download_progress::*;
+pub(crate) use transcript::{TRANSCRIPT_PUBLICATION, TranscriptPublication};
 
 use super::mcp;
 
@@ -71,16 +73,6 @@ pub struct ViewModelsSnapshot {
     pub items: im::Vector<TuiRenderUnit>,
     pub generation: u64,
 }
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TranscriptPublication {
-    pub(crate) generation: u64,
-    pub(crate) previous_generation: u64,
-    pub(crate) changed_from: usize,
-}
-
-pub(crate) static TRANSCRIPT_PUBLICATION: AtomStatic<TranscriptPublication> =
-    AtomStatic::new(TranscriptPublication::default);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServiceSnapshot {

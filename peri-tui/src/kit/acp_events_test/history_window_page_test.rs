@@ -212,6 +212,7 @@ fn window_page_loaded_admits_segments_and_settles_after_publication() {
             ))
     );
     assert!(state.window.pending_merge_request_id().is_some());
+    assert!(!state.window.diagnostics().can_prefetch);
     assert!(
         state
             .window
@@ -224,6 +225,10 @@ fn window_page_loaded_admits_segments_and_settles_after_publication() {
 
     super::push_view_models(&mut state);
     assert!(state.window.pending_merge_request_id().is_none());
+    assert!(
+        crate::kit::atoms::HISTORY_WINDOW_STATS.get().can_prefetch,
+        "the settled page must enable the next upward prefetch"
+    );
     let consumer = crate::kit::atoms::HISTORY_WINDOW_PAGING
         .state()
         .read()
@@ -585,6 +590,34 @@ fn before_and_after_pages_insert_at_segment_boundaries() {
     assert_eq!(state.window.displayed_entry_count(), 3);
     let spans = crate::kit::history_paging::HistorySpans::from_resident_window(&state.window);
     assert_eq!(spans.slots(), vec![(0, 1), (1, 1), (2, 1)]);
+}
+
+#[test]
+#[serial]
+fn before_page_shares_the_interior_of_a_large_committed_snapshot() {
+    let (mut state, _guard) = state_with_window();
+    let older_tail = (100..1_400)
+        .map(|position| text_item(&format!("m{position}"), position, "retained"))
+        .collect();
+    load_page(&mut state, "mid", WindowPagePlacement::Tail, older_tail);
+    let retained = state.committed.clone();
+    load_page(
+        &mut state,
+        "before",
+        WindowPagePlacement::BeforeFirst,
+        vec![text_item("m1", 1, "first"), text_item("m2", 2, "second")],
+    );
+    assert_eq!(retained.len(), 1_300);
+    assert_eq!(state.committed.len(), 1_302);
+    assert!(
+        matches!(&state.committed[0], TuiRenderUnit::TuiAssistantBubble(b) if b.text == "first")
+    );
+    assert!(
+        matches!(&state.committed[1], TuiRenderUnit::TuiAssistantBubble(b) if b.text == "second")
+    );
+    for index in [256, 640, 1_024] {
+        assert!(std::ptr::eq(&retained[index], &state.committed[index + 2]));
+    }
 }
 
 #[test]

@@ -55,7 +55,6 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         0,
         0,
         2,
-        0,
     );
     transcript.evict_to_budget(&mut caches, &(0..1), 0);
     assert!(caches[1..].iter().all(|cache| cache.lines.is_none()));
@@ -72,6 +71,7 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         generation: 4,
         previous_generation: 3,
         changed_from: 255,
+        ..Default::default()
     };
     let index = transcript.prepare(
         &snapshot,
@@ -84,7 +84,6 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         0,
         0,
         2,
-        0,
     );
     assert_eq!(transcript.scanned_slots, 256);
     // 2 个内容变化的 slot（128 / 255）+ 1 个视口补建：user 行高 1 行，
@@ -132,7 +131,6 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
         0,
         0,
         2,
-        0,
     );
     for grid in [GridSpec::grid_for(40), GridSpec::grid_for(40)] {
         transcript.evict_to_budget(&mut caches, &(0..0), 0);
@@ -149,7 +147,6 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             0,
             0,
             2,
-            0,
         );
         assert_eq!(transcript.updated_slots, snapshot.items.len());
         let mut fresh = Transcript::default();
@@ -164,7 +161,6 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             0,
             0,
             2,
-            0,
         );
         assert_eq!(current.total_visual(), expected.total_visual());
         assert_eq!(current.total_logical(), expected.total_logical());
@@ -256,7 +252,6 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         0,
         0,
         2,
-        0,
     );
     assert_eq!(old_index.slot_count(), 127);
     push_view_models_for_reset();
@@ -290,7 +285,6 @@ fn warm_frames_skip_history_and_reuse_index_for_growing_histories() {
             0,
             0,
             12,
-            0,
         );
         let warm = transcript.prepare(
             &snapshot,
@@ -303,7 +297,6 @@ fn warm_frames_skip_history_and_reuse_index_for_growing_histories() {
             0,
             0,
             12,
-            0,
         );
         assert!(Arc::ptr_eq(&old, &warm));
         assert_eq!(transcript.scanned_slots, 0);
@@ -330,7 +323,6 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         0,
         0,
         12,
-        0,
     );
     let old_text = old.materialize(127).expect("local publication and same length replacement keep old version: fixture must contain the requested entry").line(0).expect("local publication and same length replacement keep old version: fixture must contain the requested entry").to_string();
     snapshot.items.set(
@@ -342,6 +334,7 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         generation: 2,
         previous_generation: 1,
         changed_from: 127,
+        ..Default::default()
     };
     let current = transcript.prepare(
         &snapshot,
@@ -354,7 +347,6 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         0,
         0,
         12,
-        0,
     );
     assert_eq!(transcript.scanned_slots, 1);
     assert_eq!(
@@ -448,7 +440,6 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
             0,
             0,
             100,
-            0,
         );
         let TuiRenderUnit::TuiAssistantBubble(bubble) = &bridge.committed[0] else {
             panic!("expected assistant bubble");
@@ -478,7 +469,6 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
             0,
             0,
             100,
-            0,
         );
         assert_eq!(index.slot_count(), published.items.len());
         let copied = crate::kit::message_area::selection::extract_visual_range_index(
@@ -528,7 +518,6 @@ fn eviction_releases_old_frame_payload_and_cold_unicode_copy_matches_warm() {
         0,
         0,
         4,
-        0,
     );
     let old_lines = Arc::downgrade(caches[0].lines.as_ref().expect("eviction releases old frame payload and cold unicode copy matches warm: fixture must have the expected variant"));
     let end = index.total_visual().saturating_sub(1);
@@ -581,7 +570,6 @@ fn visible_oversize_exception_and_reset_are_explicit() {
         0,
         0,
         2,
-        0,
     );
     transcript.evict_to_budget(&mut caches, &(0..1), 0);
     assert!(caches[0].lines.is_some());
@@ -598,7 +586,6 @@ fn visible_oversize_exception_and_reset_are_explicit() {
         1,
         0,
         2,
-        0,
     );
     assert_eq!(empty.total_visual(), 0);
     assert_eq!(transcript.retained_bytes, 0);
@@ -630,7 +617,6 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
-        0,
     );
     let corrected = transcript.prepare(
         &snapshot,
@@ -643,7 +629,6 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
-        0,
     );
     let fresh = Transcript::default().prepare(
         &snapshot,
@@ -656,7 +641,6 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
-        0,
     );
     assert_eq!(
         corrected.total_visual(),
@@ -738,7 +722,6 @@ fn zone_step_renders_only_at_zone_boundaries() {
         0,
         0,
         2,
-        0,
     );
 
     let line_text_at = |slot: usize, index: usize| -> String {
@@ -799,7 +782,6 @@ fn brief_reply_stays_in_process_zone_without_step() {
         0,
         0,
         2,
-        0,
     );
 
     let line_text_at = |slot: usize, index: usize| -> String {
@@ -938,7 +920,6 @@ fn first_process_entry_renders_without_dangling_step() {
         0,
         0,
         2,
-        0,
     );
 
     let first_line = |slot: usize| -> String {
@@ -963,3 +944,6 @@ fn first_process_entry_renders_without_dangling_step() {
     );
     assert!(next.contains("Grep"), "实际 {next:?}");
 }
+
+#[path = "history_page_test.rs"]
+mod history_page_tests;

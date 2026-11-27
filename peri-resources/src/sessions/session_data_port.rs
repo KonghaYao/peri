@@ -18,6 +18,7 @@ use peri_acp_types::session::{
     MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqHeader, MqInput, MqReceiveOutcome,
     MqReceiveSelection, MqWatermark,
 };
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
@@ -162,6 +163,12 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
     ) -> SessionResourceResult<ActiveSessionSnapshot>;
 
+    /// Read the inherited context and active own flags in one snapshot, omitting own bodies.
+    async fn load_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<TranscriptRestoreState>;
+
     /// 轻量读取 frozen 原字节，不分页、不装入任何正文。
     ///
     /// 默认拒绝；生产后端必须覆写为单列读取，不得退化成完整/有效快照读取。
@@ -260,6 +267,20 @@ pub(crate) trait SessionDataPort: Send + Sync {
         )
     }
 
+    /// Read the browsing bounds and the first displayable active own message. When
+    /// every active own row is hidden, return the last one. Stop at the first match
+    /// without loading inherited history, archived bodies, or the active snapshot.
+    async fn initial_history_anchor(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
     /// 有界读取一段 canonical 完整历史（向前方向），语义见
     /// [`peri_acp_types::session_resources::SessionResources::load_history_segment`]。
     ///
@@ -340,6 +361,12 @@ pub(crate) trait SessionDataPort: Send + Sync {
                 peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
             ),
         )
+    }
+
+    fn own_history_body_reader(
+        &self,
+    ) -> Option<&dyn peri_acp_types::session_resources::OwnHistoryBodyReader> {
+        None
     }
 
     /// 有界正文分块；默认失败，不得退回完整历史读取。

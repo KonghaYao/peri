@@ -14,6 +14,7 @@
 //! `Transient` 表示并发写或 schema 变化使句柄失效、内容未损坏。
 
 use std::ffi::{c_char, c_int, c_void};
+use std::io::{self, BufReader, Read};
 use std::ptr;
 
 const SQLITE_OK: c_int = 0;
@@ -118,14 +119,20 @@ impl BlobReader {
 
     /// 读取 `[offset, offset + len)`，越界部分截断（不跨过列尾）。
     pub(super) fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, BlobReadError> {
-        if offset >= self.total || len == 0 {
-            return Ok(Vec::new());
-        }
-        let available = (self.total - offset).min(len as u64) as usize;
+        let available = self.total.saturating_sub(offset).min(len as u64) as usize;
         let mut buffer = vec![0u8; available];
+        self.read_into(offset, &mut buffer)?;
+        Ok(buffer)
+    }
+
+    fn read_into(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, BlobReadError> {
+        let available = self.total.saturating_sub(offset).min(buffer.len() as u64) as usize;
+        if available == 0 {
+            return Ok(0);
+        }
         let offset = i32::try_from(offset)
             .map_err(|_| BlobReadError::Corrupt("blob offset exceeds blob range"))?;
-        let len = i32::try_from(buffer.len())
+        let len = i32::try_from(available)
             .map_err(|_| BlobReadError::Corrupt("blob chunk exceeds blob range"))?;
         // SAFETY: `blob` 有效；`buffer` 可写且长度与 `len` 一致。
         let code = unsafe {
@@ -139,7 +146,22 @@ impl BlobReader {
                 _ => BlobReadError::Sqlite(code),
             });
         }
-        Ok(buffer)
+        Ok(available)
+    }
+
+    /// Sequential reader over this handle; no repeated overflow-page seeking.
+    pub(super) fn buffered_while<'a>(
+        &'a self,
+        alive: impl Fn() -> bool + 'a,
+    ) -> BufReader<impl Read + 'a> {
+        BufReader::with_capacity(
+            peri_acp_types::history_window::HISTORY_WINDOW_DEFAULT_CHUNK_SIZE as usize,
+            BlobCursor {
+                blob: self,
+                offset: 0,
+                alive,
+            },
+        )
     }
 
     /// 读取 `[offset, min(offset + len + 余量, end))`；余量只用于保证转义不被窗口截断。
@@ -151,6 +173,25 @@ impl BlobReader {
     ) -> Result<Vec<u8>, BlobReadError> {
         let total = (end - offset).min((len + MAX_ESCAPE_SPAN) as u64) as usize;
         self.read(offset, total)
+    }
+}
+
+struct BlobCursor<'a, F> {
+    blob: &'a BlobReader,
+    offset: u64,
+    alive: F,
+}
+
+impl<F: Fn() -> bool> Read for BlobCursor<'_, F> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if !(self.alive)() {
+            return Err(io::Error::other("history body inspection cancelled"));
+        }
+        let count = self.blob.read_into(self.offset, bytes).map_err(|error| {
+            io::Error::other(format!("sqlite incremental read failed: {error:?}"))
+        })?;
+        self.offset += count as u64;
+        Ok(count)
     }
 }
 

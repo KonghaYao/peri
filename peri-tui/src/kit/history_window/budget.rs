@@ -134,18 +134,21 @@ impl WindowBudget {
             .min(self.limits.body_bytes.saturating_sub(incoming_body_bytes))
     }
 
-    #[must_use]
-    pub fn has_body_capacity_for(&self, incoming_body_bytes: usize) -> bool {
-        // 已移除但未 ack 的正文仍保守占额，避免渲染侧未释放就重复接纳。
-        // 无持久身份的实时单元同样占用真实内存，必须计入上限。
+    // 渲染侧尚未确认释放的正文仍占用接纳与预取额度。
+    fn charged_body_bytes(&self) -> usize {
         self.total_resident_body_bytes()
             .saturating_add(self.pending_release_bytes)
+    }
+
+    #[must_use]
+    pub fn has_body_capacity_for(&self, incoming_body_bytes: usize) -> bool {
+        self.charged_body_bytes()
             .saturating_add(incoming_body_bytes)
             <= self.limits.body_bytes
     }
 
     pub fn can_prefetch(&self) -> bool {
-        self.total_resident_body_bytes() < self.prefetch_threshold_bytes()
+        self.charged_body_bytes() < self.prefetch_threshold_bytes()
             && self.page_reserved_bytes == 0
             && self.pending_merge_bytes == 0
     }

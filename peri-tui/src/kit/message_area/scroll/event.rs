@@ -34,12 +34,17 @@ pub(super) fn request_older_page_at_scroll_facts(
     offset: usize,
     content_length: usize,
     viewport_length: usize,
+    moving_earlier: bool,
 ) -> bool {
     use crate::kit::history_paging::viewport_at_forward_boundary;
     if !viewport_at_forward_boundary(follow_bottom, offset, content_length, viewport_length) {
         return false;
     }
-    crate::kit::history_paging::request_older_page_if_due(true)
+    if moving_earlier && crate::kit::history_page_consumer::window_path_enabled() {
+        crate::kit::history_page_consumer::request_window_older_page_on_scroll()
+    } else {
+        crate::kit::history_paging::request_older_page_if_due(true)
+    }
 }
 
 /// [REQ-C01-1] 滚动落定后的历史翻页触发口（滚动事件路径）——从 `State` 读事实，
@@ -54,6 +59,7 @@ fn request_older_page_after_scroll(
     scroll_state: &State<ScrollPos>,
     scrollbar_fields: &State<ScrollbarFields>,
     follow_bottom: &State<bool>,
+    moving_earlier: bool,
 ) -> bool {
     // 读—算—派发都在状态读锁之外（快照为每帧 render body 写入的滚动事实）。
     let fields = *scrollbar_fields.read();
@@ -62,6 +68,7 @@ fn request_older_page_after_scroll(
         scroll_state.read().offset(),
         fields.content_length,
         fields.viewport_length,
+        moving_earlier,
     )
 }
 
@@ -102,15 +109,47 @@ fn request_pages_after_scroll(
     scrollbar_fields: &State<ScrollbarFields>,
     follow_bottom: &State<bool>,
     direction: Option<crate::kit::history_window::GapSeekDirection>,
+    moving_earlier: bool,
 ) -> bool {
     let newer = request_newer_page_after_scroll(scroll_state, scrollbar_fields, follow_bottom);
     if newer {
         return true;
     }
-    let older = request_older_page_after_scroll(scroll_state, scrollbar_fields, follow_bottom);
+    let older = request_older_page_after_scroll(
+        scroll_state,
+        scrollbar_fields,
+        follow_bottom,
+        moving_earlier,
+    );
     // gap 回读需要方向：向上滚填缺口上端，向下滚填缺口下端。
     let gap = request_gap_page_after_scroll(direction);
-    older || gap
+    if older || gap || !moving_earlier {
+        return older || gap;
+    }
+    let fields = *scrollbar_fields.read();
+    prefetch_older_page_on_approach(
+        *follow_bottom.read(),
+        scroll_state.read().offset(),
+        fields.content_length,
+        fields.viewport_length,
+    )
+}
+
+/// Only upward user input may read one viewport ahead. At the edge, normal
+/// demand paging wins, even when speculative reads have exhausted their budget.
+/// View publication and idle frames never enter this path.
+pub(super) fn prefetch_older_page_on_approach(
+    follow_bottom: bool,
+    offset: usize,
+    content_length: usize,
+    viewport_length: usize,
+) -> bool {
+    !follow_bottom
+        && viewport_length > 0
+        && content_length > viewport_length
+        && offset > crate::kit::history_paging::FETCH_MARGIN_LINES
+        && offset <= viewport_length
+        && crate::kit::history_page_consumer::prefetch_window_older_page_if_due()
 }
 
 /// 视口没有可映射锚点（gap/淘汰后的占位）时，按桥接发布的 gap 目标重读。
@@ -293,6 +332,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                         scrollbar_fields,
                                         follow_bottom,
                                         None,
+                                        false,
                                     );
                                     return EventResult::Consumed;
                                 }
@@ -319,6 +359,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                         scrollbar_fields,
                                         follow_bottom,
                                         None,
+                                        false,
                                     );
                                     // 轨道点击后继续拖拽时，thumb 中心跟随鼠标。
                                     (bar.thumb_len / 2) as u16
@@ -356,6 +397,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                 scrollbar_fields,
                                 follow_bottom,
                                 None,
+                                false,
                             );
                             return EventResult::Consumed;
                         }
@@ -650,6 +692,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         scrollbar_fields,
                         follow_bottom,
                         Some(crate::kit::history_window::GapSeekDirection::After),
+                        false,
                     );
                 }
                 MouseEventKind::ScrollUp => {
@@ -664,6 +707,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         scrollbar_fields,
                         follow_bottom,
                         Some(crate::kit::history_window::GapSeekDirection::Before),
+                        true,
                     );
                 }
                 _ => {}
@@ -705,7 +749,13 @@ pub(in crate::kit::message_area) fn handle_event(
         // [TRAP] read+write 同 state 同线程冲突——write guard 已 drop 再 read。
         super::update_follow_on_scroll(follow_bottom, max_scroll, scroll_state.read().offset());
         // Ctrl+Up/Home 可以一路滚到已载入窗口顶端（REQ-C01-1）。
-        request_pages_after_scroll(scroll_state, scrollbar_fields, follow_bottom, None);
+        request_pages_after_scroll(
+            scroll_state,
+            scrollbar_fields,
+            follow_bottom,
+            None,
+            matches!(key.code, KeyCode::Up | KeyCode::Home),
+        );
         return EventResult::Consumed;
     }
     EventResult::Ignored

@@ -809,3 +809,75 @@ fn test_publication_builds_once_without_interleaved_click() {
 
     clear_interleave_fixture();
 }
+
+#[test]
+#[serial]
+fn history_page_regroups_only_the_seam_and_matches_a_cold_publication() {
+    use crate::kit::tui_render_unit::{TuiSystemNote, TuiUserBubble};
+    let mut state = super::make_fold_test_state();
+    let note = |n| {
+        TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+            text: format!("note {n}"),
+            level: TuiNoteLevel::Info,
+            content_hash: n,
+        })
+    };
+    let user = |n| TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("user {n}")));
+    state.committed = std::iter::once(note(0)).chain((1..650).map(user)).collect();
+    crate::kit::acp_events::push_view_models(&mut state);
+    let old = current_snapshot();
+    state.committed.push_front(note(700));
+    state.committed.push_front(user(700));
+    crate::kit::acp_events::push_view_models(&mut state);
+    let moved = current_snapshot();
+    // The previous head group absorbs the adjoining new note. A retained interior chunk is
+    // shared by both snapshots even beyond the 512 incremental cut hints.
+    assert!(
+        moved.items.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiCollapsedGroup(group) if group.count == 2)
+        )
+    );
+    let offset = moved.items.len() - old.items.len();
+    assert!(std::ptr::eq(&old.items[500], &moved.items[500 + offset]));
+    crate::kit::acp_events::render::reset_body_gap_group_cache();
+    crate::kit::acp_events::push_view_models(&mut state);
+    assert_eq!(moved.items, current_snapshot().items);
+    state.committed.push_back(note(701));
+    crate::kit::acp_events::push_view_models(&mut state);
+    let appended = current_snapshot();
+    crate::kit::acp_events::render::reset_body_gap_group_cache();
+    crate::kit::acp_events::push_view_models(&mut state);
+    assert_eq!(appended.items, current_snapshot().items);
+}
+
+#[test]
+#[serial]
+fn history_page_session_reset_during_publication_cannot_republish_old_rows() {
+    use crate::kit::acp_events::render;
+    use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
+    use crate::kit::tui_render_unit::TuiUserBubble;
+    let mut state = interleave_fixture();
+    let old_session = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            "old A history".repeat(1000),
+        )));
+    crate::kit::acp_events::push_view_models(&mut state);
+    assert!(render::debug_cache_lengths().1.is_some());
+    render::arm_publication_interleave_hook(&state, || {
+        crate::kit::session_boundary::project_session_boundary(Some("history-page-session-B"));
+    });
+    crate::kit::acp_events::push_view_models(&mut state);
+    let after = current_snapshot();
+    assert_eq!(after.generation, 0);
+    assert!(after.items.is_empty());
+    assert_eq!(render::debug_cache_lengths(), (None, None));
+    assert_eq!(state.folded_history.debug_cached_len(), 0);
+    assert_eq!(BRIDGE_RESET_COUNTER.get(), old_reset.wrapping_add(1));
+    render::disarm_publication_interleave_hook();
+    *ACTIVE_SESSION_ID.state().write() = old_session;
+    BRIDGE_RESET_COUNTER.set(old_reset);
+    clear_interleave_fixture();
+}

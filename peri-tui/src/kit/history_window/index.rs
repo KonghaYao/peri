@@ -159,6 +159,13 @@ impl ResidentIndex {
         self.entries.get(entry)
     }
 
+    pub(crate) fn entry_keys_in_slot_order(&self) -> impl Iterator<Item = &PersistentEntryKey> {
+        self.segment_order
+            .iter()
+            .filter_map(|segment| self.by_segment.get(segment))
+            .flatten()
+    }
+
     pub fn entries_in_slot_order(&self) -> Vec<(PersistentEntryKey, usize, usize)> {
         let mut entries: Vec<(PersistentEntryKey, usize, usize)> = self
             .entries

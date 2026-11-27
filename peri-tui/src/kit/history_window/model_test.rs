@@ -30,6 +30,63 @@ fn display_overlap_respects_adjacent_ranges_and_gaps() {
 }
 
 #[test]
+fn releasing_disjoint_entries_shifts_each_survivor_and_preserves_unmapped_gaps() {
+    let key = PersistentEntryKey::own;
+    let mut ledger = super::display::DisplayLedger::default();
+    for (id, slot, len) in [
+        ("a", 1, 2),
+        ("b", 4, 3),
+        ("c", 8, 2),
+        ("d", 10, 1),
+        ("e", 12, 2),
+    ] {
+        assert!(ledger.insert_existing_slot(key(id), slot, len));
+    }
+    ledger.insert(key("external"), Some(52));
+    ledger.insert_block(&[(key("before"), 2)], 4);
+    assert_eq!(
+        ledger.remove_entries_at(&[key("b"), key("d"), key("external")].into()),
+        [(6, 3), (12, 1)]
+    );
+    assert_eq!(
+        ledger.debug_ranges(),
+        [
+            (1, key("a"), 2),
+            (4, key("before"), 2),
+            (7, key("c"), 2),
+            (10, key("e"), 2)
+        ]
+    );
+    assert!(!ledger.contains(&key("external")));
+    assert!(ledger.remove_entries_at(&[key("b")].into()).is_empty());
+    assert_eq!(ledger.len(), 4);
+}
+
+#[test]
+fn page_placement_finds_a_resident_display_range_after_a_live_slot() {
+    let mut window = super::test_support::enabled_window(WindowLimits::default());
+    for (id, position) in [("a", 1), ("b", 2)] {
+        window
+            .register_segment(
+                super::test_support::segment(id, position, 10, 10),
+                SegmentPlacement::Tail,
+            )
+            .unwrap();
+    }
+    let a = PersistentEntryKey::own("s1:a");
+    let b = PersistentEntryKey::own("s1:b");
+    assert_eq!(window.index().entry_keys_in_slot_order().next(), Some(&a));
+    assert!(window.mark_existing_display_slot(a.clone(), 2, 1));
+    assert!(window.mark_existing_display_slot(PersistentEntryKey::own("s1:live"), 4, 1));
+    // The same live entry may own several disjoint display ranges.
+    assert!(window.mark_existing_display_slot(a.clone(), 5, 1));
+    assert!(window.mark_existing_display_slot(b.clone(), 7, 1));
+    assert_eq!(window.resident_entry_at_or_after_slot(2), Some(&a));
+    assert_eq!(window.resident_entry_at_or_after_slot(3), Some(&b));
+    assert_eq!(window.resident_entry_at_or_after_slot(8), None);
+}
+
+#[test]
 fn disposable_preview_removal_preserves_canonical_display_ranges() {
     let mut window = super::test_support::enabled_window(WindowLimits::default());
     let first = PersistentEntryKey::own("s1:first");
@@ -107,6 +164,24 @@ fn release_target_uses_watermark_and_remaining_capacity() {
     assert_eq!(window.budget().release_target_bytes(100), 750);
     assert_eq!(window.budget().release_target_bytes(400), 600);
     assert_eq!(window.budget().release_target_bytes(1_500), 0);
+}
+
+#[test]
+fn prefetch_counts_body_still_held_by_the_renderer() {
+    let mut window = super::test_support::enabled_window(WindowLimits {
+        body_bytes: 1_000,
+        ..WindowLimits::default()
+    });
+    window
+        .register_segment(segment("a", 1, 400, 400), SegmentPlacement::Tail)
+        .expect("segment");
+    assert!(window.diagnostics().can_prefetch);
+    window.record_pending_release(100, 3);
+    assert!(!window.diagnostics().can_prefetch);
+    window.ack_release_epoch(2);
+    assert!(!window.diagnostics().can_prefetch);
+    window.ack_release_epoch(3);
+    assert!(window.diagnostics().can_prefetch);
 }
 
 #[test]

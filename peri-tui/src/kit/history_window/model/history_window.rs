@@ -616,6 +616,7 @@ impl HistoryWindow {
             admission_blocked: self.stats.admission_blocked,
             stale_pages: self.stats.stale_pages,
             window_degraded: self.is_degraded(),
+            can_prefetch: self.is_enabled() && !self.is_degraded() && self.budget.can_prefetch(),
         }
     }
 

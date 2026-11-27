@@ -10,6 +10,8 @@ use crate::transport::types::AcpError;
 
 pub(in crate::host) struct PromptOutcome {
     pub response: Value,
+    /// Withdraw the admitted work intent when no executor received this turn.
+    pub unstarted: bool,
     pub execution_binding: Option<peri_acp_types::session::ExecutionBinding>,
 }
 

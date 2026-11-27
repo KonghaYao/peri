@@ -78,7 +78,6 @@ impl Harness {
             0,
             scroll_y,
             height,
-            0,
         );
         self.transcript
             .warm_visible(&self.snapshot, &mut self.caches, scroll_y, height)

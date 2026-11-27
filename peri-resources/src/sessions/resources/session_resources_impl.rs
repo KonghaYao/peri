@@ -1,5 +1,6 @@
 //! Leaf implementation for `crate::sessions::resources`.
 
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 use std::fmt::{self, Debug, Formatter};
 
 use super::oauth_credentials;
@@ -304,6 +305,13 @@ impl SessionResources for SessionResourcesImpl {
         Ok(snapshot)
     }
 
+    async fn load_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<TranscriptRestoreState> {
+        self.gate.data().load_transcript_restore_state(id).await
+    }
+
     async fn load_frozen_state(&self, id: &ThreadId) -> SessionResourceResult<FrozenState> {
         self.gate.data().load_frozen_state(id).await
     }
@@ -355,6 +363,13 @@ impl SessionResources for SessionResourcesImpl {
             .data()
             .load_history_page(id, cursor, limit, byte_budget)
             .await
+    }
+
+    async fn initial_history_anchor(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        self.gate.data().initial_history_anchor(id).await
     }
 
     async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
@@ -425,6 +440,12 @@ impl SessionResources for SessionResourcesImpl {
             .data()
             .read_history_entry_metadata(id, source, entry_id, committed_tail, read_ticket)
             .await
+    }
+
+    fn own_history_body_reader(
+        &self,
+    ) -> Option<&dyn peri_acp_types::session_resources::OwnHistoryBodyReader> {
+        self.gate.data().own_history_body_reader()
     }
 
     async fn load_history_body_chunk(

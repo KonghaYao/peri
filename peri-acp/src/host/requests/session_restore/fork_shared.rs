@@ -32,10 +32,16 @@ pub(crate) async fn handle_fork_shared(
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_owned();
     // 与 load/resume 共用准备；只有本请求 cold 发布 source 时才取得清理权。
-    let super::load_shared::PreparedShared {
+    let super::shared_preparation::PreparedShared {
         publication: source_publication,
         ..
-    } = super::load_shared::prepare_shared(params, cfg, sessions).await?;
+    } = super::shared_preparation::prepare_shared(
+        params,
+        cfg,
+        sessions,
+        super::RestoreContext::Immediate,
+    )
+    .await?;
     let source_setup: Result<_, AcpError> = async {
         let workspace = crate::host::workspace::reassert_expected(
             cfg,
@@ -85,7 +91,7 @@ pub(crate) async fn handle_fork_shared(
     let (workspace, cwd_owned, fork_source, prepared, frozen_data) = match source_setup {
         Ok(prepared) => prepared,
         Err(error) => {
-            return Err(super::load_shared::rollback_after_restore_error(
+            return Err(super::shared_preparation::rollback_after_restore_error(
                 cfg,
                 sessions,
                 source_publication.as_ref(),
@@ -95,7 +101,7 @@ pub(crate) async fn handle_fork_shared(
         }
     };
     if let Some(publication) = source_publication.as_ref() {
-        super::load_shared::rollback_restore_publication(cfg, sessions, publication).await?;
+        super::shared_preparation::rollback_restore_publication(cfg, sessions, publication).await?;
     }
     let cwd = cwd_owned.as_str();
     let (new_thread_id, published_payloads) = dispatch::fork_bound_session(
@@ -215,7 +221,7 @@ pub(crate) async fn handle_fork_shared(
         }
     };
     if let Some(mut state) = conflict {
-        super::load_shared::cleanup_unpublished_restore(
+        super::shared_preparation::cleanup_unpublished_restore(
             cfg,
             &new_session_id,
             state.environment.take(),

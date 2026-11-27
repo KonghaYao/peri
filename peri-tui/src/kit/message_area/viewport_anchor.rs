@@ -44,15 +44,8 @@
 //!    不额外补偿——夹取会把位移量悄悄改掉，反而引入第二种语义。
 //! 3. **同帧多次并入**：一帧内落了多页时，`prepare` 只按**最新**快照重定位一次
 //!    （身份重定位对「插入了多少块」不敏感，所以结果仍然正确；被折叠的是中间的诊断粒度）。
-//! 4. **跑在渲染 body 早段，快到足以「晚一帧」但不会漏配**：视口事实与快照由渲染 body
-//!    早段读入后传入 `prepare`。桥接任务若恰好在**快照读之后、并合代数读之前**推进发布，
-//!    本帧的 `published` 仍是旧发布 → 本帧不重定位；下一帧快照已是新发布、`merge_epoch_seen`
-//!    还没被推进（它只在观测到发布变化时推进）→ 正常配对，代价只是晚一帧。
-//!    反方向（代数读到新值、快照还是旧的）不需要处理：桥接侧**先推代数再发布**
-//!    （`acp_events/history_page.rs` 的 `HISTORY_PREPEND_EPOCH.set` 在 `push_view_models`
-//!    之前），所以「快照可见 = 代数可见」。**调用点必须保持「快照读早于代数读」**
-//!    （`message_area/mod.rs`：`read_render_snapshot()` 在 `HISTORY_PREPEND_EPOCH.get()`
-//!    之前）——这是本条不变量成立的唯一前提。
+//! 4. **并入代数和快照共同提交**：桥接持 `VIEW_MODELS` 写锁发布快照及其并入/释放代数，
+//!    渲染持同一读锁取得两者。先到的本地折叠沿用上次已提交代数，等实际页面发布后再重定位。
 //! 5. **锚点行落在纯展示行（turn divider）上**：divider 的内容身份是常量（`content_hash`
 //!    恒为 0、`label` 为 `None`），新窗口里出现 ≥2 枚即判歧义 → 不补偿。turn divider 投影
 //!    （`acp_events::render` 的 `insert_turn_dividers`：第 2 条起每条 prompt 前一行）
@@ -99,6 +92,7 @@ impl UnitIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ViewportAnchor {
     identity: UnitIdentity,
+    slot: usize,
     /// `scroll_y - 单元视觉起点`（≥ 0）。见模块文档第 2 条的符号约定。
     offset_within_unit: usize,
 }
@@ -116,6 +110,7 @@ impl ViewportAnchor {
         let start = index.slot_visual_start(slot)?;
         Some(Self {
             identity: identity_of(vm),
+            slot,
             offset_within_unit: scroll_y.saturating_sub(start),
         })
     }
@@ -152,6 +147,36 @@ impl ViewportAnchor {
         };
         let start = index.slot_visual_start(slot)?;
         Some(start.saturating_add(self.offset_within_unit))
+    }
+
+    /// When the measured run survives, its old slot is an exact candidate in the new
+    /// projection. Counts include duplicates outside the run (including newly added entries).
+    pub(super) fn relocate_page(
+        &self,
+        index: &SlotIndex,
+        run: crate::kit::tui_render_unit::HistoryOverlap,
+        counts: &std::collections::HashMap<WindowUnitToken, usize>,
+        caches: &[VmCacheSlot],
+    ) -> Option<usize> {
+        let token = self.window_token();
+        if counts.get(&token) != Some(&1) {
+            return None;
+        }
+        let slot = if (run.old_start..run.old_start + run.len).contains(&self.slot) {
+            run.new_start + (self.slot - run.old_start)
+        } else {
+            caches
+                .iter()
+                .position(|cache| cache.anchor_token == Some(token))?
+        };
+        self.identity
+            .is(index.canonical_items()?.get(slot)?)
+            .then_some(())?;
+        Some(
+            index
+                .slot_visual_start(slot)?
+                .saturating_add(self.offset_within_unit),
+        )
     }
 
     pub(super) fn window_token(&self) -> WindowUnitToken {

@@ -152,6 +152,7 @@ pub struct WindowInFlight {
     pub context: WindowRequestContext,
     pub kind: WindowInFlightKind,
     pub reservation: PageReservation,
+    pub(super) prepend_epoch_at_claim: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -179,6 +180,8 @@ pub struct WindowPagingState {
     pub window_generation: u64,
     pub read_ticket: Option<String>,
     pub before_cursor: Option<String>,
+    /// 上一次可见 before 页成功发布后推进到的游标。任意新请求都会消费它。
+    pub(super) scroll_before: Option<String>,
     pub after_cursor: Option<String>,
     pub in_flight: Option<WindowInFlight>,
     pub pending_merge: Option<WindowInFlight>,
@@ -327,16 +330,25 @@ pub fn build_window_page_request_for_gap(
     }
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
+    build_page_request(&mut state, gap, cursor, limit)
+}
+
+pub(super) fn build_page_request(
+    state: &mut WindowPagingState,
+    gap: Option<GapId>,
+    cursor: WindowPageCursor,
+    limit: u16,
+) -> Option<WindowConsumerRequest> {
     if state.is_degraded() {
         return None;
     }
     let identity = state.identity.clone()?;
-    let request_id = next_request_id(&mut state);
+    let request_id = next_request_id(state);
     let placement = match cursor {
         WindowPageCursor::Before(_) => WindowPagePlacement::BeforeFirst,
         WindowPageCursor::After(_) => WindowPagePlacement::Tail,
     };
-    let generation = current_window_generation(&state);
+    let generation = current_window_generation(state);
     Some(WindowConsumerRequest::Page {
         context: WindowRequestContext {
             request_id,
@@ -424,7 +436,13 @@ pub fn claim_window_request(request: &WindowConsumerRequest) -> WindowClaim {
         return WindowClaim::Disabled;
     }
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
-    let mut state = handle.write();
+    claim_request(&mut handle.write(), request)
+}
+
+pub(super) fn claim_request(
+    state: &mut WindowPagingState,
+    request: &WindowConsumerRequest,
+) -> WindowClaim {
     if request.session_id() != state.session_id.as_str() {
         return WindowClaim::Rejected(WindowClaimRejection::SessionMismatch {
             requested: request.session_id().to_string(),
@@ -515,7 +533,9 @@ pub fn claim_window_request(request: &WindowConsumerRequest) -> WindowClaim {
         context,
         kind,
         reservation,
+        prepend_epoch_at_claim: atoms::HISTORY_PREPEND_EPOCH.get(),
     };
+    state.scroll_before = None;
     state.in_flight = Some(in_flight.clone());
     state.reserved_bytes = state.reserved_bytes.saturating_add(reserved);
     state.last_request_at = Some(Instant::now());
@@ -663,6 +683,9 @@ pub fn settle_window_response(
 pub(crate) fn note_window_cursors(before: Option<String>, after: Option<String>) {
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
+    if state.before_cursor != before {
+        state.scroll_before = None;
+    }
     state.before_cursor = before;
     state.after_cursor = after.clone();
     if after.is_some() {
@@ -680,6 +703,8 @@ pub fn finish_window_merge(request_id: &str) -> usize {
     if pending.context.request_id != request_id {
         return 0;
     }
+    state.scroll_before =
+        super::triggers::published_before_cursor(&pending, state.before_cursor.as_ref());
     state.pending_merge = None;
     state.reserved_bytes = state
         .reserved_bytes
@@ -744,6 +769,7 @@ pub fn fail_window_request(request_id: &str, message: impl Into<String>, invalid
         return;
     }
     state.last_error = Some(message.clone());
+    state.scroll_before = None;
     if invalidates {
         let attempts = match &state.status {
             WindowPagingStatus::Degraded { attempts, .. } => attempts.saturating_add(1),

@@ -391,9 +391,8 @@ impl HistorySpans {
                 let Some(position) = entry.position else {
                     continue;
                 };
-                if spans.contains(&entry.key.entry_id) {
-                    continue;
-                }
+                // ResidentIndex admits each (source, entry_id) once. All entries here
+                // have the same Own source, so no second membership scan is needed.
                 let Some(locator) = window.index().locate_entry(&entry.key) else {
                     continue;
                 };
