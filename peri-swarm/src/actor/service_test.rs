@@ -715,6 +715,35 @@ async fn reject_dispatch(server: &MpscServerTransport, dispatch: RequestId) {
 }
 
 #[tokio::test]
+async fn a_missing_queue_capability_keeps_the_operation_that_failed() {
+    let Fixture {
+        service,
+        runtime,
+        server,
+        ..
+    } = fixture(false).await;
+    open_turn(&runtime, "req-1", "turn_1").await;
+    let u1 = spawn_steer(&service, steer_submission("u1", "first"));
+    let (dispatch, _, _) = reach_dispatch(&server).await;
+    server
+        .send_response(dispatch, Err(AcpError::new(-32601, "Method not found")))
+        .await
+        .expect("error sent");
+    let error = bounded(u1, "dispatch failure returns")
+        .await
+        .expect("u1 joined")
+        .expect_err("queue method is not negotiated");
+    assert_eq!(error.code(), ErrorCode::QueueUnavailable);
+    // `operation` 指向失败的方法；能力缺失放在 reason，不冒充操作名。
+    assert_eq!(error.details()["operation"], "session/input/dispatch");
+    assert_eq!(error.details()["reason"], "capability_not_negotiated");
+    assert!(
+        !error.details().to_string().contains("Method not found"),
+        "the upstream message must not be echoed: {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn aborting_after_handoff_still_rolls_back_a_dispatch_error() {
     let Fixture {
         service,

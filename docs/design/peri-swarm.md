@@ -265,8 +265,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | 持久条目 | `data` 投影 |
 | --- | --- |
 | 根会话用户消息 | `message`，`content` 为 `input_text`，`phase:null`，`status:completed` |
-| 根会话助手消息 | `message`，`content` 为 `output_text`；有 `complete:true` 时以**首条**完成帧为起点，按 `seq` 追加其后各帧的 `text`（迟到 delta 与后续完成帧），`status:completed`，缺少合法 `phase` 时用 `final_answer`。无完成帧时按 `seq` 拼接历史 delta（单帧直接取文本），缺少合法 `phase` 时为 `null`；所归属 turn 已终止时为 `incomplete`，否则为 `in_progress` |
-| `thought` | `reasoning`，`summary` 为 `summary_text`，`status:null`；优先取完成帧，否则拼接历史 delta；空文本不投影。`summary_text` 承载 Peri 的**原始** thought 文本，不是官方语义的推理摘要 |
+| 根会话助手消息 | `message`，`content` 为 `output_text`；有 `complete:true` 时取**首条**完成帧的 `text`，只追加其后（`seq` 更大）**delta** 帧的 `text`；后续完成帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）。`status:completed`，缺少合法 `phase` 时用 `final_answer`。无完成帧时按 `seq` 拼接历史 delta（单帧直接取文本），缺少合法 `phase` 时为 `null`；所归属 turn 已终止时为 `incomplete`，否则为 `in_progress` |
+| `thought` | `reasoning`，`summary` 为 `summary_text`，`status:null`；有完成帧时与助手同一规则（首条完成帧 + 其后 delta），否则拼接历史 delta；空文本不投影。`summary_text` 承载 Peri 的**原始** thought 文本，不是官方语义的推理摘要 |
 | `tool_call` / `tool_result` | `function_call` / `function_call_output`，以 `toolCallId` 作为 `call_id` 跨页关联。`title` 用作 `name`（依赖宿主把工具名写进 ACP `title`；`projection.rs` 只读该字段），`input` 或 `body` 用作 `arguments`；失败文本进 `error`，其他输出进 `output`（非字符串序列化为 JSON 文本）。同页输出状态可覆盖调用状态；无同页输出时，所属 turn 已终止（`completed`/`cancelled`/`failed`）为 `incomplete`，仍在运行为 `in_progress`，跨页仍不回填——客户端应结合同 `call_id` 的 `function_call_output` 判断真实结果。不发 `mcp_call` |
 
 `receipt`、`approval`、`tool_update`、子 agent 条目、所需帧已截断的条目、缺少工具标识
@@ -498,17 +498,26 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
 - 官方 cancel 的 `202` 沿用 `InputOutcome`，只写控制收据，不为取消本身写 item 或建
   turn。**收据在下发之后写**：只会向准入时已绑定的 slot 发送 `session/cancel`，空闲或
-  尚无 slot 时是 no-op；下发失败（ACP 拒绝或传输关闭）不留收据，返回 `503`
-  （`error.code=queue_unavailable`，`details.operation=session/cancel`），文案是“取消未
-  送达、可用同键重试”，同键重试因此可以重新受理。下发成功但宿主在等待窗口（30s）内
-  没有退出 slot 时仍是 `202`：这只表示取消已送达，不表示已取消，终态以宿主为准。
-  此时同键重放且该 turn 仍持有 slot，会**重新下发** `session/cancel` 并返回
-  `disposition=existing`，不新增 item；目标始终是受理时绑定的 turn，因此不会误取消
-  后来启动的 turn（目标 turn 已离开 slot 时重放只是 no-op）。无 live runtime 且持久
-  turn 未结束时，不写新收据，返回 `502`（`details.operation=session_resume_required`）。
-  宿主确认 `cancelled` 才按该状态落库并发送 `turn.completed`；终态仍按既有
-  `turn_ended` 规则结算该 turn 的待办。网关不把受理等同于宿主停止，也不新增
-  `turn.cancelled` 帧。
+  尚无 slot 时是 no-op；两种下发失败分开返回：
+  - 首次下发失败（ACP 拒绝或传输关闭，收据不存在或已回滚）不留收据，返回 `503`
+    （`error.code=queue_unavailable`，`details.operation=session/cancel`），文案是“取消未
+    送达、未写收据、可用同键重试”，同键重试因此可以重新受理。
+  - 同键重放的**重发**失败（收据已存在）返回 `503 cancel_redelivery_failed`
+    （`details.receipt=accepted`），文案明确“取消收据已存在，但本次重发未送达，可再次用
+    同一键重试”；不能沿用“未写收据”的首次失败措辞。
+
+  下发成功但宿主在等待窗口（30s）内没有退出 slot 时仍是 `202`：这只表示取消已送达，不表示
+  已取消，终态以宿主为准。此时同键重放且该 turn 仍持有 slot，会**重新下发**
+  `session/cancel` 并返回 `disposition=existing`，不新增 item；目标始终是受理时绑定的
+  turn，因此不会误取消后来启动的 turn（目标 turn 已离开 slot 时重放只是 no-op）。无 live
+  runtime 且持久 turn 未结束时，不写新收据，返回 `502`
+  （`details.operation=session_resume_required`）。宿主确认 `cancelled` 才按该状态落库并
+  发送 `turn.completed`；终态仍按既有 `turn_ended` 规则结算该 turn 的待办。网关不把受理
+  等同于宿主停止，也不新增 `turn.cancelled` 帧。
+- 取消重试的已知边界：重发目标表 `accepted_cancels` 是**进程内**状态，actor 重启后同键
+  重放命中持久收据并返回 `202 existing`，但不会重发 `session/cancel`；收据写入失败发生在
+  `session/cancel` 已送达之后时，已送达的取消不会回滚，同键重试可能再次下发同一取消。
+  两者只记录为边界，不引入跨进程重发或补偿事务。
 - 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
   `409 input_conflict`，恢复期间的冲突或上游故障返回对应的 409 或 502
   （`details.operation` 指向具体阶段）。turn 执行失败在流上以 `turn.failed` +
@@ -524,11 +533,14 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   - 有 live runtime 且 turn 正在运行（持有 admitted slot）：`409 turn_in_progress`，详情
     包含 `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和会话的 `POST /events`
     入口；这不改变普通用户输入的 `suggest:"steer"`；
-  - 有 live runtime 但**没有** admitted slot（`child.recovering()` 的恢复窗口，或已
-    `begin_turn` 而 slot 已释放）：同样 `409 turn_in_progress`，详情改为
+  - 有 live runtime 但**没有** admitted slot：同样 `409 turn_in_progress`，详情改为
     `suggest:"retry_later"`、`reason:"recovery_pending"`，不宣传 cancel——该状态下
-    `session/cancel` 没有可达目标，只是一次 202 no-op。只能用新的用户输入触发交互恢复
-    （或等待宿主恢复），再重试修改/删除；
+    `session/cancel` 没有可达目标，只是一次 202 no-op。两个子状态的推进方式不同：
+    `child.recovering()` 的恢复窗口里，新用户输入会等待恢复终态（最长 5s），超时同样
+    409，并让下一次输入尝试 `session/resume`，因此建议等待恢复；已 `begin_turn` 而
+    slot 已释放且不在恢复中时，新用户输入不会触发任何恢复，只会命中开放 turn 的
+    `409 turn_in_progress`（`suggest:"steer"`），只能等宿主终态落库。之后再重试
+    修改/删除；
   - 无 live runtime，但持久会话行 `state=running` 或 `swarm_turns` 仍有开放行
     （`queued`/`in_progress`/`waiting`）：`502`，`details.operation =
     "session_resume_required"`，与 `ensure_live` 的恢复拒绝一致；更新（官方 POST）

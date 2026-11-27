@@ -125,6 +125,116 @@ async fn a_cancel_that_never_reaches_the_host_writes_no_receipt() {
 }
 
 #[tokio::test]
+async fn a_failed_cancel_redelivery_reports_the_existing_receipt() {
+    set_cancel_settle_wait(Duration::from_millis(50));
+    // 首次下发成功：收据已写，取消目标已绑定。
+    let fixture = fixture(false).await;
+    fixture.runtime.turn.send_replace(running("prompt-1"));
+    let before = fixture
+        .store
+        .swarm_last_seq(LOGICAL_ID)
+        .await
+        .expect("last seq");
+    let accepted = bounded(
+        fixture
+            .service
+            .accept_input(&logical_id(), cancel_submission(CANCEL_ID)),
+        "first cancel",
+    )
+    .await
+    .expect("delivered cancel is accepted");
+    assert_eq!(accepted.outcome.disposition, Disposition::Inserted);
+    assert!(bounded(fixture.server.recv(), "first session/cancel")
+        .await
+        .is_some());
+
+    // 传输关闭后的同键重发失败：收据已存在，文案不能说“未写收据”。
+    fixture.runtime.child.close_transport();
+    let error = bounded(
+        fixture
+            .service
+            .accept_input(&logical_id(), cancel_submission(CANCEL_ID)),
+        "cancel redelivery",
+    )
+    .await
+    .expect_err("a closed transport cannot redeliver the cancel");
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert_eq!(error.code(), ErrorCode::CancelRedeliveryFailed);
+    assert!(
+        error.message().contains("receipt already exists"),
+        "{}",
+        error.message()
+    );
+    assert!(
+        !error.message().contains("no receipt"),
+        "a written receipt must not be reported as missing: {}",
+        error.message()
+    );
+    assert_eq!(error.details()["operation"], "session/cancel");
+    assert_eq!(error.details()["receipt"], "accepted");
+    assert_eq!(error.details()["reason"], "acp_error");
+    // 重发失败不删收据，同键仍可再次重试；也不新增 item。
+    assert!(fixture
+        .store
+        .swarm_get_input(LOGICAL_ID, CANCEL_ID)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        fixture
+            .store
+            .swarm_last_seq(LOGICAL_ID)
+            .await
+            .expect("last seq"),
+        before
+    );
+
+    // 传输可用时同键重发成功：202 existing，且不新增 item。
+    let fixture = super::fixture(false).await;
+    fixture.runtime.turn.send_replace(running("prompt-1"));
+    let before = fixture
+        .store
+        .swarm_last_seq(LOGICAL_ID)
+        .await
+        .expect("last seq");
+    let accepted = bounded(
+        fixture
+            .service
+            .accept_input(&logical_id(), cancel_submission(CANCEL_ID)),
+        "first cancel",
+    )
+    .await
+    .expect("delivered cancel is accepted");
+    assert_eq!(accepted.outcome.disposition, Disposition::Inserted);
+    assert!(bounded(fixture.server.recv(), "first session/cancel")
+        .await
+        .is_some());
+    let replay = bounded(
+        fixture
+            .service
+            .accept_input(&logical_id(), cancel_submission(CANCEL_ID)),
+        "cancel replay",
+    )
+    .await
+    .expect("replay");
+    assert_eq!(replay.outcome.disposition, Disposition::Existing);
+    assert!(
+        bounded(fixture.server.recv(), "re-delivered session/cancel")
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .swarm_last_seq(LOGICAL_ID)
+            .await
+            .expect("last seq"),
+        before
+    );
+    set_cancel_settle_wait(Duration::from_secs(0));
+}
+
+#[tokio::test]
 async fn a_timed_out_cancel_is_delivered_again_on_the_same_key_without_new_items() {
     let fixture = fixture(false).await;
     // 宿主收到取消但不应答终态：等待窗口到期后仍必须以 202 返回。

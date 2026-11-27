@@ -234,8 +234,9 @@ impl SessionRuntime {
 ///
 /// `suggest=cancel` is only a real entry point while an admitted slot exists:
 /// `accept_input` sends `session/cancel` only for that slot. The recovery window
-/// (`child.recovering()`) and an open turn whose slot is already gone can only
-/// be waited out or moved by a new user input, so they point at `retry_later`.
+/// (`child.recovering()`) and an open turn whose slot is already gone point at
+/// `retry_later`: the former lets the next input wait for the recovery terminal,
+/// while the latter only rejects new input until the host writes the terminal.
 fn mutation_blocked(runtime: &SessionRuntime, logical_id: &LogicalId) -> Option<SwarmError> {
     if !(runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()) {
         return None;
@@ -1128,7 +1129,7 @@ impl AcpSwarmService {
         }
         self.cancel_turn(logical_id, Some(&target))
             .await
-            .map_err(cancel_delivery_failure)?;
+            .map_err(cancel_redelivery_failure)?;
         if self.live_slot_request(logical_id).as_deref() != Some(target.as_str()) {
             self.accepted_cancels.lock().remove(&key);
         }
@@ -2316,7 +2317,13 @@ fn queue_unavailable(operation: &'static str, error: ChildError) -> SwarmError {
     tracing::warn!(operation, error = %error, "swarm input handoff failed");
     match error {
         ChildError::Rpc { code: -32601, .. } => {
-            SwarmError::queue_unavailable("capability_not_negotiated")
+            // `operation` stays the method that failed; the diagnostic names the
+            // missing capability so a client can tell it apart from a closed
+            // transport.
+            SwarmError::queue_unavailable(operation).with_details(serde_json::json!({
+                "operation": operation,
+                "reason": "capability_not_negotiated",
+            }))
         }
         ChildError::Rpc { code, .. } => {
             SwarmError::queue_unavailable(operation).with_details(serde_json::json!({
@@ -2352,6 +2359,25 @@ fn child_reason(error: &ChildError) -> &'static str {
 fn cancel_delivery_failure(error: SwarmError) -> SwarmError {
     tracing::warn!(error = %error, "swarm cancel was not delivered");
     SwarmError::cancel_not_delivered("session/cancel").with_details(error.details().clone())
+}
+
+/// 503 for a cancel replay whose `session/cancel` re-delivery failed.
+///
+/// The receipt already exists, so the first-delivery wording (“no receipt was
+/// written”) would be false; the retry still uses the same key. Delivery
+/// details (operation/RPC code/reason) stay as redacted by
+/// [`queue_unavailable`].
+fn cancel_redelivery_failure(error: SwarmError) -> SwarmError {
+    tracing::warn!(error = %error, "swarm cancel redelivery failed");
+    let details = match error.details() {
+        Value::Object(details) => {
+            let mut details = details.clone();
+            details.insert("receipt".to_owned(), json!("accepted"));
+            Value::Object(details)
+        }
+        _ => json!({ "operation": "session/cancel", "receipt": "accepted" }),
+    };
+    SwarmError::cancel_redelivery_failed("session/cancel").with_details(details)
 }
 
 #[cfg(test)]

@@ -395,19 +395,29 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
   `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和取消入口
   `POST /v1/agents/sessions/{logicalId}/events`。只有开放 turn/恢复窗口而没有 slot 时同样是
   `409 turn_in_progress`，但详情改为 `suggest:"retry_later"`、`reason:"recovery_pending"`：
-  此时 cancel 只是 202 no-op，需要新的用户输入（或宿主恢复）推进。无 live runtime 但持久行
+  此时 cancel 只是一次 202 no-op。按实际行为区分两种子状态：`child.recovering()` 为真时，
+  新用户输入会等待恢复终态（最长 5s），超时同样 409，并让下一次输入尝试 `session/resume`，
+  建议等待恢复；不在恢复中但 turn 仍开放（slot 已释放）时，新用户输入**不会触发任何恢复**，
+  只会命中开放 turn 的 `409 turn_in_progress`（`suggest:"steer"`），只能等宿主终态落库。
+  无 live runtime 但持久行
   `running` 或仍有开放 turn 行时，修改、删除、取消都返回 `502`
   （`error.code=upstream_unavailable`，`details.operation=session_resume_required`）；该状态
-  cancel 也不可达，只能用新用户输入恢复或等待宿主恢复。
+  cancel 也不可达，只能用新用户输入触发恢复或等待宿主恢复。
 - 取消请求体是 `{"events":[{"type":"agent.session.input.cancel"}]}`，不带 `input`。
   `202` 返回 `{inputId, accepted:true, disposition:"inserted"|"existing", mode:"turn", lastItemSeq}`；
-  只写控制收据，不为取消本身追加 item 或创建 turn。收据在下发**之后**写：`session/cancel`
-  送不出去时返回 `503 queue_unavailable`（`details.operation=session/cancel`，文案为“取消未
-  送达、可用同键重试”）且不留收据。空闲时受理但不作用于下一轮。下发成功但宿主 30s 内未
+  只写控制收据，不为取消本身追加 item 或创建 turn。收据在下发**之后**写，两种下发失败分开
+  返回：首次下发失败（收据不存在或已回滚）返回 `503 queue_unavailable`
+  （`details.operation=session/cancel`，文案为“取消未送达、未写收据、可用同键重试”）且不留
+  收据；同键重放的**重发**失败（收据已存在）返回 `503 cancel_redelivery_failed`
+  （`details.receipt=accepted`），文案明确“取消收据已存在，但本次重发未送达，可再次用同一键
+  重试”。空闲时受理但不作用于下一轮。下发成功但宿主 30s 内未
   退出 slot 仍是 `202`（取消已送达，不等于已取消）；此时同键重放且该 turn 仍在 slot 中会
   重新下发 `session/cancel`，返回 `disposition=existing`、不新增 item，且不会取消后来启动
   的 turn（目标 turn 已离开 slot 时重放是 no-op）。网关向已准入的 turn 发送 ACP
   `session/cancel`，宿主是否停止在途生成须看终态，不能从 `202` 推断。
+  已知边界：重发目标表 `accepted_cancels` 是进程内状态——actor 重启后同键重放命中持久收据
+  返回 `202 existing`，但不会重发 cancel；收据写入失败发生在 `session/cancel` 已送达之后时，
+  已送达的取消不会回滚，重试可能再次下发同一取消。
 - create attach：同一 `logicalId` 已存在时，省略 metadata/prompt cache 保持原值；显式不同
   值 → `409 identity_conflict`。
 - turns 在 `begin_turn` 写入 `in_progress`，终态在 `finish_turn` 更新；pending 输入不落 turn
@@ -450,7 +460,7 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 | --- | --- | --- |
 | 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
 | assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 按 `messageId` 聚合 |
-| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 按 `messageId` 聚合；最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）各帧的 `text`（迟到 delta 与后续 complete），与 `scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致 |
+| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 按 `messageId` 聚合；最终文本 = **首条** complete 的 `text` + 其后（`seq` 更大）**delta** 帧的 `text`。后续 complete 帧只是该代 delta 的累计文本，不再追加（否则两代会拼成 `hellolo`）；thought 流同一规则。与 `scripts/sdk_reconnect_idempotency_e2e.mjs` 的定义一致（首条 complete.text + 迟到 delta） |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 

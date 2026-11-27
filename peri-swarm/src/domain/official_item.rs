@@ -105,11 +105,12 @@ fn is_recovered_row(row: &ItemView) -> bool {
     row.payload.get("recovered").and_then(Value::as_bool) == Some(true)
 }
 
-/// 根会话 assistant 的完成帧。
-fn is_complete_assistant_row(row: &ItemView) -> bool {
-    row.kind == ItemKind::Message
+/// 根会话流的完成帧（assistant 消息或 thought）。
+fn is_complete_row(row: &ItemView, kind: ItemKind) -> bool {
+    row.kind == kind
         && row.source.is_root()
-        && text_field(&row.payload, "role") == Some("assistant")
+        && (kind == ItemKind::Thought
+            || (kind == ItemKind::Message && text_field(&row.payload, "role") == Some("assistant")))
         && row.payload["complete"].as_bool() == Some(true)
 }
 
@@ -162,17 +163,18 @@ impl<'a> ItemGroup<'a> {
         )
     }
 
-    /// 历史多行 assistant 的最终文本：首条完成帧的 `text` 加其后各帧的 `text`。
+    /// 历史多行根流的最终文本：首条完成帧的 `text` 加其后各 **delta** 帧的 `text`。
     ///
-    /// 完成帧写的是该次 flush 时累积的文本；同一 itemId 在 flush 之后仍可能
-    /// 追加迟到 delta，或由下一次 flush 写入只含新增文本的完成帧。只取最新完成帧
-    /// 会丢掉迟到文本，只取首条会丢掉后者，所以从首条完成帧起按 `seq` 累计。
-    /// 这是 `scripts/sdk_reconnect_idempotency_e2e.mjs` 对最终文本的定义。
+    /// 完成帧写的是该次 flush 时该代 delta 的累计文本；一次 flush 之后同一 itemId
+    /// 仍可能追加迟到 delta，并由此产生下一次 flush 的完成帧。后续完成帧只是该代
+    /// delta 的累计，不是新增文本，重复追加会拼出 `hellolo`。assistant 消息与
+    /// thought 流共用本规则。这是 `scripts/sdk_reconnect_idempotency_e2e.mjs`
+    /// 对最终文本的定义（首条 complete.text + 迟到 delta）。
     fn complete_text(&self) -> Option<String> {
         let first = self
             .rows
             .iter()
-            .find(|row| is_complete_assistant_row(row))?;
+            .find(|row| is_complete_row(row, self.selected.kind))?;
         if first.truncated {
             // 首条完成帧的正文不可得：不把残缺文本冒充完整内容。
             return None;
@@ -182,7 +184,10 @@ impl<'a> ItemGroup<'a> {
             .to_owned();
         for row in self.rows.iter().skip_while(|row| row.seq <= first.seq) {
             // 截断帧的正文不可得：跳过它，而不是把整段文本判为不可读。
-            if row.truncated || !row.source.is_root() {
+            if row.truncated
+                || !row.source.is_root()
+                || row.payload["delta"].as_bool() != Some(true)
+            {
                 continue;
             }
             if let Some(part) = text_field(&row.payload, "text") {
@@ -253,7 +258,7 @@ pub(crate) fn map_group(
         }
         ItemKind::Thought => {
             let text = if payload["complete"].as_bool() == Some(true) {
-                text()
+                group.complete_text()?
             } else {
                 group.joined_text()?
             };

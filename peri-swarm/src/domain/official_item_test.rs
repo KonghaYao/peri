@@ -74,15 +74,15 @@ fn assistant_appends_rows_after_the_first_complete_frame() {
         ),
         Some(expected)
     );
-    // 第二个完成帧只带迟到文本：同样按 seq 追加。
-    let late_complete = row(
+    // 第二次 flush 的完成帧只累计该代 delta：不再并入最终文本。
+    let second_complete = row(
         4,
         ItemKind::Message,
-        json!({"role":"assistant","text":"!","complete":true}),
+        json!({"role":"assistant","text":"lo","complete":true}),
     );
     assert_eq!(
-        project(&[complete.clone(), late_delta, late_complete], None).unwrap()["content"],
-        json!([{"type":"output_text","text":"hello!"}])
+        project(&[complete.clone(), late_delta, second_complete], None).unwrap()["content"],
+        json!([{"type":"output_text","text":"hello"}])
     );
     // 迟到帧被截断（正文不可得）：跳过它，不把完成帧文本判为不可读。
     let mut truncated = row(5, ItemKind::Message, json!({"role":"assistant","text":"?"}));
@@ -157,7 +157,15 @@ fn reasoning_joins_deltas_without_duplicating_a_complete_frame() {
         project(&[first, last, done.clone()], None),
         Some(expected.clone())
     );
-    assert_eq!(project(&[done], None), Some(expected));
+    assert_eq!(project(&[done], None), Some(expected.clone()));
+    // 与 assistant 流同一规则：首条完成帧 + 其后的 delta，后续完成帧不重复追加。
+    let first_complete = row(2, ItemKind::Thought, json!({"text":"rea","complete":true}));
+    let late_delta = row(3, ItemKind::Thought, json!({"text":"son","delta":true}));
+    let second_complete = row(4, ItemKind::Thought, json!({"text":"son","complete":true}));
+    assert_eq!(
+        project(&[first_complete, late_delta, second_complete], None),
+        Some(expected)
+    );
     assert_eq!(
         project(&[row(1, ItemKind::Thought, json!({"text":""}))], None),
         None

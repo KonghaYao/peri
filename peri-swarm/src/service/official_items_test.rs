@@ -1,8 +1,12 @@
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use super::*;
-use crate::domain::{ItemKind, ItemSource};
-use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmTurnRow};
+use crate::actor::reader::{ItemLog, TurnOutcome};
+use crate::domain::{EnvironmentRef, ItemKind, ItemSource, SessionState};
+use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore, SwarmTurnRow};
 
 async fn append(
     store: &MemorySwarmStore,
@@ -694,4 +698,97 @@ async fn many_gaps_stop_at_the_lookback_cap_and_degrade_to_items_only() {
         .unwrap()
         .iter()
         .any(|item| item["id"] == "itim_open_17"));
+}
+
+fn log_session_row() -> SwarmSessionRow {
+    SwarmSessionRow {
+        logical_id: "agent-01".into(),
+        root_session_id: "0192f0c5-0000-7000-8000-000000000001".into(),
+        actor_key: "agent/agent-01".into(),
+        cwd: "/tmp".into(),
+        state: SessionState::Idle,
+        model: None,
+        instructions: None,
+        mcp_tools: Vec::new(),
+        environment: EnvironmentRef::none(),
+        metadata: Default::default(),
+        prompt_cache_options: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        last_activity_at: "2026-01-01T00:00:00Z".into(),
+        last_item_seq: 0,
+    }
+}
+
+async fn stream_chunk(log: &ItemLog, kind: &str, message_id: &str, text: &str) {
+    log.ingest(
+        "session/update",
+        &json!({
+            "sessionId": "sess-01",
+            "update": {
+                "sessionUpdate": kind,
+                "messageId": message_id,
+                "content": { "type": "text", "text": text },
+            },
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn multi_generation_streams_project_the_first_completion_plus_late_deltas() {
+    // 真实写入器形状（`ItemLog` + `MemorySwarmStore`）：
+    //   delta "hel" → complete "hel"（第一次 flush）→
+    //   delta "lo"（迟到 chunk，保留同一 itemId）→ complete "lo"（第二次 flush）
+    // 第二次 complete 是该代 delta 的累计文本，不是新增文本；再追加会拼出 "hellolo"。
+    let store = Arc::new(MemorySwarmStore::new());
+    store
+        .swarm_upsert_session(log_session_row())
+        .await
+        .expect("session row");
+    let log = ItemLog::new(
+        "agent-01",
+        Arc::clone(&store) as Arc<dyn SwarmStore>,
+        tokio::sync::broadcast::channel(64).0,
+        Arc::new(AtomicU64::new(0)),
+    );
+    let (_, opener) = log
+        .record_user_input(Some("input-1"), "hi")
+        .await
+        .expect("user item");
+    let turn_id = turn_id_for_item(&opener);
+    for (message, thought) in [("hel", "rea"), ("lo", "son")] {
+        // 每代 flush 前先进入该代 turn：同一 messageId 复用同一 itemId。
+        log.begin_turn("prompt-1", &turn_id).await.expect("turn");
+        stream_chunk(&log, "agent_message_chunk", "msg-1", message).await;
+        stream_chunk(&log, "agent_thought_chunk", "msg-2", thought).await;
+        log.finish_turn("prompt-1", TurnOutcome::Completed("end_turn".into()))
+            .await;
+    }
+
+    let page = page(&store, ItemOrder::Asc, None, 20).await;
+    let data = page["data"].as_array().expect("data");
+    let message = data
+        .iter()
+        .find(|item| item["type"] == "message" && item["role"] == "assistant")
+        .expect("assistant projection");
+    assert_eq!(
+        message["content"],
+        json!([{ "type": "output_text", "text": "hello" }])
+    );
+    let reasoning = data
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("reasoning projection");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{ "type": "summary_text", "text": "reason" }])
+    );
+    // items 仍是逐帧原始行：两代各一条 delta 与一条 complete，共享同一 itemId。
+    let frames = page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|row| row["itemId"] == message["id"])
+        .count();
+    assert_eq!(frames, 4);
 }
