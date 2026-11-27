@@ -184,7 +184,7 @@ async fn remote_fixture_with_pool(
 #[ignore = "requires PERI_TEST_POSTGRES_URL"]
 async fn remote_initial_history_anchor_validates_only_the_needed_own_rows() {
     let hidden = PersistedPayload::Message(BaseMessage::system("identity"));
-    let visible = BaseMessage::human("legacy 界\0".repeat(4000));
+    let visible = BaseMessage::human("visible");
     let tail = PersistedPayload::Message(BaseMessage::human("unused"));
     let messages = [
         hidden.clone(),
@@ -198,9 +198,11 @@ async fn remote_initial_history_anchor_validates_only_the_needed_own_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    // Large legacy message bodies can carry JSON escapes unavailable to PostgreSQL jsonb.
+    // The first user message supplies the PostgreSQL TEXT title. Inject the escaped
+    // legacy body into its TEXT column after the ordinary append has set that title.
+    let legacy = BaseMessage::human("legacy 界\0".repeat(4000)).with_message_id(visible.id());
     sqlx::query("UPDATE messages SET role = 'system', content = $1 WHERE message_id = $2")
-        .bind(serde_json::to_string(&visible).unwrap())
+        .bind(serde_json::to_string(&legacy).unwrap())
         .bind(visible.id().as_uuid().to_string())
         .execute(&pool)
         .await
