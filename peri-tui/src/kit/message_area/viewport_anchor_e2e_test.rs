@@ -481,3 +481,69 @@ fn a20_e2e_insert_between_grouped_tool_cards_keeps_the_anchored_unit_screen_row(
         "锚点上方内容变高 → 目标偏移必须增大"
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn prepending_short_prompts_keeps_the_same_divider_and_three_row_wheel_delta() {
+    let token = "short-divider";
+    let mut state = browsing_state(token);
+    seed_own_entry(&mut state, "s1:latest", 200, "继续");
+    dispatch_landing_page(
+        &mut state,
+        token,
+        page(
+            token,
+            Some("older"),
+            vec![
+                ("s1:first", 140, vec![sub(0, user_update("继续"))]),
+                ("s1:second", 150, vec![sub(0, user_update("继续"))]),
+                ("s1:target", 160, vec![sub(0, user_update("继续"))]),
+            ],
+        ),
+    );
+    let older: Vec<_> = (0..50).map(|n| format!("s1:old-{n}")).collect();
+    let incoming = page(
+        token,
+        None,
+        older
+            .iter()
+            .enumerate()
+            .map(|(n, id)| (id.as_str(), n as u64, vec![sub(0, user_update("继续"))]))
+            .collect(),
+    );
+    // Old projection: first, divider, second, divider, target, divider, latest.
+    let probe = publish_then_relocate(&mut state, token, 3, 0, incoming);
+    let target_slot = |index: &SlotIndex| {
+        index.canonical_items().unwrap().iter().position(|unit| {
+            matches!(unit, TuiRenderUnit::TuiUserBubble(bubble) if bubble.message_id.as_deref() == Some("target"))
+        }).unwrap()
+    };
+    let old = target_slot(&probe.before);
+    let new = target_slot(&probe.after);
+    assert_eq!(old, 4);
+    assert_eq!(
+        new - old,
+        100,
+        "each short prompt adds a bubble and a divider"
+    );
+    assert!(matches!(
+        probe.after.canonical_items().unwrap()[new - 1],
+        TuiRenderUnit::TuiDivider(_)
+    ));
+    assert_eq!(
+        probe
+            .after
+            .visual_lookup(probe.target())
+            .unwrap()
+            .slot_index,
+        new - 1
+    );
+    for delta in [-3, 0, 3] {
+        let scroll = probe.scroll_y.saturating_add_signed(delta);
+        let compensated = probe.relocation.target_for(false, scroll).unwrap();
+        assert_eq!(
+            probe.screen_row(&probe.before, old, scroll),
+            probe.screen_row(&probe.after, new, compensated)
+        );
+    }
+}
