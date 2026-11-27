@@ -241,6 +241,7 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 | F-SWARM-014 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official_item.rs)、[投影](../../peri-swarm/src/service/official_items.rs)；[测试](../../peri-swarm/src/domain/official_item_test.rs)、[投影用例](../../peri-swarm/src/service/official_items_test.rs)、[分页](../../peri-swarm/tests/it/items_pagination_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；补充证据见下方官方 items 组分页验收；缺口：真实 SDK 只消费过消息项 | 四类官方投影、恢复行排除、悬挂调用状态、游标与回扫上限由用例覆盖；真实 `/items` 为 `raw=3 official=3` |
 | F-SWARM-015 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/request.rs)、[受理](../../peri-swarm/src/actor/service.rs)、[错误](../../peri-swarm/src/domain/error.rs)；[测试](../../peri-swarm/tests/it/http_contract/official_cancel.rs)、[actor 取消](../../peri-swarm/src/actor/service_cancel_test.rs)、[flush 失败](../../peri-swarm/src/actor/reader_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：真实宿主 30s 取消超时与重发失败的上游行为未验证；取消 turn 落库失败只记录日志 | 事件解析、202 收据、两类下发失败、管理冲突与取消 turn 保持 `cancelled` 由用例覆盖；真实宿主未跑 |
 | F-SWARM-016 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official.rs)、[实时](../../peri-swarm/src/actor/reader.rs)、[回放](../../peri-swarm/src/service/mod.rs)；[测试](../../peri-swarm/src/actor/reader_test.rs)、[回放用例](../../peri-swarm/src/service/in_memory_test.rs)、[历史多行](../../peri-swarm/src/actor/service_test.rs)；[证据](peri-swarm-official-text-delta-2026-11-26.md)；缺口：reasoning delta 未实现；回放无 chunk 边界；历史同 itemId 多条 complete 行未测；added 首段去重未用真实客户端验证；关闭-广播窄竞态未复现 | 实时 85 chunk / 回放 1 条 336 字符全文 delta 在本地 Compose 单 turn 实测；`72c10cfe9` 上 lib 421 / it 115 / 27 ignored 与 PG 20 通过；未验证项不构成验收 |
+| F-SWARM-017 | 源码存在 | [契约](../design/peri-swarm-dashboard.md) | [源码](../../peri-swarm/dashboard/src/main.rs)、[状态机](../../peri-swarm/dashboard/src/app.rs)、[HTTP 客户端](../../peri-swarm/dashboard/src/api.rs)；[测试](../../peri-swarm/dashboard/src/app_test.rs)、[配置](../../peri-swarm/dashboard/src/config_test.rs)、[API](../../peri-swarm/dashboard/src/api_test.rs)、[鼠标命中](../../peri-swarm/dashboard/src/ui/mouse_test.rs)、[live smoke（ignored）](../../peri-swarm/dashboard/tests/live_gateway.rs)；缺口：人工 TUI 走查未覆盖发送、审批、退出登录；自动 live smoke 只覆盖只读 health + 列表；无像素快照；500 条上限与长时间轮询未压测；真实 401/409/502 信封未验证。见下节补充验收 | crate check/test/clippy/fmt 与静态门通过；187 passed / 0 failed / 1 ignored；真实网关只读 live smoke 通过；真实 pty 人工走查列表/设置/详情/标签点击与一次 create/edit/delete 通过，发现并修复详情页标签点击偏移（回归测试覆盖） |
 
 ### PR #614 Swarm 补充验收
 
@@ -284,3 +285,49 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 ### F-TASK-001 补充验收
 
 基线为 `a2c0149` 加本次补丁。在受控本地文件和网页工具上，Luna 将 14/14 个调查委派给 explorer，另 4/4 个已知位置查询或改代码的对照任务均选对执行者。四个交付任务覆盖本地追踪、网页查证、混合核对和网页不可用。首次 3/4 满足取证要求，同一子会话补回混合核对的源码定位后达到 4/4。该模拟未测生产流量、实际联网或后台任务生命周期。
+
+### F-SWARM-017 补充验收
+
+基线为 `b9fd1a293` 加 `feat/peri-swarm-dashboard` 的未提交变更。本行覆盖
+`peri-swarm-dashboard` crate 的自动检查、一次真实网关只读冒烟，以及一次真实 pty 上的
+人工 TUI 端到端走查。
+
+```bash
+./scripts/cargo-rmcp-patched.sh check --locked -p peri-swarm-dashboard --all-targets
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm-dashboard
+./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm-dashboard --all-targets -- -D warnings
+cargo fmt --check
+bash scripts/check-layer-imports.sh
+python3 scripts/check-feature-catalog.py
+bash scripts/check-file-size.sh
+git diff --check
+```
+
+结果：check/clippy/fmt/layer-imports/catalog/diff 通过；crate 测试 187 passed / 0 failed /
+1 ignored（`tests/live_gateway.rs`）。`bash scripts/check-file-size.sh` 在 `PATH` 缺少 `rg`
+时无法启动；注入 VS Code 自带 ripgrep 后退出 1，67 个超限文件全部为仓库既有文件，本次
+新增/修改文件均低于 1000 行（最大 993 行）。
+
+真实网关只读冒烟（2026-11-27）：对本地 Compose 网关 `http://127.0.0.1:8080`，从
+`deploy/.env` 读取凭据且全程不打印 key，运行
+`cargo test -p peri-swarm-dashboard --test live_gateway -- --ignored`。
+`health_then_list_sessions` 通过（1 passed / 0 failed）：`GET /healthz` 返回 `ok`，
+携带 Bearer 的 `GET /v1/agents/sessions?limit=1` 成功，`x-peri-swarm-contract` 为 `1`。
+该冒烟未执行任何写操作，也未覆盖真实 401/409/502 信封。
+
+人工 TUI 端到端走查（2026-11-27）：真实 pty（tmux 140×40，独立
+`HOME=/tmp/peri-dash-e2e`）连接同一网关。首启 onboarding 预填 Base URL，API key 粘贴后
+显示为掩码且未出现在抓屏中，提交后配置目录 `0700`/文件 `0600` 并进入 dashboard；列表
+显示真实 8 条会话与状态 chips，Settings 的 `[ Test connection ]` 返回
+“Connection OK in 4 ms”。鼠标切换侧栏、打开会话详情、点击 Timeline/Turns/Info 均生效，
+键盘 Left/Right 仍可循环。写路径经 `[ Create ]` 创建 `e2e-check-2711`，用编辑表单把
+model 改为 `stub-model` 并生效，`[ Delete ]` 确认覆盖层外点击被吞掉，删除成功后再次
+查询列表确认该会话不存在（8 条，计数 0）。走查发现详情页标签点击区域相对绘制文字左移
+（`Info` 偏移 5 列而不可点击），已修复为与 `Tabs` 渲染一致的 1 列左内边距和 5 列标签
+间距，新增回归测试 `tab_hit_regions_cover_the_drawn_labels`，并在真实终端按可见标签
+首列点击 Info/Turns/Timeline 复验通过。
+
+明确缺口：自动 live smoke 只覆盖只读 health + 列表，写路径仅有上述一次人工
+create/edit/delete 记录；未人工走查发送消息、审批与退出登录；没有像素快照；500 条上限
+与长时间轮询未压测；真实 401/409/502 信封未验证；未做 release 构建。以上缺口不构成
+验收。

@@ -51,6 +51,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 | Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
 | Peri SDK Chat | [peri-sdk-chat.md](peri-sdk-chat.md) | `ChatManager`/`ChatService`/`ChatUserAction`/`PeriInstance`/`ChatView` 与 `ChatReplica` 的职责、事实/同步、宿主与关闭边界；公开入口见 [TS SDK 索引](../code-index/peri-ts-sdk.md) |
+| Swarm 管理 TUI | [peri-swarm-dashboard.md](peri-swarm-dashboard.md) | 单网关 HTTP 客户端的终端管理面：凭据引导、会话日志/详情与动作、设置；11 个空页显式说明能力边界 |
 
 ## 已批准目标设计
 
