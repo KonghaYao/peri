@@ -1,0 +1,455 @@
+//! Shared rendering helpers built on `peri-tui-components` and `ratatui`.
+//!
+//! Buttons, colors and scroll behavior come from the shared components. The
+//! single-line field is rendered locally because the shared text area is
+//! multi-line and cannot mask a secret.
+//!
+//! Every helper draws into a [`Buffer`] rather than a [`ratatui::Frame`] so a
+//! page can be rendered into an off-screen buffer, measured, and then blitted
+//! through the scroll offset of the most recent frame.
+
+use std::sync::OnceLock;
+
+use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::button::{
+    button_visual, ButtonChrome, ButtonSpec, ButtonState, ButtonTone, ButtonVisual,
+};
+use peri_tui_components::text::{truncate_to_width, wrap_by_width};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph, Row, Table, Tabs, Widget, Wrap};
+
+use crate::text_field::TextField;
+
+/// Label column width for label/value rows.
+pub const LABEL_WIDTH: u16 = 20;
+
+/// Dashboard theme. A single built-in dark theme keeps the shell deterministic.
+pub fn theme() -> &'static ThemeDefinition {
+    static THEME: OnceLock<ThemeDefinition> = OnceLock::new();
+    THEME.get_or_init(peri_theme::builtin::dark_theme)
+}
+
+/// Page and section titles.
+#[must_use]
+pub fn title_style() -> Style {
+    Style::default()
+        .fg(theme().semantic.text.primary)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Section headings.
+#[must_use]
+pub fn section_style() -> Style {
+    Style::default()
+        .fg(theme().semantic.accent)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Secondary body text.
+#[must_use]
+pub fn muted_style() -> Style {
+    Style::default().fg(theme().semantic.text.muted)
+}
+
+/// Low-emphasis hints.
+#[must_use]
+pub fn dim_style() -> Style {
+    Style::default().fg(theme().semantic.text.dim)
+}
+
+/// Error text.
+#[must_use]
+pub fn error_style() -> Style {
+    Style::default().fg(theme().semantic.status.error)
+}
+
+/// Warning text.
+#[must_use]
+pub fn warning_style() -> Style {
+    Style::default().fg(theme().semantic.status.warning)
+}
+
+/// Success text.
+#[must_use]
+pub fn success_style() -> Style {
+    Style::default().fg(theme().semantic.status.success)
+}
+
+/// Selected sidebar row.
+#[must_use]
+pub fn selected_style() -> Style {
+    Style::default()
+        .fg(theme().semantic.accent)
+        .bg(theme().semantic.surface.selection)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Border color for a focused or idle field/panel.
+#[must_use]
+pub fn border_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(theme().semantic.border.active)
+    } else {
+        Style::default().fg(theme().semantic.border.default)
+    }
+}
+
+/// Semantic status colors for chips and dots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusTone {
+    /// Healthy/success.
+    Ok,
+    /// Degraded/warning.
+    Warning,
+    /// Failure.
+    Error,
+    /// Unknown/muted.
+    Muted,
+}
+
+/// Style for a status tone.
+#[must_use]
+pub fn tone_style(tone: StatusTone) -> Style {
+    match tone {
+        StatusTone::Ok => success_style(),
+        StatusTone::Warning => warning_style(),
+        StatusTone::Error => error_style(),
+        StatusTone::Muted => muted_style(),
+    }
+}
+
+/// Decimal health/status dot.
+#[must_use]
+pub fn status_dot(tone: StatusTone) -> Span<'static> {
+    Span::styled("●", tone_style(tone))
+}
+
+/// A dot plus a label.
+#[must_use]
+pub fn status_chip(label: &str, tone: StatusTone) -> Line<'static> {
+    Line::from(vec![
+        status_dot(tone),
+        Span::raw(" "),
+        Span::styled(label.to_owned(), tone_style(tone)),
+    ])
+}
+
+/// A vertical cursor over a rectangular content area.
+///
+/// Rows are handed out top to bottom. The rectangle handed back is clipped to
+/// the area, but the cursor advances by the requested height so a caller can
+/// measure content that extends past a small terminal.
+///
+/// A windowed cursor ([`Rows::window`]) keeps the full content height for
+/// scrolling while drawing only the visible slice: content row `scroll` lands
+/// on buffer row `margin`, and rows outside `scroll..scroll + height` are
+/// handed back empty. The leading margin lets a block that starts just above
+/// the viewport still be drawn from its first line and be clipped by the blit.
+#[derive(Clone, Copy, Debug)]
+pub struct Rows {
+    area: Rect,
+    y: u16,
+    window: Option<Window>,
+}
+
+/// Visible slice of a scrolling page.
+#[derive(Clone, Copy, Debug)]
+struct Window {
+    /// First content row shown below the leading margin.
+    scroll: u16,
+    /// Scratch rows reserved above the viewport.
+    margin: u16,
+    /// Viewport height in rows.
+    height: u16,
+}
+
+impl Rows {
+    /// Start at the top of `area`.
+    #[must_use]
+    pub fn new(area: Rect) -> Self {
+        Self {
+            area,
+            y: area.y,
+            window: None,
+        }
+    }
+
+    /// Start a scrolling page: content row `scroll` is drawn at buffer row
+    /// `margin`, with `height` viewport rows below it.
+    #[must_use]
+    pub fn window(area: Rect, scroll: u16, margin: u16, height: u16) -> Self {
+        Self {
+            area,
+            y: area.y,
+            window: Some(Window {
+                scroll,
+                margin,
+                height,
+            }),
+        }
+    }
+
+    /// Total height used so far, relative to the area top.
+    #[must_use]
+    pub fn used(&self) -> u16 {
+        self.y.saturating_sub(self.area.y)
+    }
+
+    /// Remaining width.
+    #[must_use]
+    pub fn width(&self) -> u16 {
+        self.area.width
+    }
+
+    /// Allocate `height` rows.
+    pub fn take(&mut self, height: u16) -> Rect {
+        let top = self.y;
+        self.y = self.y.saturating_add(height);
+        let Some(window) = self.window else {
+            let available = self.area.bottom().saturating_sub(top);
+            let visible = height.min(available);
+            return Rect::new(self.area.x, top, self.area.width, visible);
+        };
+        let bottom = top.saturating_add(height);
+        let view_end = window.scroll.saturating_add(window.height);
+        if height == 0 || bottom <= window.scroll || top >= view_end {
+            return Rect::new(self.area.x, 0, self.area.width, 0);
+        }
+        let draw_y = i32::from(top) - i32::from(window.scroll) + i32::from(window.margin);
+        if draw_y < 0 {
+            // Only a block taller than the leading margin can start this far
+            // above the viewport; fall back to its visible tail.
+            let hidden = u16::try_from(-draw_y).unwrap_or(u16::MAX);
+            if hidden >= height {
+                return Rect::new(self.area.x, 0, self.area.width, 0);
+            }
+            return Rect::new(self.area.x, 0, self.area.width, height - hidden);
+        }
+        let draw_y = u16::try_from(draw_y).unwrap_or(u16::MAX);
+        Rect::new(self.area.x, draw_y, self.area.width, height)
+    }
+
+    /// Allocate one row.
+    pub fn line(&mut self) -> Rect {
+        self.take(1)
+    }
+
+    /// Advance without drawing.
+    pub fn skip(&mut self, height: u16) {
+        self.y = self.y.saturating_add(height);
+    }
+}
+
+/// Width of a bracketed button label, including the space padding.
+#[must_use]
+pub fn button_width(label: &str) -> u16 {
+    let text = ButtonChrome::Bracketed { padded: true }.text(label);
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+}
+
+/// A button rectangle clamped to the row it is placed on.
+#[must_use]
+pub fn button_rect(row: Rect, x: u16, label: &str) -> Rect {
+    let width = button_width(label).min(row.right().saturating_sub(x));
+    let height = if row.height == 0 { 0 } else { 1 };
+    Rect::new(x, row.y, width, height)
+}
+
+/// Render a bracketed button, using the shared component for text and style.
+pub fn render_button(buf: &mut Buffer, rect: Rect, label: &str, focused: bool, tone: ButtonTone) {
+    if rect.is_empty() {
+        return;
+    }
+    let spec = ButtonSpec {
+        label,
+        chrome: ButtonChrome::Bracketed { padded: true },
+        tone,
+        state: if focused {
+            ButtonState::Focused
+        } else {
+            ButtonState::Normal
+        },
+    };
+    let ButtonVisual { text, style, .. } = button_visual(spec, theme());
+    let text = truncate_to_width(&text, usize::from(rect.width));
+    buf.set_string(rect.x, rect.y, text, style);
+}
+
+/// Render a single-line text field with a block, optional masking, and a caret.
+///
+/// Returns the caret position in buffer coordinates when the field is focused.
+pub fn render_field(
+    buf: &mut Buffer,
+    rect: Rect,
+    field: &TextField,
+    focused: bool,
+    masked: bool,
+    placeholder: &str,
+) -> Option<Position> {
+    if rect.is_empty() {
+        return None;
+    }
+    let block = Block::bordered().border_style(border_style(focused));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+    if inner.is_empty() {
+        return None;
+    }
+    let display = field.display(inner.width, masked);
+    if display.text.is_empty() {
+        if !placeholder.is_empty() {
+            Paragraph::new(truncate_to_width(placeholder, usize::from(inner.width)))
+                .style(dim_style())
+                .render(inner, buf);
+        }
+    } else {
+        Paragraph::new(display.text)
+            .style(title_style())
+            .render(inner, buf);
+    }
+    if focused {
+        Some(Position::new(
+            inner.x.saturating_add(display.caret_col),
+            inner.y,
+        ))
+    } else {
+        None
+    }
+}
+
+/// Label/value row used by Settings and placeholder pages.
+pub fn render_label_value(
+    buf: &mut Buffer,
+    area: Rect,
+    label: &str,
+    value: &str,
+    value_style: Style,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let columns = Layout::horizontal([
+        Constraint::Length(LABEL_WIDTH.min(area.width)),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    Paragraph::new(label)
+        .style(muted_style())
+        .render(columns[0], buf);
+    if !columns[1].is_empty() {
+        Paragraph::new(truncate_to_width(value, usize::from(columns[1].width)))
+            .style(value_style)
+            .render(columns[1], buf);
+    }
+}
+
+/// Section heading.
+pub fn render_section(buf: &mut Buffer, area: Rect, label: &str) {
+    if area.is_empty() {
+        return;
+    }
+    Paragraph::new(label)
+        .style(section_style())
+        .render(area, buf);
+}
+
+/// Wrapped paragraph.
+pub fn render_body(buf: &mut Buffer, area: Rect, body: &str, style: Style) {
+    if area.is_empty() {
+        return;
+    }
+    Paragraph::new(body.to_owned())
+        .style(style)
+        .wrap(Wrap { trim: true })
+        .render(area, buf);
+}
+
+/// Wrapped line count for `text` at `width`, matching [`render_body`].
+#[must_use]
+pub fn wrapped_height(text: &str, width: u16) -> u16 {
+    let lines = wrap_by_width(text, usize::from(width.max(1)));
+    u16::try_from(lines.len()).unwrap_or(u16::MAX)
+}
+
+/// Centered line.
+pub fn render_centered(buf: &mut Buffer, area: Rect, line: Line<'static>) {
+    if area.is_empty() {
+        return;
+    }
+    Paragraph::new(line)
+        .alignment(Alignment::Center)
+        .render(area, buf);
+}
+
+/// Non-interactive tab bar (session detail uses it in a later stage).
+pub fn render_tabs(buf: &mut Buffer, area: Rect, titles: &[&str], selected: usize) {
+    if area.is_empty() || titles.is_empty() {
+        return;
+    }
+    let tabs = Tabs::new(titles.iter().map(|title| Line::from(*title)))
+        .select(selected.min(titles.len() - 1))
+        .divider(Span::styled(" | ", dim_style()))
+        .style(muted_style())
+        .highlight_style(selected_style());
+    tabs.render(area, buf);
+}
+
+/// Minimal table renderer for later stages; column widths are caller-owned.
+pub fn render_table(
+    buf: &mut Buffer,
+    area: Rect,
+    headers: &[&str],
+    rows: &[Vec<String>],
+    widths: &[Constraint],
+) {
+    if area.is_empty() {
+        return;
+    }
+    let header = Row::new(headers.iter().map(|header| (*header).to_owned())).style(section_style());
+    let body = rows
+        .iter()
+        .map(|row| Row::new(row.to_vec()).style(muted_style()));
+    let table = Table::new(body, widths.to_vec())
+        .header(header)
+        .column_spacing(2);
+    Widget::render(table, area, buf);
+}
+
+/// Table body without a header, for chunks that continue a table above.
+pub fn render_table_body(
+    buf: &mut Buffer,
+    area: Rect,
+    rows: &[Vec<String>],
+    widths: &[Constraint],
+) {
+    if area.is_empty() {
+        return;
+    }
+    let body = rows
+        .iter()
+        .map(|row| Row::new(row.clone()).style(muted_style()));
+    let table = Table::new(body, widths.to_vec()).column_spacing(2);
+    Widget::render(table, area, buf);
+}
+
+/// Truncate text to `width` cells.
+#[must_use]
+pub fn fit(text: &str, width: u16) -> String {
+    truncate_to_width(text, usize::from(width))
+}
+
+/// Draw a horizontal rule as a dim line of `─` characters.
+pub fn render_rule(buf: &mut Buffer, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    buf.set_string(
+        area.x,
+        area.y,
+        "─".repeat(usize::from(area.width)),
+        dim_style(),
+    );
+}

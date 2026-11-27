@@ -23,6 +23,7 @@ members = [
     "peri-time",
     "peri-runtime",
     "peri-swarm",
+    "peri-swarm/dashboard",
     "peri-tui",
     "peri-tui-components",
     "langfuse-client",
@@ -72,6 +73,7 @@ serde_json = "1.0"
 indexmap = { version = "2.14", features = ["serde"] }
 icu_collator = "2.1"
 serde_norway = "0.9.42"
+toml = "0.9"
 
 # --- HTTP ---
 reqwest = { version = "=0.13.4", default-features = false, features = [
