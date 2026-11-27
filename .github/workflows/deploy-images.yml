@@ -1,43 +1,9 @@
 name: Deploy images
 
 on:
-    pull_request:
-        branches: [main, pre-release/main]
-        paths:
-            - 'deploy/**'
-            - 'peri-swarm/**'
-            - 'langfuse-client/**'
-            - 'mcp-packages/artifact/**'
-            - 'mcp-packages/common/**'
-            - 'mcp-packages/config/**'
-            - 'mcp-packages/credentials/**'
-            - 'mcp-packages/cron/**'
-            - 'mcp-packages/monitor/**'
-            - 'mcp-packages/web/**'
-            - 'mcp-packages/workflow/**'
-            - 'mcp-packages/workspace/**'
-            - 'peri-acp/**'
-            - 'peri-acp-types/**'
-            - 'peri-agent/**'
-            - 'peri-config/**'
-            - 'peri-controller/**'
-            - 'peri-js-runtime/**'
-            - 'peri-mcp-core/**'
-            - 'peri-middlewares/**'
-            - 'peri-model/**'
-            - 'peri-process/**'
-            - 'peri-resources/**'
-            - 'peri-runtime/**'
-            - 'peri-time/**'
-            - 'peri-workflow/**'
-            - 'patches/**'
-            - scripts/cargo-rmcp-patched.sh
-            - Cargo.toml
-            - Cargo.lock
-            - rust-toolchain.toml
-            - .github/workflows/deploy-images.yml
+    # 只在合入 main 后构建并推送；PR 事件不触发，避免为每个 PR 付一次完整镜像构建。
     push:
-        branches: [main, pre-release/main]
+        branches: [main]
         paths:
             - 'deploy/**'
             - 'peri-swarm/**'
@@ -71,12 +37,8 @@ on:
             - Cargo.lock
             - rust-toolchain.toml
             - .github/workflows/deploy-images.yml
+    # 手动重发：GHCR 故障或基础镜像需要重建时使用，行为与合入 main 一致。
     workflow_dispatch:
-        inputs:
-            push:
-                description: '是否将镜像推送到 GHCR'
-                type: boolean
-                default: false
 
 permissions:
     contents: read
@@ -95,18 +57,17 @@ jobs:
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@v3
 
-            # GHCR 镜像名要求小写；PR 只构建和加载，不登录或推送。
+            # GHCR 镜像名要求小写；本 workflow 只由合入 main 或手动触发，始终推送。
             - name: Set image options
               env:
                   REPOSITORY_OWNER: ${{ github.repository_owner }}
-                  SHOULD_PUSH: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true)) && 'true' || 'false' }}
               shell: bash
               run: |
                   owner="$(printf '%s' "$REPOSITORY_OWNER" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
                   {
                       printf 'IMAGE_OWNER=%s\n' "$owner"
                       printf 'IMAGE_NAME=ghcr.io/%s/peri-swarm\n' "$owner"
-                      printf 'PUSH_IMAGE=%s\n' "$SHOULD_PUSH"
+                      printf 'PUSH_IMAGE=true\n'
                   } >> "$GITHUB_ENV"
 
             - name: Log in to GHCR
@@ -125,7 +86,6 @@ jobs:
                   tags: |
                       type=sha,format=short
                       type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-                      type=ref,event=pr
 
             - name: Build image
               uses: docker/build-push-action@v6
