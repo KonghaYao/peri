@@ -4,6 +4,9 @@ use super::*;
 use crate::domain::{ItemKind, ItemSource};
 use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmTurnRow};
 
+#[path = "official_items_paging_test.rs"]
+mod paging_tests;
+
 async fn append(
     store: &MemorySwarmStore,
     seq: u64,
@@ -226,7 +229,7 @@ async fn a_truly_truncated_completion_only_moves_the_boundary_through_its_persis
 }
 
 #[tokio::test]
-async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
+async fn orphan_and_internal_rows_are_retained_until_the_first_projection() {
     let store = MemorySwarmStore::new();
     append(
         &store,
@@ -259,14 +262,20 @@ async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
     let first = page(&store, ItemOrder::Asc, None, 3).await;
     assert_eq!(first["data"].as_array().unwrap().len(), 1);
     assert_eq!(first["data"][0]["id"], "itim_open");
-    assert_eq!(first["items"].as_array().unwrap().len(), 3);
-    assert_eq!(first["has_more"], true);
-    assert_eq!(first["nextCursor"], 3);
+    assert_eq!(first["data"][0]["turn_id"], turn_id_for_item("itim_open"));
+    let raw_ids: Vec<_> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["itemId"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        raw_ids,
+        ["itim_orphan", "itim_tool", "itim_receipt", "itim_open"]
+    );
+    assert_eq!(first["has_more"], false);
+    assert_eq!(first["nextCursor"], Value::Null);
     assert_eq!(first["lastItemSeq"], 900);
-    let second = page(&store, ItemOrder::Asc, first["nextCursor"].as_u64(), 3).await;
-    assert_eq!(second["data"][0]["turn_id"], turn_id_for_item("itim_open"));
-    assert_eq!(second["has_more"], false);
-    assert_eq!(second["nextCursor"], Value::Null);
 }
 
 #[tokio::test]
@@ -430,308 +439,6 @@ async fn a_dangling_call_in_a_terminal_turn_is_incomplete() {
     turn(&store, "itim_open", TurnStatus::InProgress).await;
     let running = page(&store, ItemOrder::Asc, None, 10).await;
     assert_eq!(call_status(&running), "in_progress");
-}
-
-/// 记录 `swarm_items_before` 调用次数的 store 包装（M-5 的回扫成本上限）。
-struct CountingStore {
-    inner: MemorySwarmStore,
-    items_before: std::sync::atomic::AtomicUsize,
-}
-
-impl CountingStore {
-    fn new() -> Self {
-        Self {
-            inner: MemorySwarmStore::new(),
-            items_before: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    fn items_before_calls(&self) -> usize {
-        self.items_before.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::store::SwarmStore for CountingStore {
-    async fn swarm_upsert_session(
-        &self,
-        row: crate::store::SwarmSessionRow,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_upsert_session(row).await
-    }
-
-    async fn swarm_create_hosted_session(
-        &self,
-        row: crate::store::SwarmSessionRow,
-        binding: crate::store::SwarmBindingRow,
-        require_existing: bool,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner
-            .swarm_create_hosted_session(row, binding, require_existing)
-            .await
-    }
-
-    async fn swarm_get_session(
-        &self,
-        logical_id: &str,
-    ) -> Result<Option<crate::store::SwarmSessionRow>, crate::store::StoreError> {
-        self.inner.swarm_get_session(logical_id).await
-    }
-
-    async fn swarm_update_session(
-        &self,
-        update: crate::store::SwarmSessionUpdate,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_update_session(update).await
-    }
-
-    async fn swarm_patch_session(
-        &self,
-        patch: crate::store::SwarmSessionPatch,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_patch_session(patch).await
-    }
-
-    async fn swarm_list_sessions(
-        &self,
-        window: &crate::domain::SessionsWindow,
-    ) -> Result<Vec<crate::store::SwarmSessionRow>, crate::store::StoreError> {
-        self.inner.swarm_list_sessions(window).await
-    }
-
-    async fn swarm_delete_session(&self, logical_id: &str) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_delete_session(logical_id).await
-    }
-
-    async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_append_item(row).await
-    }
-
-    async fn swarm_append_items(
-        &self,
-        rows: &[SwarmItemRow],
-        progress: Option<crate::store::SwarmSessionUpdate>,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_append_items(rows, progress).await
-    }
-
-    async fn swarm_items_after(
-        &self,
-        logical_id: &str,
-        after: u64,
-        limit: u32,
-    ) -> Result<Vec<SwarmItemRow>, crate::store::StoreError> {
-        self.inner.swarm_items_after(logical_id, after, limit).await
-    }
-
-    async fn swarm_items_before(
-        &self,
-        logical_id: &str,
-        before: Option<u64>,
-        limit: u32,
-    ) -> Result<Vec<SwarmItemRow>, crate::store::StoreError> {
-        self.items_before
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner
-            .swarm_items_before(logical_id, before, limit)
-            .await
-    }
-
-    async fn swarm_item_page(
-        &self,
-        logical_id: &str,
-        order: ItemOrder,
-        after: Option<u64>,
-        limit: u32,
-    ) -> Result<crate::store::SwarmItemPage, crate::store::StoreError> {
-        self.inner
-            .swarm_item_page(logical_id, order, after, limit)
-            .await
-    }
-
-    async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, crate::store::StoreError> {
-        self.inner.swarm_last_seq(logical_id).await
-    }
-
-    async fn swarm_get_item(
-        &self,
-        logical_id: &str,
-        item_id: &str,
-    ) -> Result<Option<SwarmItemRow>, crate::store::StoreError> {
-        self.inner.swarm_get_item(logical_id, item_id).await
-    }
-
-    async fn swarm_put_input(
-        &self,
-        row: crate::store::SwarmInputRow,
-    ) -> Result<crate::store::InputPut, crate::store::StoreError> {
-        self.inner.swarm_put_input(row).await
-    }
-
-    async fn swarm_get_input(
-        &self,
-        logical_id: &str,
-        input_id: &str,
-    ) -> Result<Option<crate::store::SwarmInputRow>, crate::store::StoreError> {
-        self.inner.swarm_get_input(logical_id, input_id).await
-    }
-
-    async fn swarm_put_binding(
-        &self,
-        row: crate::store::SwarmBindingRow,
-    ) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_put_binding(row).await
-    }
-
-    async fn swarm_get_binding(
-        &self,
-        logical_env_id: &str,
-    ) -> Result<Option<crate::store::SwarmBindingRow>, crate::store::StoreError> {
-        self.inner.swarm_get_binding(logical_env_id).await
-    }
-
-    async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), crate::store::StoreError> {
-        self.inner.swarm_upsert_turn(row).await
-    }
-
-    async fn swarm_get_turn(
-        &self,
-        logical_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<SwarmTurnRow>, crate::store::StoreError> {
-        self.inner.swarm_get_turn(logical_id, turn_id).await
-    }
-
-    async fn swarm_turn_page(
-        &self,
-        logical_id: &str,
-        window: &crate::domain::TurnsWindow,
-    ) -> Result<Vec<SwarmTurnRow>, crate::store::StoreError> {
-        self.inner.swarm_turn_page(logical_id, window).await
-    }
-
-    async fn swarm_close_open_turns(
-        &self,
-        logical_id: &str,
-        status: TurnStatus,
-        completed_at: i64,
-        error: Option<Value>,
-    ) -> Result<u64, crate::store::StoreError> {
-        self.inner
-            .swarm_close_open_turns(logical_id, status, completed_at, error)
-            .await
-    }
-
-    async fn swarm_has_open_turn(
-        &self,
-        logical_id: &str,
-    ) -> Result<bool, crate::store::StoreError> {
-        self.inner.swarm_has_open_turn(logical_id).await
-    }
-}
-
-#[tokio::test]
-async fn many_gaps_stop_at_the_lookback_cap_and_degrade_to_items_only() {
-    let store = CountingStore::new();
-    // 每个条目都带持久 turn 行：每次回扫都在第一页命中 opener，一个缺口一次回扫。
-    for seq in (1..=19).step_by(2) {
-        let opener = format!("itim_open_{seq}");
-        append(
-            &store.inner,
-            seq,
-            &opener,
-            ItemKind::Message,
-            json!({"role":"user","text":opener}),
-            false,
-        )
-        .await;
-        store
-            .swarm_upsert_turn(SwarmTurnRow {
-                logical_id: "agent-01".into(),
-                turn_id: turn_id_for_item(&opener),
-                status: TurnStatus::InProgress,
-                created_at: 1,
-                started_at: Some(1),
-                completed_at: None,
-                error: None,
-                usage: None,
-                subagent_id: None,
-            })
-            .await
-            .unwrap();
-    }
-    let page = item_page(
-        &store,
-        &LogicalId::parse("agent-01").unwrap(),
-        ItemsWindow {
-            order: ItemOrder::Asc,
-            after: None,
-            after_id: None,
-            limit: 20,
-        },
-        900,
-    )
-    .await
-    .unwrap();
-    let page = serde_json::to_value(page).unwrap();
-    assert_eq!(page["items"].as_array().unwrap().len(), 10);
-    assert_eq!(
-        store.items_before_calls(),
-        8,
-        "回扫次数必须受硬上限约束（9 个缺口只回扫 8 次）"
-    );
-    // 超上限后的缺口降级为 items-only：不把未验证的 turn 归属写进 data。
-    // 第一个条目不需要缺口回扫，所以前 9 个条目仍可映射。
-    assert_eq!(page["data"].as_array().unwrap().len(), 9);
-    let mapped: Vec<_> = page["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["id"].as_str().unwrap().to_owned())
-        .collect();
-    assert!(!mapped.contains(&"itim_open_19".to_owned()));
-    assert!(page["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["id"] == "itim_open_17"));
-}
-
-/// [回归测试] 历史多行可能让一个缺口的回扫本身跨过很多页。
-#[tokio::test]
-async fn a_deep_lookback_stops_at_the_page_cap_and_keeps_raw_rows() {
-    let store = CountingStore::new();
-    user(&store.inner, 1, "itim_opener").await;
-    let last_history_seq = u64::from(ItemsWindow::MAX_LIMIT) * MAX_TURN_LOOKBACK_PAGES as u64 + 1;
-    for seq in 2..=last_history_seq {
-        append(
-            &store.inner,
-            seq,
-            "itim_history",
-            ItemKind::Message,
-            json!({"role":"assistant","text":"recovered","complete":true,"recovered":true}),
-            false,
-        )
-        .await;
-    }
-    user(&store.inner, last_history_seq + 1, "itim_steer").await;
-    let page = item_page(
-        &store,
-        &LogicalId::parse("agent-01").unwrap(),
-        ItemsWindow {
-            order: ItemOrder::Asc,
-            after: Some(last_history_seq),
-            after_id: None,
-            limit: 1,
-        },
-        last_history_seq + 1,
-    )
-    .await
-    .unwrap();
-    assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].item_id, "itim_steer");
-    assert!(page.data.is_empty());
-    assert_eq!(store.items_before_calls(), MAX_TURN_LOOKBACK_PAGES);
 }
 
 #[tokio::test]

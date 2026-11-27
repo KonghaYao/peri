@@ -238,7 +238,7 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 | F-SWARM-011 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/config.rs)、[bootstrap.rs](../../peri-swarm/src/bootstrap.rs)；[测试](../../peri-swarm/src/config_test.rs)、[bootstrap_test.rs](../../peri-swarm/src/bootstrap_test.rs)；[证据](peri-swarm-multi-replica-2026-11-21.md)；缺口：域名实际指向、双进程多副本、单 engine 节点、TLS 未验证 | 配置矩阵与 endpoint 私网校验单测、编译门结果见证据；M0 未执行；人工双进程矩阵未执行 |
 | F-SWARM-012 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/mod.rs)、[测试](../../peri-swarm/tests/it/session_resources_test.rs)；[证据](peri-swarm-session-resources-2026-11-21.md)、[官方默认值对齐](peri-swarm-official-defaults-2026-11-21.md)；缺口：Loom 存量不做自动迁移；提供一次性离线导入脚本（`import_loom_state.py`，未对真实 Loom 生产快照验证）、engine 上的 delete/update 未验证 | 契约测试覆盖 list/update/delete/turns、POST update 与显式 404；真实 `openai@7.60.0` SDK 已对进程内网关执行 create/retrieve/update/turns.list 探针；持久未完成 turn 的 502 准入与取消状态持久化有单测；本轮补充 `prompt_cache_options:{}` 默认 30m、官方会话默认字段与环境 `none` 归一化、`{}` update 与无 body 同为 no-op |
 | F-SWARM-013 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/actor/reader.rs)；[测试](../../peri-swarm/src/actor/reader_test.rs)、[审批与合并行](../../peri-swarm/src/actor/service_test.rs)、[回放与重连](../../peri-swarm/tests/it/actor_runtime_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：历史多行真实回放、`afterSeq` 断线重连、审批折叠未实测 | ILOG-1..7 由进程内用例覆盖；真实单 turn `swarm_items` 3 行（2 message + 1 thought，0 持久 delta）；未验证项不构成验收 |
-| F-SWARM-014 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official_item.rs)、[投影](../../peri-swarm/src/service/official_items.rs)；[测试](../../peri-swarm/src/domain/official_item_test.rs)、[投影用例](../../peri-swarm/src/service/official_items_test.rs)、[分页](../../peri-swarm/tests/it/items_pagination_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：M-2 两代 complete 只在 store 层构造历史行验证；真实 SDK 只消费过消息项 | 四类官方投影、恢复行排除、悬挂调用状态、游标与回扫上限由用例覆盖；真实 `/items` 为 `raw=3 official=3` |
+| F-SWARM-014 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official_item.rs)、[投影](../../peri-swarm/src/service/official_items.rs)；[测试](../../peri-swarm/src/domain/official_item_test.rs)、[投影用例](../../peri-swarm/src/service/official_items_test.rs)、[分页](../../peri-swarm/tests/it/items_pagination_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；补充证据见下方官方 items 组分页验收；缺口：真实 SDK 只消费过消息项 | 四类官方投影、恢复行排除、悬挂调用状态、游标与回扫上限由用例覆盖；真实 `/items` 为 `raw=3 official=3` |
 | F-SWARM-015 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/request.rs)、[受理](../../peri-swarm/src/actor/service.rs)、[错误](../../peri-swarm/src/domain/error.rs)；[测试](../../peri-swarm/tests/it/http_contract/official_cancel.rs)、[actor 取消](../../peri-swarm/src/actor/service_cancel_test.rs)、[flush 失败](../../peri-swarm/src/actor/reader_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：真实宿主 30s 取消超时与重发失败的上游行为未验证；取消 turn 落库失败只记录日志 | 事件解析、202 收据、两类下发失败、管理冲突与取消 turn 保持 `cancelled` 由用例覆盖；真实宿主未跑 |
 | F-SWARM-016 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official.rs)、[实时](../../peri-swarm/src/actor/reader.rs)、[回放](../../peri-swarm/src/service/mod.rs)；[测试](../../peri-swarm/src/actor/reader_test.rs)、[回放用例](../../peri-swarm/src/service/in_memory_test.rs)、[历史多行](../../peri-swarm/src/actor/service_test.rs)；[证据](peri-swarm-official-text-delta-2026-11-26.md)；缺口：reasoning delta 未实现；回放无 chunk 边界；历史同 itemId 多条 complete 行未测；added 首段去重未用真实客户端验证；关闭-广播窄竞态未复现 | 实时 85 chunk / 回放 1 条 336 字符全文 delta 在本地 Compose 单 turn 实测；`72c10cfe9` 上 lib 421 / it 115 / 27 ignored 与 PG 20 通过；未验证项不构成验收 |
 
@@ -247,8 +247,39 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 基线为 `bca78fb1b` 加本次补丁。以下均用本地 fixture，未重跑真实 Compose / Rivet 链路。
 
 - F-SWARM-001/004：用 [准入回归](../../peri-swarm/src/actor/service_admission_test.rs) 暂停第一条 user item 的写入，验证竞争输入无收据且可在空闲后用原键重试。
-- F-SWARM-003/014：[分页回归](../../peri-swarm/tests/it/items_official_pagination_test.rs) 保持原始行和游标；实际 `openai@7.60.0` 对进程内 HTTP 网关迭代，升降序均能跨过纯内部页，并读到完整答案。
+- F-SWARM-003/014：该基线的 [分页回归](../../peri-swarm/tests/it/items_official_pagination_test.rs) 当时保持首个原始页和游标，只前探 `data`；实际 `openai@7.60.0` 对进程内 HTTP 网关迭代，升降序均能跨过纯内部页并读到完整答案。组分页的新契约见下一节。
 - F-SWARM-016：[广播回归](../../peri-swarm/src/actor/reader_broadcast_test.rs) 验证发送期间关闭方不能取走 stream、引入帧不重复，以及无订阅者时完成行补发；不代替真实客户端并发验证。
+
+### F-SWARM-003/014 官方 items 组分页验收
+
+基线为 `b9fd1a293` 加本次补丁。测试使用进程内 HTTP 与 Memory store；SDK 探针使用真实
+`openai@7.60.0` 访问本地监听端口。本轮未覆盖真实 Postgres、Rivet 或 Compose。
+
+1. [跨页整组](../../peri-swarm/tests/it/items_official_pagination_test.rs)：升序 `afterSeq` 在
+   两代 assistant 帧之间时仍返回全组、正文与整页读取一致，`nextCursor` 为组最大 `seq`；降序续页不重选该组。
+2. [逐页投影回归](../../peri-swarm/tests/it/items_official_pagination_test.rs)：十组 thought
+   多帧与 receipt 交错，`limit=11` 从 `nextCursor=21` 续读与直接 `after=31` 的 answer 正文和 `turn_id` 一致。
+3. [请求预算](../../peri-swarm/tests/it/items_official_pagination_test.rs)：第 101 页才有投影时
+   返回 `422 items_scan_limit`、无部分页或游标，第 100 页可成功；累计或单组超过 2000 行不返回残组。
+4. [读取失败](../../peri-swarm/src/service/official_items_paging_test.rs)：第二存储页或 turn 历史读失败均整页
+   返回 `502`；首页有投影不探页；空页游标不推进时返回扫描错误。
+5. [SDK 分页探针](../../peri-swarm/scripts/sdk_items_pagination_test.mjs)：升降序分别用原生 `nextCursor`、
+   SDK `data` 末项 id 或交替游标遍历，官方 id 不重不漏；SDK 可重扫内部原始行。
+6. [SDK 会话 E2E 断言](../../peri-swarm/scripts/sdk_sessions_e2e.mjs)：`data.length <= min(limit, 原始组数)`、
+   `data` id 唯一且来自 `items`；有续页时 `nextCursor` 等于末组最大 `seq`，否则为 `null`。
+   已用提取函数体的最小 harness 实际执行 `assertOfficialItems`：正常合并页不抛错、
+   `data.length <= min(limit, rawItemCount)`、`nextCursor` 为末组最大 `seq`；未跑真实网关。
+7. [升序并发追加](../../peri-swarm/src/service/official_items_paging_test.rs)：请求开始 `lastItemSeq=2`，
+   每次读页前追加一条独立 receipt；响应 200、只读 1 页、游标停在 2 且不追尾（上限为 100 页）。
+8. [组增长去重](../../peri-swarm/src/service/official_items_paging_test.rs)：首读后向无正文 thought
+   追加第 4 帧并追加 answer 5；同一响应 `seq=[2,3,4,5]` 唯一。1000 行组增长后只新增 1 帧，
+   重复行不把纳入量推到 2000 以上，也不误报 `items_scan_limit`。
+9. [SDK 重扫预算差异](../../peri-swarm/tests/it/items_official_pagination_test.rs)：
+   `official_pagination::openai_sdk_iterates_past_internal_only_pages`（`#[ignore]`，需 Node.js 与
+   `openai@7.60.0`）的脚本在 7 行 fixture 上让真实 SDK 迭代，断言 SDK 从 `data` 末项 id 续页
+   会重读内部 receipt 原始行（原始 `seq` 序列出现重复读取）；不覆盖纳入预算。
+   SDK 续页因此可能比原生 `nextCursor` 更早触发 `items_scan_limit` 属基于重扫行为的推断，
+   本轮未实测 2000 行预算边界，也未在真实 Postgres、Compose 或全链路 E2E 上验证。
 
 ### F-TASK-001 补充验收
 

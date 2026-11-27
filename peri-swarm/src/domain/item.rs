@@ -230,7 +230,7 @@ impl Serialize for ItemPage {
 }
 
 impl ItemPage {
-    /// `items` 是原始行，`data` 是官方条目投影，必要时取自后续原始页。
+    /// `items` 是已扫描完整条目的原始行，`data` 是其中首个非空页的官方投影。
     #[must_use]
     pub fn new(
         logical_id: impl Into<String>,

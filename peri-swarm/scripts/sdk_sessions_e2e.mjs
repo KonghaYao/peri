@@ -474,10 +474,14 @@ function assertOfficialItems(body, label) {
   }
   const ids = data.map((item) => item.id);
   const idsInRawPage = ids.filter((id) => lastSeq.has(id));
-  // 原始页没有投影时，data 来自后续页；原始游标仍只描述 items。
-  check(`${label}: data contains distinct item ids from one page`, new Set(ids).size === data.length
-    && (idsInRawPage.length === ids.length || (idsInRawPage.length === 0 && body?.hasMore === true)),
+  check(`${label}: data contains distinct item ids from the raw page`,
+    new Set(ids).size === data.length && ids.every((id) => lastSeq.has(id)),
     { ids, rawItems: lastSeq.size });
+  const groupMaxima = [...lastSeq.values()];
+  const tailSeq = body?.order === 'desc' ? Math.min(...groupMaxima) : Math.max(...groupMaxima);
+  check(`${label}: nextCursor is the last group's maximum seq when more items exist`,
+    body?.has_more ? Number.isFinite(tailSeq) && body.nextCursor === tailSeq : body?.nextCursor === null,
+    { nextCursor: body?.nextCursor, tailSeq, hasMore: body?.has_more });
   for (const item of data) {
     const outputStatuses = ['in_progress', 'completed', 'incomplete'];
     const callStatuses = [...outputStatuses, 'failed'];
@@ -1335,9 +1339,9 @@ async function main() {
       check(`items ${order} page logical id`, body.logicalId === createdSessionId, body.logicalId);
       check(`items ${order} page order`, body.order === order, body.order);
       check(
-        `items ${order} page respects the item limit`,
-        dataShape.rawItemCount <= limit,
-        { items: dataShape.rawItemCount, rawRows: (body.items ?? []).length, limit },
+        `items ${order} page respects the official item limit`,
+        dataShape.data.length <= Math.min(limit, dataShape.rawItemCount),
+        { data: dataShape.data.length, items: dataShape.rawItemCount, limit },
       );
       check(
         `items ${order} page lastItemSeq is a number`,

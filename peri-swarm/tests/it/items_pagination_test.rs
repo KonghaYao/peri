@@ -576,7 +576,8 @@ async fn row_budget_stops_before_the_next_item() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
-    for seq in 1..=3 {
+    append_row(&harness, 1, "itim_opener", "user", json!({})).await;
+    for seq in 2..=4 {
         append_row(
             &harness,
             seq,
@@ -588,37 +589,36 @@ async fn row_budget_stops_before_the_next_item() {
     }
     append_row(
         &harness,
-        4,
+        5,
         "itim_msg_b",
         "assistant",
         json!({"complete": true}),
     )
     .await;
 
-    let (_, _, first) = send(
+    let (status, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=1",
         None,
     )
     .await;
-    assert_eq!(seqs(&first), [1, 2, 3], "only the long item fits");
-    assert!(
-        data_ids(&first).is_empty(),
-        "没有 opener 的 assistant 不可投影"
-    );
-    assert_eq!(first["nextCursor"], json!(3));
-    assert_eq!(first["has_more"], json!(true), "the next item still exists");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seqs(&first), [2, 3, 4]);
+    assert_eq!(data_ids(&first), ["itim_msg_a"]);
+    assert_eq!(first["nextCursor"], 4);
+    assert_eq!(first["has_more"], true);
 
-    let (_, _, second) = send(
+    let (status, _, second) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=3",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=4",
         None,
     )
     .await;
-    assert_eq!(seqs(&second), [4]);
-    assert!(data_ids(&second).is_empty());
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seqs(&second), [5]);
+    assert_eq!(data_ids(&second), ["itim_msg_b"]);
     assert_eq!(second["has_more"], json!(false));
     assert_eq!(second["nextCursor"], json!(null));
 }

@@ -293,7 +293,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   行，SSE 对每条 assistant 完成行合成一条全文 `output_text.delta`（§4.2.1），
   `/items` 的条目投影与文本折叠规则不变。`data` 是官方 `AgentSessionItem` 投影，有
   `type`、条目 `id`（等于 `itemId`）、`turn_id`，没有 `seq`。同一 `itemId` 投影至多
-  一次；原始页没有投影时，`data` 可以来自后续原始页（§4.2.2）。
+  一次；`data` 来自扫描到的首个有投影的存储页，其条目都在本次响应的 `items` 中（§4.2.2）。
 
 | 持久条目 | `data` 投影 |
 | --- | --- |
@@ -310,7 +310,7 @@ turn 规则：回扫页首最小 `seq` 之前的历史取种子，跨过未入�
 首条用户消息、已出现助手完成帧后到达的用户消息、或有对应持久 turn 行的用户消息开启
 turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被截断）不因该条目未进入
 `data` 而失效；真实截断行的 payload 只剩 `{_truncated, originalBytes}`，边界信息已丢失，
-只能依赖持久 turn 行。投影不改变 §9.4 的原始分页语义。
+只能依赖持久 turn 行。原始组的归属不受投影影响，响应页边界见 §4.2.2。
 
 页内 `data` 的顺序取自条目在该页的原始顺序（即 item 的 `MAX(seq)`），不是所选完成帧的
 `seq`；迟到 delta 让两者不一致时，按 `MAX(seq)` 的顺序稳定，正文仍按上文规则折叠。
@@ -334,29 +334,46 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 - item 归属按该 item 的最大 `seq` 判定，分页单位是 item；升序页是
   `MAX(seq) > after` 的前若干个 item，降序页是 `MAX(seq) < after` 的前若干个
   item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、可映射时 `data` 有 1 项。
-  `has_more`/`hasMore` 按原始条目计，`nextCursor` 仅在还有条目时给出。
 - 分组在存储层完成：PostgreSQL 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
   再按 `item_id` join 回全部行；内存 fake 用同一 `grouped_item_page` 规则，两者
   不会给出不同的页边界。
-- **行预算**：`limit` 既是 item 数上限，也是整页聚合行预算。按 item 顺序累加原始
-  行数，达到或超过 `limit` 行后不再纳入下一个 item；因此 `limit` 个 item 不保证
-  都出现在一页里。单个 item 自身的行数超过预算时整条返回（至少纳入 1 个 item），
-  否则会丢掉它的最终帧——这是已知边界；`items.list` 是 item 取向的接口，delta
-  帧应走 SSE。
-- `nextCursor` 是页内最后一个 item 的最大 `seq`，因此升序下一页严格前进；降序页
-  的游标是页内最旧 item 的最大 `seq`，下一页只取更小的 item。`after=<itemId>`
-  解析为该 item 的最大 `seq`，所以同一 item 不会被重复分页。十进制
-  `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
-  出现在页里（`items` 含游标之前的帧，`data` 仍按投影条件决定是否发出）。畸形或未知
-  item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回 `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页（网关把它解析为 item 的 `MAX(seq)`）。有投影
-  的原始页按原有规则返回 `data`；若原始页无投影，网关按请求顺序前探，返回第一个非空
-  的官方投影页。找不到可投影条目才返回 `data=[]`，此时 SDK 停止；升序不会追着并发
-  追加的条目继续扫描。`items`、`has_more`/`hasMore` 和 `nextCursor` 始终描述最初的
-  原始页，不会被前探改变，因此 `data` 可以引用不在当次 `items` 中的条目。
-- SDK 游标会越过所经过的未映射条目；同页排在 `data` 末项之后的原始条目可能被下一页
-  重读。需要全量原始条目时，用 `nextCursor`/`afterSeq` 翻页并读 `items`，不要用
-  `data` 的末项或是否为空决定原始分页。
+- **单次存储页行预算**：`limit` 同时是 item 数上限和聚合行预算。按 item 顺序累加原始
+  行数，达到或超过 `limit` 行后不再纳入下一个 item；跨过行预算的组也必须完整读取，
+  不截断。响应 `items` 跟随可投影条目的页边界：逐页读取并各投影一次，首个非空 `data`
+  即返回，不再探页；如果一直无投影，读到确证的末尾才返回 `data=[]`（`has_more=false`）。
+  `items` 包含所有纳入的组，按 `seq` 随 `order` 排序，行数可以超过 `limit`；`data` 按
+  item id 去重且最多 `limit` 项。`has_more`/`hasMore` 和 `nextCursor` 描述最后纳入的存储页。
+- **请求级预算**：含首个存储页最多读取 100 页（`MAX_ITEM_PAGE_READS`）。2000 条
+  （`MAX_SELECTED_RAW_ROWS`）是**纳入**上限，不是读取上限：PostgreSQL 会先取 `limit+1`
+  个候选组的全部帧，再丢弃未纳入的组；历史回扫读取的行不计入这 2000 条。纳入按 `seq`
+  保持集合语义，组因并发追加而后移并被再次选中时，已纳入的帧不重复计数。
+  若仍需续查但纳入预算不足，或探页游标无法严格推进，返回 `422 items_scan_limit`，不返回
+  部分页或游标。上游读失败一律返回 `502 upstream_unavailable`，不降级为成功空页。
+- **升序观察上界**：探页遇到下一页游标 `>= lastItemSeq` 时停止，返回已累积的页而不是错误。
+  `lastItemSeq` 是请求开始时的观察上界；首读之后追加的条目可能属于并发写入，升序不追尾，
+  但首读本身仍可能包含越过该值的并发帧。降序不受此限。守卫命中时仍返回 `200`：形状为
+  `data=[]`、`has_more=true`、`nextCursor` 为本页原始游标（探到的下一页游标达到或越过
+  `lastItemSeq`，且该页没有可投影条目）。原生客户端可沿该游标继续；SDK 因空 `data` 停止，
+  因此在该边界可能比原生游标遍历少看到条目，但不是错误。
+- `nextCursor` 是页内最后一个 item 的最大 `seq`，仅在还有条目时给出。升序下一页严格
+  前进；降序页的游标是页内最旧组的最大 `seq`，下一页只取更小的组。`after=<itemId>`
+  解析为该 item 的最大 `seq`。十进制 `after`/`afterSeq` 同样按 item 边界解释：游标
+  落在多帧 item 中间时，要么按组最大 `seq` 选入整个 item（含游标之前的帧），要么
+  整组排除。畸形或未知 item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
+  `400 conflicting_cursor`。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页。只有在**每次续页都正常返回非空 `data`**、
+  且**已返回的 item 不再增长**时，它才与 `nextCursor` 覆盖同一批可投影条目；此时 SDK
+  续页会从该 `id` 之后重扫内部原始行，因此在 100 页/2000 行预算边界上，SDK 可能比原生
+  `nextCursor` 更早触发 `items_scan_limit`。命中升序观察上界而 `data=[]` 时同样产生分叉，
+  item 未增长也不例外：例如已返回 `seq=1`，续页的分页边界停在 `seq=2` 的内部条目并
+  命中上界（`data=[]`、游标 2），并发写入的 `seq=3` 可投影条目对 SDK 不可见，
+  原生从游标 2 继续则能读到。
+  已返回的 item 若又追加了帧，`after=<itemId>` 按请求时该 item 的**当前** `MAX(seq)` 解析，
+  可能越过中间尚未读到的可投影 item：例如 SDK 末项 `seq=2`、`nextCursor=3`、`seq=4`
+  有可投影条目，末项增长到 `seq=5` 后 `after=<itemId>` 解析为 5，跳过了 `seq=4`，而数字
+  游标 `nextCursor=3` 仍会包含它。两者差异不只在重扫成本或扫描预算。升序响应也可能包含
+  `lastItemSeq` 之后的并发追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读
+  `items`，不要用 `data` 的末项或是否为空决定原始分页。
 - **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
   之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
@@ -364,6 +381,11 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   最终帧。分页游标始终严格前进、不会循环。
 - `order` 默认 `desc`，与官方 `ItemListParams.order` 一致；需要升序时显式
   `order=asc`。分页游标 `after`/`afterSeq` 在所选顺序下排他。
+
+| HTTP | `/items` 错误码 | 含义 |
+| --- | --- | --- |
+| 422 | `items_scan_limit` | 扫描预算耗尽或游标不能推进；恢复方式取决于成因：目标 item 之前累计 2000 条内部行时，用 `afterSeq`（取这些行的最大 `seq`）或 `after=<内部 item id>` 移到它们之后、目标 item 之前再读，不要越过目标 item；单个 item 自身超 2000 条时只能跳过该 item 再读（存储层整组返回、无法纳入，其帧不会出现在响应里，减小 `limit` 无效）；100 页读取预算触顶时减小 `limit` 只会更快耗尽，应改用更近的游标；游标不能严格推进时重试或改用 `afterSeq`。 |
+| 502 | `upstream_unavailable` | 存储页或投影依赖读取失败；`details.operation` 指明操作，不返回部分页。 |
 
 #### 4.2.1 官方事件映射
 
