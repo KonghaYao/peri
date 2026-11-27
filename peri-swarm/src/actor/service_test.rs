@@ -1634,3 +1634,37 @@ async fn child_config_propagates_the_shared_handle_to_both_child_paths() {
         );
     }
 }
+
+/// A cold actor's subagent read must stay inside the deployment-wide facade.
+/// The configured store path is deliberately unopenable, so falling back to the
+/// per-actor read-only reader would surface `502 upstream_unavailable`.
+#[tokio::test]
+async fn subagent_reads_use_the_shared_facade_instead_of_opening_per_actor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = peri_resources::Resources::open_with(Some(dir.path().join("shared.db")))
+        .await
+        .expect("open the shared local store")
+        .into_parts()
+        .0;
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"blocker").expect("write the blocking file");
+    let config = ActorServiceConfig {
+        session_store: Some(
+            peri_acp_types::session_store::SessionStoreDeployment::local_path(
+                blocker.join("unreachable.db"),
+            ),
+        ),
+        ..ActorServiceConfig::default()
+    };
+    let service = AcpSwarmService::new_with_session_resources(
+        Arc::new(MemorySwarmStore::new()) as Arc<dyn SwarmStore>,
+        config,
+        Some(Arc::clone(&shared)),
+    );
+
+    let records = service
+        .subagent_records(&logical_id(), "0192f0c5-0000-7000-8000-0000000000ff")
+        .await
+        .expect("the shared facade answers without opening the configured store");
+    assert!(records.is_empty(), "the empty shared store has no children");
+}

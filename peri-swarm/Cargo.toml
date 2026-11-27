@@ -13,7 +13,7 @@ test = false
 
 [dependencies]
 peri-time = { path = "../peri-time" }
-# S4 runtime boundary: only `src/actor/runtime.rs`, `src/store/remote.rs` and
+# S4 runtime boundary: only `src/actor/runtime/`, `src/store/remote.rs` and
 # the `bootstrap` process entry may import `peri-acp` / `peri-acp-types` /
 # `peri-resources` (design §1.2). The rest of the crate consumes their own
 # types: `store` owns the persistence port, `bootstrap` owns the process store.

@@ -3,6 +3,10 @@
 - 状态：**修复已实现，并完成 1000 并发运行时复测**（1000/1000 成功，连接耗尽未复现）；复测证据与局限见 §5、§6。
 - 日期：2026-11-27
 - 基线：`3eecbdede`（`origin/main`）；修复前运行证据来自相关文件完全相同的 `1bbb7dec6` 构建。
+- 合并说明：运行时复测镜像由修复提交 `8d73d7f6a` 构建；随后为解除与 `cc76e2ad9`
+  （#618 `sessions.subagents`）的冲突合并了 `origin/main`。合并后的代码由 PR CI 覆盖，
+  **未重复** 1000 并发运行时复测；合并新增的 subagent 读取路径已改为复用同一 facade，
+  见 §4.1，但未纳入 §5 的压测样本。
 - 问题单：[P1：Swarm 每个会话独立打开会话存储](../../spec/issues/2026-11-27-p1-swarm-shared-session-pool.md)
 - 范围：`peri-swarm` 的 actor host 装配、部署启动，以及 `peri-resources` 远程会话池容量。
 
@@ -52,11 +56,17 @@
   既有 `new(...)` 委托为 `None`，测试与独立 actor 的构造点不变。
 - `SwarmActor::create` 用 `deployment.session_resources()` 构造 service；create 与
   reattach 两条路径统一经 `AcpSwarmService::child_config(...)` 传播句柄。
-- `runtime::resolve_session_resources`：
+- `runtime/session_open.rs::resolve_session_resources`（合并 #618 后，打开规则已由
+  `runtime.rs` 收敛到 `session_open.rs`）：
   1. 先校验 `machine_id` / `workspace_root` 必须同时存在或同时缺失（半配置仍
      fail-closed，即使注入了句柄）；
   2. 注入句柄 ⇒ 直接 clone，**不打开任何存储**，关闭权为 `None`；
-  3. 未注入 ⇒ 原 per-child 打开路径，`into_parts()` 返回业务句柄 + 关闭权。
+  3. 未注入 ⇒ 经 `session_open::open_resources` 打开，`into_parts()` 返回业务句柄 +
+     关闭权。
+- `sessions.subagents` 的冷 actor 读取：优先复用 live child 或部署级 facade；
+  只有未安装共享句柄的独立/本地部署才走 `SubagentReader` 的惰性只读打开。回归测试
+  `subagent_reads_use_the_shared_facade_instead_of_opening_per_actor` 用不可打开的
+  配置路径证明网关路径不会再按 actor 另开池。
 - `HostAssemblyInput.session_store_shutdown` 在注入路径为 `None`：第一个 child
   退出不会关闭全进程共享池。部署在 `drain` 后消费唯一关闭权。
 - 本地 SQLite 仍 per-child；未注入行为不变。
@@ -113,6 +123,9 @@ python3 /tmp/peri-loadtest/run_test.py --count 1000 --concurrency 50 --tag 20261
 
 ## 6. 证据局限与残留风险
 
+- **合并后未重复压测**：§5 的镜像由 `8d73d7f6a` 构建，不含随后合并的
+  `cc76e2ad9`（#618 `sessions.subagents`）。合并后的创建/连接路径未改，但新增的
+  subagent 读取复用分支只由单元/集成测试与 CI 覆盖，没有新的 1000 并发运行时样本。
 - 修复前运行时数字来自 `1bbb7dec6` 构建，修复后数字来自
   `fix/swarm-session-store-pool` 构建的镜像；两次部署的相关源码相同，但不是同一个
   镜像/进程。

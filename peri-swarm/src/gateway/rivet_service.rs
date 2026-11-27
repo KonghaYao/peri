@@ -22,13 +22,13 @@ use rivetkit::TypedActorHandle;
 use tokio::sync::broadcast;
 
 use crate::actor::swarm::{
-    ActionEnvelope, Create, Delete, Get, GetTurn, ListItems, ListTurns, RespondRequiredAction,
-    Submit, Subscribe, SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
+    ActionEnvelope, Create, Delete, Get, GetSubagent, GetTurn, ListItems, ListSubagents, ListTurns,
+    RespondRequiredAction, Submit, Subscribe, SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
 };
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
-    ItemsWindow, LogicalId, OfficialTurn, SessionPage, SessionView, SessionsWindow, StreamEvent,
-    SwarmError, TurnPage, TurnsWindow,
+    ItemsWindow, LogicalId, OfficialSubagent, OfficialTurn, SessionPage, SessionView,
+    SessionsWindow, StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameParser;
 use crate::service::{
@@ -360,6 +360,36 @@ impl SwarmService for RivetSwarmService {
             turn_id: turn_id.to_owned(),
         };
         let envelope: ActionEnvelope<OfficialTurn> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn list_subagents(
+        &self,
+        logical_id: &LogicalId,
+        window: SubagentsWindow,
+    ) -> Result<SubagentPage, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = ListSubagents {
+            logical_id: logical_id.as_str().to_owned(),
+            order: window.order,
+            after: window.after,
+            limit: window.limit,
+        };
+        let envelope: ActionEnvelope<SubagentPage> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn get_subagent(
+        &self,
+        logical_id: &LogicalId,
+        subagent_id: &str,
+    ) -> Result<OfficialSubagent, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = GetSubagent {
+            logical_id: logical_id.as_str().to_owned(),
+            subagent_id: subagent_id.to_owned(),
+        };
+        let envelope: ActionEnvelope<OfficialSubagent> = self.call(&handle, action).await?;
         envelope.into_result()
     }
 

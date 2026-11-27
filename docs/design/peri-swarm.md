@@ -116,7 +116,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | `GET` | `/v1/agents/sessions/{logicalId}/items` | 按条目边界分页；`data` 是官方 `AgentSessionItem` 投影，`items` 是原始行（§4.2） |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns` | 官方 `sessions.turns.list`：按 `(created_at, turn_id)` 的 keyset 分页，`order` 默认 `desc` |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | 官方 `sessions.turns.retrieve`；turn 不属于该会话时 `404 unknown_agent` |
-| `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]`、`.../subagents[/{id}]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
+| `GET` | `/v1/agents/sessions/{logicalId}/subagents` | 官方 `sessions.subagents.list`：按 `(opened_at, id)` 的 keyset 分页（`order` 默认 `desc`，`limit` 默认 20、上限 500）；数据来自 Peri 会话树的全部子线程（含 nested 与 closed，不含 root），`session_id` 是 `logicalId` |
+| `GET` | `/v1/agents/sessions/{logicalId}/subagents/{subagentId}` | 官方 `sessions.subagents.retrieve`；subagent 不属于该会话时 `404 unknown_agent`；`instructions` 恒 `null` |
+| `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
 
 约定：
 
@@ -759,6 +761,8 @@ PostgreSQL：
   传 **32**。默认 `max_connections=100` 下两副本预算为
   `2 × (32 + 8) + 3 = 83 ≤ 100`（8 是状态库池上限，3 是 PostgreSQL 保留槽）。32 是
   上限不是预留，`min_connections(0)` 使空闲池回落到 0；重连沿用打开时的策略。
+  安装了共享句柄的部署中，`sessions.subagents` 的冷 actor 读取也复用该门面，不会按
+  actor 另开池；未安装共享句柄的独立/本地部署才走 `SubagentReader` 的惰性只读打开。
 - 状态库首次启动自动建表；`swarm_meta` 记录 engine `postgres` 与 contract
   `peri.swarm.postgres/v1`，因此把 Loom/SQLite 文件或会话库误指过来都会显式失败。
 - 从 Loom 割接不做自动迁移，网关不读取旧库文件；需要保留旧状态库内容时停写后取只读
@@ -854,8 +858,10 @@ Bun：
    存储；修复改为每进程共享门面/池并把 Swarm 池上限设为 32，见
    [验收记录](../verification/peri-swarm-1000-concurrent-sessions-2026-11-27.md)。
    修复后复测：1000/1000 成功，7.08s，网关会话库连接 32+32、未出现
-   `too many clients already`；旧 943 个 `creating` 未清理。actor 的并发 SSE 观看者、
-   单 engine 节点容量、1000 个同时执行 turn 的 Agent 吞吐与长时内存仍无证据。
+   `too many clients already`；旧 943 个 `creating` 未清理。该镜像基于合并 #618 前的
+   提交；合并后新增的 subagent 读取复用路径由测试与 CI 覆盖，未重复 1000 并发压测。
+   actor 的并发 SSE 观看者、单 engine 节点容量、1000 个同时执行 turn 的 Agent 吞吐与
+   长时内存仍无证据。
 5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；非 loopback 绑定（含
    `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关，启动时输出 WARN；
    Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。Rivet endpoint

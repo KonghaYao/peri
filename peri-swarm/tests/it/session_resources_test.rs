@@ -1653,16 +1653,6 @@ async fn unmappable_official_resources_return_gateway_json_404() {
         ),
         (
             Method::GET,
-            "/v1/agents/sessions/agent-x/subagents",
-            "sessions.subagents",
-        ),
-        (
-            Method::GET,
-            "/v1/agents/sessions/agent-x/subagents/sub_1",
-            "sessions.subagents",
-        ),
-        (
-            Method::GET,
             "/v1/agents/sessions/agent-x/subagents/sub_1/items",
             "sessions.subagents.items",
         ),

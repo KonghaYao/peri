@@ -633,7 +633,8 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         machine_id = %config.machine_id,
         "opening the remote Peri session store"
     );
-    // One deployment-wide session-store facade serves every ACP child. Connection
+    // One deployment-wide session-store facade serves every ACP child and the
+    // cold-actor `sessions.subagents` read. Connection
     // budget with PostgreSQL's default max_connections=100:
     //   2 replicas × (32 session + 8 state) + 3 reserved = 83 ≤ 100.
     // 32 is a cap, not a reservation (`min_connections(0)`): an idle pool

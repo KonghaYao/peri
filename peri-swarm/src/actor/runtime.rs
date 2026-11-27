@@ -21,6 +21,11 @@
 //!    handle would only detach the host task.
 
 mod history;
+mod session_open;
+mod subagents;
+
+use session_open::resolve_session_resources;
+pub(crate) use subagents::{records_from, SubagentReader};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +43,6 @@ use peri_acp::transport::AcpTransport;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 pub use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_resources::{RemoteWorkspaceEnvironment, Resources, SessionStoreShutdownOwner};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
@@ -166,80 +170,6 @@ pub fn local_session_store(path: Option<PathBuf>) -> SessionStoreDeployment {
         Some(path) => SessionStoreDeployment::local_path(path),
         None => SessionStoreDeployment::default_local(),
     }
-}
-
-/// Resolved session store for one child: business handle plus, only when this
-/// child opened the store itself, its close right.
-struct ResolvedSessionResources {
-    resources: Arc<dyn SessionResources>,
-    /// `None` when the deployment injected a shared handle: a child never owns
-    /// the process-wide pool's close right.
-    shutdown: Option<SessionStoreShutdownOwner>,
-}
-
-impl std::fmt::Debug for ResolvedSessionResources {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResolvedSessionResources")
-            .field("owns_shutdown", &self.shutdown.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Resolve the child's session store for the configured deployment.
-///
-/// 1. Validate the remote identity first: exactly one of `machine_id` /
-///    `workspace_root` is an explicit error even when a shared handle exists,
-///    because a half-configured identity must never be papered over by an
-///    injected facade.
-/// 2. Injected deployment handle ⇒ clone it and open nothing. The close right
-///    stays with the deployment.
-/// 3. No injected handle ⇒ the existing per-child open:
-///    - no remote identity ⇒ `Resources::open_deployment` (local SQLite);
-///    - `machine_id` **and** `workspace_root` ⇒ the remote PostgreSQL store
-///      with a virtual workspace identity (`design §4.1`);
-///    - exactly one of the two ⇒ an explicit error. Falling back to the local
-///      SQLite file would write Swarm facts to a second database.
-async fn resolve_session_resources(
-    config: &ChildConfig,
-) -> Result<ResolvedSessionResources, ChildError> {
-    let identity = match (config.machine_id, config.workspace_root.as_ref()) {
-        (None, None) => None,
-        (Some(machine_id), Some(root)) => Some((machine_id, root)),
-        _ => {
-            return Err(ChildError::Local(
-                "remote session store requires both machine_id and workspace_root; \
-                 refusing to open the local store"
-                    .to_owned(),
-            ));
-        }
-    };
-    if let Some(shared) = config.session_resources.as_ref() {
-        return Ok(ResolvedSessionResources {
-            resources: Arc::clone(shared),
-            shutdown: None,
-        });
-    }
-    let resources = match identity {
-        None => Resources::open_deployment(&config.session_store).await,
-        Some((machine_id, root)) => {
-            let environment = RemoteWorkspaceEnvironment::virtual_workspace(
-                &machine_id.to_string(),
-                root.clone(),
-            )
-            .map_err(|error| {
-                ChildError::Local(format!("invalid remote workspace environment: {error:#}"))
-            })?;
-            Resources::open_deployment_in_remote_environment(&config.session_store, environment)
-                .await
-        }
-    }
-    .map_err(|error| ChildError::Local(format!("{error:#}")))?;
-    let (resources, shutdown) = resources.into_parts();
-    Ok(ResolvedSessionResources {
-        resources,
-        shutdown: Some(shutdown),
-    })
 }
 
 /// Stable shape of the host shutdown report, without re-exporting peri-acp types.
@@ -390,6 +320,9 @@ pub struct AcpChild {
     retry_recovery: AsyncMutex<bool>,
     shutdown: AsyncMutex<Option<ChildShutdown>>,
     session_id: String,
+    /// Clone of the handle moved into the host assembly. Kept so the actor can
+    /// read child-thread metadata without reopening the store.
+    session_resources: Option<Arc<dyn SessionResources>>,
 }
 
 impl std::fmt::Debug for AcpChild {
@@ -420,6 +353,7 @@ impl AcpChild {
             retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: session_id.into(),
+            session_resources: None,
         }
     }
 
@@ -512,6 +446,9 @@ impl AcpChild {
         let resolved = resolve_session_resources(&config).await?;
         let session_resources = resolved.resources;
         let session_store_shutdown = resolved.shutdown;
+        // Keep one clone before the host takes ownership: the actor needs the
+        // same facade to read child-thread metadata (`sessions.subagents`).
+        let child_session_resources = Some(Arc::clone(&session_resources));
         if entry == SessionEntry::Interrupted {
             // Ordinary prompts also set working before calling the model. A
             // dead synchronous attempt has no owner to settle it. This store
@@ -613,6 +550,7 @@ impl AcpChild {
             retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: String::new(),
+            session_resources: child_session_resources,
         };
 
         if let Err(error) = child.initialize().await {
@@ -684,6 +622,12 @@ impl AcpChild {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Session-store facade shared with the host, when this child opened one.
+    #[must_use]
+    pub(crate) fn session_resources(&self) -> Option<Arc<dyn SessionResources>> {
+        self.session_resources.clone()
     }
 
     async fn initialize(&self) -> Result<(), ChildError> {

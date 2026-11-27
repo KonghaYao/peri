@@ -1,6 +1,6 @@
 # P1：Swarm 每个会话独立打开会话存储，1000 并发建会话耗尽 PostgreSQL 连接
 
-**状态**：已修复，待 PR 合并。
+**状态**：已修复，PR [#620](https://github.com/KonghaYao/peri/pull/620)。
 **优先级**：P1。
 **类型**：性能 / 可用性。
 **创建日期**：2026-11-27。
@@ -43,10 +43,11 @@
   - `AcpSwarmService` 保存 `Option<Arc<dyn SessionResources>>`；新增 `new_with_session_resources(store, config, resources)`，保留 `new` 委托为 `None`。
   - `:435` 与 `:1421` 两处 `ChildConfig` 构造统一走一个 `child_config(...)` 辅助函数，避免其中一条忘记传播。
 - `peri-swarm/src/actor/swarm.rs::create` 用 `deployment.session_resources()` 构造 service。
-- `peri-swarm/src/actor/runtime.rs`
+- `peri-swarm/src/actor/runtime.rs` / `runtime/session_open.rs`
   - `ChildConfig` 增加 `session_resources: Option<Arc<dyn SessionResources>>`。
-  - 新增 `resolve_session_resources(config)`：**先**做现有 `machine_id/workspace_root` 半配置校验（保持 fail-closed），**再**判断注入句柄；注入时直接返回该句柄且关闭权为 `None`，未注入时走原 `open_session_resources` 并把关闭权包成 `Some`。
+  - 新增 `resolve_session_resources(config)`：**先**做现有 `machine_id/workspace_root` 半配置校验（保持 fail-closed），**再**判断注入句柄；注入时直接返回该句柄且关闭权为 `None`，未注入时经 `session_open::open_resources` 打开并把关闭权包成 `Some`。合并 #618 后，打开规则已收敛到 `session_open.rs`，`runtime.rs` 只消费解析结果。
   - `build` 使用解析结果；`HostAssemblyInput.session_store_shutdown` 在注入路径传 `None`。**这是硬约束**：若仍传 `Some`，第一个 child 退出会关闭全进程共享池（`peri-resources/src/sessions/resources/deployment.rs` 的 `close()` 会使后续写入返回 `Unavailable`）。
+  - `AcpChild` 保留同一 facade 的 clone，供 `sessions.subagents` 读取；`AcpSwarmService::subagent_records` 依次复用 live child → 部署级 facade，只有未安装共享句柄的独立/本地部署才走 `SubagentReader` 惰性只读打开。
 - `peri-swarm/src/bootstrap.rs`
   - `:666` 保留 `session_resources`，连同 `store_shutdown` 一起进入部署；安装 `StaticDeployment` 时传入 `Arc::clone`。
   - 状态库打开失败分支（`:653`）改为直接调用保留的 `store_shutdown.shutdown()`。
@@ -122,3 +123,12 @@
   **32+32**（池上限）、状态库 **8+8**；新 session 1000 全部 `idle`。主机侧 `dbx` 客户端另占
   11 条会话库 + 7 条状态库连接，不属部署。详见
   [验收记录](../../docs/verification/peri-swarm-1000-concurrent-sessions-2026-11-27.md)。
+- 2026-11-27 合并 `origin/main`（`cc76e2ad9`，#618 `sessions.subagents`）并解决
+  `runtime.rs` / `service.rs` 冲突后：
+  - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib`：**439 passed /
+    0 failed / 20 ignored**；新增
+    `subagent_reads_use_the_shared_facade_instead_of_opening_per_actor`。
+  - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --test it`：**124 passed /
+    0 failed / 8 ignored**。
+  - `./scripts/check-changed.sh`：通过。
+  - 合并新增的 subagent 读取路径未再次进入 1000 并发运行时样本；证据边界见验收记录 §6。
