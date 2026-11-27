@@ -98,6 +98,14 @@ async fn a_cancel_that_never_reaches_the_host_writes_no_receipt() {
         error.message()
     );
     assert_eq!(error.details()["operation"], "session/cancel");
+    // n-5：上游 message 不进 details（"Transport closed" 是 ACP 的原文）。
+    assert_eq!(error.details()["rpcCode"], -32603);
+    assert_eq!(error.details()["reason"], "acp_error");
+    assert!(
+        !error.details().to_string().contains("Transport closed")
+            && !error.message().contains("Transport closed"),
+        "the upstream message must not be echoed: {error:?}"
+    );
     // 没有留下“已受理”的持久收据：同键可以重新受理。
     assert!(fixture
         .store
