@@ -97,7 +97,12 @@ fn acknowledged_budget_release_keeps_both_directions_contiguous_and_retries_the_
     assert!(state.window.pending_release_bytes() > 0);
     assert_eq!(committed_texts(&state), expected(4, 7));
     let evicted = state.window.stats().evicted_segments;
-    assert_eq!(read_page(&mut state, before(4), 2), PublicationIntent::None);
+    // `dispatch_for_bridge` schedules a publication for every page event even when the
+    // handler rejects it; the rejection itself must leave the window untouched.
+    assert_eq!(
+        read_page(&mut state, before(4), 2),
+        PublicationIntent::Deferred
+    );
     assert_eq!(committed_texts(&state), expected(4, 7));
     assert_eq!(state.window.stats().evicted_segments, evicted);
     assert_eq!(paging.read().before_cursor.as_deref(), Some("before-04"));
@@ -133,9 +138,11 @@ fn acknowledged_budget_release_keeps_both_directions_contiguous_and_retries_the_
         PublicationIntent::Deferred
     );
     assert_eq!(committed_texts(&state), expected(6, 11));
+    // Every entry was already displayed, so the page collapses to an empty draft; the
+    // page event still schedules a publication but the window must not move.
     assert_eq!(
         read_page(&mut state, after(11), 10),
-        PublicationIntent::None
+        PublicationIntent::Deferred
     );
     assert_eq!(committed_texts(&state), expected(6, 11));
     assert_eq!(paging.read().after_cursor.as_deref(), Some("after-11"));
