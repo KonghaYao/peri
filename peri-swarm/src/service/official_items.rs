@@ -7,9 +7,17 @@ use crate::domain::official_item::{
     map_group, GroupClass, ItemGroup, OfficialSessionItem, TurnContext,
 };
 use crate::domain::{
-    turn_id_for_item, ItemOrder, ItemPage, ItemView, ItemsWindow, LogicalId, SwarmError, TurnStatus,
+    turn_id_for_item, ItemKind, ItemOrder, ItemPage, ItemView, ItemsWindow, LogicalId, SwarmError,
+    TurnStatus,
 };
 use crate::store::{store_failure, SwarmStore};
+
+/// 每请求允许的 `turn_at_cursor` 页首回扫次数上限。
+///
+/// 历史多行（item 粒度之前）里根消息流与推理流/子 agent 流按 `seq` 交错，
+/// 页内每个缺口都要回扫到 turn opener。超过上限的缺口放弃精确归属：
+/// 该组及其后续组只留在 `items`，不把猜测写进官方 `turn_id`。
+const MAX_TURN_LOOKBACKS: usize = 8;
 
 pub(crate) async fn item_page(
     store: &dyn SwarmStore,
@@ -57,6 +65,7 @@ async fn project_items(
     // 多帧条目跨过未入页的条目时，原始行的 seq 可能不连续。缺口中也可能有开轮或完成帧。
     let mut seqs: Vec<_> = items.iter().map(|row| row.seq).collect();
     seqs.sort_unstable();
+    // 相同边界只回扫一次：缺口起点去重后再按条目顺序消费。
     let seed_bounds: Vec<_> = (min_seq > 1)
         .then_some(min_seq)
         .into_iter()
@@ -64,8 +73,12 @@ async fn project_items(
             seqs.windows(2)
                 .filter_map(|pair| (pair[1] - pair[0] > 1).then_some(pair[1])),
         )
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
     let mut seed_at = seed_bounds.into_iter().peekable();
+    let mut lookbacks = 0usize;
+    let mut degraded = false;
 
     let mut rows_by_item: BTreeMap<&str, Vec<&ItemView>> = BTreeMap::new();
     for row in items {
@@ -83,7 +96,20 @@ async fn project_items(
         while let Some(seq) = seed_at.next_if(|&seq| seq <= group.selected.seq) {
             seed = Some(seq - 1);
         }
+        if seed.is_some() && lookbacks == MAX_TURN_LOOKBACKS {
+            degraded = true;
+            tracing::warn!(
+                logical_id,
+                max = MAX_TURN_LOOKBACKS,
+                "swarm items turn seeding degraded to items-only"
+            );
+        }
+        if degraded {
+            // 后续组的 turn 归属依赖未验证的缺口边界：宁可只留在 items。
+            continue;
+        }
         if let Some(up_to) = seed {
+            lookbacks += 1;
             let mut persisted = BTreeMap::new();
             let previous = turn_at_cursor(store, logical_id, up_to, &mut persisted).await?;
             has_output = previous
@@ -119,10 +145,15 @@ async fn project_items(
             // 边界不取决于 payload 是否能进入 data。
             has_output = true;
         }
-        let status = if group.class == GroupClass::UnfinishedAssistant {
-            turn_status(store, logical_id, &mut statuses, turn_id).await?
-        } else {
-            None
+        let status = match group.class {
+            GroupClass::UnfinishedAssistant => {
+                turn_status(store, logical_id, &mut statuses, turn_id).await?
+            }
+            // 调用行自身没有终态：同一 turn 已终止时按 `incomplete` 兜底。
+            _ if group.selected.kind == ItemKind::ToolCall => {
+                turn_status(store, logical_id, &mut statuses, turn_id).await?
+            }
+            _ => None,
         };
         if let Some(item) = map_group(
             &group,

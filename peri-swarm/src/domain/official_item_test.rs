@@ -49,32 +49,52 @@ fn user_message_has_the_official_fields_even_with_empty_text() {
 }
 
 #[test]
-fn assistant_prefers_newest_complete_to_later_delta_and_preserves_phase() {
-    let mut delta = row(
-        4,
-        ItemKind::Message,
-        json!({"role":"assistant","text":"delta","delta":true}),
-    );
-    delta.truncated = true;
-    let mut complete = row(
-        3,
-        ItemKind::Message,
-        json!({"role":"assistant","text":"full text","complete":true,"phase":"commentary"}),
-    );
-    let old = row(
+fn assistant_appends_rows_after_the_first_complete_frame() {
+    // 真实写入形状：完成帧是 flush 时的累计文本，flush 之后同一 itemId 仍可能
+    // 追加迟到 delta，或由下一次 flush 写一条只含新增文本的完成帧。
+    let complete = row(
         2,
         ItemKind::Message,
-        json!({"role":"assistant","text":"old","complete":true}),
+        json!({"role":"assistant","text":"hel","complete":true,"phase":"commentary"}),
+    );
+    let late_delta = row(
+        3,
+        ItemKind::Message,
+        json!({"role":"assistant","text":"lo","delta":true}),
+    );
+    let expected = json!({
+        "type":"message", "id":"itim_example", "turn_id":"turn_opener", "role":"assistant",
+        "status":"completed", "phase":"commentary",
+        "content":[{"type":"output_text","text":"hello"}]
+    });
+    assert_eq!(
+        project(
+            &[late_delta.clone(), complete.clone()],
+            Some(TurnStatus::Cancelled)
+        ),
+        Some(expected)
+    );
+    // 第二个完成帧只带迟到文本：同样按 seq 追加。
+    let late_complete = row(
+        4,
+        ItemKind::Message,
+        json!({"role":"assistant","text":"!","complete":true}),
     );
     assert_eq!(
-        project(&[delta, complete.clone(), old], Some(TurnStatus::Cancelled)),
-        Some(json!({
-            "type":"message", "id":"itim_example", "turn_id":"turn_opener", "role":"assistant",
-            "status":"completed", "phase":"commentary", "content":[{"type":"output_text","text":"full text"}]
-        }))
+        project(&[complete.clone(), late_delta, late_complete], None).unwrap()["content"],
+        json!([{"type":"output_text","text":"hello!"}])
     );
-    complete.payload.as_object_mut().unwrap().remove("phase");
-    assert_eq!(project(&[complete], None).unwrap()["phase"], "final_answer");
+    // 迟到帧被截断（正文不可得）：跳过它，不把完成帧文本判为不可读。
+    let mut truncated = row(5, ItemKind::Message, json!({"role":"assistant","text":"?"}));
+    truncated.truncated = true;
+    assert_eq!(
+        project(&[complete.clone(), truncated], None).unwrap()["content"],
+        json!([{"type":"output_text","text":"hel"}])
+    );
+    // 缺少合法 phase 时用 final_answer。
+    let mut no_phase = complete;
+    no_phase.payload.as_object_mut().unwrap().remove("phase");
+    assert_eq!(project(&[no_phase], None).unwrap()["phase"], "final_answer");
 }
 
 #[test]
@@ -236,6 +256,65 @@ fn tool_output_status_and_error_follow_the_official_shape() {
             None
         ),
         None
+    );
+}
+
+#[test]
+fn dangling_call_status_follows_the_turn_terminal() {
+    let call = row(
+        1,
+        ItemKind::ToolCall,
+        json!({"toolCallId":"call-1","title":"tool","status":"in_progress"}),
+    );
+    for (status, expected) in [
+        (None, "in_progress"),
+        (Some(TurnStatus::Queued), "in_progress"),
+        (Some(TurnStatus::InProgress), "in_progress"),
+        (Some(TurnStatus::Waiting), "in_progress"),
+        (Some(TurnStatus::Completed), "incomplete"),
+        (Some(TurnStatus::Cancelled), "incomplete"),
+        (Some(TurnStatus::Failed), "incomplete"),
+    ] {
+        assert_eq!(
+            project(std::slice::from_ref(&call), status).unwrap()["status"],
+            expected,
+            "turn status {status:?}"
+        );
+    }
+    // 调用行自身已带终态时以它为准（同页输出覆盖另由 `reconcile_calls` 负责）。
+    let failed = row(
+        1,
+        ItemKind::ToolCall,
+        json!({"toolCallId":"call-1","title":"tool","status":"failed"}),
+    );
+    assert_eq!(
+        project(&[failed], Some(TurnStatus::Cancelled)).unwrap()["status"],
+        "failed"
+    );
+}
+
+#[test]
+fn recovered_rows_are_never_projected_and_do_not_join_a_group() {
+    let recovered = row(
+        2,
+        ItemKind::Message,
+        json!({"role":"assistant","text":"recovered","complete":true,"recovered":true}),
+    );
+    assert!(
+        ItemGroup::new(vec![&recovered]).is_none(),
+        "整组都是恢复行时不参与投影"
+    );
+    // 与普通 delta 同组时，恢复行不参与：组仍按未完成 assistant 投影。
+    let delta = row(
+        1,
+        ItemKind::Message,
+        json!({"role":"assistant","text":"hi","delta":true}),
+    );
+    let group = ItemGroup::new(vec![&delta, &recovered]).expect("group");
+    assert_eq!(group.class, GroupClass::UnfinishedAssistant);
+    assert_eq!(
+        project(&[delta, recovered], Some(TurnStatus::InProgress)).unwrap()["content"],
+        json!([{"type":"output_text","text":"hi"}])
     );
 }
 

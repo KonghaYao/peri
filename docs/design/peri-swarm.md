@@ -106,8 +106,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先建立订阅并构造/返回 SSE 响应（初始 `session` 帧），再调度首轮；首轮事件受广播容量约束（§4.3） |
 | `GET` | `/v1/agents/sessions` | 官方 `sessions.list`：按 `logicalId` 的 keyset 分页（`after` 排他、`order` 默认 `desc`），可选 `agent_id` 与 `metadata[key]=value` 过滤 |
 | `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
-| `POST` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.update`：替换 model / MCP tools / metadata / prompt cache；live 运行中返回 `409 turn_in_progress`，详情指向官方 cancel 入口；无 live runtime 但持久 turn 未完成时返回 `502`（`details.operation=session_resume_required`） |
-| `DELETE` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.delete`：删除该会话的全部 Swarm 行并失效运行态；与 update 同一准入及取消提示 |
+| `POST` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.update`：替换 model / MCP tools / metadata / prompt cache；live 运行中返回 `409 turn_in_progress`，有 admitted slot 时详情指向官方 cancel 入口，恢复窗口/无 slot 时改为 `retry_later`（§4.4）；无 live runtime 但持久 turn 未完成时返回 `502`（`details.operation=session_resume_required`） |
+| `DELETE` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.delete`：删除该会话的全部 Swarm 行并失效运行态；与 update 同一准入、`suggest` 判定与 `502` 规则 |
 | `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条用户输入或控制输入；受理持久化后 `202`。官方信封接受单条纯文本 message、cancel 或 MCP 审批答复；cancel 不创建 turn 或 item |
 | `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
 | `GET` | `/v1/agents/sessions/{logicalId}/items` | 按条目边界分页；`data` 是官方 `AgentSessionItem` 投影，`items` 是原始行（§4.2） |
@@ -265,16 +265,32 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | 持久条目 | `data` 投影 |
 | --- | --- |
 | 根会话用户消息 | `message`，`content` 为 `input_text`，`phase:null`，`status:completed` |
-| 根会话助手消息 | `message`，`content` 为 `output_text`；有 `complete:true` 时取最新完成帧，`status:completed`，缺少合法 `phase` 时用 `final_answer`。无完成帧时按 `seq` 拼接历史 delta（单帧直接取文本），缺少合法 `phase` 时为 `null`；所归属 turn 已终止时为 `incomplete`，否则为 `in_progress` |
-| `thought` | `reasoning`，`summary` 为 `summary_text`，`status:null`；优先取完成帧，否则拼接历史 delta；空文本不投影 |
-| `tool_call` / `tool_result` | `function_call` / `function_call_output`，以 `toolCallId` 作为 `call_id` 跨页关联。`title` 用作 `name`，`input` 或 `body` 用作 `arguments`；失败文本进 `error`，其他输出进 `output`（非字符串序列化为 JSON 文本）。同页输出状态可覆盖调用状态，跨页不回填。不发 `mcp_call` |
+| 根会话助手消息 | `message`，`content` 为 `output_text`；有 `complete:true` 时以**首条**完成帧为起点，按 `seq` 追加其后各帧的 `text`（迟到 delta 与后续完成帧），`status:completed`，缺少合法 `phase` 时用 `final_answer`。无完成帧时按 `seq` 拼接历史 delta（单帧直接取文本），缺少合法 `phase` 时为 `null`；所归属 turn 已终止时为 `incomplete`，否则为 `in_progress` |
+| `thought` | `reasoning`，`summary` 为 `summary_text`，`status:null`；优先取完成帧，否则拼接历史 delta；空文本不投影。`summary_text` 承载 Peri 的**原始** thought 文本，不是官方语义的推理摘要 |
+| `tool_call` / `tool_result` | `function_call` / `function_call_output`，以 `toolCallId` 作为 `call_id` 跨页关联。`title` 用作 `name`（依赖宿主把工具名写进 ACP `title`；`projection.rs` 只读该字段），`input` 或 `body` 用作 `arguments`；失败文本进 `error`，其他输出进 `output`（非字符串序列化为 JSON 文本）。同页输出状态可覆盖调用状态；无同页输出时，所属 turn 已终止（`completed`/`cancelled`/`failed`）为 `incomplete`，仍在运行为 `in_progress`，跨页仍不回填——客户端应结合同 `call_id` 的 `function_call_output` 判断真实结果。不发 `mcp_call` |
 
 `receipt`、`approval`、`tool_update`、子 agent 条目、所需帧已截断的条目、缺少工具标识
-（或调用名称）以及无法确定 turn 的条目只保留在 `items`。turn 归属与 SSE 回放共用开
+（或调用名称）、恢复期根输出（`payload.recovered=true`）以及无法确定 turn 的条目只保留在
+`items`。恢复行是真实持久行，但不属于任何 gateway turn：
+它既不进入 `data`，也不开启/关闭 turn，不置“已有输出”。turn 归属与 SSE 回放共用开
 turn 规则：回扫页首最小 `seq` 之前的历史取种子，跨过未入页的原始行时补查其边界。
 首条用户消息、已出现助手完成帧后到达的用户消息、或有对应持久 turn 行的用户消息开启
-turn；steer 沿用 opener 的 `turn_id`。能识别的边界不因该条目未进入 `data` 而失效。
-投影不改变 §9.4 的原始分页语义。
+turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被截断）不因该条目未进入
+`data` 而失效；真实截断行的 payload 只剩 `{_truncated, originalBytes}`，边界信息已丢失，
+只能依赖持久 turn 行。投影不改变 §9.4 的原始分页语义。
+
+页内 `data` 的顺序取自条目在该页的原始顺序（即 item 的 `MAX(seq)`），不是所选完成帧的
+`seq`；迟到 delta 让两者不一致时，按 `MAX(seq)` 的顺序稳定，正文仍按上文规则折叠。
+
+页内 `seq` 缺口需要回扫历史确认 turn 归属。相同缺口边界只回扫一次，且每请求最多 8 次
+`turn_at_cursor` 回扫（历史多行在迁移期可能制造很多缺口）。超上限的缺口降级为
+“仅 `items`”：该组及其后的组不写入 `data`，不把未验证的 turn 归属写进官方 `turn_id`；
+需要完整官方投影时减小 `limit` 或按 `afterSeq` 分段读取。
+
+`ItemPage` 同时是 HTTP body 和 actor `ListItems` action 的 Rivet wire 类型（`data` 从原始
+行改为官方投影是跨版本硬契约变化）。升级必须把 actor 与 gateway 作为同一版本整体重启；
+混合版本时网关反序列化旧 `data` 失败，`/items` 返回 `502 upstream_unavailable`
+（`details.operation=swarm_actor`）直到 actor 重启。
 
 #### 4.2.2 item 级分页
 
@@ -299,9 +315,12 @@ turn；steer 沿用 opener 的 `turn_id`。能识别的边界不因该条目未�
   `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
   出现在页里（`items` 含游标之前的帧，`data` 仍按投影条件决定是否发出）。畸形或未知
   item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回 `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页。页尾有未映射条目时可能重读其原始行；整页
-  `data=[]` 即使 `has_more=true` 也会提前停止。需要覆盖所有原始条目时，用网关的
-  `nextCursor` 配合 `has_more` 翻页；网关不为避免空 `data` 扩大页边界。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页（网关把该 item 解析为它的 `MAX(seq)`）。页内
+  未映射条目若排在最后一个可映射条目**之前**（升序页 `MAX(seq) < after`，降序页
+  `MAX(seq) > after`），就落在游标的已越过侧，下一页不会返回它；排在它之后（页序更
+  靠后）的未映射条目会在下一页重读。整页 `data=[]` 即使 `has_more=true` 也会提前停止。
+  需要全量原始条目时用网关的 `nextCursor`/`afterSeq` 翻页并读 `items`；网关不为避免
+  空 `data` 或漏读扩大页边界。
 - **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
   之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
@@ -462,6 +481,8 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   `inputId`；其他键派生为 `UUIDv5(namespace, logicalId + "\0" + key)`，namespace 冻结为
   `76663edb-72b5-58df-9b4c-b1e3c8f8d418`。header 与 body 同时给出时，body 必须等于
   解析后的 header 值。字面 UUID 与派生 UUID 共用同一收据键空间；非 UUID 原键不落库、不回显。
+  UUID 文本按**字面**保留为 `inputId`（花括号、无连字符、大写等非规范写法都接受），
+  同一逻辑键写成两种串会得到两条收据：重试请复用同一字节串。
   原生路径两者都未提供仍返回 `400`；官方 message/cancel 无键时生成一次性 UUIDv7，
   不保证无键重试幂等。MCP 审批答复给出 header 时使用同一派生规则。
 - 同一 `inputId` 与同一内容重放返回 `disposition=existing`，不重复追加用户 item；同一
@@ -476,11 +497,18 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此
   「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
 - 官方 cancel 的 `202` 沿用 `InputOutcome`，只写控制收据，不为取消本身写 item 或建
-  turn。只向准入时已绑定的 slot 发送 `session/cancel`；空闲或尚无 slot 时是 no-op，
-  同键重放不会再取消后来启动的 turn。无 live runtime 且持久 turn 未结束时，不写新收据，
-  返回 `502`（`details.operation=session_resume_required`）。宿主确认 `cancelled` 才按
-  该状态落库并发送 `turn.completed`；终态仍按既有 `turn_ended` 规则结算该 turn 的待办。
-  网关不把受理等同于宿主停止，也不新增 `turn.cancelled` 帧。
+  turn。**收据在下发之后写**：只会向准入时已绑定的 slot 发送 `session/cancel`，空闲或
+  尚无 slot 时是 no-op；下发失败（ACP 拒绝或传输关闭）不留收据，返回 `503`
+  （`error.code=queue_unavailable`，`details.operation=session/cancel`），文案是“取消未
+  送达、可用同键重试”，同键重试因此可以重新受理。下发成功但宿主在等待窗口（30s）内
+  没有退出 slot 时仍是 `202`：这只表示取消已送达，不表示已取消，终态以宿主为准。
+  此时同键重放且该 turn 仍持有 slot，会**重新下发** `session/cancel` 并返回
+  `disposition=existing`，不新增 item；目标始终是受理时绑定的 turn，因此不会误取消
+  后来启动的 turn（目标 turn 已离开 slot 时重放只是 no-op）。无 live runtime 且持久
+  turn 未结束时，不写新收据，返回 `502`（`details.operation=session_resume_required`）。
+  宿主确认 `cancelled` 才按该状态落库并发送 `turn.completed`；终态仍按既有
+  `turn_ended` 规则结算该 turn 的待办。网关不把受理等同于宿主停止，也不新增
+  `turn.cancelled` 帧。
 - 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
   `409 input_conflict`，恢复期间的冲突或上游故障返回对应的 409 或 502
   （`details.operation` 指向具体阶段）。turn 执行失败在流上以 `turn.failed` +
@@ -493,9 +521,14 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
   失败，不接管该身份。
 - `sessions.update` 与 `sessions.delete` 使用管理操作的准入判定：
-  - 有 live runtime 且 turn 正在运行或已有未关闭 turn：`409 turn_in_progress`，详情包含
-    `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和会话的 `POST /events` 入口；
-    这不改变普通用户输入的 `suggest:"steer"`；
+  - 有 live runtime 且 turn 正在运行（持有 admitted slot）：`409 turn_in_progress`，详情
+    包含 `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和会话的 `POST /events`
+    入口；这不改变普通用户输入的 `suggest:"steer"`；
+  - 有 live runtime 但**没有** admitted slot（`child.recovering()` 的恢复窗口，或已
+    `begin_turn` 而 slot 已释放）：同样 `409 turn_in_progress`，详情改为
+    `suggest:"retry_later"`、`reason:"recovery_pending"`，不宣传 cancel——该状态下
+    `session/cancel` 没有可达目标，只是一次 202 no-op。只能用新的用户输入触发交互恢复
+    （或等待宿主恢复），再重试修改/删除；
   - 无 live runtime，但持久会话行 `state=running` 或 `swarm_turns` 仍有开放行
     （`queued`/`in_progress`/`waiting`）：`502`，`details.operation =
     "session_resume_required"`，与 `ensure_live` 的恢复拒绝一致；更新（官方 POST）

@@ -1199,6 +1199,13 @@ impl SwarmService for InMemorySwarmService {
         } else {
             None
         };
+        if submission.is_cancel() && cancel_request.is_none() {
+            // 与 actor 的取消门禁一致：没有 live turn 但持久 turn 仍未完成时，
+            // `session/cancel` 没有可达目标，不能只写一张“已受理”的收据。
+            if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+                return Err(SwarmError::upstream_unavailable("session_resume_required"));
+            }
+        }
         if submission.mode == InputMode::Turn
             && submission.kind == InputKind::User
             && row.state == SessionState::Running

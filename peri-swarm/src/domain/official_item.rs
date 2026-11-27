@@ -97,8 +97,26 @@ pub(crate) struct ItemGroup<'a> {
     pub class: GroupClass,
 }
 
+/// 恢复期根输出行：真实持久行，但不属于任何 gateway turn。
+///
+/// 与 `feat/swarm-item-granularity` 的 `service::is_recovered_row` 同一规则。
+/// 它既不开启也不关闭 turn，也不进入 `data`（`design §4.2`）。
+fn is_recovered_row(row: &ItemView) -> bool {
+    row.payload.get("recovered").and_then(Value::as_bool) == Some(true)
+}
+
+/// 根会话 assistant 的完成帧。
+fn is_complete_assistant_row(row: &ItemView) -> bool {
+    row.kind == ItemKind::Message
+        && row.source.is_root()
+        && text_field(&row.payload, "role") == Some("assistant")
+        && row.payload["complete"].as_bool() == Some(true)
+}
+
 impl<'a> ItemGroup<'a> {
     pub(crate) fn new(mut rows: Vec<&'a ItemView>) -> Option<Self> {
+        // 恢复行不是边界，也不是可映射条目：整组只剩恢复行时不参与投影。
+        rows.retain(|row| !is_recovered_row(row));
         rows.sort_unstable_by_key(|row| row.seq);
         let last = *rows.last()?;
         let complete = rows.iter().rev().copied().find(|row| {
@@ -143,6 +161,36 @@ impl<'a> ItemGroup<'a> {
                 .collect(),
         )
     }
+
+    /// 历史多行 assistant 的最终文本：首条完成帧的 `text` 加其后各帧的 `text`。
+    ///
+    /// 完成帧写的是该次 flush 时累积的文本；同一 itemId 在 flush 之后仍可能
+    /// 追加迟到 delta，或由下一次 flush 写入只含新增文本的完成帧。只取最新完成帧
+    /// 会丢掉迟到文本，只取首条会丢掉后者，所以从首条完成帧起按 `seq` 累计。
+    /// 这是 `scripts/sdk_reconnect_idempotency_e2e.mjs` 对最终文本的定义。
+    fn complete_text(&self) -> Option<String> {
+        let first = self
+            .rows
+            .iter()
+            .find(|row| is_complete_assistant_row(row))?;
+        if first.truncated {
+            // 首条完成帧的正文不可得：不把残缺文本冒充完整内容。
+            return None;
+        }
+        let mut text = text_field(&first.payload, "text")
+            .unwrap_or_default()
+            .to_owned();
+        for row in self.rows.iter().skip_while(|row| row.seq <= first.seq) {
+            // 截断帧的正文不可得：跳过它，而不是把整段文本判为不可读。
+            if row.truncated || !row.source.is_root() {
+                continue;
+            }
+            if let Some(part) = text_field(&row.payload, "text") {
+                text.push_str(part);
+            }
+        }
+        Some(text)
+    }
 }
 
 pub(crate) fn map_group(
@@ -151,7 +199,7 @@ pub(crate) fn map_group(
 ) -> Option<OfficialSessionItem> {
     let context = context?;
     let row = group.selected;
-    if row.truncated || !row.source.is_root() {
+    if row.truncated || !row.source.is_root() || is_recovered_row(row) {
         return None;
     }
     let id = row.item_id.clone();
@@ -174,7 +222,9 @@ pub(crate) fn map_group(
                 ),
                 GroupClass::CompleteAssistant => (
                     MessageRole::Assistant,
-                    OfficialContent::OutputText { text: text() },
+                    OfficialContent::OutputText {
+                        text: group.complete_text()?,
+                    },
                     phase.or(Some(MessagePhase::FinalAnswer)),
                     OutputItemStatus::Completed,
                 ),
@@ -227,7 +277,7 @@ pub(crate) fn map_group(
                 .unwrap_or(Value::Null),
             call_id: nonempty_field(payload, "toolCallId")?.to_owned(),
             name: nonempty_field(payload, "title")?.to_owned(),
-            status: call_status(payload).unwrap_or(FunctionCallStatus::InProgress),
+            status: dangling_call_status(payload, context.status),
             turn_id,
         },
         ItemKind::ToolResult => {
@@ -276,6 +326,23 @@ fn call_status(payload: &Value) -> Option<FunctionCallStatus> {
         Some("completed") => Some(FunctionCallStatus::Completed),
         Some("failed") => Some(FunctionCallStatus::Failed),
         _ => None,
+    }
+}
+
+/// `function_call.status`：调用行自身只写 `pending`/`in_progress`，终态通常在
+/// 另一条 `tool_result` 行。
+///
+/// 没有同页输出时，所属 turn 已终止就报 `incomplete`（官方状态集没有
+/// `cancelled`），仍在运行才报 `in_progress`；客户端应结合
+/// `function_call_output` 判断真实结果。
+fn dangling_call_status(payload: &Value, turn: Option<TurnStatus>) -> FunctionCallStatus {
+    match call_status(payload) {
+        Some(FunctionCallStatus::Completed) => FunctionCallStatus::Completed,
+        Some(FunctionCallStatus::Failed) => FunctionCallStatus::Failed,
+        _ => match turn {
+            Some(status) if !status.is_open() => FunctionCallStatus::Incomplete,
+            _ => FunctionCallStatus::InProgress,
+        },
     }
 }
 

@@ -34,6 +34,10 @@ async fn submit_cancel(router: &Router, key: &str) -> (StatusCode, Value) {
     (status, body)
 }
 
+/// `Manual` 让 fake 保持一个 live turn，用来复现 actor 的“有 slot 才能取消”。
+///
+/// 它不代表 `Immediate`（默认策略）：那里 turn 在受理内同步完成，随后的 cancel
+/// 看到的是空 slot，只能作为 202 no-op。
 fn manual_harness() -> Harness {
     let service = Arc::new(InMemorySwarmService::in_memory(ServiceConfig {
         turn_policy: TurnPolicy::Manual,
@@ -127,6 +131,69 @@ async fn actor_cancel_without_a_host_refuses_a_persisted_open_turn_before_receip
     let service = Arc::new(AcpSwarmService::new(
         store.clone(),
         ActorServiceConfig::default(),
+    ));
+    let (router, workspace) = harness_with_service(service, 15_000);
+    let id = "agent-cancel";
+    store
+        .swarm_upsert_session(SwarmSessionRow {
+            logical_id: id.into(),
+            root_session_id: CANCEL_ID.into(),
+            actor_key: format!("agent/{id}"),
+            cwd: workspace.path().display().to_string(),
+            state: SessionState::Idle,
+            model: None,
+            instructions: None,
+            mcp_tools: vec![],
+            environment: EnvironmentRef::none(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            last_activity_at: "2026-01-01T00:00:00Z".into(),
+            last_item_seq: 0,
+        })
+        .await
+        .unwrap();
+    store
+        .swarm_upsert_turn(SwarmTurnRow {
+            logical_id: id.into(),
+            turn_id: "turn_interrupted".into(),
+            status: TurnStatus::Waiting,
+            created_at: 1,
+            started_at: Some(1),
+            completed_at: None,
+            error: None,
+            usage: None,
+            subagent_id: None,
+        })
+        .await
+        .unwrap();
+
+    let (status, refusal) = submit_cancel(&router, CANCEL_ID).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "upstream_unavailable");
+    assert_eq!(
+        refusal["error"]["details"]["operation"],
+        "session_resume_required"
+    );
+    assert!(store
+        .swarm_get_input(id, CANCEL_ID)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        get(&router, "/turns/turn_interrupted").await["status"],
+        "waiting"
+    );
+}
+
+/// fake 与 actor 的取消门禁一致：没有 live turn 但持久 turn 未完成时，
+/// `session/cancel` 没有可达目标，不写“已受理”的收据。
+#[tokio::test]
+async fn in_memory_cancel_without_a_live_turn_refuses_a_persisted_open_turn() {
+    let store = Arc::new(MemorySwarmStore::new());
+    let service = Arc::new(InMemorySwarmService::new(
+        Arc::clone(&store) as Arc<dyn SwarmStore>,
+        ServiceConfig::default(),
     ));
     let (router, workspace) = harness_with_service(service, 15_000);
     let id = "agent-cancel";

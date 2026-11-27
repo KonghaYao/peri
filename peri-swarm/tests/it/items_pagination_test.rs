@@ -503,8 +503,8 @@ fn data_ids(value: &Value) -> Vec<String> {
         .map(|row| row["itemId"].as_str().unwrap())
         .collect();
     let data = value["data"].as_array().expect("data");
-    assert!(data.len() <= raw_ids.len() && raw_ids.len() <= rows.len());
-    data.iter()
+    let ids: Vec<String> = data
+        .iter()
         .map(|item| {
             assert!(matches!(
                 item["type"].as_str(),
@@ -515,7 +515,11 @@ fn data_ids(value: &Value) -> Vec<String> {
             assert!(raw_ids.contains(id));
             id.to_owned()
         })
-        .collect()
+        .collect();
+    // `data` 每个 itemId 至多一项；具体顺序与内容仍由各用例断言。
+    let unique: HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "data repeats an itemId: {ids:?}");
+    ids
 }
 
 #[tokio::test]
@@ -826,4 +830,194 @@ async fn internal_only_page_keeps_items_and_next_cursor() {
     assert_eq!(seqs(&page), [4]);
     assert_eq!(data_ids(&page), ["itim_answer"]);
     assert_eq!(page["has_more"], false);
+}
+
+fn item_ids(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|row| row["itemId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Count how often one raw item id is delivered across the walked pages.
+fn seen(pages: &[Value], item_id: &str) -> usize {
+    pages
+        .iter()
+        .map(|page| {
+            item_ids(page)
+                .iter()
+                .filter(|id| id.as_str() == item_id)
+                .count()
+        })
+        .sum()
+}
+
+/// Walk `/items` exactly like the official `CursorPage`: the next cursor is
+/// `data[last].id`, and an empty `data` page (or `has_more=false`) ends the run.
+async fn sdk_pages(harness: &Harness, order: &str, limit: u32) -> Vec<Value> {
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let uri = match after.as_deref() {
+            Some(id) => {
+                format!("/v1/agents/sessions/agent-01/items?order={order}&limit={limit}&after={id}")
+            }
+            None => format!("/v1/agents/sessions/agent-01/items?order={order}&limit={limit}"),
+        };
+        let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let next = page["data"]
+            .as_array()
+            .and_then(|data| data.last())
+            .map(|item| item["id"].as_str().unwrap().to_owned());
+        let has_more = page["hasMore"].as_bool().unwrap();
+        pages.push(page);
+        match next {
+            Some(id) if has_more => after = Some(id),
+            _ => break,
+        }
+    }
+    pages
+}
+
+/// 官方 SDK 的自动翻页游标是 `data[last].id`（网关解析为该 item 的 `MAX(seq)`），
+/// 不是 `nextCursor`。desc 页里排在最后一个可映射条目**之前**（更新）的未映射
+/// 条目落在游标的已越过侧，下一页不会再返回它；排在它**之后**（更旧）的会在
+/// 下一页重读。需要全量原始条目时用 `nextCursor`/`afterSeq` 翻页并读 `items`。
+#[tokio::test]
+async fn sdk_data_cursor_skips_newer_unmapped_items_in_desc() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    append_row(&harness, 1, "itim_u1", "user", json!({})).await;
+    append_item(
+        &harness,
+        2,
+        "itim_r2",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(
+        &harness,
+        3,
+        "itim_a3",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+    append_item(
+        &harness,
+        4,
+        "itim_r4",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 5, "itim_u5", "user", json!({})).await;
+    append_item(
+        &harness,
+        6,
+        "itim_r6",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+
+    let pages = sdk_pages(&harness, "desc", 3).await;
+    assert_eq!(
+        pages.iter().map(item_ids).collect::<Vec<_>>(),
+        vec![
+            vec!["itim_r6", "itim_u5", "itim_r4"],
+            vec!["itim_r4", "itim_a3", "itim_r2"],
+            vec!["itim_r2", "itim_u1"],
+        ]
+    );
+    assert_eq!(
+        pages.iter().map(data_ids).collect::<Vec<_>>(),
+        vec![vec!["itim_u5"], vec!["itim_a3"], vec!["itim_u1"]],
+        "SDK 游标取 data 末项：页里更旧的未映射条目不在其中"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r6"),
+        1,
+        "desc：排在最后一个可映射条目之前（更新），下一页不再返回"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r4"),
+        2,
+        "desc：排在它之后（更旧），下一页重读"
+    );
+}
+
+/// asc 下的镜像：比 `data` 末项更旧的未映射条目只在这一页出现，更新的会重读。
+#[tokio::test]
+async fn sdk_data_cursor_skips_older_unmapped_items_in_asc() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    append_item(
+        &harness,
+        1,
+        "itim_r1",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 2, "itim_u2", "user", json!({})).await;
+    append_row(
+        &harness,
+        3,
+        "itim_a3",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+    append_item(
+        &harness,
+        4,
+        "itim_r4",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 5, "itim_u5", "user", json!({})).await;
+
+    let pages = sdk_pages(&harness, "asc", 2).await;
+    assert_eq!(
+        pages.iter().map(item_ids).collect::<Vec<_>>(),
+        vec![
+            vec!["itim_r1", "itim_u2"],
+            vec!["itim_a3", "itim_r4"],
+            vec!["itim_r4", "itim_u5"],
+        ]
+    );
+    assert_eq!(
+        pages.iter().map(data_ids).collect::<Vec<_>>(),
+        vec![vec!["itim_u2"], vec!["itim_a3"], vec!["itim_u5"],]
+    );
+    assert_eq!(
+        seen(&pages, "itim_r1"),
+        1,
+        "asc：排在最后一个可映射条目之前（更旧），下一页不再返回"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r4"),
+        2,
+        "asc：排在它之后（更新），下一页重读"
+    );
 }

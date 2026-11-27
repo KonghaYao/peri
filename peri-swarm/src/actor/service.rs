@@ -66,6 +66,37 @@ const STEER_CONTINUATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// this is only a safety net against a lost `peri/agent_event_done`.
 const ATTEMPT_REPLY_TERMINAL_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// How long `cancel_turn` waits for the host to leave the slot after
+/// `session/cancel`.
+///
+/// A cancel that was delivered is delivered even if the host does not confirm
+/// in time: the 202 still means "delivered", and a same-key replay re-sends the
+/// notification while the target turn still owns the slot.
+const CANCEL_SETTLE_WAIT: Duration = Duration::from_secs(30);
+
+/// Test-only override for [`CANCEL_SETTLE_WAIT`] (milliseconds, 0 = default).
+#[cfg(test)]
+static CANCEL_SETTLE_WAIT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn cancel_settle_wait() -> Duration {
+    #[cfg(test)]
+    match CANCEL_SETTLE_WAIT_MS.load(Ordering::Relaxed) {
+        0 => CANCEL_SETTLE_WAIT,
+        ms => Duration::from_millis(ms),
+    }
+    #[cfg(not(test))]
+    CANCEL_SETTLE_WAIT
+}
+
+/// Shorten the settle wait for one test (unit tests only).
+#[cfg(test)]
+pub(crate) fn set_cancel_settle_wait(wait: Duration) {
+    CANCEL_SETTLE_WAIT_MS.store(
+        u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
 /// Turn identity visible to `GET /sessions` while the turn runs.
 #[derive(Clone, Debug)]
 struct TurnSlot {
@@ -198,6 +229,24 @@ impl SessionRuntime {
     }
 }
 
+/// `409` for `sessions.update`/`sessions.delete`, or `None` when the mutation is
+/// admitted.
+///
+/// `suggest=cancel` is only a real entry point while an admitted slot exists:
+/// `accept_input` sends `session/cancel` only for that slot. The recovery window
+/// (`child.recovering()`) and an open turn whose slot is already gone can only
+/// be waited out or moved by a new user input, so they point at `retry_later`.
+fn mutation_blocked(runtime: &SessionRuntime, logical_id: &LogicalId) -> Option<SwarmError> {
+    if !(runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()) {
+        return None;
+    }
+    Some(if runtime.is_running() {
+        SwarmError::turn_in_progress_for_mutation(logical_id.as_str())
+    } else {
+        SwarmError::turn_in_progress_awaiting_recovery(logical_id.as_str())
+    })
+}
+
 /// Keep the safety net alive when `finish_turn` deferred the close to a steer.
 /// The retry runs detached, so cancelling the prompt future cannot drop the
 /// only closer of the turn. It first waits one grace period for a continuation
@@ -254,6 +303,15 @@ pub struct AcpSwarmService {
     config: ActorServiceConfig,
     sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     channels: Mutex<HashMap<String, StreamHub>>,
+    /// Accepted cancels whose target turn still holds the slot, keyed by
+    /// `(logicalId, inputId)`.
+    ///
+    /// A cancel receipt is written only after `session/cancel` was delivered.
+    /// If the host does not leave the slot within the wait bound, a same-key
+    /// replay must deliver the notification again — but only to that same turn.
+    /// The map is live-only: an actor restart drops it, and a new actor never
+    /// re-delivers a cancel addressed to a host that is gone.
+    accepted_cancels: Mutex<HashMap<(String, String), String>>,
     /// Serializes `create_session` so two concurrent creates cannot reserve two
     /// hosts for the same logical id.
     create_lock: AsyncMutex<()>,
@@ -279,6 +337,7 @@ impl AcpSwarmService {
             config,
             sessions: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
+            accepted_cancels: Mutex::new(HashMap::new()),
             create_lock: AsyncMutex::new(()),
             attach_lock: AsyncMutex::new(()),
         }
@@ -1014,7 +1073,7 @@ impl AcpSwarmService {
         // was already taken by a newer turn.
         let mut receiver = runtime.turn.subscribe();
         let waited = tokio::time::timeout(
-            Duration::from_secs(30),
+            cancel_settle_wait(),
             receiver.wait_for(|slot| {
                 slot.as_ref()
                     .map(|slot| slot.request_id.as_str())
@@ -1026,10 +1085,61 @@ impl AcpSwarmService {
             tracing::warn!(
                 logical_id = logical_id.as_str(),
                 request_id = %active,
-                "swarm cancel did not observe the turn terminal within 30s"
+                "swarm cancel did not observe the turn terminal within the wait bound"
             );
         }
         Ok(())
+    }
+
+    /// Remember (or forget) the live turn an accepted cancel may still need to
+    /// address on a same-key replay.
+    ///
+    /// The entry survives only while the target turn holds the slot: once the
+    /// host left it, a retry is an `existing` no-op and cannot reach a later
+    /// turn. The map is in-memory by design — a new actor has no host to
+    /// re-notify.
+    fn note_cancel_target(&self, logical_id: &LogicalId, input_id: &str, target: &str) {
+        let key = (logical_id.as_str().to_owned(), input_id.to_owned());
+        let live = self.live_slot_request(logical_id).as_deref() == Some(target);
+        let mut cancels = self.accepted_cancels.lock();
+        if live {
+            cancels.insert(key, target.to_owned());
+        } else {
+            cancels.remove(&key);
+        }
+    }
+
+    /// Re-deliver a cancel that was accepted but did not stop its turn.
+    ///
+    /// Only the turn bound at acceptance is targeted, so a retry cannot cancel
+    /// a turn that started afterwards.
+    async fn redeliver_cancel(
+        &self,
+        logical_id: &LogicalId,
+        input_id: &str,
+    ) -> Result<(), SwarmError> {
+        let key = (logical_id.as_str().to_owned(), input_id.to_owned());
+        let Some(target) = self.accepted_cancels.lock().get(&key).cloned() else {
+            return Ok(());
+        };
+        if self.live_slot_request(logical_id).as_deref() != Some(target.as_str()) {
+            self.accepted_cancels.lock().remove(&key);
+            return Ok(());
+        }
+        self.cancel_turn(logical_id, Some(&target))
+            .await
+            .map_err(cancel_delivery_failure)?;
+        if self.live_slot_request(logical_id).as_deref() != Some(target.as_str()) {
+            self.accepted_cancels.lock().remove(&key);
+        }
+        Ok(())
+    }
+
+    /// The request id currently holding the turn slot, if a live runtime has one.
+    fn live_slot_request(&self, logical_id: &LogicalId) -> Option<String> {
+        let runtime = self.sessions.lock().get(logical_id.as_str()).cloned()?;
+        let slot = runtime.turn.borrow().clone();
+        slot.map(|slot| slot.request_id)
     }
 
     /// Read one `session/load` page from the host. Paging never mutates
@@ -1757,12 +1867,11 @@ impl SwarmService for AcpSwarmService {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
         };
-        if runtime.as_ref().is_some_and(|runtime| {
-            runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
-        }) {
-            return Err(SwarmError::turn_in_progress_for_mutation(
-                logical_id.as_str(),
-            ));
+        if let Some(error) = runtime
+            .as_ref()
+            .and_then(|runtime| mutation_blocked(runtime, logical_id))
+        {
+            return Err(error);
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             // The live host is gone but the durable row still owns an open
@@ -1819,12 +1928,11 @@ impl SwarmService for AcpSwarmService {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
         };
-        if runtime.as_ref().is_some_and(|runtime| {
-            runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
-        }) {
-            return Err(SwarmError::turn_in_progress_for_mutation(
-                logical_id.as_str(),
-            ));
+        if let Some(error) = runtime
+            .as_ref()
+            .and_then(|runtime| mutation_blocked(runtime, logical_id))
+        {
+            return Err(error);
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             // No live host owns this row, but its durable turn is still open;
@@ -1884,6 +1992,12 @@ impl SwarmService for AcpSwarmService {
         if let Some(outcome) =
             Self::existing_input(store, logical_id, &submission, &fingerprint).await?
         {
+            // 已送达但宿主没在等待窗口内退出 slot 的取消：重放要重新下发，
+            // 目标仍是受理时绑定的 turn（见 `accepted_cancels`）。
+            if submission.is_cancel() {
+                self.redeliver_cancel(logical_id, &submission.input_id)
+                    .await?;
+            }
             return Ok(outcome);
         }
 
@@ -1972,7 +2086,24 @@ impl SwarmService for AcpSwarmService {
             }
         }
 
+        let cancel_target = admitted_slot
+            .as_ref()
+            .filter(|_| cancel)
+            .map(|slot| slot.request_id.clone());
+        drop(admission);
+
+        // 取消先下发、后写收据：未送达的取消不能留下“已受理”的持久事实，
+        // 否则同键重试会命中收据，再也不会发第二次 `session/cancel`。
+        if let Some(target) = cancel_target.as_deref() {
+            self.cancel_turn(logical_id, Some(target))
+                .await
+                .map_err(cancel_delivery_failure)?;
+        }
+
         let disposition = Self::put_input(store, logical_id, &submission, &fingerprint).await?;
+        if let Some(target) = cancel_target.as_deref() {
+            self.note_cancel_target(logical_id, &submission.input_id, target);
+        }
         if disposition == Disposition::Existing {
             let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
             return Ok(AcceptedInput::settled(outcome));
@@ -1994,13 +2125,6 @@ impl SwarmService for AcpSwarmService {
         } else {
             None
         };
-        drop(admission);
-
-        // 控制输入只记录收据；cancel 仍绑定在准入时看到的 turn。
-        if let Some(admitted) = admitted_slot.as_ref().filter(|_| cancel) {
-            self.cancel_turn(logical_id, Some(&admitted.request_id))
-                .await?;
-        }
         let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
         // 普通 turn 仍由调用方在 202 后运行，不能在受理时等待模型。
         Ok(AcceptedInput {
@@ -2181,22 +2305,53 @@ fn child_error(error: ChildError) -> SwarmError {
 }
 
 /// Queue handoff failures are always `503 queue_unavailable`; a missing
-/// capability keeps its own diagnostic in `details.operation`. The host's
-/// rejection reason is carried in `details.reason` so the client can diagnose
-/// a stale generation without reading the host log.
+/// capability keeps its own diagnostic in `details.operation`.
+///
+/// The host's reply is **not** echoed: an ACP message may embed provider
+/// payloads or credentials (the same policy as
+/// [`SwarmError::from_acp_error`]). Only the JSON-RPC code and a classified
+/// reason stay inspectable, so a client can still tell a stale generation from a
+/// closed transport without reading the host log.
 fn queue_unavailable(operation: &'static str, error: ChildError) -> SwarmError {
     tracing::warn!(operation, error = %error, "swarm input handoff failed");
     match error {
         ChildError::Rpc { code: -32601, .. } => {
             SwarmError::queue_unavailable("capability_not_negotiated")
         }
-        ChildError::Rpc { code, message } => SwarmError::queue_unavailable(operation).with_details(
-            serde_json::json!({ "operation": operation, "rpcCode": code, "reason": message }),
-        ),
+        ChildError::Rpc { code, .. } => {
+            SwarmError::queue_unavailable(operation).with_details(serde_json::json!({
+                "operation": operation,
+                "rpcCode": code,
+                // The message is dropped; the code classifies the failure.
+                "reason": "acp_error",
+            }))
+        }
         other => SwarmError::queue_unavailable(operation).with_details(
-            serde_json::json!({ "operation": operation, "reason": other.to_string() }),
+            serde_json::json!({ "operation": operation, "reason": child_reason(&other) }),
         ),
     }
+}
+
+/// Classified reason for a child failure; never the upstream text.
+fn child_reason(error: &ChildError) -> &'static str {
+    match error {
+        ChildError::ProviderUnavailable => "provider_unavailable",
+        ChildError::Local(_) => "local_error",
+        ChildError::Rpc { .. } => "acp_error",
+        ChildError::Closed => "closed",
+    }
+}
+
+/// 503 for a cancel whose `session/cancel` never reached the host.
+///
+/// `cancel_turn` builds its error with the generic queue wording ("the
+/// submission was not accepted"); a cancel is not a submission, and no receipt
+/// was written, so the message must name the undelivered cancellation and say
+/// that the same key may be retried. Details (operation/RPC code/reason) are
+/// already redacted by [`queue_unavailable`].
+fn cancel_delivery_failure(error: SwarmError) -> SwarmError {
+    tracing::warn!(error = %error, "swarm cancel was not delivered");
+    SwarmError::cancel_not_delivered("session/cancel").with_details(error.details().clone())
 }
 
 #[cfg(test)]
