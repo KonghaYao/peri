@@ -503,13 +503,21 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
   默认 `order=desc`（`after` 指向更旧的组），升序需显式 `order=asc`。
 - 单次请求最多读 100 个存储页（含首页）；2000 条是**纳入**上限，不是读取上限：存储层先取
   `limit+1` 个候选组的全部帧再丢弃未纳入的组，历史回扫不计入。纳入按 `seq` 去重。升序探到
-  下一页游标 `>= lastItemSeq` 时停止（不追并发追加），返回已累积页。超出纳入预算或游标
-  无法推进时返回 `422 items_scan_limit`，可减小 `limit` 或从更近的游标重试；上游读取失败
-  返回 `502 upstream_unavailable`。两类错误均不返回部分页或游标。
-- SDK 用最后一个 `data[].id`，与 `nextCursor` 覆盖同一批可投影条目；SDK 续页会重扫该 id
-  之后的内部行，因此在预算边界上可能比原生更早触发 `items_scan_limit`；升序响应也可能
-  包含 `lastItemSeq` 之后的并发追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读
-  `items`。
+  下一页游标 `>= lastItemSeq` 时停止（不追并发追加），返回已累积页；此时仍是 `200`，形状为
+  `data=[]`、`has_more=true`、`nextCursor` 为本页原始游标（下一页游标达到或越过
+  `lastItemSeq`，且该页没有可投影条目）。原生客户端可沿该游标继续，SDK 因空 `data` 停止，
+  因此在该边界可能比原生游标遍历少看到条目，但不是错误。超出纳入预算或游标无法推进时返回 `422 items_scan_limit`，恢复方式随成因不同：纳入
+  超 2000 行需把游标移到该 item 之后（单个 item 自身就可能超过 2000 行，存储层整组返回、
+  与 `limit` 无关，减小 `limit` 无效），100 页读取预算触顶时减小 `limit` 只会更快耗尽，
+  游标不能严格推进时重试或改用 `afterSeq`。上游读取失败返回 `502 upstream_unavailable`。
+  两类错误均不返回部分页或游标。
+- SDK 用最后一个 `data[].id` 翻页；只有已返回的 item 不再增长时，它才与 `nextCursor` 覆盖
+  同一批可投影条目，且续页会重扫该 id 之后的内部行，因此在预算边界上可能比原生更早触发
+  `items_scan_limit`。已返回的 item 若又追加了帧，`after=<itemId>` 按请求时的当前
+  `MAX(seq)` 解析，可能跳过中间尚未读到的可投影条目（例如末项 `seq=2`、`nextCursor=3`、
+  `seq=4` 有可投影条目，末项增长到 5 后解析为 5，越过 4），而数字游标仍会包含它。升序响应
+  也可能包含 `lastItemSeq` 之后的并发追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq`
+  并读 `items`。
 - `POST /events` 的用户输入在原始行中是 `kind=message`。事件 `Idempotency-Key` 的非 UUID 值
   按 `UUIDv5(namespace, logicalId + "\0" + key)` 派生；键区分大小写、不 trim，空头视为缺省。
   UUID 键按**字面**文本原样使用（花括号、无连字符、大写等非规范写法都接受），同一逻辑键

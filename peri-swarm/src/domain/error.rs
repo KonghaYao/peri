@@ -330,7 +330,7 @@ impl SwarmError {
         Self::new(
             ErrorKind::Unprocessable,
             ErrorCode::ItemsScanLimit,
-            "item scan budget exhausted; reduce limit or retry from a closer cursor",
+            "item scan budget exhausted",
         )
     }
 

@@ -351,18 +351,25 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   部分页或游标。上游读失败一律返回 `502 upstream_unavailable`，不降级为成功空页。
 - **升序观察上界**：探页遇到下一页游标 `>= lastItemSeq` 时停止，返回已累积的页而不是错误。
   `lastItemSeq` 是请求开始时的观察上界；首读之后追加的条目可能属于并发写入，升序不追尾，
-  但首读本身仍可能包含越过该值的并发帧。降序不受此限。
+  但首读本身仍可能包含越过该值的并发帧。降序不受此限。守卫命中时仍返回 `200`：形状为
+  `data=[]`、`has_more=true`、`nextCursor` 为本页原始游标（探到的下一页游标达到或越过
+  `lastItemSeq`，且该页没有可投影条目）。原生客户端可沿该游标继续；SDK 因空 `data` 停止，
+  因此在该边界可能比原生游标遍历少看到条目，但不是错误。
 - `nextCursor` 是页内最后一个 item 的最大 `seq`，仅在还有条目时给出。升序下一页严格
   前进；降序页的游标是页内最旧组的最大 `seq`，下一页只取更小的组。`after=<itemId>`
   解析为该 item 的最大 `seq`。十进制 `after`/`afterSeq` 同样按 item 边界解释：游标
   落在多帧 item 中间时，要么按组最大 `seq` 选入整个 item（含游标之前的帧），要么
   整组排除。畸形或未知 item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
   `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页。它与 `nextCursor` 覆盖同一批可投影条目，但 SDK
-  续页会从该 `id` 之后重扫内部原始行；因此在 100 页/2000 行预算边界上，SDK 可能比原生
-  `nextCursor` 更早触发 `items_scan_limit`。升序响应也可能包含 `lastItemSeq` 之后的并发
-  追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读 `items`，不要用 `data` 的
-  末项或是否为空决定原始分页。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页。只有在**已返回的 item 不再增长**时，它才与
+  `nextCursor` 覆盖同一批可投影条目；此时 SDK 续页会从该 `id` 之后重扫内部原始行，因此在
+  100 页/2000 行预算边界上，SDK 可能比原生 `nextCursor` 更早触发 `items_scan_limit`。
+  已返回的 item 若又追加了帧，`after=<itemId>` 按请求时该 item 的**当前** `MAX(seq)` 解析，
+  可能越过中间尚未读到的可投影 item：例如 SDK 末项 `seq=2`、`nextCursor=3`、`seq=4`
+  有可投影条目，末项增长到 `seq=5` 后 `after=<itemId>` 解析为 5，跳过了 `seq=4`，而数字
+  游标 `nextCursor=3` 仍会包含它。两者差异不只在重扫成本或扫描预算。升序响应也可能包含
+  `lastItemSeq` 之后的并发追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读
+  `items`，不要用 `data` 的末项或是否为空决定原始分页。
 - **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
   之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
@@ -373,7 +380,7 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 
 | HTTP | `/items` 错误码 | 含义 |
 | --- | --- | --- |
-| 422 | `items_scan_limit` | 扫描预算耗尽或游标不能推进；可缩小 `limit` 或从更近的游标重试。 |
+| 422 | `items_scan_limit` | 扫描预算耗尽或游标不能推进；恢复方式取决于成因：纳入超 2000 行需把游标移到该 item 之后（单个 item 就超过 2000 行时存储层整组返回，减小 `limit` 无效），100 页读取预算触顶时减小 `limit` 只会更快耗尽，游标不能严格推进时重试或改用 `afterSeq`。 |
 | 502 | `upstream_unavailable` | 存储页或投影依赖读取失败；`details.operation` 指明操作，不返回部分页。 |
 
 #### 4.2.1 官方事件映射
