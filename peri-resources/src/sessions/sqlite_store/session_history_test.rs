@@ -7,6 +7,26 @@ use crate::sessions::data::SessionDataPort;
 use peri_acp_types::store::ThreadStore;
 
 #[tokio::test]
+async fn history_context_read_yields_to_cancellation_even_when_every_row_is_ready() {
+    let payload = super::payloads(1).pop().unwrap();
+    let cancel = tokio::sync::Notify::new();
+    let mut decoded = 0;
+    let read = crate::sessions::sqlite_store::context::collect_decoded_payloads(|_| {
+        decoded += 1;
+        if decoded == 3 {
+            cancel.notify_one();
+        }
+        std::task::Poll::Ready((decoded <= 64).then(|| Ok(payload.clone())))
+    });
+    tokio::select! {
+        biased;
+        _ = read => panic!("a ready transcript must let the caller cancel between batches"),
+        _ = cancel.notified() => {}
+    }
+    assert_eq!(decoded, 16);
+}
+
+#[tokio::test]
 async fn test_projection_and_compaction_maintain_derived_views_in_the_same_write() {
     let (store, data, directory) = super::database().await;
     let workspace = super::workspace(&store, directory.path()).await;

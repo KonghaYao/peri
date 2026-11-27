@@ -16,4 +16,6 @@
 
 在中间修复版上，首屏与前 19 页的改善未覆盖深翻。第 80 页 RSS 达到 281 MiB，100 页内进程高水位 301 MiB。同样数据库单独运行 ACP，第 81–100 页耗时中位 15 ms，RSS 为 49 MiB。后续改动复用分隔线投影，并将相邻显示条目的淘汰合并处理。
 
+含 2,500 条约 9 KiB 的有效消息时，在首次执行读取期间采样并发送 Stop 或 close。热库行连续就绪的情况下，SQLite 每解码 16 行给调度器一次取消机会；单条消息解码耗时受消息大小影响。
+
 相应的回归用例位于 `peri-acp` 的 `history_page_window_test`、`peri-resources` 的 SQLite 与 remote 会话测试、`peri-tui` 的 `message_area` 和 `history_window`。发布交接包另附相同编译 profile 的二进制摘要、原始指标及合成数据生成脚本。

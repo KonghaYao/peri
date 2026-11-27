@@ -15,6 +15,7 @@ use peri_acp_types::thread::ThreadId;
 use peri_acp_types::thread::ThreadMeta;
 use sqlx::{AssertSqlSafe, Row, SqliteConnection};
 use std::collections::HashSet;
+use std::task::{Context, Poll};
 
 impl SqliteSessionDatabase {
     /// 小型 metadata 投影；上下文事实由独立历史读取提供。
@@ -154,25 +155,38 @@ async fn collect_payload_rows(
     connection: &mut SqliteConnection,
     query: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
 ) -> Result<Vec<PersistedPayload>> {
-    query
-        .try_map(|row| {
-            let row_id: &str = row.try_get(0)?;
-            let content: &str = row.try_get(1)?;
-            let payload = peri_acp_types::store::deserialize_persisted_payload(content)
-                .map_err(|err| sqlx::Error::Decode(err.into()))?;
-            if payload.id().as_uuid().to_string() != row_id {
-                return Err(sqlx::Error::Decode(
-                    "persisted payload message id mismatch".into(),
-                ));
-            }
-            Ok(payload)
-        })
-        .fetch_all(connection)
-        .await
-        .map_err(|err| match err {
+    let query = query.try_map(|row| {
+        let row_id: &str = row.try_get(0)?;
+        let content: &str = row.try_get(1)?;
+        let payload = peri_acp_types::store::deserialize_persisted_payload(content)
+            .map_err(|err| sqlx::Error::Decode(err.into()))?;
+        if payload.id().as_uuid().to_string() != row_id {
+            return Err(sqlx::Error::Decode(
+                "persisted payload message id mismatch".into(),
+            ));
+        }
+        Ok(payload)
+    });
+    let mut rows = query.fetch(connection);
+    collect_decoded_payloads(|cx| rows.as_mut().poll_next(cx)).await
+}
+
+pub(super) async fn collect_decoded_payloads(
+    mut poll_row: impl FnMut(&mut Context<'_>) -> Poll<Option<sqlx::Result<PersistedPayload>>>,
+) -> Result<Vec<PersistedPayload>> {
+    let mut payloads = Vec::new();
+    while let Some(row) = std::future::poll_fn(&mut poll_row).await {
+        payloads.push(row.map_err(|err| match err {
             sqlx::Error::Decode(cause) => anyhow::Error::from_boxed(cause),
             other => other.into(),
-        })
+        })?);
+        // A ready SQLite row stream can decode the whole result in one poll.
+        // Let a pending Stop or close interrupt between batches even on a warm database.
+        if payloads.len().is_multiple_of(16) {
+            tokio::task::yield_now().await;
+        }
+    }
+    Ok(payloads)
 }
 
 pub(super) async fn load_context_payloads_on(
