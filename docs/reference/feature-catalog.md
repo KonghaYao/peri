@@ -221,7 +221,7 @@
 | F-SWARM-009 | L2 | 宿主恢复；按交互重新挂接，持久 MQ 恢复，同步中断可继续追问 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
 | F-SWARM-011 | L3 | 副本组部署面；外部 engine（字面 endpoint 限私网/环回，域名由部署保证）、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |
-| F-SWARM-012 | L1 | 官方会话资源面；list/update/delete/turns，官方默认字段与环境 `none` 投影，空对象 update no-op，未映射资源显式 404 | [契约](../design/peri-swarm.md) |
+| F-SWARM-012 | L1 | 官方资源；list/update/delete/turns/subagents，默认字段/环境 `none`，空 update no-op，未映射资源显式 404 | [契约](../design/peri-swarm.md) |
 | F-SWARM-013 | L1 | 事件持久化粒度；turn 终止按 item 合并文本与推理，工具与审批逐帧 | [契约](../design/peri-swarm.md) |
 | F-SWARM-014 | L1 | 官方 items 投影；`data` 为官方条目，`items` 保留原始行，恢复行不投影 | [契约](../design/peri-swarm.md) |
 | F-SWARM-015 | L1 | 官方取消；cancel 事件受理、收据后写、首次与重发失败可分 | [契约](../design/peri-swarm.md) |

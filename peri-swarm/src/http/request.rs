@@ -11,8 +11,8 @@ use crate::domain::input_id::input_id_for_key;
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
-    PromptCacheTtl, SessionsWindow, SwarmError, TurnsWindow, MAX_METADATA_KEY_CHARS,
-    MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
+    PromptCacheTtl, SessionsWindow, SubagentsWindow, SwarmError, TurnsWindow,
+    MAX_METADATA_KEY_CHARS, MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
 };
 use crate::service::{SessionUpdateCommand, UpdateField};
 
@@ -272,6 +272,17 @@ pub struct ItemsQuery {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnsQuery {
+    #[serde(default)]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub order: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentsQuery {
     #[serde(default)]
     pub after: Option<String>,
     #[serde(default)]
@@ -1469,6 +1480,29 @@ pub fn resolve_turns_window(query: &TurnsQuery) -> Result<TurnsWindow, SwarmErro
         None => ItemOrder::Desc,
     };
     Ok(TurnsWindow {
+        order,
+        after: query.after.clone(),
+        limit,
+    })
+}
+
+/// `GET /v1/agents/sessions/{id}/subagents` query. The official default is
+/// `desc`; `after` is a subagent id validated against the session's tree by the
+/// service.
+pub fn resolve_subagents_window(query: &SubagentsQuery) -> Result<SubagentsWindow, SwarmError> {
+    let limit = query.limit.unwrap_or(SubagentsWindow::DEFAULT_LIMIT);
+    if limit == 0 || limit > SubagentsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            SubagentsWindow::MAX_LIMIT
+        ))
+        .with_details(json!({ "field": "limit", "received": limit })));
+    }
+    let order = match query.order.as_deref() {
+        Some(value) => ItemOrder::parse(value)?,
+        None => ItemOrder::Desc,
+    };
+    Ok(SubagentsWindow {
         order,
         after: query.after.clone(),
         limit,

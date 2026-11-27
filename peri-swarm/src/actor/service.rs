@@ -34,15 +34,16 @@ use super::reader::{
     ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, SteerReservation, TurnOutcome,
 };
 use super::runtime::{
-    local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
-    WORKSPACE_MCP_SERVER_NAME,
+    local_session_store, records_from, AcpChild, ChildConfig, ChildError, ChildShutdown,
+    SessionStoreDeployment, SubagentReader, WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
     new_root_session_id, turn_id_for_item, ActorKey, ApprovalDecision, Disposition,
     EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputOutcome, InputState, InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec,
-    OfficialTurn, SandboxView, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
-    SwarmError, TurnPage, TurnView, TurnsWindow,
+    OfficialSubagent, OfficialTurn, SandboxView, SessionPage, SessionState, SessionView,
+    SessionsWindow, StreamEvent, SubagentPage, SubagentRecord, SubagentsWindow, SwarmError,
+    TurnPage, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::official_items::item_page;
@@ -145,6 +146,16 @@ impl Default for ActorServiceConfig {
             sandbox: None,
         }
     }
+}
+
+/// One resolution of the deployment's session store, shared by host assembly
+/// and the read-only subagent reader. A remote deployment never falls back to
+/// the local SQLite file here; the open path decides that.
+fn configured_session_store(config: &ActorServiceConfig) -> SessionStoreDeployment {
+    config
+        .session_store
+        .clone()
+        .unwrap_or_else(|| local_session_store(config.session_store_path.clone()))
 }
 
 /// Everything [`AcpSwarmService::spawn_runtime`] needs to assemble one host.
@@ -319,6 +330,8 @@ pub struct AcpSwarmService {
     /// Serializes `ensure_live` so concurrent interactions after a host restart
     /// attach one host, not one per action.
     attach_lock: AsyncMutex<()>,
+    /// Read-only session-store handle for subagents when no live child owns one.
+    subagent_reader: SubagentReader,
 }
 
 impl std::fmt::Debug for AcpSwarmService {
@@ -333,6 +346,11 @@ impl std::fmt::Debug for AcpSwarmService {
 impl AcpSwarmService {
     #[must_use]
     pub fn new(store: Arc<dyn SwarmStore>, config: ActorServiceConfig) -> Self {
+        let subagent_reader = SubagentReader::new(
+            configured_session_store(&config),
+            config.machine_id,
+            config.workspace_root.clone(),
+        );
         Self {
             store,
             config,
@@ -341,6 +359,7 @@ impl AcpSwarmService {
             accepted_cancels: Mutex::new(HashMap::new()),
             create_lock: AsyncMutex::new(()),
             attach_lock: AsyncMutex::new(()),
+            subagent_reader,
         }
     }
 
@@ -369,6 +388,29 @@ impl AcpSwarmService {
     #[must_use]
     pub fn is_live(&self, logical_id: &LogicalId) -> bool {
         self.sessions.lock().contains_key(logical_id.as_str())
+    }
+
+    /// Deployment session store shared by host assembly and subagent reads.
+    fn session_store(&self) -> SessionStoreDeployment {
+        configured_session_store(&self.config)
+    }
+
+    /// Prefer the live host's already-open facade; a cold actor lazily opens the
+    /// configured store read-only. Both paths read the same persisted tree.
+    async fn subagent_records(
+        &self,
+        logical_id: &LogicalId,
+        root_session_id: &str,
+    ) -> Result<Vec<SubagentRecord>, SwarmError> {
+        let live = self
+            .sessions
+            .lock()
+            .get(logical_id.as_str())
+            .and_then(|runtime| runtime.child.session_resources());
+        if let Some(resources) = live {
+            return records_from(resources.as_ref(), root_session_id).await;
+        }
+        self.subagent_reader.records(root_session_id).await
     }
 
     fn runtime(&self, logical_id: &LogicalId) -> Result<Arc<SessionRuntime>, SwarmError> {
@@ -427,11 +469,7 @@ impl AcpSwarmService {
             )
             .with_approval_declarations(&row.mcp_tools),
         );
-        let session_store = self
-            .config
-            .session_store
-            .clone()
-            .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
+        let session_store = self.session_store();
         let config = ChildConfig {
             cwd: PathBuf::from(&row.cwd),
             session_store,
@@ -1411,11 +1449,7 @@ impl AcpSwarmService {
             )
             .with_approval_declarations(request.mcp_tools),
         );
-        let session_store = self
-            .config
-            .session_store
-            .clone()
-            .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
+        let session_store = self.session_store();
         let root_session_id = request.root_session_id;
         let child = AcpChild::spawn(
             ChildConfig {
@@ -1973,6 +2007,40 @@ impl SwarmService for AcpSwarmService {
     ) -> Result<OfficialTurn, SwarmError> {
         self.require_row(logical_id).await?;
         crate::service::get_turn_from_store(self.store.as_ref(), logical_id.as_str(), turn_id).await
+    }
+
+    async fn list_subagents(
+        &self,
+        logical_id: &LogicalId,
+        window: SubagentsWindow,
+    ) -> Result<SubagentPage, SwarmError> {
+        let row = self.require_row(logical_id).await?;
+        let records = self
+            .subagent_records(logical_id, &row.root_session_id)
+            .await?;
+        crate::service::subagents::subagent_page(
+            records,
+            logical_id.as_str(),
+            &row.root_session_id,
+            &window,
+        )
+    }
+
+    async fn get_subagent(
+        &self,
+        logical_id: &LogicalId,
+        subagent_id: &str,
+    ) -> Result<OfficialSubagent, SwarmError> {
+        let row = self.require_row(logical_id).await?;
+        let records = self
+            .subagent_records(logical_id, &row.root_session_id)
+            .await?;
+        crate::service::subagents::subagent_by_id(
+            records,
+            logical_id.as_str(),
+            &row.root_session_id,
+            subagent_id,
+        )
     }
 
     async fn accept_input(

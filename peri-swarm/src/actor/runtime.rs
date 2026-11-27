@@ -21,6 +21,11 @@
 //!    handle would only detach the host task.
 
 mod history;
+mod session_open;
+mod subagents;
+
+use session_open::open_session_resources;
+pub(crate) use subagents::{records_from, SubagentReader};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,9 +41,8 @@ use peri_acp::transport::mpsc::{mpsc_transport_pair, MpscClientTransport};
 use peri_acp::transport::types::{AcpError, IncomingMessage};
 use peri_acp::transport::AcpTransport;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::session_resources::SessionResources;
 pub use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_resources::RemoteWorkspaceEnvironment;
-use peri_resources::Resources;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
@@ -138,39 +142,6 @@ pub fn local_session_store(path: Option<PathBuf>) -> SessionStoreDeployment {
         Some(path) => SessionStoreDeployment::local_path(path),
         None => SessionStoreDeployment::default_local(),
     }
-}
-
-/// Open the child's session store for the configured deployment.
-///
-/// - no remote identity ⇒ the existing local `Resources::open_deployment`
-///   (S4/S5 default, unchanged);
-/// - `machine_id` **and** `workspace_root` ⇒ the remote PostgreSQL store with a
-///   virtual workspace identity (`design §4.1`);
-/// - exactly one of the two ⇒ an explicit error. Falling back to the local
-///   SQLite file here would write Swarm facts to a second database.
-async fn open_session_resources(config: &ChildConfig) -> Result<Resources, ChildError> {
-    match (config.machine_id, config.workspace_root.as_ref()) {
-        (None, None) => Resources::open_deployment(&config.session_store).await,
-        (Some(machine_id), Some(root)) => {
-            let environment = RemoteWorkspaceEnvironment::virtual_workspace(
-                &machine_id.to_string(),
-                root.clone(),
-            )
-            .map_err(|error| {
-                ChildError::Local(format!("invalid remote workspace environment: {error:#}"))
-            })?;
-            Resources::open_deployment_in_remote_environment(&config.session_store, environment)
-                .await
-        }
-        _ => {
-            return Err(ChildError::Local(
-                "remote session store requires both machine_id and workspace_root; \
-                 refusing to open the local store"
-                    .to_owned(),
-            ));
-        }
-    }
-    .map_err(|error| ChildError::Local(format!("{error:#}")))
 }
 
 /// Stable shape of the host shutdown report, without re-exporting peri-acp types.
@@ -321,6 +292,9 @@ pub struct AcpChild {
     retry_recovery: AsyncMutex<bool>,
     shutdown: AsyncMutex<Option<ChildShutdown>>,
     session_id: String,
+    /// Clone of the handle moved into the host assembly. Kept so the actor can
+    /// read child-thread metadata without reopening the store.
+    session_resources: Option<Arc<dyn SessionResources>>,
 }
 
 impl std::fmt::Debug for AcpChild {
@@ -351,6 +325,7 @@ impl AcpChild {
             retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: session_id.into(),
+            session_resources: None,
         }
     }
 
@@ -441,6 +416,9 @@ impl AcpChild {
         };
 
         let resources = open_session_resources(&config).await?;
+        // Keep one clone before the host takes ownership: the actor needs the
+        // same facade to read child-thread metadata (`sessions.subagents`).
+        let child_session_resources = Some(resources.session_resources());
         let (session_resources, session_store_shutdown) = resources.into_parts();
         if entry == SessionEntry::Interrupted {
             // Ordinary prompts also set working before calling the model. A
@@ -535,6 +513,7 @@ impl AcpChild {
             retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: String::new(),
+            session_resources: child_session_resources,
         };
 
         if let Err(error) = child.initialize().await {
@@ -606,6 +585,12 @@ impl AcpChild {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Session-store facade shared with the host, when this child opened one.
+    #[must_use]
+    pub(crate) fn session_resources(&self) -> Option<Arc<dyn SessionResources>> {
+        self.session_resources.clone()
     }
 
     async fn initialize(&self) -> Result<(), ChildError> {

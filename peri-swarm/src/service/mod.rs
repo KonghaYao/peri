@@ -6,6 +6,7 @@
 
 mod in_memory;
 pub(crate) mod official_items;
+pub(crate) mod subagents;
 
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
@@ -23,9 +24,10 @@ pub use crate::actor::reader::ApprovalReceipt;
 
 use crate::domain::{
     EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
-    McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn,
-    PromptCacheOptions, SessionPage, SessionState, SessionStatus, SessionView, SessionsWindow,
-    StreamEvent, SwarmError, TurnPage, TurnStatus, TurnsWindow,
+    McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialSubagent,
+    OfficialTurn, PromptCacheOptions, SessionPage, SessionState, SessionStatus, SessionView,
+    SessionsWindow, StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnPage, TurnStatus,
+    TurnsWindow,
 };
 use crate::store::{store_failure, SwarmSessionRow, SwarmStore};
 
@@ -1431,6 +1433,21 @@ pub trait SwarmService: Send + Sync {
         logical_id: &LogicalId,
         turn_id: &str,
     ) -> Result<OfficialTurn, SwarmError>;
+
+    /// `sessions.subagents.list`: one `(opened_at, id)` keyset page over the
+    /// root's whole child tree, including nested and closed children.
+    async fn list_subagents(
+        &self,
+        logical_id: &LogicalId,
+        window: SubagentsWindow,
+    ) -> Result<SubagentPage, SwarmError>;
+
+    /// `sessions.subagents.retrieve`; an id outside this session is `404`.
+    async fn get_subagent(
+        &self,
+        logical_id: &LogicalId,
+        subagent_id: &str,
+    ) -> Result<OfficialSubagent, SwarmError>;
 
     /// Durably accept one input: idempotency resolution, receipt write, and the
     /// user item. The returned [`AcceptedInput::pending_turn`] is the execution

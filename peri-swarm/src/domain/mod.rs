@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod official;
 pub mod official_item;
 pub mod session;
+pub mod subagent;
 pub mod workspace;
 
 pub use approval::{
@@ -37,5 +38,8 @@ pub use session::{
     PromptCacheTtl, SandboxState, SandboxView, SessionDeleted, SessionPage, SessionState,
     SessionStatus, SessionView, SessionsWindow, TurnView, MAX_METADATA_KEY_CHARS,
     MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
+};
+pub use subagent::{
+    OfficialSubagent, SubagentPage, SubagentRecord, SubagentsWindow, SUBAGENT_OBJECT,
 };
 pub use workspace::resolve_cwd;

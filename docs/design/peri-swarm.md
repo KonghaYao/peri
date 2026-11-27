@@ -113,7 +113,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | `GET` | `/v1/agents/sessions/{logicalId}/items` | 按条目边界分页；`data` 是官方 `AgentSessionItem` 投影，`items` 是原始行（§4.2） |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns` | 官方 `sessions.turns.list`：按 `(created_at, turn_id)` 的 keyset 分页，`order` 默认 `desc` |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | 官方 `sessions.turns.retrieve`；turn 不属于该会话时 `404 unknown_agent` |
-| `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]`、`.../subagents[/{id}]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
+| `GET` | `/v1/agents/sessions/{logicalId}/subagents` | 官方 `sessions.subagents.list`：按 `(opened_at, id)` 的 keyset 分页（`order` 默认 `desc`，`limit` 默认 20、上限 500）；数据来自 Peri 会话树的全部子线程（含 nested 与 closed，不含 root），`session_id` 是 `logicalId` |
+| `GET` | `/v1/agents/sessions/{logicalId}/subagents/{subagentId}` | 官方 `sessions.subagents.retrieve`；subagent 不属于该会话时 `404 unknown_agent`；`instructions` 恒 `null` |
+| `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
 
 约定：
 

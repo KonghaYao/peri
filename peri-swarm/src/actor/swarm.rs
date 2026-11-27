@@ -40,8 +40,8 @@ use super::service::AcpSwarmService;
 use crate::domain::{
     ActorKey, ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind,
     InputMode, InputOutcome, InputSubmission, ItemOrder, ItemPage, ItemView, ItemsWindow,
-    LogicalId, McpToolSpec, OfficialTurn, SessionDeleted, SessionState, SessionView, StreamEvent,
-    SwarmError, TurnPage, TurnsWindow,
+    LogicalId, McpToolSpec, OfficialSubagent, OfficialTurn, SessionDeleted, SessionState,
+    SessionView, StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameWriter;
 use crate::service::{
@@ -224,6 +224,8 @@ impl Actor for SwarmActor {
         Delete,
         ListTurns,
         GetTurn,
+        ListSubagents,
+        GetSubagent,
     );
     type Events = ();
     type ConnParams = ();
@@ -1063,6 +1065,76 @@ impl Handler<GetTurn> for SwarmActor {
         };
         Ok(envelope(
             self.service.get_turn(&logical_id, &action.turn_id).await,
+        ))
+    }
+}
+
+/// `GET /sessions/{id}/subagents`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSubagents {
+    pub logical_id: String,
+    pub order: ItemOrder,
+    #[serde(default)]
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+impl rivetkit::Action for ListSubagents {
+    type Output = ActionEnvelope<SubagentPage>;
+
+    const NAME: &'static str = "list_subagents";
+}
+
+impl Handler<ListSubagents> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: ListSubagents,
+    ) -> Result<ActionEnvelope<SubagentPage>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        let window = SubagentsWindow {
+            order: action.order,
+            after: action.after,
+            limit: action.limit,
+        };
+        Ok(envelope(
+            self.service.list_subagents(&logical_id, window).await,
+        ))
+    }
+}
+
+/// `GET /sessions/{id}/subagents/{subagentId}`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetSubagent {
+    pub logical_id: String,
+    pub subagent_id: String,
+}
+
+impl rivetkit::Action for GetSubagent {
+    type Output = ActionEnvelope<OfficialSubagent>;
+
+    const NAME: &'static str = "get_subagent";
+}
+
+impl Handler<GetSubagent> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: GetSubagent,
+    ) -> Result<ActionEnvelope<OfficialSubagent>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        Ok(envelope(
+            self.service
+                .get_subagent(&logical_id, &action.subagent_id)
+                .await,
         ))
     }
 }
