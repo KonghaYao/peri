@@ -359,6 +359,8 @@ fn reopen_required_enters_degraded_and_retry_uses_open_not_full_load() {
         super::settle_window_response(&in_flight, &page_response("snap-reopen", 1)),
         WindowSettlement::Accepted(_)
     ));
+    assert!(atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
+    assert!(super::finish_window_merge(&in_flight.context.request_id) > 0);
     assert!(!atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
 }
 
@@ -685,17 +687,37 @@ fn reservation_budget_rejects_before_request_dispatch() {
 #[serial]
 fn open_request_skips_prior_snapshot_validation() {
     let _guard = reset_atoms();
-    let request = super::build_window_open_request(WindowDirection::Before);
-    let in_flight = match super::claim_window_request(&request) {
-        WindowClaim::Granted(in_flight) => in_flight,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let paging = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut page = page_response("new-snap", 1);
+    page.read_ticket = "new-ticket".into();
+    let open = || granted(&super::build_window_open_request(WindowDirection::Before));
+    let first = open();
+    assert!(matches!(
+        super::settle_window_response(&first, &page),
+        WindowSettlement::Accepted(_)
+    ));
+    super::fail_window_request(&first.context.request_id, "admission declined", false);
+    {
+        let existing = paging.read();
+        assert!(!existing.is_degraded());
+        assert_eq!(existing.identity.as_ref().unwrap().snapshot_token, "snap-1");
+        assert_eq!(existing.read_ticket.as_deref(), Some("ticket-1"));
+        assert_eq!(existing.before_cursor.as_deref(), Some("before-1"));
+    }
+
+    let retry = open();
+    let request_id = retry.context.request_id.clone();
     assert_eq!(
-        super::settle_window_response(&in_flight, &page_response("new-snap", 1)),
-        WindowSettlement::Accepted(Box::new(in_flight))
+        super::settle_window_response(&retry, &page),
+        WindowSettlement::Accepted(Box::new(retry))
     );
-    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
-    assert_eq!(state.identity.expect("open request skips prior snapshot validation: the fixture establishes state.identity before this assertion").snapshot_token, "new-snap");
+    assert!(super::finish_window_merge(&request_id) > 0);
+    let current = paging.read();
+    assert_eq!(
+        current.identity.as_ref().unwrap().snapshot_token,
+        "new-snap"
+    );
+    assert_eq!(current.read_ticket.as_deref(), Some("new-ticket"));
 }
 
 fn session_response(session: &str, snapshot: &str, items: usize) -> WindowPageResponse {
@@ -797,7 +819,10 @@ fn late_open_response_from_previous_window_never_merges_into_current_window() {
             .map(|pending| pending.context.session_id.as_str()),
         Some("s3")
     );
-    assert_eq!(state.identity.expect("late open response from previous window never merges into current window: the fixture establishes state.identity before this assertion").snapshot_token, "snap-c");
+    assert!(state.identity.is_none());
+    assert!(super::finish_window_merge(&in_flight_c.context.request_id) > 0);
+    let current = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(current.identity.unwrap().snapshot_token, "snap-c");
 }
 
 /// 当前窗口身份是结算权威：在途槽位若残留旧窗口上下文（防线性场景），

@@ -68,57 +68,114 @@ fn late_open_replaces_only_replay_prefix_and_keeps_appended_turn() {
 #[test]
 #[serial]
 fn late_open_without_known_replay_boundary_keeps_display_intact() {
+    use crate::kit::history_page_consumer::{
+        self as consumer, WindowClaim, WindowPagingStatus, WindowSettlement,
+    };
+    use crate::kit::history_paging::WindowDirection;
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
     let (mut state, _guard) = super::state_with_window();
     crate::kit::history_paging::reset_browsing_state();
+    let paging = crate::kit::atoms::HISTORY_WINDOW_PAGING.state();
+    {
+        let mut initial = paging.write();
+        initial.identity = None;
+        initial.read_ticket = None;
+    }
     state
         .committed
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "legacy replay".to_string(),
-        )));
-    let requested_display = state.generation;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "new answer".to_string(),
+            "legacy replay".into(),
         )));
     super::push_view_models(&mut state);
+    let claim = |request| match consumer::claim_window_request(&request) {
+        WindowClaim::Granted(page) => page,
+        other => panic!("expected open request, got {other:?}"),
+    };
+    let first = claim(consumer::build_window_open_request(WindowDirection::Before));
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            "new answer".into(),
+        )));
+    super::push_view_models(&mut state);
+    assert!(state.generation > first.context.display_generation);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
-    let context = WindowRequestContext {
-        request_id: "r-open-late-unknown".into(),
-        session_id: "s1".into(),
-        identity: WindowIdentity::new("s1", "", 0, ""),
-        window_generation: 0,
-        reserved_bytes: 1024,
-        placement: WindowPagePlacement::Tail,
-        is_open: true,
-        display_generation: requested_display,
-        gap: None,
-    };
+    let page = super::response(identity.clone(), vec![super::text_item("m1", 10, "page")]);
+    assert!(matches!(
+        consumer::settle_window_response(&first, &page),
+        WindowSettlement::Accepted(_)
+    ));
     super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryWindowPageLoaded {
-            context: Box::new(context),
-            response: Box::new(super::response(
-                identity,
-                vec![super::text_item("m1", 10, "page")],
-            )),
+            context: Box::new(first.context),
+            response: Box::new(page.clone()),
         },
     );
-
     assert_eq!(
         super::committed_texts(&state),
-        vec!["legacy replay", "new answer"],
-        "无法确认旧回放边界时不得整体清空，也不得把旧页重复铺上去"
+        ["legacy replay", "new answer"]
     );
-    assert_eq!(
-        state.window.segment_count(),
-        0,
-        "无法安全合并的页面不预留、不接纳，留待后续翻页重新获取"
-    );
+    assert_eq!(state.window.segment_count(), 0);
     assert_eq!(state.window.displayed_entry_count(), 0);
+    assert!(paging.read().read_ticket.is_none());
+
+    let retry_at = |expected_attempts| {
+        let current = paging.read();
+        let WindowPagingStatus::Degraded {
+            attempts,
+            retry_at: Some(at),
+            ..
+        } = &current.status
+        else {
+            panic!("a rejected initial open must schedule another open")
+        };
+        assert_eq!(*attempts, expected_attempts);
+        *at
+    };
+    let at = retry_at(1);
+    assert!(consumer::retry_window_open_if_due(at - std::time::Duration::from_millis(1)).is_none());
+    let retry = claim(consumer::retry_window_open_if_due(at).unwrap());
+    assert!(
+        consumer::retry_window_open_if_due(at).is_none(),
+        "only one open may run"
+    );
+    // A second unaccepted response must retain the accumulated backoff.
+    assert!(matches!(
+        consumer::settle_window_response(&retry, &page),
+        WindowSettlement::Accepted(_)
+    ));
+    consumer::fail_window_request(&retry.context.request_id, "still cannot admit", false);
+    let next = retry_at(2);
+    assert!(next > at);
+    let recovered = claim(consumer::retry_window_open_if_due(next).unwrap());
+    assert_eq!(
+        recovered.context.placement,
+        WindowPagePlacement::BeforeFirst
+    );
+    assert!(matches!(
+        consumer::settle_window_response(&recovered, &page),
+        WindowSettlement::Accepted(_)
+    ));
+    super::dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(recovered.context),
+            response: Box::new(page),
+        },
+    );
+    super::push_view_models(&mut state);
+    assert_eq!(
+        super::committed_texts(&state),
+        ["page", "legacy replay", "new answer"]
+    );
+    let current = paging.read();
+    assert!(!current.is_degraded());
+    assert_eq!(current.identity.as_ref(), Some(&identity));
+    assert_eq!(current.read_ticket.as_deref(), Some("ticket-1"));
+    assert_eq!(current.before_cursor.as_deref(), Some("before-2"));
 }
 
 #[test]

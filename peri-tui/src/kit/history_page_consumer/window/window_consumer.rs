@@ -492,7 +492,11 @@ pub(super) fn claim_request(
                 identity: WindowIdentity::new(session_id.clone(), "", 0, ""),
                 window_generation: state.window_generation,
                 reserved_bytes: reserved,
-                placement: WindowPagePlacement::Tail,
+                placement: if state.read_ticket.is_none() && state.is_degraded() {
+                    WindowPagePlacement::BeforeFirst
+                } else {
+                    WindowPagePlacement::Tail
+                },
                 is_open: true,
                 display_generation: current_display_generation(),
                 gap: None,
@@ -613,14 +617,8 @@ pub fn settle_window_response(
         return WindowSettlement::ReopenRequired;
     }
     state.in_flight = None;
-    state.identity = Some(response.identity.clone());
     let boundary = ReceivedPageBoundary::from_response(&state, &current, response);
-    if is_open {
-        // 成功的 open 是唯一能把 consumer 从 Degraded 拉回 Ready 的路径。
-        state.status = WindowPagingStatus::Ready;
-        state.last_error = None;
-        state.newer_exhausted = false;
-    } else if response.items.is_empty()
+    if response.items.is_empty()
         && current.context.gap.is_none()
         && let WindowInFlightKind::Page {
             cursor: WindowPageCursor::After(request_cursor),
@@ -757,6 +755,15 @@ pub fn fail_window_request(request_id: &str, message: impl Into<String>, invalid
     // 只结算仍属于当前窗口的请求：会话切换后旧 RPC 的失败/超时不得把
     // 新窗口置为 Degraded，也不得改写它的 `last_error`。已结算并交给桥接的
     // 最近一个请求仍算命中——桥接可能随后拒绝该页并要求 open 重试。
+    // An initial open has no usable page cursor until the bridge accepts it. Retry that
+    // open on the existing backoff after either transport or admission rejects its payload.
+    let initial_open = state.read_ticket.is_none()
+        && state
+            .in_flight
+            .iter()
+            .chain(&state.pending_merge)
+            .any(|page| page.context.request_id == request_id && page.context.is_open);
+    let invalidates = invalidates || initial_open;
     let released = release_window_request(&mut state, request_id);
     let settled_here = state.last_settled_request_id.as_deref() == Some(request_id);
     if released.is_none() && !settled_here {

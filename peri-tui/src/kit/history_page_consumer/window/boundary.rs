@@ -1,11 +1,15 @@
 //! Cursor and ticket changes belong to the page whose rows the bridge publishes.
 
-use super::window_consumer::{WindowInFlight, WindowInFlightKind, WindowPagingState};
+use super::window_consumer::{
+    WindowInFlight, WindowInFlightKind, WindowPagingState, WindowPagingStatus,
+};
 use crate::kit::history_paging::{WindowPageCursor, WindowPageResponse};
+use crate::kit::history_window::WindowIdentity;
 
 /// Held by the matching reservation until the bridge has admitted and published its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ReceivedPageBoundary {
+    open_identity: Option<WindowIdentity>,
     before: Option<String>,
     after: Option<String>,
     read_ticket: String,
@@ -19,6 +23,7 @@ impl ReceivedPageBoundary {
         response: &WindowPageResponse,
     ) -> Self {
         let mut boundary = Self {
+            open_identity: None,
             before: state.before_cursor.clone(),
             after: state.after_cursor.clone(),
             read_ticket: response.read_ticket.clone(),
@@ -28,6 +33,7 @@ impl ReceivedPageBoundary {
         if current.context.gap.is_none() {
             match &current.kind {
                 WindowInFlightKind::Open { .. } => {
+                    boundary.open_identity = Some(response.identity.clone());
                     boundary.before = response.before_cursor.clone();
                     boundary.after = response.after_cursor.clone();
                 }
@@ -63,6 +69,12 @@ impl ReceivedPageBoundary {
     }
 
     pub(super) fn commit(self, state: &mut WindowPagingState) {
+        if let Some(identity) = self.open_identity {
+            state.identity = Some(identity);
+            state.status = WindowPagingStatus::Ready;
+            state.last_error = None;
+            state.newer_exhausted = false;
+        }
         if self.resident_has_newer {
             state.newer_exhausted = false;
         }
