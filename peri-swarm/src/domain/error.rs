@@ -24,6 +24,7 @@ pub enum ErrorCode {
     TurnInProgress,
     InputConflict,
     QueueUnavailable,
+    CancelRedeliveryFailed,
     SessionCreationPending,
     UpstreamUnavailable,
     SessionConflict,
@@ -63,6 +64,7 @@ impl ErrorCode {
             Self::TurnInProgress => "turn_in_progress",
             Self::InputConflict => "input_conflict",
             Self::QueueUnavailable => "queue_unavailable",
+            Self::CancelRedeliveryFailed => "cancel_redelivery_failed",
             Self::SessionCreationPending => "session_creation_pending",
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::SessionConflict => "session_conflict",
@@ -275,8 +277,10 @@ impl SwarmError {
     ///
     /// This covers the recovery window and an open turn whose admitted slot is
     /// already gone: `session/cancel` would be an accepted no-op, so pointing
-    /// the caller at cancel would be a false promise. Only a new user input (or
-    /// the host finishing recovery) moves the session out of this state.
+    /// the caller at cancel would be a false promise. In the recovery window
+    /// the next input waits for the recovery terminal (and may ask the host to
+    /// resume); outside it, a new user input does not start recovery and only
+    /// gets `409 turn_in_progress` until the host writes the turn terminal.
     #[must_use]
     pub fn turn_in_progress_awaiting_recovery(logical_id: &str) -> Self {
         Self::new(
@@ -447,6 +451,21 @@ impl SwarmError {
             "the cancellation was not delivered; no receipt was written, retry with the same inputId",
         )
         .with_details(serde_json::json!({ "operation": operation }))
+    }
+
+    /// 503 for a same-key cancel replay whose re-delivery failed.
+    ///
+    /// The receipt already exists (`disposition=existing`), so the
+    /// “no receipt was written” wording would describe the opposite fact: the
+    /// turn may still be running and the same key can be retried.
+    #[must_use]
+    pub fn cancel_redelivery_failed(operation: &str) -> Self {
+        Self::new(
+            ErrorKind::Unavailable,
+            ErrorCode::CancelRedeliveryFailed,
+            "the cancellation receipt already exists, but this redelivery did not reach the host; retry with the same inputId",
+        )
+        .with_details(serde_json::json!({ "operation": operation, "receipt": "accepted" }))
     }
 
     #[must_use]

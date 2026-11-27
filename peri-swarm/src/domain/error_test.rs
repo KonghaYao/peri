@@ -31,6 +31,10 @@ fn error_codes_are_stable_strings() {
         "session_creation_pending"
     );
     assert_eq!(ErrorCode::SeqConflict.as_str(), "seq_conflict");
+    assert_eq!(
+        ErrorCode::CancelRedeliveryFailed.as_str(),
+        "cancel_redelivery_failed"
+    );
 }
 
 #[test]
