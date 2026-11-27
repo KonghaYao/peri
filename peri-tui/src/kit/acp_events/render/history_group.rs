@@ -108,31 +108,3 @@ pub(super) fn group_prepended_page(
     }
     Some((grouped, cuts))
 }
-
-#[test]
-#[serial_test::serial]
-fn history_page_rebuilt_process_group_before_todo_keeps_live_working_state() {
-    use crate::kit::tui_render_unit::{TuiNoteLevel, TuiSystemNote, TuiTodoSummary};
-    crate::kit::atoms::init_atoms();
-    super::reset_body_gap_group_cache();
-    let note = |n| {
-        TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-            text: format!("note {n}"),
-            level: TuiNoteLevel::Info,
-            content_hash: n,
-        })
-    };
-    let raw = im::vector![
-        note(1),
-        TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("tasks".into()))
-    ];
-    let mut first = raw.clone();
-    super::group_body_gaps(&mut first, &Default::default(), &Default::default(), true);
-    let mut page = raw;
-    page.push_front(note(2));
-    super::group_body_gaps(&mut page, &Default::default(), &Default::default(), true);
-    assert!(
-        matches!(&page[0], TuiRenderUnit::TuiCollapsedGroup(group) if group.is_working && group.count == 2)
-    );
-    super::reset_body_gap_group_cache();
-}

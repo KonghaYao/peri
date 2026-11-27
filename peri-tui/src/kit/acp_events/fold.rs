@@ -5,6 +5,7 @@ use crate::kit::tui_render_unit::FoldKey;
 use crate::kit::tui_render_unit::FoldState;
 use crate::kit::tui_render_unit::FoldTarget;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct FoldedHistory {
@@ -12,6 +13,9 @@ pub(crate) struct FoldedHistory {
     phase: Option<SessionPhase>,
     overrides: HashMap<FoldKey, FoldState>,
     folded: im::Vector<TuiRenderUnit>,
+    /// Opaque revision tokens certify the existing grouped history prefix without retaining its raw units.
+    pub(super) revision: Arc<()>,
+    pub(super) prepended_to: Option<(Arc<()>, usize)>,
 }
 
 impl FoldedHistory {
@@ -20,6 +24,8 @@ impl FoldedHistory {
         self.source = None;
         self.folded = im::Vector::new();
         self.phase = None;
+        self.prepended_to = None;
+        self.revision = Arc::default();
     }
 
     #[cfg(test)]
@@ -47,6 +53,8 @@ impl FoldedHistory {
                 .as_ref()
                 .filter(|_| self.phase == Some(phase) && self.overrides == *overrides)
                 .and_then(|old| crate::kit::tui_render_unit::prepended_len(old, source));
+            let old_revision = std::mem::take(&mut self.revision);
+            self.prepended_to = prepend.map(|len| (old_revision, len));
             let mut changed = source.clone();
             if let Some(end) = prepend {
                 changed.split_off(end);

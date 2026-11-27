@@ -7,7 +7,7 @@
 //! - `page_reserved_bytes`：在途页预留（尚未委身为段），独立于 body；
 //! - `pinned_body_bytes`：驻留段中不可淘汰部分（是 `resident_body_bytes` 的子集）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::super::HistoryWindowConfig;
 use super::super::budget::WindowBudget;
@@ -47,6 +47,8 @@ pub struct HistoryWindow {
     pub(crate) reservations: HashMap<String, PageReservation>,
     pub(crate) pending_merge: Option<PendingMerge>,
     pub(crate) pending_release: Vec<ReleasePlan>,
+    /// Detached segments whose display ranges/byte credit still need release, including plans in transit.
+    pub(crate) pending_display_release: HashSet<SegmentKey>,
     pub(crate) pending_release_epoch: u64,
     next_segment_seq: u64,
     next_gap_id: u64,
@@ -85,6 +87,7 @@ impl HistoryWindow {
             reservations: HashMap::new(),
             pending_merge: None,
             pending_release: Vec::new(),
+            pending_display_release: HashSet::new(),
             pending_release_epoch: 0,
             next_segment_seq: 0,
             next_gap_id: 0,
@@ -337,6 +340,7 @@ impl HistoryWindow {
         self.reservations.clear();
         self.pending_merge = None;
         self.pending_release.clear();
+        self.pending_display_release.clear();
         self.pending_release_epoch = 0;
         self.next_segment_seq = 0;
         self.next_gap_id = 0;
@@ -597,6 +601,7 @@ impl HistoryWindow {
     }
 
     pub(crate) fn record_release_plan(&mut self, plan: ReleasePlan) {
+        self.pending_display_release.insert(plan.segment);
         self.pending_release.push(plan);
     }
 

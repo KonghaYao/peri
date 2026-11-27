@@ -16,6 +16,9 @@ use crate::kit::tui_render_unit::same_render_unit;
 
 #[path = "history_group.rs"]
 mod history_group;
+#[cfg(test)]
+#[path = "history_group_test.rs"]
+mod history_group_tests;
 use fluent_bundle::FluentValue;
 use history_group::{group_prepended_page, rebuild_grouped_suffix};
 // These replaceable derived snapshots are committed through whole-value assignments.
@@ -175,11 +178,10 @@ fn build_publication_snapshot(state: &mut BridgeState) -> (im::Vector<TuiRenderU
         __t = peri_time::monotonic_now();
     }
 
-    let history = items.clone();
-    let (mut items, has_history_prompt) = decorated_history(&history);
+    let (mut items, history_prefix) = decorated_history(&items, &state.folded_history);
     let visual_active_start = items.len();
     join_into(&mut items, active);
-    insert_turn_dividers(&mut items, visual_active_start, has_history_prompt);
+    insert_turn_dividers(&mut items, visual_active_start, history_prefix.has_prompt);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -191,7 +193,12 @@ fn build_publication_snapshot(state: &mut BridgeState) -> (im::Vector<TuiRenderU
 
     // [§6.9] todo 进度摘要：活动 turn（current_turn 非空）且 TODO_ITEMS 非空时，
     // 插在 trailing 最终回答之前（回答后无 todo）；无 trailing 回答时位于 turn 底部。
-    insert_todo_summary(&mut items, state.phase);
+    let inserted_todo = insert_todo_summary(&mut items, state.phase);
+    // An active todo may be inserted before the final historical assistant when a new turn
+    // is still empty. In that case the merged input no longer has an exact historical prefix.
+    let history_prefix = inserted_todo
+        .is_none_or(|slot| slot >= visual_active_start)
+        .then_some(history_prefix);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -213,6 +220,7 @@ fn build_publication_snapshot(state: &mut BridgeState) -> (im::Vector<TuiRenderU
         &overrides,
         &detail_hashes,
         active_turn_of(state),
+        history_prefix,
     );
     drop(overrides);
 
@@ -330,68 +338,78 @@ fn run_publication_interleave_hook(state: &BridgeState) {
 /// 纯 memoization：文本只依赖 (todos 内容, 语言版本)，命中即与重建等价。
 pub(super) static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
 
-pub(super) struct DividerHistoryCache {
-    pub(super) raw: im::Vector<TuiRenderUnit>,
-    pub(super) decorated: im::Vector<TuiRenderUnit>,
-    pub(super) has_prompt: bool,
+/// Describes the decorated prefix of BodyGapGroupCache::input. This marker never owns a
+/// second transcript tree. The folded input supplies the proof for a verified prefix insertion.
+#[derive(Clone, Debug)]
+pub(super) struct DividerPrefix {
+    revision: std::sync::Arc<()>,
+    len: usize,
+    has_prompt: bool,
+    #[cfg(test)]
+    raw_len: usize,
 }
-
-pub(super) static DIVIDER_HISTORY: Mutex<Option<DividerHistoryCache>> = Mutex::new(None);
 
 #[must_use]
 pub(super) fn is_visible_user_prompt(vm: &TuiRenderUnit) -> bool {
     matches!(vm, TuiRenderUnit::TuiUserBubble(user) if !user.text.is_empty() || !user.attachments.is_empty())
 }
 
-/// History is immutable during a streaming turn. Reuse its decorated tree so
-/// each token only inserts dividers for newly appended active entries.
-pub(super) fn decorated_history(
+fn decorated_history(
     history: &im::Vector<TuiRenderUnit>,
-) -> (im::Vector<TuiRenderUnit>, bool) {
-    let mut cache = DIVIDER_HISTORY.lock();
-    if let Some(cached) = cache.as_ref()
-        && (cached.raw.ptr_eq(history) || (history.is_inline() && &cached.raw == history))
-    {
-        return (cached.decorated.clone(), cached.has_prompt);
-    }
-    let mut decorated = history.clone();
-    let has_prompt = if let Some((cached, end)) = cache.as_ref().and_then(|cached| {
-        crate::kit::tui_render_unit::prepended_len(&cached.raw, history).map(|end| (cached, end))
-    }) {
-        decorated.split_off(end);
-        let earlier_prompt = insert_turn_dividers(&mut decorated, 0, false);
-        let mut old = cached.decorated.clone();
+    folded: &super::super::fold::FoldedHistory,
+) -> (im::Vector<TuiRenderUnit>, DividerPrefix) {
+    let cached = BODY_GAP_GROUP_CACHE.lock().as_ref().and_then(|cached| {
+        let prefix = cached.history.as_ref()?;
+        let added = if std::sync::Arc::ptr_eq(&prefix.revision, &folded.revision) {
+            0
+        } else {
+            let (previous, added) = folded.prepended_to.as_ref()?;
+            if !std::sync::Arc::ptr_eq(&prefix.revision, previous) {
+                return None;
+            }
+            *added
+        };
+        Some((cached.input.clone(), prefix.clone(), added))
+    });
+    let (items, has_prompt) = if let Some((mut old, prefix, added)) = cached {
+        if old.len() > prefix.len {
+            old.truncate(prefix.len);
+        }
+        if added == 0 {
+            return (old, prefix);
+        }
+        let mut incoming = history.clone();
+        incoming.truncate(added);
+        let earlier_prompt = insert_turn_dividers(&mut incoming, 0, false);
         if earlier_prompt
-            && cached.has_prompt
+            && prefix.has_prompt
             && let Some(first) = old.iter().position(is_visible_user_prompt)
         {
             let suffix = old.split_off(first);
-            decorated.append(old);
-            decorated.push_back(TuiRenderUnit::TuiDivider(TuiDivider {
+            incoming.append(old);
+            incoming.push_back(TuiRenderUnit::TuiDivider(TuiDivider {
                 label: None,
                 content_hash: 0,
             }));
             old = suffix;
         }
-        decorated = crate::kit::tui_render_unit::prepend_units(decorated, old);
-        earlier_prompt || cached.has_prompt
+        (
+            crate::kit::tui_render_unit::prepend_units(incoming, old),
+            earlier_prompt || prefix.has_prompt,
+        )
     } else {
-        insert_turn_dividers(&mut decorated, 0, false)
+        let mut items = history.clone();
+        let has_prompt = insert_turn_dividers(&mut items, 0, false);
+        (items, has_prompt)
     };
-    if history.len() > 1024 {
-        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
-        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
-        if bytes > 6 * 1024 * 1024 {
-            *cache = None;
-            return (decorated, has_prompt);
-        }
-    }
-    *cache = Some(DividerHistoryCache {
-        raw: history.clone(),
-        decorated: decorated.clone(),
+    let prefix = DividerPrefix {
+        revision: folded.revision.clone(),
+        len: items.len(),
         has_prompt,
-    });
-    (decorated, has_prompt)
+        #[cfg(test)]
+        raw_len: history.len(),
+    };
+    (items, prefix)
 }
 
 /// Put the rule immediately before every user prompt after the first one.
@@ -403,22 +421,26 @@ pub(super) fn insert_turn_dividers(
     start: usize,
     mut seen_prompt: bool,
 ) -> bool {
-    let mut index = start;
-    while index < items.len() {
-        if is_visible_user_prompt(&items[index]) {
-            if seen_prompt {
-                items.insert(
-                    index,
-                    TuiRenderUnit::TuiDivider(TuiDivider {
-                        label: None,
-                        content_hash: 0,
-                    }),
-                );
-                index += 1;
-            }
-            seen_prompt = true;
+    // Leave a stable prefix and the common streaming case (no new divider) entirely shared.
+    // On a cold publication, repeated inserts in the middle of an im::Vector would repeatedly
+    // split and rebalance the remaining suffix. Each new row is appended exactly once here.
+    let first = (start..items.len()).find(|&slot| {
+        if !is_visible_user_prompt(&items[slot]) {
+            return false;
         }
-        index += 1;
+        std::mem::replace(&mut seen_prompt, true)
+    });
+    if let Some(first) = first {
+        let tail = items.split_off(first);
+        for unit in tail {
+            if is_visible_user_prompt(&unit) {
+                items.push_back(TuiRenderUnit::TuiDivider(TuiDivider {
+                    label: None,
+                    content_hash: 0,
+                }));
+            }
+            items.push_back(unit);
+        }
     }
     seen_prompt
 }
@@ -428,16 +450,19 @@ pub(super) fn insert_turn_dividers(
 /// 摘要格式 `3/7 tasks · Running tests`：完成数/总数 + 首个 in-progress 项内容。
 /// 插在 trailing assistant 回答（最终回答）之前；无 trailing 回答时追加在 turn 底部。
 /// turn 结束后 current_turn 清空 → 摘要随快照消失（回答后无 todo）。
-pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
+pub(super) fn insert_todo_summary(
+    items: &mut im::Vector<TuiRenderUnit>,
+    phase: SessionPhase,
+) -> Option<usize> {
     use crate::kit::message_area::TodoStatus;
     if phase != SessionPhase::PromptRunning {
-        return;
+        return None;
     }
     // 读引用代替 clone——无克隆只读扫描（hash 公式与 footer::hash_todo_items 一致）。
     let todos_state = crate::kit::atoms::TODO_ITEMS.state();
     let todos = todos_state.read();
     if todos.is_empty() {
-        return;
+        return None;
     }
     let todos_hash = crate::kit::message_area::hash_todo_items(&todos);
     let lang_version = crate::kit::atoms::LANG_VERSION.get();
@@ -494,6 +519,7 @@ pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: 
         items.len()
     };
     items.insert(insert_at, summary);
+    Some(insert_at)
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +733,7 @@ pub(super) struct BodyGapGroupCache {
     grouped: im::Vector<TuiRenderUnit>,
     cuts: Vec<GroupCut>,
     aux: u64,
+    history: Option<DividerPrefix>,
 }
 
 /// [PERF] 正文空档分组结果缓存（纯函数 memoization）。
@@ -746,11 +773,12 @@ pub(super) fn group_body_gaps(
     overrides: &std::collections::HashMap<FoldKey, FoldState>,
     detail_hashes: &std::collections::HashSet<u64>,
     active_turn: bool,
+    history: Option<DividerPrefix>,
 ) -> usize {
     let input = items.clone();
     let aux = body_gap_aux_fingerprint(overrides, detail_hashes, active_turn);
     let mut cache = BODY_GAP_GROUP_CACHE.lock();
-    let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
+    let (rebuild_from, mut grouped, mut cuts) = match cache.as_mut() {
         Some(cached) if cached.aux == aux => {
             let common = cached.input.len().min(input.len());
             let d = (0..common)
@@ -758,6 +786,7 @@ pub(super) fn group_body_gaps(
                 .unwrap_or(common);
             if d == input.len() && d == cached.input.len() {
                 // 输入逐条一致——整段复用（O(1) 引用计数）。
+                cached.history = history;
                 let grouped = cached.grouped.clone();
                 drop(cache);
                 *items = grouped;
@@ -775,6 +804,7 @@ pub(super) fn group_body_gaps(
                     grouped,
                     cuts,
                     aux,
+                    history,
                 });
                 return 0;
             }
@@ -825,6 +855,7 @@ pub(super) fn group_body_gaps(
         grouped: grouped.clone(),
         cuts,
         aux,
+        history,
     });
     *items = grouped;
     changed_from.min(items.len())
@@ -917,19 +948,18 @@ pub(super) fn join_into(items: &mut im::Vector<TuiRenderUnit>, tail: im::Vector<
 
 /// 结构性释放：丢弃所有持有旧 `committed` 节点的投影缓存。
 pub(crate) fn invalidate_structural_caches() {
-    *DIVIDER_HISTORY.lock() = None;
     *TODO_SUMMARY_CACHE.lock() = None;
     *BODY_GAP_GROUP_CACHE.lock() = None;
 }
 
 #[cfg(test)]
 pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>) {
+    let cache = BODY_GAP_GROUP_CACHE.lock();
     (
-        BODY_GAP_GROUP_CACHE
-            .lock()
+        cache.as_ref().map(|cache| cache.input.len()),
+        cache
             .as_ref()
-            .map(|cache| cache.input.len()),
-        DIVIDER_HISTORY.lock().as_ref().map(|cache| cache.raw.len()),
+            .and_then(|cache| cache.history.as_ref().map(|prefix| prefix.raw_len)),
     )
 }
 

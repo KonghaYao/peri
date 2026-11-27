@@ -413,17 +413,129 @@ fn release_does_not_touch_live_phase_or_input_queues() {
 #[test]
 #[serial]
 fn release_ack_is_idempotent_and_late_ack_does_not_double_credit() {
-    let (mut state, _weak, _key) = release_fixture();
+    let (mut state, _weak, key) = release_fixture();
     let plans = state.window.take_pending_release_plans();
-    crate::kit::history_window::release_window_plans(
+    let outcome = crate::kit::history_window::release_window_plans(
+        &mut state,
+        vec![plans[0].clone(), plans[0].clone()],
+        ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(outcome.plans.len(), 1);
+    assert_eq!(state.window.pending_release_bytes(), plans[0].body_bytes);
+    state.window.ack_release_epoch(1);
+    assert_eq!(state.window.pending_release_bytes(), 0);
+
+    // A gap reread reuses the durable entry identity in a new segment. Replaying
+    // the old release must leave its restored display range and payload in place.
+    let reread = state
+        .window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    key.clone(),
+                    Some(10),
+                    1,
+                    128,
+                    128,
+                    Vec::new(),
+                )],
+                128,
+                128,
+            ),
+            SegmentPlacement::Tail,
+        )
+        .expect("reread segment");
+    assert_ne!(reread, plans[0].segment);
+    state.window.mark_display_block(&[(key.clone(), 1)], 0);
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiAssistantBubble(bubble("reread body")));
+    let repeat = crate::kit::history_window::release_window_plans(
         &mut state,
         plans,
         ReleaseReason::BudgetPressure,
     );
+    assert!(repeat.plans.is_empty());
+    assert_eq!(
+        crate::kit::atoms::STRUCTURAL_EPOCH.get(),
+        outcome.structural_epoch
+    );
     state.window.ack_release_epoch(1);
     assert_eq!(state.window.pending_release_bytes(), 0);
-    state.window.ack_release_epoch(1);
-    assert_eq!(state.window.pending_release_bytes(), 0);
+    assert_eq!(state.window.displayed_range(&key), Some((0, 1)));
+    assert!(
+        matches!(&state.committed[0], TuiRenderUnit::TuiAssistantBubble(b) if b.text == "reread body")
+    );
+}
+
+#[test]
+#[serial]
+fn releasing_contiguous_and_disjoint_entries_preserves_anchor_and_live_slot() {
+    use crate::kit::history_window::{WindowAnchor, WindowAnchorOffset, release_window_plans};
+    let mut state = super::make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen", 1, "snapshot"));
+    state.committed = (0..8)
+        .map(|slot| TuiRenderUnit::TuiAssistantBubble(bubble(&format!("message {slot}"))))
+        .collect();
+    let mut plans = Vec::new();
+    for (start, end) in [(0, 2), (2, 3), (3, 5), (6, 8)] {
+        let entries = (start..end)
+            .map(|slot| {
+                let key = PersistentEntryKey::own(format!("s1:{slot}"));
+                assert!(
+                    state
+                        .window
+                        .mark_existing_display_slot(key.clone(), slot, 1)
+                );
+                HistoryEntryView::new(key, Some(slot as u64), 1, 16, 16, Vec::new())
+            })
+            .collect();
+        let bytes = (end - start) * 16;
+        let key = state
+            .window
+            .register_segment(
+                SegmentDraft::new(HistorySource::Own, entries, bytes, bytes),
+                SegmentPlacement::Tail,
+            )
+            .expect("resident segment");
+        let segment = state.window.segment(key).unwrap();
+        plans.push(ReleasePlan {
+            segment: key,
+            source: segment.source.clone(),
+            entries: segment.entry_keys(),
+            unit_count: segment.unit_count,
+            body_bytes: bytes,
+            reserved_bytes: bytes,
+            slot_range: state.window.index().slot_range(key),
+            before: None,
+            after: None,
+            before_cursor: None,
+            after_cursor: None,
+        });
+    }
+    let anchor_key = PersistentEntryKey::own("s1:2");
+    let anchor = WindowAnchor::new(anchor_key.clone(), None, WindowAnchorOffset::CharOffset(1));
+    let expected_anchor = state.window.set_anchor(Some(anchor));
+    let outcome = release_window_plans(&mut state, plans, ReleaseReason::BudgetPressure);
+    assert_eq!(outcome.skipped, 1, "the anchored segment is pinned");
+    assert_eq!(outcome.released_units, 6);
+    assert_eq!(outcome.released_entries, 6);
+    assert_eq!(state.window.relocate_anchor(), expected_anchor);
+    assert_eq!(state.window.displayed_range(&anchor_key), Some((0, 1)));
+    let kept: Vec<_> = state
+        .committed
+        .iter()
+        .filter_map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(data) => Some(data.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept, ["message 2", "message 5"]);
 }
 
 #[test]
