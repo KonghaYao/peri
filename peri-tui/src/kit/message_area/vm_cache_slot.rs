@@ -114,6 +114,9 @@ pub(super) struct VmCacheSlot {
     pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
     pub(super) wrap_width: u16,
     pub(super) visual_rows: usize,
+    /// Part of the measured geometry, retained even when the heavy render entry is evicted.
+    pub(super) layout_transition: Option<super::grid::ZoneTransition>,
+    pub(super) anchor_token: Option<crate::kit::history_window::WindowUnitToken>,
     pub(super) copy_button: Option<render::CopyButtonInfo>,
     pub(super) interaction: Option<render::InteractionLayout>,
     pub(super) image_lines: Vec<ImageLineInfo>,

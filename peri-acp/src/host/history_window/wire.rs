@@ -71,6 +71,23 @@ pub(super) async fn body_visible(
     cache: &VisibilityCache,
     entry_id: MessageId,
 ) -> Result<bool, AcpError> {
+    if let (HistorySource::Own, Some(tail), Some(body)) = (
+        source,
+        tail,
+        cfg.session_resources.own_history_body_reader(),
+    ) {
+        let cache = cache.clone();
+        return body
+            .inspect(
+                &ThreadId::from(thread_id.to_owned()),
+                entry_id,
+                tail,
+                ticket,
+                Box::new(move |reader| cache.inspect(entry_id, reader)),
+            )
+            .await
+            .map_err(super::resource_window_error);
+    }
     let expected = HistoryEntryId::new(&thread_id.to_owned(), entry_id).encode();
     let owner = thread_id.to_owned();
     let source = source.clone();

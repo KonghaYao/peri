@@ -96,7 +96,7 @@ fn capture_and_relocate_keep_the_anchored_unit_on_its_screen_row() {
     // 发布前：`[继承前缀(1 行), 自有(5 行)]`，视口顶行（scroll_y=3）落在自有单元内。
     let before = index(vec![bubble("继承"), bubble("own")], &[1, 5]);
     let anchor = ViewportAnchor::capture(&before, 3).expect("锚点可取");
-    assert_eq!(anchor.offset_within_unit, 2, "3 − 单元起始 1");
+    assert_eq!(anchor.offset_within_unit(), 2, "3 − 单元起始 1");
 
     // 发布后：更早条目（4 行）插到继承前缀之后 → 自有单元整体下推 4 行。
     let after = index(
@@ -122,7 +122,7 @@ fn relocate_is_zero_when_the_inserted_block_is_below_the_viewport() {
     // 发布前：`[A(4), B(4), D(4)]`，视口顶行 0 在 A。
     let before = index(vec![bubble("a"), bubble("b"), bubble("d")], &[4, 4, 4]);
     let anchor = ViewportAnchor::capture(&before, 0).expect("锚点可取");
-    assert_eq!(anchor.offset_within_unit, 0);
+    assert_eq!(anchor.offset_within_unit(), 0);
 
     // 发布后：中间缺口页插到 B 之后 → A 的位置完全没变。
     let after = index(
@@ -146,7 +146,7 @@ fn relocate_survives_neighbouring_tool_cards_collapsing_to_single_lines() {
         &[3, 3, 3],
     );
     let anchor = ViewportAnchor::capture(&before, 7).expect("锚点落在 tail 内");
-    assert_eq!(anchor.offset_within_unit, 1, "7 − tail 起始 6");
+    assert_eq!(anchor.offset_within_unit(), 1, "7 − tail 起始 6");
 
     // 发布后：两张工具卡分别收束为 1 行——槽位数不变，但上方高度减少。
     let after = index(
@@ -198,7 +198,7 @@ fn relocate_refuses_when_identity_is_missing_or_ambiguous() {
 fn relocate_does_not_clamp_a_within_unit_offset_that_outgrew_the_unit() {
     let before = index(vec![bubble("big")], &[10]);
     let anchor = ViewportAnchor::capture(&before, 9).expect("锚点可取");
-    assert_eq!(anchor.offset_within_unit, 9);
+    assert_eq!(anchor.offset_within_unit(), 9);
 
     let after = index(vec![bubble("big")], &[2]);
     assert_eq!(
@@ -416,5 +416,45 @@ fn reading_anchor_finds_the_same_paragraph_after_80_40_80_roundtrip() {
     assert!(
         text.is_some_and(|text| text.contains("line-10")),
         "同一阅读位置仍可选中原段落"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn divider_offsets_require_the_same_unambiguous_following_prompt_and_decoration() {
+    let divider = || {
+        TuiRenderUnit::TuiDivider(crate::kit::tui_render_unit::TuiDivider {
+            label: None,
+            content_hash: 0,
+        })
+    };
+    let before = index(
+        vec![bubble("first"), divider(), bubble("target")],
+        &[4, 2, 1],
+    );
+    let after = index(
+        vec![
+            bubble("older"),
+            divider(),
+            bubble("first"),
+            divider(),
+            bubble("target"),
+        ],
+        &[3, 2, 4, 2, 1],
+    );
+    for row in 0..2 {
+        let anchor = ViewportAnchor::capture(&before, 4 + row).unwrap();
+        assert_eq!(anchor.relocate(&after), Some(9 + row));
+    }
+    let anchor = ViewportAnchor::capture(&before, 4).unwrap();
+    let ambiguous = index(
+        vec![divider(), bubble("target"), divider(), bubble("target")],
+        &[2, 1, 2, 1],
+    );
+    assert_eq!(anchor.relocate(&ambiguous), None);
+    let lost_divider = index(vec![bubble("first"), bubble("target")], &[4, 1]);
+    assert_eq!(anchor.relocate(&lost_divider), None);
+    assert!(
+        ViewportAnchor::capture(&index(vec![bubble("first"), divider()], &[4, 2]), 4).is_none()
     );
 }

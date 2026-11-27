@@ -49,19 +49,18 @@ impl DisplayLedger {
             return;
         }
         let total: usize = entries.iter().map(|(_, len)| *len).sum();
-        let shifted: BTreeMap<usize, (PersistentEntryKey, usize)> = self
-            .slots
-            .iter()
-            .map(|(start, value)| {
-                let start = if *start >= at {
-                    start.saturating_add(total)
-                } else {
-                    *start
-                };
-                (start, value.clone())
-            })
-            .collect();
-        self.slots = shifted;
+        if total > 0
+            && self
+                .slots
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= at)
+        {
+            let tail = self.slots.split_off(&at);
+            self.slots.extend(
+                tail.into_iter()
+                    .map(|(start, range)| (start.saturating_add(total), range)),
+            );
+        }
         let mut cursor = at;
         for (key, len) in entries {
             self.entries.insert(key.clone());
@@ -125,30 +124,25 @@ impl DisplayLedger {
 
     /// 移除一批身份，返回其槽位区间（升序）。后续区间同步左移。
     pub fn remove_entries_at(&mut self, keys: &HashSet<PersistentEntryKey>) -> Vec<(usize, usize)> {
-        let ranges: Vec<(usize, usize)> = self
-            .slots
-            .iter()
-            .filter(|(_, (key, _))| keys.contains(key))
-            .map(|(start, (_, len))| (*start, *len))
-            .collect();
-        {
-            let iteration_items = ranges.iter().rev();
-            for (start, len) in iteration_items {
-                self.slots.remove(start);
-                let shifted: BTreeMap<usize, (PersistentEntryKey, usize)> = self
-                    .slots
-                    .iter()
-                    .map(|(other, value)| {
-                        let other = if *other > *start {
-                            other.saturating_sub(*len)
-                        } else {
-                            *other
-                        };
-                        (other, value.clone())
-                    })
-                    .collect();
-                self.slots = shifted;
-            }
+        let mut ranges = Vec::new();
+        if keys.is_empty() {
+            return ranges;
+        }
+        if let Some((&first, _)) = self.slots.iter().find(|(_, (key, _))| keys.contains(key)) {
+            // Keep the prefix in place. Each survivor in the ordered tail shifts
+            // by the sum of the removed lengths before its original start.
+            let mut removed = 0usize;
+            let tail = self.slots.split_off(&first);
+            self.slots
+                .extend(tail.into_iter().filter_map(|(start, (key, len))| {
+                    if keys.contains(&key) {
+                        ranges.push((start, len));
+                        removed = removed.saturating_add(len);
+                        None
+                    } else {
+                        Some((start.saturating_sub(removed), (key, len)))
+                    }
+                }));
         }
         for key in keys {
             self.entries.remove(key);
@@ -158,11 +152,15 @@ impl DisplayLedger {
     }
 
     pub fn remove_entries(&mut self, entries: &[HistoryEntryView]) {
-        for entry in entries {
-            self.entries.remove(&entry.key);
-            self.positions.remove(&entry.key);
-            self.slots.retain(|_, (key, _)| key != &entry.key);
+        if entries.is_empty() {
+            return;
         }
+        let removed: HashSet<_> = entries.iter().map(|entry| &entry.key).collect();
+        for key in &removed {
+            self.entries.remove(*key);
+            self.positions.remove(*key);
+        }
+        self.slots.retain(|_, (key, _)| !removed.contains(key));
     }
 
     pub fn clear(&mut self) {
@@ -262,10 +260,25 @@ impl HistoryWindow {
     /// （见 [`super::index::ResidentIndex::rebuild_slots`]），不能一律追加到尾部。
     pub fn segment_after_display_slot(&self, slot: usize) -> Option<SegmentKey> {
         self.display
-            .debug_ranges()
-            .into_iter()
-            .find(|(start, _, _)| *start > slot)
-            .and_then(|(_, key, _)| self.index.locate_entry(&key).map(|locator| locator.segment))
+            .slots
+            .range((std::ops::Bound::Excluded(slot), std::ops::Bound::Unbounded))
+            .next()
+            .and_then(|(_, (key, _))| self.index.locate_entry(key).map(|locator| locator.segment))
+    }
+
+    pub(crate) fn resident_entry_at_or_after_slot(
+        &self,
+        slot: usize,
+    ) -> Option<&PersistentEntryKey> {
+        // A live message can own multiple separate ranges. Use its first display
+        // start, then choose in resident layout order, as when placing a page.
+        let mut starts = HashMap::new();
+        for (start, (key, _)) in &self.display.slots {
+            starts.entry(key).or_insert(*start);
+        }
+        self.index
+            .entry_keys_in_slot_order()
+            .find(|key| starts.get(key).is_some_and(|start| *start >= slot))
     }
 
     pub fn displayed_range(&self, key: &PersistentEntryKey) -> Option<(usize, usize)> {

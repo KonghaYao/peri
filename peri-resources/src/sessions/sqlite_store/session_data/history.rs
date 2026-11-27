@@ -119,13 +119,14 @@ pub(in crate::sessions) const HISTORY_WINDOW_TAIL_CHECK_SQL: &str =
     "SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3 LIMIT 1";
 
 /// before 方向候选：`rowid <= tail`，并按锚点身份定位；`?4` 为 1 时包含锚点自身
-/// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文；
+/// （seek/open(entry)），为 0 时严格更早（游标翻页）。将锚点放进索引上界，使 SQLite
+/// 从当前页开始读取。最多 `limit + 1` 行，不取正文；
 /// `role` 随行返回，供 History V2 在不读正文时判定 oversize 可见性。长度由 blob 句柄
 /// 逐行给出（理由见 [`HISTORY_PAGE_ROWS_SQL`]）。
 pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
-    WHERE thread_id = ?1 AND rowid <= ?2
-      AND (?3 IS NULL OR rowid < ?3 OR (?4 <> 0 AND rowid = ?3))
+    WHERE thread_id = ?1 AND rowid <= min(?2, coalesce(?3, ?2))
+      AND (?3 IS NULL OR ?4 <> 0 OR rowid < ?3)
     ORDER BY rowid DESC LIMIT ?5";
 
 /// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文；
@@ -133,8 +134,8 @@ pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_
 /// before 半段不存在），保证锚点恰好返回一次。`role` 口径同 before。
 pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
-    WHERE thread_id = ?1 AND rowid <= ?2
-      AND (rowid > ?3 OR (?4 <> 0 AND rowid = ?3))
+    WHERE thread_id = ?1 AND rowid >= ?3 AND rowid <= ?2
+      AND (?4 <> 0 OR rowid > ?3)
     ORDER BY rowid ASC LIMIT ?5";
 
 /// 更早方向是否还有可读行（相对给定 rowid）。用于在 `before_limit == 0` 或页到达
@@ -209,7 +210,7 @@ impl SqliteSessionData {
     ///
     /// 调用方必须已开事务并确认会话存在（[`Self::require_session`]），使这条单行读取与
     /// 它服务的候选行/回答落在同一时刻。
-    async fn read_page_bounds(
+    pub(super) async fn read_page_bounds(
         connection: &mut SqliteConnection,
         id: &ThreadId,
         anchor: Option<&str>,

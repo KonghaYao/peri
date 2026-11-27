@@ -38,6 +38,49 @@ use serial_test::serial;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[tokio::test]
+#[serial]
+async fn bound_restore_preparation_does_not_request_active_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "test", "model"),
+    );
+    let (mut cfg, _bridge) = crate::host::requests::tests::make_server_config_with_bridge(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &tmp,
+    )
+    .await;
+    let mut sessions = HashMap::new();
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
+    // 生效的历史读取走 `cfg.controller` 持有的 resource port，不是 `cfg.session_resources`；
+    // 只替换后者时断言会空转。两个入口装同一份注入：任一历史读取都会失败。
+    let failing: Arc<dyn SessionResources> = Arc::new(FailingHistoryLoad {
+        inner: cfg.session_resources.clone(),
+    });
+    cfg.session_resources = Arc::clone(&failing);
+    cfg.controller = Arc::new(peri_controller::Controller::new(failing));
+    // 正控：同一 port 的 active history 读取确实失败，否则「未读历史」没有区分力。
+    assert!(
+        crate::dispatch::load_active_session_payloads(cfg.controller.as_ref(), &sid)
+            .await
+            .is_err()
+    );
+    crate::host::requests::session_lifecycle::restore::prepare_existing(
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+    )
+    .await
+    .expect("preparing a bound session should only need its binding");
+}
+
 /// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；
 /// 写一次接纳本身不回滚。
 #[tokio::test]

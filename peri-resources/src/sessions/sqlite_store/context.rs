@@ -8,12 +8,14 @@ use super::database::SqliteSessionDatabase;
 use super::row_mapping::ThreadRow;
 use anyhow::Result;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 use peri_acp_types::store::InheritedContext;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::thread::ThreadMeta;
-use sqlx::{AssertSqlSafe, SqliteConnection};
+use sqlx::{AssertSqlSafe, Row, SqliteConnection};
 use std::collections::HashSet;
+use std::task::{Context, Poll};
 
 impl SqliteSessionDatabase {
     /// 小型 metadata 投影；上下文事实由独立历史读取提供。
@@ -124,13 +126,10 @@ pub(super) async fn load_payloads_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> Result<Vec<PersistedPayload>> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
-    )
-    .bind(id.as_str())
-    .fetch_all(&mut *connection)
-    .await?;
-    decode_payload_rows(rows)
+    let query =
+        sqlx::query("SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid")
+            .bind(id.as_str());
+    collect_payload_rows(connection, query).await
 }
 
 /// 有效范围自有 payload 的语句原文（计划证据与生产读取同一份文本，见 `session_history_perf_test.rs`）。
@@ -143,24 +142,51 @@ pub(super) async fn load_active_payloads_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> Result<Vec<PersistedPayload>> {
-    let rows: Vec<(String, String)> = sqlx::query_as(ACTIVE_PAYLOADS_SQL)
-        .bind(id.as_str())
-        .fetch_all(&mut *connection)
-        .await?;
-    decode_payload_rows(rows)
+    collect_payload_rows(
+        connection,
+        sqlx::query(ACTIVE_PAYLOADS_SQL).bind(id.as_str()),
+    )
+    .await
 }
 
-/// 行内 ID 与主键必须一致：不一致是数据故障，不把两套身份混起来。
-fn decode_payload_rows(rows: Vec<(String, String)>) -> Result<Vec<PersistedPayload>> {
-    rows.into_iter()
-        .map(|(row_id, content)| {
-            let payload = peri_acp_types::store::deserialize_persisted_payload(&content)?;
-            if payload.id().as_uuid().to_string() != row_id {
-                anyhow::bail!("persisted payload message id mismatch");
-            }
-            Ok(payload)
-        })
-        .collect()
+/// Decode directly from each SQLite row, so the owned transcript needs no separate
+/// allocation containing all serialized JSON strings.
+async fn collect_payload_rows(
+    connection: &mut SqliteConnection,
+    query: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+) -> Result<Vec<PersistedPayload>> {
+    let query = query.try_map(|row| {
+        let row_id: &str = row.try_get(0)?;
+        let content: &str = row.try_get(1)?;
+        let payload = peri_acp_types::store::deserialize_persisted_payload(content)
+            .map_err(|err| sqlx::Error::Decode(err.into()))?;
+        if payload.id().as_uuid().to_string() != row_id {
+            return Err(sqlx::Error::Decode(
+                "persisted payload message id mismatch".into(),
+            ));
+        }
+        Ok(payload)
+    });
+    let mut rows = query.fetch(connection);
+    collect_decoded_payloads(|cx| rows.as_mut().poll_next(cx)).await
+}
+
+pub(super) async fn collect_decoded_payloads(
+    mut poll_row: impl FnMut(&mut Context<'_>) -> Poll<Option<sqlx::Result<PersistedPayload>>>,
+) -> Result<Vec<PersistedPayload>> {
+    let mut payloads = Vec::new();
+    while let Some(row) = std::future::poll_fn(&mut poll_row).await {
+        payloads.push(row.map_err(|err| match err {
+            sqlx::Error::Decode(cause) => anyhow::Error::from_boxed(cause),
+            other => other.into(),
+        })?);
+        // A ready SQLite row stream can decode the whole result in one poll.
+        // Let a pending Stop or close interrupt between batches even on a warm database.
+        if payloads.len().is_multiple_of(16) {
+            tokio::task::yield_now().await;
+        }
+    }
+    Ok(payloads)
 }
 
 pub(super) async fn load_context_payloads_on(
@@ -182,6 +208,20 @@ pub(in crate::sessions) const INHERITED_CONTEXT_SQL: &str =
 /// 祖先链上一条边的语句原文（主键单行；计划证据与生产读取同一份文本）。
 pub(in crate::sessions) const PARENT_THREAD_ID_SQL: &str =
     "SELECT parent_thread_id FROM threads WHERE id = ?1";
+
+/// Read the transcript side data from the same snapshot as its active messages.
+pub(super) async fn load_transcript_restore_state_on(
+    connection: &mut SqliteConnection,
+    thread_id: &ThreadId,
+    meta_columns: &str,
+) -> Result<TranscriptRestoreState> {
+    let own_flags = super::compaction::load_active_flags_on(connection, thread_id).await?;
+    let inherited = load_inherited_context_on(connection, thread_id, meta_columns).await?;
+    Ok(TranscriptRestoreState {
+        inherited,
+        own_flags,
+    })
+}
 
 pub(super) async fn load_inherited_context_on(
     connection: &mut SqliteConnection,
@@ -292,22 +332,12 @@ async fn load_payloads_up_to_on(
     let Some((target_rowid,)) = target_row else {
         return Ok(vec![]);
     };
-    let rows: Vec<(String, String)> = sqlx::query_as(
+    let query = sqlx::query(
         "SELECT message_id, content FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
     )
     .bind(thread_id.as_str())
-    .bind(target_rowid)
-    .fetch_all(&mut *connection)
-    .await?;
-    rows.into_iter()
-        .map(|(row_id, content)| {
-            let payload = peri_acp_types::store::deserialize_persisted_payload(&content)?;
-            if payload.id().as_uuid().to_string() != row_id {
-                anyhow::bail!("persisted payload message id mismatch");
-            }
-            Ok(payload)
-        })
-        .collect()
+    .bind(target_rowid);
+    collect_payload_rows(connection, query).await
 }
 
 impl SqliteSessionDatabase {

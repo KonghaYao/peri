@@ -6,8 +6,8 @@
 use super::blob_reader::{is_transient_blob_error, BlobReadError};
 use super::history::{
     read_content_length, read_window_candidates, HISTORY_WINDOW_AFTER_SQL,
-    HISTORY_WINDOW_ANCHOR_SQL, HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL,
-    HISTORY_WINDOW_BOUNDS_SQL, HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
+    HISTORY_WINDOW_ANCHOR_SQL, HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BOUNDS_SQL,
+    HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
     HISTORY_WINDOW_ENTRY_METADATA_SQL, HISTORY_WINDOW_INHERITED_ANCHOR_SQL,
     HISTORY_WINDOW_INHERITED_LENGTH_SQL, HISTORY_WINDOW_INHERITED_ROWID_SQL,
     HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL, HISTORY_WINDOW_OLDER_EXISTS_SQL,
@@ -370,10 +370,6 @@ impl SqliteSessionData {
         let committed_tail = committed_tail.ok_or_else(|| {
             HistoryWindowError::invalid_request("own history body requires a committed tail")
         })?;
-        let tail_position = i64::try_from(committed_tail.position).map_err(|_| {
-            super::corrupt("history window tail position exceeds the supported range")
-        })?;
-        let expected = entry_id.as_uuid().to_string();
         let mut connection = self
             .database
             .pool
@@ -385,20 +381,7 @@ impl SqliteSessionData {
             let mut tx = sqlx::Connection::begin(&mut *connection)
                 .await
                 .map_err(|error| super::map_sqlx(&error))?;
-            require_committed_tail(&mut tx, id, committed_tail).await?;
-            let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_BODY_ROWID_SQL)
-                .bind(id.as_str())
-                .bind(&expected)
-                .bind(tail_position)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| super::map_sqlx(&error))?;
-            let Some((rowid,)) = row else {
-                return Err(HistoryWindowError::anchor_unavailable(
-                    "history body entry is not present in this session",
-                )
-                .into());
-            };
+            let rowid = Self::own_body_rowid(&mut tx, id, entry_id, committed_tail).await?;
             let read = Self::blob_scope(&mut tx, b"messages\0", b"content\0", rowid, |reader| {
                 Ok((reader.total(), reader.read(offset, max_bytes as usize)?))
             })
@@ -657,7 +640,7 @@ impl SqliteSessionData {
 ///
 /// 只绑定 `rowid <= tail.position` 不够：rewind 删除尾部条目但保留更早条目时，
 /// 旧窗口仍能读到已失效快照内的内容。必须在同一事务内确认 tail 身份仍存在。
-async fn require_committed_tail(
+pub(super) async fn require_committed_tail(
     connection: &mut SqliteConnection,
     id: &ThreadId,
     expected: &HistoryCommittedTail,

@@ -5,6 +5,7 @@ use crate::kit::tui_render_unit::FoldKey;
 use crate::kit::tui_render_unit::FoldState;
 use crate::kit::tui_render_unit::FoldTarget;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct FoldedHistory {
@@ -12,6 +13,9 @@ pub(crate) struct FoldedHistory {
     phase: Option<SessionPhase>,
     overrides: HashMap<FoldKey, FoldState>,
     folded: im::Vector<TuiRenderUnit>,
+    /// Opaque revision tokens certify the existing grouped history prefix without retaining its raw units.
+    pub(super) revision: Arc<()>,
+    pub(super) prepended_to: Option<(Arc<()>, usize)>,
 }
 
 impl FoldedHistory {
@@ -20,6 +24,8 @@ impl FoldedHistory {
         self.source = None;
         self.folded = im::Vector::new();
         self.phase = None;
+        self.prepended_to = None;
+        self.revision = Arc::default();
     }
 
     #[cfg(test)]
@@ -40,13 +46,32 @@ impl FoldedHistory {
             .as_ref()
             .is_some_and(|old| old.ptr_eq(source) || (source.is_inline() && old == source));
         if !same_source || self.phase != Some(phase) || self.overrides != *overrides {
+            // Folding an entry depends on its own state and these overrides. A plain
+            // prepend preserves every old fold (including frozen durations).
+            let prepend = self
+                .source
+                .as_ref()
+                .filter(|_| self.phase == Some(phase) && self.overrides == *overrides)
+                .and_then(|old| crate::kit::tui_render_unit::prepended_len(old, source));
+            let old_revision = std::mem::take(&mut self.revision);
+            self.prepended_to = prepend.map(|len| (old_revision, len));
+            let mut changed = source.clone();
+            if let Some(end) = prepend {
+                changed.split_off(end);
+            }
             #[cfg(test)]
             crate::kit::acp_bridge::observe_perf(
                 crate::kit::acp_bridge::PerfCounter::HistoryFoldVisits,
-                source.len() as u64,
+                changed.len() as u64,
             );
-            self.folded = source.clone();
-            apply_fold_pass(&mut self.folded, phase, overrides);
+            apply_fold_pass(&mut changed, phase, overrides);
+            if prepend.is_some() {
+                changed = crate::kit::tui_render_unit::prepend_units(
+                    changed,
+                    std::mem::take(&mut self.folded),
+                );
+            }
+            self.folded = changed;
             self.source = Some(source.clone());
             self.phase = Some(phase);
             self.overrides = overrides.clone();

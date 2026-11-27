@@ -59,6 +59,8 @@ pub(crate) fn next_session_generation() -> u64 {
 /// 会话为空。持久化结果不确定时必须进入 ReloadRequired，从权威存储冷恢复。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextOwnership {
+    /// 窗口恢复已通过准入；正文保存在存储，首次执行时才读取。
+    Deferred,
     /// 有效上下文驻留 Host，可读、可派生展示投影。
     Resident,
     /// 已随本轮执行移交给执行器；Host 不持有正文。
@@ -224,7 +226,7 @@ impl SessionState {
         )
     }
 
-    /// Host 是否持有可读的有效上下文。`HandedOff`/`ReloadRequired` 时不能把空
+    /// Host 是否持有可读的有效上下文。其他所有权状态下不能把空
     /// `history_payloads` 解释为空会话。
     pub(crate) fn owns_effective_context(&self) -> bool {
         self.context_ownership == ContextOwnership::Resident

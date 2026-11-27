@@ -16,7 +16,7 @@ use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use crate::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -174,33 +174,20 @@ pub trait SessionResources: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<ActiveSessionSnapshot> {
-        let SessionSnapshot {
-            meta,
-            binding,
-            frozen,
-            payloads,
-            flags,
-            inherited,
-        } = self.load_session_snapshot(id).await?;
-        // 排除只认 flags 事实：没有标记的 payload 视为未排除，不猜测。
-        let excluded: HashSet<MessageId> = flags
-            .iter()
-            .filter(|(_, flags)| flags.excluded)
-            .map(|(id, _)| *id)
-            .collect();
-        let mut flags = flags;
-        flags.retain(|id, _| !excluded.contains(id));
-        let payloads = payloads
-            .into_iter()
-            .filter(|payload| !excluded.contains(&payload.id()))
-            .collect();
-        Ok(ActiveSessionSnapshot {
-            meta,
-            binding,
-            frozen,
-            inherited,
-            payloads,
-            flags,
+        self.load_session_snapshot(id).await.map(Into::into)
+    }
+
+    /// Read the frozen inherited context and active own projections at the same storage
+    /// revision. The executor already owns the message bodies. Storage adapters can
+    /// serve this projection without reading those bodies again.
+    async fn load_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<history::TranscriptRestoreState> {
+        let snapshot = self.load_active_snapshot(id).await?;
+        Ok(history::TranscriptRestoreState {
+            inherited: snapshot.inherited,
+            own_flags: snapshot.flags,
         })
     }
 
@@ -372,6 +359,18 @@ pub trait SessionResources: Send + Sync {
         ))
     }
 
+    /// Read the browsing bounds and the first displayable active own message. When
+    /// every active own row is hidden, return the last one. Stop at the first match
+    /// without loading inherited history, archived bodies, or the active snapshot.
+    async fn initial_history_anchor(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     /// 有界读取 `peri.historyWindowV1` 的边界事实：own 最旧/最新稳定身份、durable tail、
     /// 可重建 checkpoint 与冻结前缀状态；**不读任何正文**。
     ///
@@ -454,6 +453,11 @@ pub trait SessionResources: Send + Sync {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ))
+    }
+
+    /// Optional single-snapshot reader for own entries. Other stores use bounded chunks.
+    fn own_history_body_reader(&self) -> Option<&dyn super::OwnHistoryBodyReader> {
+        None
     }
 
     /// 有界读取超大条目的正文块（原始字节）。

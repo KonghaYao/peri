@@ -233,12 +233,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         frame_t0,
         Some("body-before-prepare-including-vm-read"),
     );
-    // [REQ-C01-3 / A20] 历史翻页代数（`HISTORY_PREPEND_EPOCH`，桥接任务每并入一页 +1）
-    // 在 prepare **之前**读，且**必须晚于上面的 `read_render_snapshot()`**：桥接侧先推
-    // 代数再发布，所以「快照里看得到并入 = 代数也看得到」；反过来（代数读在前、快照读在
-    // 后）会漏配一整次并入——它是本处读序的唯一理由，见 `viewport_anchor` 模块文档 4.。
-    // epoch 只是「并合发生过」这个事实，不承载任何桥接槽位语义。
-    let prepend_epoch = HISTORY_PREPEND_EPOCH.get();
     let prepare_wait = peri_time::monotonic_now();
     let mut transcript_guard = transcript.write_no_update();
     let mut caches_guard = vm_caches.write_no_update();
@@ -260,7 +254,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         BRIDGE_RESET_COUNTER.get(),
         scroll_state.read().offset(),
         vis_height as usize,
-        prepend_epoch,
     );
     let prepare_end = peri_time::monotonic_now();
     *anchor_slot_state.write_no_update() = transcript_guard.anchor();
@@ -968,8 +961,6 @@ pub(super) fn render_viewport(
 use crate::kit::atoms::BRIDGE_RESET_COUNTER;
 
 use crate::kit::atoms::FOCUSED_ENTRY;
-
-use crate::kit::atoms::HISTORY_PREPEND_EPOCH;
 
 use crate::kit::atoms::IMAGE_HOVER;
 

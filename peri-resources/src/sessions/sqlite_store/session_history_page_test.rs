@@ -182,6 +182,53 @@ async fn non_displayable_rows_advance_the_position_without_faking_the_end() {
     assert!(second.next_cursor.is_none());
 }
 
+#[tokio::test]
+async fn initial_history_anchor_validates_only_through_the_first_displayable_own_row() {
+    let mut history: Vec<_> = (0..34)
+        .map(|_| PersistedPayload::Message(BaseMessage::system("identity")))
+        .collect();
+    history.push(model_only_reminder());
+    let visible = PersistedPayload::Message(BaseMessage::human("first visible"));
+    history.push(visible.clone());
+    history.extend(messages(1));
+    let (store, data, _directory) = session_with_history(&history).await;
+    let pool = &store.database.pool;
+    let id = PAGE_SESSION.to_owned();
+    // Ignore the denormalized role; only the persisted envelope carries the audience.
+    sqlx::query("UPDATE messages SET role = 'user' WHERE thread_id = ?1")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE threads SET inherited_context = 'corrupt inherited' WHERE id = ?1")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let truncated =
+        r#"{"version":1,"type":"message","message":{"role":"user","content":"unfinished"#;
+    sqlx::query("UPDATE messages SET content = ?1 WHERE message_id = ?2")
+        .bind(truncated)
+        .bind(history.last().unwrap().id().as_uuid().to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let (bounds, anchor) = data.initial_history_anchor(&id).await.unwrap();
+    assert_eq!(bounds.range_head, Some(history[0].id()));
+    assert_eq!(anchor, Some(visible.id()));
+    sqlx::query("UPDATE messages SET content = ?1 WHERE message_id = ?2")
+        .bind(truncated)
+        .bind(visible.id().as_uuid().to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        data.initial_history_anchor(&id).await.unwrap_err().kind(),
+        SessionResourceErrorKind::Corrupt { .. }
+    ));
+}
+
 /// PARTIAL A 的存储级证据：多读的那一条候选行的正文**永不出库**。
 ///
 /// 「更早方向还有内容」的那一行被直接写成不可解码的正文（绕过门面，只有原始 SQL 能造出

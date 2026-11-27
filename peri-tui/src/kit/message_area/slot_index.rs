@@ -11,6 +11,9 @@ use ratatui_kit::ratatui::text::Line;
 pub(super) struct SlotIndex {
     root: Option<Arc<Node>>,
     capacity: usize,
+    // Physical leaf for logical slot zero. Prepending can attach a left subtree without
+    // rewriting retained wrap geometry (including the geometry of evicted rows).
+    first: usize,
     count: usize,
     source: Option<(im::Vector<TuiRenderUnit>, GridSpec, EntryRenderContext, u64)>,
 }
@@ -27,6 +30,31 @@ struct LayoutSlot {
     /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey。与行生存期解耦
     /// （行被淘汰后命中表仍可判定）。
     fold_hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
+}
+
+/// A page worker sends only measured rows, never rendered text or a Markdown cache.
+pub(super) struct ColdLayout {
+    visual_prefix: Vec<usize>,
+    header_local: u8,
+}
+
+impl ColdLayout {
+    pub(super) fn measure(lines: &SlotLines, map: &[WrappedLineInfo]) -> Self {
+        let mut visual_prefix = Vec::with_capacity(map.len() + 1);
+        visual_prefix.push(0);
+        visual_prefix.extend(map.iter().map(|entry| entry.visual_end));
+        Self {
+            visual_prefix,
+            header_local: header_local_of(lines),
+        }
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.visual_prefix.capacity() * size_of::<usize>()
+    }
+    pub(super) fn visual_rows(&self) -> usize {
+        self.visual_prefix.last().copied().unwrap_or(0)
+    }
 }
 
 /// entry 的可点击 header 逻辑行下标：首行是过程区转场台阶时为 1，否则 0。
@@ -83,11 +111,16 @@ impl Node {
         Self::branch(left, right).expect("setting a leaf leaves at least one populated branch")
     }
 
-    fn truncate(root: Option<&Arc<Self>>, capacity: usize, count: usize) -> Option<Arc<Self>> {
-        if count == 0 {
+    fn retain(
+        root: Option<&Arc<Self>>,
+        capacity: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<Arc<Self>> {
+        if start >= end || start >= capacity {
             return None;
         }
-        if count >= capacity {
+        if start == 0 && end >= capacity {
             return root.cloned();
         }
         let node = root?;
@@ -96,8 +129,13 @@ impl Node {
         };
         let half = capacity / 2;
         Self::branch(
-            Self::truncate(left.as_ref(), half, count.min(half)),
-            Self::truncate(right.as_ref(), half, count.saturating_sub(half)),
+            Self::retain(left.as_ref(), half, start, end.min(half)),
+            Self::retain(
+                right.as_ref(),
+                half,
+                start.saturating_sub(half),
+                end.saturating_sub(half),
+            ),
         )
     }
 }
@@ -145,37 +183,96 @@ impl SlotIndex {
         map: &[WrappedLineInfo],
         retain: bool,
     ) {
-        let mut visual_prefix = Vec::with_capacity(map.len() + 1);
-        visual_prefix.push(0);
-        visual_prefix.extend(map.iter().map(|entry| entry.visual_end));
+        let measured = ColdLayout::measure(&lines, map);
         let leaf = Arc::new(Node {
             logical: lines.len(),
-            visual: visual_prefix.last().copied().unwrap_or(0),
+            visual: measured.visual_rows(),
             kind: NodeKind::Leaf(LayoutSlot {
-                header_local: header_local_of(&lines),
+                header_local: measured.header_local,
                 fold_hits: Arc::clone(lines.fold_hits()),
                 lines: Arc::downgrade(&lines),
                 resident: retain.then_some(lines),
-                visual_prefix: Arc::new(visual_prefix),
+                visual_prefix: Arc::new(measured.visual_prefix),
             }),
         });
+        self.set_leaf(slot, leaf);
+    }
+
+    pub(super) fn set_cold(&mut self, slot: usize, measured: ColdLayout) {
+        let leaf = Arc::new(Node {
+            logical: measured.visual_prefix.len() - 1,
+            visual: measured.visual_rows(),
+            kind: NodeKind::Leaf(LayoutSlot {
+                lines: Weak::new(),
+                resident: None,
+                fold_hits: Arc::default(),
+                header_local: measured.header_local,
+                visual_prefix: Arc::new(measured.visual_prefix),
+            }),
+        });
+        self.set_leaf(slot, leaf);
+    }
+
+    fn set_leaf(&mut self, slot: usize, leaf: Arc<Node>) {
         if self.capacity == 0 {
             self.capacity = 1;
         }
-        while slot >= self.capacity {
+        let physical = self.first + slot;
+        while physical >= self.capacity {
             self.root = Node::branch(self.root.take(), None);
             self.capacity *= 2;
         }
-        self.root = Some(Node::set(self.root.as_ref(), self.capacity, slot, leaf));
+        self.root = Some(Node::set(self.root.as_ref(), self.capacity, physical, leaf));
         self.count = self.count.max(slot + 1);
     }
 
     pub(super) fn truncate(&mut self, count: usize) {
-        self.root = Node::truncate(self.root.as_ref(), self.capacity, count);
-        self.count = self.count.min(count);
         if count == 0 {
+            self.root = None;
             self.capacity = 0;
+            self.first = 0;
+            self.count = 0;
+        } else if count < self.count {
+            self.root = Node::retain(
+                self.root.as_ref(),
+                self.capacity,
+                self.first,
+                self.first + count,
+            );
+            self.count = count;
         }
+    }
+
+    /// Keep an unchanged range, releasing both sides. Whole subtrees are shared with the
+    /// previous snapshot. Holes before the range get their measurements from the new page.
+    pub(super) fn move_history(&mut self, run: crate::kit::tui_render_unit::HistoryOverlap) {
+        debug_assert!(run.len > 0 && run.old_start + run.len <= self.count);
+        let mut start = self.first + run.old_start;
+        self.root = Node::retain(self.root.as_ref(), self.capacity, start, start + run.len);
+        // Drop empty outer levels when alternating page directions over a long-lived window.
+        while self.capacity > 1 {
+            let half = self.capacity / 2;
+            let Some(NodeKind::Branch(left, right)) = self.root.as_ref().map(|node| &node.kind)
+            else {
+                break;
+            };
+            if start >= half {
+                self.root = right.clone();
+                start -= half;
+            } else if start + run.len <= half {
+                self.root = left.clone();
+            } else {
+                break;
+            }
+            self.capacity = half;
+        }
+        while start < run.new_start {
+            self.root = Node::branch(None, self.root.take());
+            start += self.capacity;
+            self.capacity *= 2;
+        }
+        self.first = start - run.new_start;
+        self.count = run.new_start + run.len;
     }
 
     pub(super) fn replace_lines(&mut self, slot: usize, lines: Arc<SlotLines>) {
@@ -193,7 +290,12 @@ impl SlotIndex {
                 visual_prefix: Arc::clone(&old.visual_prefix),
             }),
         });
-        self.root = Some(Node::set(self.root.as_ref(), self.capacity, slot, leaf));
+        self.root = Some(Node::set(
+            self.root.as_ref(),
+            self.capacity,
+            self.first + slot,
+            leaf,
+        ));
     }
 
     /// entry 可点击 header 的逻辑行下标（过程区台阶行占第 0 行时为 1）。
@@ -220,7 +322,7 @@ impl SlotIndex {
             return None;
         }
         let mut node = self.root.as_ref()?;
-        let mut local = slot;
+        let mut local = self.first + slot;
         let mut capacity = self.capacity;
         let mut logical = 0usize;
         let mut visual = 0usize;
@@ -268,7 +370,7 @@ impl SlotIndex {
                         local
                     };
                     return Some(SlotLookup {
-                        slot_index,
+                        slot_index: slot_index - self.first,
                         local_logical,
                         global_logical: logical.saturating_add(local_logical),
                         global_visual_start: visual
@@ -331,16 +433,7 @@ impl SlotIndex {
         // 与常驻渲染同一转场判定：相邻 entry 决定过程区进入/退出台阶（§6）。
         let transition = super::transcript::zone_transition(items, slot);
         cache.ensure(items.get(slot)?, grid, context.clone(), *frame, transition);
-        Some(Arc::new(
-            (match cache.markdown_lines().stable_overlay() {
-                Some((start, stable)) => {
-                    SlotLines::composite(Arc::clone(cache.lines()), start, stable)
-                }
-                None => SlotLines::single(Arc::clone(cache.lines())),
-            })
-            .with_genui_ranges(&cache.markdown_lines().genui_ranges)
-            .with_fold_hits(Arc::clone(cache.fold_hits())),
-        ))
+        Some(Arc::new(SlotLines::from_entry(&cache)))
     }
     #[cfg(test)]
     pub(super) fn line(&self, slot: usize, local: usize) -> Option<Line<'static>> {

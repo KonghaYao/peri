@@ -64,7 +64,7 @@ pub mod frozen;
 pub mod goal;
 pub mod history_common;
 pub mod history_page;
-mod history_page_visibility;
+pub mod history_page_visibility;
 pub mod history_v2;
 pub mod history_window;
 #[path = "history_window/request.rs"]

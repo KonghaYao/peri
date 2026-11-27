@@ -88,7 +88,6 @@ impl Harness {
             0,
             scroll_y,
             height,
-            0,
         );
         if warm {
             self.warm(scroll_y, height);
@@ -383,7 +382,6 @@ fn two_fences_in_one_message_are_scheduled_by_line_intersection() {
         0,
         0,
         height,
-        0,
     );
     transcript.warm_visible(&snapshot, &mut caches, 0, height);
     crate::kit::mermaid::drain_preview_jobs_now();
@@ -407,7 +405,6 @@ fn two_fences_in_one_message_are_scheduled_by_line_intersection() {
         1,
         scroll,
         height,
-        0,
     );
     drop(index);
     transcript.warm_visible(&snapshot, &mut caches, scroll, height);
@@ -453,7 +450,6 @@ fn diagram_height_change_relocates_the_paragraph_under_the_cursor() {
         0,
         0,
         height,
-        0,
     );
     transcript.warm_visible(&snapshot, &mut caches, 0, height);
     crate::kit::mermaid::drain_preview_jobs_now();
@@ -481,7 +477,6 @@ fn diagram_height_change_relocates_the_paragraph_under_the_cursor() {
         1,
         scroll,
         height,
-        0,
     );
     let relocation = transcript
         .take_reflow_relocation()

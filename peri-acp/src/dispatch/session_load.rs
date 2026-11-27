@@ -88,48 +88,18 @@ pub struct InitialHistoryCursor {
 
 /// 为初始 load 铸造第一个游标（REQ-H01-1、验收 A15）。
 ///
-/// 锚点 = 有效视图里最旧的**可展示**自有 payload，**跳过继承/祖先前缀**：首屏第一条可能是
-/// 继承条目，它在本线程没有行——拿它当锚点会让第一次翻页立刻 `Expired`，或者把浏览
-/// 带进祖先区。`ActiveSessionSnapshot` 的 `inherited` 与 `payloads` 是分开给的，
-/// 自有区即 `payloads`（顺序与完整读取一致），这里不需要在 ACP 层重新推导边界。
-///
-/// 可展示性取自 [`PersistedPayload::displayable_to_client`]——与分页出口装配 `items` 的过滤
-/// **同一条**规则，不在这里另立判据。这不是洁癖：subagent / fork / bg 子会话的自有区第一条
-/// 是会话身份 System 条目（`session/subagent/factory/spawn.rs`），它既不被 Full 排除、
-/// 又永远不进入客户端渲染；拿它（或任何 model-only reminder）当锚点，会让比它更早的
-/// 归档原文一页都取不到，锚点本身就是浏览范围起点时更会直接谎称「没有更早历史」。
-/// 首屏不展示的条目不该占据「已交付」的位置：锚点是**已交付集合的下边界**。
-///
-/// 有效视图里一条可展示条目都没有时（只有身份 System / model-only reminder）退到**最新**
-/// 一条**有效**自有 payload（`payloads.last()`）：它同样不在首屏展示，所以既不会重，也不会
-/// 让比它更早的可展示归档行失去交付机会；是否收尾仍交给 `range_head` 判据——宁可多给一次
-/// 空页，也不谎称没有更早历史。
-///
-/// 没有自有 payload（空会话），或锚点**就是**浏览范围起点（更早方向确实没有行）时
-/// 回答 `nextCursor = null`：不编造游标，也不触发任何兜底摘要。
-///
-/// 代价：一次有效视图读取（边界单行 + 有效集合，已排除正文不读取）。它发生在初始
-/// load 上，与「首屏只读有效范围」同一口径；调用方只在当前连接协商了分页能力时调用。
+/// 锚点取首条客户端可见的有效自有消息；全隐藏时取最后一条有效自有消息。
+/// 存储按序检查候选，遇到首条可见消息即停止。继承区和已排除正文不进入这条读取。
 pub async fn initial_history_cursor(
     controller: &Controller,
     thread_id: &str,
 ) -> Result<InitialHistoryCursor, AcpError> {
     let id = ThreadId::from(thread_id.to_string());
-    let resources = controller.sessions();
-    let bounds = resources
-        .history_page_bounds(&id)
+    let (bounds, anchor) = controller
+        .sessions()
+        .initial_history_anchor(&id)
         .await
         .map_err(history_page_error)?;
-    let effective = resources
-        .load_active_snapshot(&id)
-        .await
-        .map_err(history_page_error)?;
-    let anchor = effective
-        .payloads
-        .iter()
-        .find(|payload| payload.displayable_to_client())
-        .or_else(|| effective.payloads.last())
-        .map(PersistedPayload::id);
     let next_cursor = anchor.and_then(|anchor| {
         (bounds.range_head != Some(anchor))
             .then(|| HistoryCursor::new(id.clone(), anchor, bounds.range_token.clone()))

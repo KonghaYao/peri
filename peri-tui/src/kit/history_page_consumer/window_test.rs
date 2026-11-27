@@ -359,6 +359,8 @@ fn reopen_required_enters_degraded_and_retry_uses_open_not_full_load() {
         super::settle_window_response(&in_flight, &page_response("snap-reopen", 1)),
         WindowSettlement::Accepted(_)
     ));
+    assert!(atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
+    assert!(super::finish_window_merge(&in_flight.context.request_id) > 0);
     assert!(!atoms::HISTORY_WINDOW_PAGING.state().read().is_degraded());
 }
 
@@ -458,7 +460,7 @@ fn gap_request_uses_stable_identity_seek_and_keeps_window_open() {
 
 #[test]
 #[serial]
-fn page_settlement_only_advances_the_requested_window_cursor() {
+fn publication_only_advances_the_requested_window_cursor() {
     {
         let _guard = reset_atoms();
         let request = super::build_window_page_request(
@@ -477,6 +479,10 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
             super::settle_window_response(&in_flight, &response),
             WindowSettlement::Accepted(_)
         ));
+        let unsettled = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+        assert_eq!(unsettled.before_cursor.as_deref(), Some("before-1"));
+        assert_eq!(unsettled.after_cursor.as_deref(), Some("after-1"));
+        assert!(super::finish_window_merge(&in_flight.context.request_id) > 0);
         let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
         assert_eq!(state.before_cursor.as_deref(), Some("before-2"));
         assert_eq!(
@@ -504,6 +510,10 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
             super::settle_window_response(&in_flight, &response),
             WindowSettlement::Accepted(_)
         ));
+        let unsettled = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+        assert_eq!(unsettled.before_cursor.as_deref(), Some("before-1"));
+        assert_eq!(unsettled.after_cursor.as_deref(), Some("after-1"));
+        assert!(super::finish_window_merge(&in_flight.context.request_id) > 0);
         let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
         assert_eq!(
             state.before_cursor.as_deref(),
@@ -516,10 +526,59 @@ fn page_settlement_only_advances_the_requested_window_cursor() {
 
 #[test]
 #[serial]
+fn discarded_pending_page_cannot_spend_the_old_boundary_or_commit_into_a_new_session() {
+    let _guard = reset_atoms();
+    let old = granted(&page_request());
+    let mut page = page_response("snap-1", 1);
+    page.read_ticket = "ticket-that-was-rejected".into();
+    assert!(matches!(
+        super::settle_window_response(&old, &page),
+        WindowSettlement::Accepted(_)
+    ));
+    super::note_window_cursors(
+        Some(&old.context.request_id),
+        Some("new-before".into()),
+        Some("new-after".into()),
+    );
+    assert_eq!(super::finish_window_merge("unrelated"), 0);
+    super::fail_window_request(&old.context.request_id, "waiting for render ACK", false);
+    let paging = atoms::HISTORY_WINDOW_PAGING.state();
+    let untouched = paging.read().clone();
+    assert_eq!(untouched.before_cursor.as_deref(), Some("before-1"));
+    assert_eq!(untouched.after_cursor.as_deref(), Some("after-1"));
+    assert_eq!(untouched.read_ticket.as_deref(), Some("ticket-1"));
+    assert_eq!(untouched.reserved_bytes, 0);
+    let retry = granted(&page_request());
+    assert_eq!(super::finish_window_merge(&old.context.request_id), 0);
+    assert!(matches!(
+        super::settle_window_response(&retry, &page),
+        WindowSettlement::Accepted(_)
+    ));
+
+    switch_window_session("s2");
+    let new = granted(&super::build_window_open_request(WindowDirection::Before));
+    super::note_window_cursors(
+        Some(&retry.context.request_id),
+        Some("late-before".into()),
+        None,
+    );
+    super::fail_window_request(&retry.context.request_id, "late rejection", true);
+    assert_eq!(super::finish_window_merge(&retry.context.request_id), 0);
+    let current = paging.read();
+    assert_eq!(current.in_flight.as_ref(), Some(&new));
+    assert!(!current.is_degraded());
+    assert!(current.before_cursor.is_none());
+    assert!(current.after_cursor.is_none());
+    assert!(current.read_ticket.is_none());
+    assert_eq!(current.reserved_bytes, new.reservation.bytes);
+}
+
+#[test]
+#[serial]
 fn note_window_cursors_recomputes_both_edges_and_reopens_newer_direction() {
     let _guard = reset_atoms();
     atoms::HISTORY_WINDOW_PAGING.state().write().newer_exhausted = true;
-    super::note_window_cursors(Some("before-edge".into()), Some("after-edge".into()));
+    super::note_window_cursors(None, Some("before-edge".into()), Some("after-edge".into()));
     let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
     assert_eq!(state.before_cursor.as_deref(), Some("before-edge"));
     assert_eq!(state.after_cursor.as_deref(), Some("after-edge"));
@@ -628,17 +687,37 @@ fn reservation_budget_rejects_before_request_dispatch() {
 #[serial]
 fn open_request_skips_prior_snapshot_validation() {
     let _guard = reset_atoms();
-    let request = super::build_window_open_request(WindowDirection::Before);
-    let in_flight = match super::claim_window_request(&request) {
-        WindowClaim::Granted(in_flight) => in_flight,
-        other => panic!("expected grant, got {other:?}"),
-    };
+    let paging = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut page = page_response("new-snap", 1);
+    page.read_ticket = "new-ticket".into();
+    let open = || granted(&super::build_window_open_request(WindowDirection::Before));
+    let first = open();
+    assert!(matches!(
+        super::settle_window_response(&first, &page),
+        WindowSettlement::Accepted(_)
+    ));
+    super::fail_window_request(&first.context.request_id, "admission declined", false);
+    {
+        let existing = paging.read();
+        assert!(!existing.is_degraded());
+        assert_eq!(existing.identity.as_ref().unwrap().snapshot_token, "snap-1");
+        assert_eq!(existing.read_ticket.as_deref(), Some("ticket-1"));
+        assert_eq!(existing.before_cursor.as_deref(), Some("before-1"));
+    }
+
+    let retry = open();
+    let request_id = retry.context.request_id.clone();
     assert_eq!(
-        super::settle_window_response(&in_flight, &page_response("new-snap", 1)),
-        WindowSettlement::Accepted(Box::new(in_flight))
+        super::settle_window_response(&retry, &page),
+        WindowSettlement::Accepted(Box::new(retry))
     );
-    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
-    assert_eq!(state.identity.expect("open request skips prior snapshot validation: the fixture establishes state.identity before this assertion").snapshot_token, "new-snap");
+    assert!(super::finish_window_merge(&request_id) > 0);
+    let current = paging.read();
+    assert_eq!(
+        current.identity.as_ref().unwrap().snapshot_token,
+        "new-snap"
+    );
+    assert_eq!(current.read_ticket.as_deref(), Some("new-ticket"));
 }
 
 fn session_response(session: &str, snapshot: &str, items: usize) -> WindowPageResponse {
@@ -740,7 +819,10 @@ fn late_open_response_from_previous_window_never_merges_into_current_window() {
             .map(|pending| pending.context.session_id.as_str()),
         Some("s3")
     );
-    assert_eq!(state.identity.expect("late open response from previous window never merges into current window: the fixture establishes state.identity before this assertion").snapshot_token, "snap-c");
+    assert!(state.identity.is_none());
+    assert!(super::finish_window_merge(&in_flight_c.context.request_id) > 0);
+    let current = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(current.identity.unwrap().snapshot_token, "snap-c");
 }
 
 /// 当前窗口身份是结算权威：在途槽位若残留旧窗口上下文（防线性场景），

@@ -68,6 +68,31 @@ fn inherited_source(
 }
 
 #[tokio::test]
+async fn transcript_restore_reads_inherited_and_own_projections_without_decoding_own_bodies() {
+    let history = super::payloads(2);
+    let (store, data, _directory) = session_with_history(&history).await;
+    let inherited = super::payloads(1);
+    let id = WINDOW_SESSION.to_owned();
+    set_inherited_context(&store, &id, &inherited, "parent").await;
+    sqlx::query("UPDATE messages SET content = 'unreadable', truncated = 1 WHERE thread_id = ?1")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET excluded = 1 WHERE message_id = ?1")
+        .bind(history[1].id().as_uuid().to_string())
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+
+    let state = data.load_transcript_restore_state(&id).await.unwrap();
+    assert_eq!(state.inherited.payloads[0].id(), inherited[0].id());
+    assert_eq!(state.own_flags.len(), 1);
+    assert!(state.own_flags[&history[0].id()].truncated);
+    assert!(data.load_active_snapshot(&id).await.is_err());
+}
+
+#[tokio::test]
 async fn inherited_bounds_report_the_frozen_range_and_snapshot_identity() {
     let history = super::payloads(2);
     let (store, data, _directory) = session_with_history(&history).await;

@@ -642,3 +642,34 @@ async fn history_segment_statements_are_index_located() {
     drop(resources);
     pool.close().await;
 }
+
+#[tokio::test]
+async fn window_pages_seek_from_the_anchor_in_both_directions() {
+    use super::super::history::{HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_BEFORE_SQL};
+
+    let fixture = super::build_fixture(4_000, ArchivedBody::Undecodable, 0).await;
+    let pool = super::fixture_pool(&fixture.db_path).await;
+    let mut conn = pool.acquire().await.unwrap();
+    // A 51-row page takes fewer than 1,000 VM steps. Walking thousands of
+    // other rows to reach its anchor interrupts the query, independent of CPU speed.
+    conn.lock_handle()
+        .await
+        .unwrap()
+        .set_progress_handler(4_000, || false);
+    for (sql, anchor, first, last) in [
+        (HISTORY_WINDOW_BEFORE_SQL, 100_i64, 99_i64, 49_i64),
+        (HISTORY_WINDOW_AFTER_SQL, 3_900, 3_901, 3_951),
+    ] {
+        let rows: Vec<(String, i64, String)> = sqlx::query_as(sql)
+            .bind(&fixture.thread)
+            .bind(4_003_i64)
+            .bind(anchor)
+            .bind(0_i64)
+            .bind(51_i64)
+            .fetch_all(&mut *conn)
+            .await
+            .expect("window must seek to the cursor within the VM budget");
+        assert_eq!((rows.len(), rows[0].1, rows[50].1), (51, first, last));
+    }
+    conn.lock_handle().await.unwrap().remove_progress_handler();
+}

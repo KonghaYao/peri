@@ -28,4 +28,5 @@ pub struct HistoryWindowDiagnostics {
     pub admission_blocked: u64,
     pub stale_pages: u64,
     pub window_degraded: bool,
+    pub can_prefetch: bool,
 }

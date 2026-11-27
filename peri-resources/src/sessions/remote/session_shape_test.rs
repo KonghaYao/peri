@@ -588,6 +588,32 @@ async fn draft_revocation_removes_only_uncommitted_rows() {
 }
 
 #[test]
+fn binding_lookup_reads_only_the_binding_and_parent_marker() {
+    let statement = session_sql::select_binding_statement("stored-session");
+    let columns = statement
+        .sql
+        .strip_prefix("SELECT ")
+        .unwrap()
+        .split("FROM")
+        .next()
+        .unwrap()
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        columns,
+        [
+            "b.schema_version",
+            "b.project_id",
+            "b.workspace_id",
+            "b.relative_cwd",
+            "s.parent_thread_id",
+        ]
+    );
+    assert_eq!(statement.params, [Value::Text("stored-session".into())]);
+}
+
+#[test]
 fn read_statements_are_read_only_and_parameterized() {
     let single_id_reads = [
         session_sql::select_session_statement("s"),

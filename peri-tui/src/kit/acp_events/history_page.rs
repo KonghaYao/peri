@@ -391,16 +391,7 @@ pub(super) fn project_items(
     let mut tool_slots: HashMap<String, (usize, usize)> = HashMap::new();
     for item in items {
         let mut units: Vec<TuiRenderUnit> = Vec::new();
-        // 历史条目身份 `{session}:{uuid}`：own 会话的 uuid 即 ACP messageId，
-        // reasoning 折叠键与 live/history_v2 同口径。继承前缀不伪造本会话身份。
-        let message_id = match &item.source {
-            HistorySource::Own => item
-                .entry_id
-                .split_once(':')
-                .map(|(_, uuid)| uuid.to_owned())
-                .filter(|uuid| !uuid.is_empty()),
-            HistorySource::Inherited { .. } => None,
-        };
+        let message_id = item.source.own_message_id(&item.entry_id);
         for sub in &item.sub_items {
             if sub.system_reminder {
                 if let Ok(reminder) = serde_json::from_value(sub.update.clone())
@@ -421,7 +412,7 @@ pub(super) fn project_items(
                     units.push(super::turn::committed_assistant_unit_with_message_id(
                         &text,
                         reasoning.as_deref(),
-                        message_id.clone(),
+                        message_id.map(str::to_owned),
                     ));
                 }
                 AcpEventData::ReplayToolStarted {
@@ -486,7 +477,9 @@ pub(super) fn project_items(
                 // 展示（队列认领是执行侧状态），历史页不消费它。
                 AcpEventData::ReplayedUserBubble { text, .. }
                 | AcpEventData::LocalUserBubble { text, .. } => {
-                    units.push(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
+                    let mut bubble = TuiUserBubble::new(text);
+                    bubble.message_id = message_id.map(str::to_owned);
+                    units.push(TuiRenderUnit::TuiUserBubble(bubble));
                 }
                 // 其余变体（usage_update / 未知 tag / 无展示形式的投影）在历史投影里
                 // 没有对应物：跳过，不猜测。

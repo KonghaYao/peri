@@ -19,61 +19,98 @@ use super::history_paging;
 use crate::kit::history_paging::WindowGapRequest;
 use crate::kit::history_window::GapSeekDirection;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OlderTrigger {
+    Automatic,
+    UpwardScroll,
+    Prefetch,
+}
+
 pub fn request_window_older_page_if_due() -> bool {
+    request_window_older_page(OlderTrigger::Automatic)
+}
+
+pub(crate) fn request_window_older_page_on_scroll() -> bool {
+    request_window_older_page(OlderTrigger::UpwardScroll)
+}
+
+pub(crate) fn prefetch_window_older_page_if_due() -> bool {
+    atoms::HISTORY_WINDOW_STATS.get().can_prefetch
+        && request_window_older_page(OlderTrigger::Prefetch)
+}
+
+/// Only a published, visible prepend to the outer edge permits the next deliberate scroll
+/// to skip its cooldown. Empty, fully hidden and duplicate pages never advance the epoch.
+pub(super) fn published_before_cursor(
+    pending: &super::WindowInFlight,
+    before: Option<&String>,
+) -> Option<String> {
+    let super::WindowInFlightKind::Page {
+        cursor: WindowPageCursor::Before(previous),
+        ..
+    } = &pending.kind
+    else {
+        return None;
+    };
+    let published = atoms::TRANSCRIPT_PUBLICATION.get().prepend_epoch;
+    if pending.context.gap.is_none()
+        && published != pending.prepend_epoch_at_claim
+        && published == atoms::HISTORY_PREPEND_EPOCH.get()
+    {
+        before.filter(|next| *next != previous).cloned()
+    } else {
+        None
+    }
+}
+
+fn request_window_older_page(trigger: OlderTrigger) -> bool {
     if !super::window_path_enabled() {
         return false;
     }
-    let cursor = {
+    let request = {
         let handle = atoms::HISTORY_WINDOW_PAGING.state();
-        let state = handle.read();
+        let mut state = handle.write();
         if state.is_degraded() {
             drop(state);
-            return request_window_retry_if_due();
+            return trigger != OlderTrigger::Prefetch && request_window_retry_if_due();
         }
         if state.in_flight.is_some() || state.pending_merge.is_some() {
             return false;
         }
-        if state
-            .last_request_at
-            .is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(250))
+        let Some(cursor) = state.before_cursor.as_ref() else {
+            return false;
+        };
+        let continued_scroll =
+            trigger != OlderTrigger::Automatic && state.scroll_before.as_ref() == Some(cursor);
+        if !continued_scroll
+            && state
+                .last_request_at
+                .is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(250))
         {
             return false;
         }
-        let Some(cursor) = state.before_cursor.clone() else {
+        let cursor = WindowPageCursor::Before(cursor.clone());
+        let Some(request) =
+            super::window_consumer::build_page_request(&mut state, None, cursor, WINDOW_PAGE_LIMIT)
+        else {
             return false;
         };
-        cursor
-    };
-    let Some(request) =
-        super::build_window_page_request(WindowPageCursor::Before(cursor), WINDOW_PAGE_LIMIT)
-    else {
-        return false;
+        if !matches!(
+            super::window_consumer::claim_request(&mut state, &request),
+            WindowClaim::Granted(_)
+        ) {
+            return false;
+        }
+        request
     };
     let request_id = request.request_id().to_string();
-    match super::claim_window_request(&request) {
-        WindowClaim::Granted(_) => {
-            let sent = atoms::HISTORY_WINDOW_TX
-                .get()
-                .is_some_and(|tx| tx.send(request).is_ok());
-            if !sent {
-                super::fail_window_request(
-                    &request_id,
-                    "history window channel is unavailable",
-                    false,
-                );
-            }
-            sent
-        }
-        WindowClaim::Merged => false,
-        WindowClaim::Disabled => false,
-        WindowClaim::Rejected(rejection) => {
-            debug!(
-                request_id = %request_id,
-                "history_window_consumer: older page trigger rejected ({rejection:?})"
-            );
-            false
-        }
+    let sent = atoms::HISTORY_WINDOW_TX
+        .get()
+        .is_some_and(|tx| tx.send(request).is_ok());
+    if !sent {
+        super::fail_window_request(&request_id, "history window channel is unavailable", false);
     }
+    sent
 }
 
 pub fn request_window_newer_page_if_due() -> bool {

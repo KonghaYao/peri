@@ -55,6 +55,10 @@ mod blob_reader;
 mod catalog;
 #[path = "session_data/history.rs"]
 mod history;
+#[path = "session_data/history_anchor.rs"]
+mod history_anchor;
+#[path = "session_data/history_body_reader.rs"]
+mod history_body_reader;
 #[path = "session_data/history_projection.rs"]
 mod history_projection;
 #[path = "session_data/history_window.rs"]

@@ -97,6 +97,47 @@ fn over_budget_admission_evicts_farthest_segment_first_and_reports_plans() {
     window.settle_pending_merge();
 }
 
+#[test]
+fn inserting_before_the_only_evictable_segment_keeps_the_page_and_its_readback_edge() {
+    use super::test_support::{accepted_key, admit, admit_and_settle, enabled_window, segment};
+    use super::{PersistentEntryKey, RegionKey};
+
+    let mut window = enabled_window(small_limits(1_000));
+    let old = accepted_key(admit_and_settle(
+        &mut window,
+        "r20",
+        segment("m20", 20, 750, 750),
+    ));
+    let mut next = segment("m10", 10, 750, 750);
+    next.after_cursor = Some("after-10".into());
+    let decision = admit(&mut window, "r10", next, PagePlacement::BeforeSegment(old));
+    let AdmissionDecision::Accepted {
+        segments, released, ..
+    } = decision
+    else {
+        panic!("a fitting page can replace its only insertion neighbor: {decision:?}");
+    };
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].segment, old);
+    assert_eq!(window.segment_count(), 1);
+    let [RegionKey::Resident(new), RegionKey::Gap(gap)] =
+        window.layout().iter().copied().collect::<Vec<_>>()[..]
+    else {
+        panic!("expected the new page before the released interval");
+    };
+    assert_eq!(new, segments[0]);
+    assert_eq!(
+        window.gaps()[&gap].before,
+        Some(PersistentEntryKey::own("s1:m10"))
+    );
+    assert_eq!(
+        window.gaps()[&gap].after_cursor.as_deref(),
+        Some("after-10")
+    );
+    assert_eq!(window.edge_cursors().1.as_deref(), Some("after-10"));
+    assert_eq!(window.budget().resident_body_bytes, 750);
+}
+
 /// 工具卡归属后成为可淘汰 LiveSeal 段：同一批字节从「只增不减的 unattributed」
 /// 转入可释放段，预算压力能生成释放计划并接纳新页。
 #[test]

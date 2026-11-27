@@ -1,3 +1,6 @@
+mod buffered_tool_text;
+pub use buffered_tool_text::history_body_displayable_to_client_buffered;
+
 use serde::Deserialize;
 
 use crate::messages::{BaseMessage, MessageId};

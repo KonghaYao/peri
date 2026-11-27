@@ -244,6 +244,10 @@ pub(in super::super) fn handle_window_page_loaded(
     if !context.is_open {
         sync_window_anchor_from_viewport(state);
     }
+    // The previous page may already be on screen since its publication sampled the budget.
+    state
+        .window
+        .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
 
     match state
         .window
@@ -376,9 +380,9 @@ pub(in super::super) fn handle_window_page_loaded(
             WindowPagePlacement::BeforeFirst => state
                 .window
                 .index()
-                .entries_in_slot_order()
-                .first()
-                .and_then(|(key, _, _)| state.window.displayed_range(key))
+                .entry_keys_in_slot_order()
+                .next()
+                .and_then(|key| state.window.displayed_range(key))
                 .map_or(0, |(slot, _)| slot),
         }
     };
@@ -392,24 +396,16 @@ pub(in super::super) fn handle_window_page_loaded(
         // open 页插在保留 live 前面时，模型顺序必须与 committed 同步。
         state
             .window
-            .index()
-            .entries_in_slot_order()
-            .into_iter()
-            .find(|(key, _, _)| {
-                state
-                    .window
-                    .displayed_range(key)
-                    .is_some_and(|(slot, _)| slot >= insert_slot)
-            })
-            .map_or(PagePlacement::Tail, |(key, _, _)| {
-                PagePlacement::BeforeEntry(key)
+            .resident_entry_at_or_after_slot(insert_slot)
+            .map_or(PagePlacement::Tail, |key| {
+                PagePlacement::BeforeEntry(key.clone())
             })
     } else {
         match context.placement {
             WindowPagePlacement::Tail => PagePlacement::Tail,
             WindowPagePlacement::BeforeFirst => {
-                match state.window.index().entries_in_slot_order().first() {
-                    Some((entry, _, _)) => PagePlacement::BeforeEntry(entry.clone()),
+                match state.window.index().entry_keys_in_slot_order().next() {
+                    Some(entry) => PagePlacement::BeforeEntry(entry.clone()),
                     None => PagePlacement::Tail,
                 }
             }
@@ -470,10 +466,7 @@ pub(in super::super) fn handle_window_page_loaded(
                 let slots = live_tool_slots(state, &bound);
                 state.register_live_seal_segments(slots.into_iter());
                 // 新段改变了 index 槽位；重新发布 spans 并补齐在途工具终点。
-                let spans =
-                    crate::kit::history_paging::HistorySpans::from_resident_window(&state.window);
-                history_page::apply_pending_tool_ends(state, &spans);
-                crate::kit::history_paging::sync_spans_from_window(&state.window);
+                publish_spans_and_pair_tool_ends(state);
             }
             let pending = state.window.take_pending_release_plans();
             if !pending.is_empty() {
@@ -502,10 +495,14 @@ pub(in super::super) fn handle_window_page_loaded(
             // 空页已由 consumer 按方向清空游标（EOF/无更多行）；再按驻留边缘回写会
             // 把该方向重新“点亮”，导致对同一 cursor 无限重试。adopt-only 页同样
             // 不建段：此时布局为空，边缘游标是 `(None, None)`，回写会覆盖
-            // `settle_window_response` 从 open 响应写入的边界。
+            // open 响应将在 finish_window_merge 时提交的边界。
             if !response.items.is_empty() && state.window.segment_count() > 0 {
                 let (edge_before, edge_after) = state.window.edge_cursors();
-                history_page_consumer::note_window_cursors(edge_before, edge_after);
+                history_page_consumer::note_window_cursors(
+                    Some(&context.request_id),
+                    edge_before,
+                    edge_after,
+                );
             }
             crate::kit::history_window::publish_window_viewport(&state.window);
             crate::kit::history_paging::publish_window_gap_request(&state.window);
@@ -578,6 +575,8 @@ pub(in super::super) fn settle_after_publication(state: &mut BridgeState) {
     };
     state.window.settle_pending_merge();
     history_page_consumer::finish_window_merge(&request_id);
+    // The render publication sampled the budget before this reservation was returned.
+    crate::kit::atoms::HISTORY_WINDOW_STATS.set(state.window.diagnostics());
 }
 
 pub(super) fn projection_items(response: &WindowPageResponse) -> Vec<ProjectionItem> {
@@ -707,22 +706,26 @@ pub(super) fn merge_window_units(
     )],
 ) {
     let inserted_before_existing = insert_slot < state.committed.len();
-    let mut cursor = insert_slot;
-    let mut inserted = 0usize;
-    for (_, _, units, _) in views {
-        for unit in units {
-            state.committed.insert(cursor, unit.clone());
-            cursor = cursor.saturating_add(1);
-            inserted = inserted.saturating_add(1);
-        }
-    }
     let entries: Vec<(PersistentEntryKey, usize)> = views
         .iter()
         .filter(|(_, _, units, _)| !units.is_empty())
         .map(|(key, _, units, _)| (key.clone(), units.len()))
         .collect();
+    if !entries.is_empty() {
+        let page = views
+            .iter()
+            .flat_map(|(_, _, units, _)| units.iter().cloned());
+        if insert_slot == 0 {
+            let retained = std::mem::take(&mut state.committed);
+            state.committed = crate::kit::tui_render_unit::prepend_units(page.collect(), retained);
+        } else {
+            let tail = state.committed.split_off(insert_slot);
+            state.committed.extend(page);
+            state.committed.append(tail);
+        }
+    }
     state.window.mark_display_block(&entries, insert_slot);
-    if inserted > 0
+    if !entries.is_empty()
         && (context.placement == WindowPagePlacement::BeforeFirst || inserted_before_existing)
     {
         crate::kit::atoms::HISTORY_PREPEND_EPOCH.set(
@@ -731,9 +734,7 @@ pub(super) fn merge_window_units(
                 .wrapping_add(1),
         );
     }
-    let spans = crate::kit::history_paging::HistorySpans::from_resident_window(&state.window);
-    history_page::apply_pending_tool_ends(state, &spans);
-    crate::kit::history_paging::sync_spans_from_window(&state.window);
+    publish_spans_and_pair_tool_ends(state);
     let mappings = views
         .iter()
         .flat_map(|(key, _, units, _)| {
@@ -747,6 +748,13 @@ pub(super) fn merge_window_units(
         .collect();
     crate::kit::history_window::publish_window_unit_mappings(mappings);
 }
+
+fn publish_spans_and_pair_tool_ends(state: &mut BridgeState) {
+    let spans = crate::kit::history_paging::HistorySpans::from_resident_window(&state.window);
+    history_page::apply_pending_tool_ends(state, &spans);
+    crate::kit::history_paging::with_spans(|published| *published = spans);
+}
+
 /// 旧回放在 `committed` 里的严格前缀末尾。只有「回放区间之后确实还有单元」时
 /// 才返回边界；否则无法区分旧回放与后来追加的 live 内容，调用方必须保守处理。
 pub(super) fn known_replay_prefix_end(state: &BridgeState) -> Option<usize> {

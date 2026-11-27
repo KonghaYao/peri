@@ -41,6 +41,16 @@ impl HistorySource {
         matches!(self, Self::Own)
     }
 
+    /// Own window entry ids use `{session}:{message}`. Frozen ancestors do not supply
+    /// the current session's durable message id.
+    pub(crate) fn own_message_id<'a>(&self, entry_id: &'a str) -> Option<&'a str> {
+        if !self.is_own() {
+            return None;
+        }
+        let (_, id) = entry_id.rsplit_once(':')?;
+        (!id.is_empty()).then_some(id)
+    }
+
     pub fn frozen_snapshot_id(&self) -> Option<&str> {
         match self {
             Self::Own => None,

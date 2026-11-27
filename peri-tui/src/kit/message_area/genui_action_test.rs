@@ -129,7 +129,6 @@ impl Fixture {
             BRIDGE_RESET_COUNTER.get(),
             0,
             100,
-            0,
         )
     }
 

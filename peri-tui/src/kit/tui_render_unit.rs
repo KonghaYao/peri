@@ -21,6 +21,7 @@ mod diff;
 mod fold;
 mod group;
 mod hash;
+mod history_overlap;
 mod interaction;
 mod reminder;
 mod tool_card;
@@ -39,6 +40,9 @@ pub use group::{
     TuiCollapsedGroup, TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary,
 };
 pub use hash::{tui_hash_combine, tui_hash_roll, tui_hash_roll_update, tui_hash_str};
+pub(crate) use history_overlap::{
+    HistoryOverlap, history_overlap, prepend_units, prepended_len, same_render_unit,
+};
 pub use interaction::{InteractionKind, TuiAskUserBlock, TuiAskUserItem, interaction_kind_code};
 pub(crate) use reminder::DisplayTrusted;
 pub use reminder::{ReminderInfo, ReminderRelay, ReminderType, TuiSystemReminder, detect_reminder};

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::grid::{GridSpec, TextLineSource, ZoneTransition};
@@ -7,7 +7,8 @@ use super::viewport_anchor::{PrependRelocation, ReadingAnchor, ViewportAnchor};
 use super::vm_cache::VmCacheSlot;
 
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
-use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::history_window::WindowUnitToken;
+use crate::kit::tui_render_unit::{HistoryOverlap, TuiRenderUnit, history_overlap};
 
 const HEAVY_CACHE_BUDGET: usize = 8 * 1024 * 1024;
 const HEAVY_CACHE_TARGET: usize = 6 * 1024 * 1024;
@@ -137,6 +138,7 @@ pub(super) struct Transcript {
     context: Option<EntryRenderContext>,
     animations: BTreeMap<usize, u64>,
     anchors: BTreeSet<usize>,
+    anchor_counts: HashMap<WindowUnitToken, usize>,
     recency: BTreeSet<(u64, usize)>,
     stamps: Vec<u64>,
     bytes: Vec<usize>,
@@ -152,8 +154,7 @@ pub(super) struct Transcript {
     prepend: Option<PrependRelocation>,
     /// 同条消息内高度变化（图完成/缩放/异步结果）时的阅读位置重定位。
     reflow: Option<PrependRelocation>,
-    /// 已观测并配对的并入代数（`HISTORY_PREPEND_EPOCH`）——只在观测到**发布变化**
-    /// 时推进，因此「epoch 先于发布被读到」不会漏配（见 `viewport_anchor` 模块文档 4.）。
+    /// 最近一次已显示快照携带的桥接并入代数，点击折叠沿用上一桥接发布的代数。
     merge_epoch_seen: u64,
     structural_epoch_seen: u64,
     pub(super) scanned_slots: usize,
@@ -178,8 +179,8 @@ impl Transcript {
         reset: u64,
         scroll_y: usize,
         height: usize,
-        merge_epoch: u64,
     ) -> Arc<SlotIndex> {
+        let merge_epoch = publication.prepend_epoch;
         self.scanned_slots = 0;
         self.updated_slots = 0;
         self.evictions = 0;
@@ -187,28 +188,61 @@ impl Transcript {
         {
             self.genui_budget_checks = 0;
         }
-        let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
+        let published = self
+            .generation
+            .is_some_and(|generation| generation != snapshot.generation);
+        let structural_epoch = publication.structural_epoch;
         let structural_changed = structural_epoch != self.structural_epoch_seen;
-        if structural_changed {
+        let merging = published && self.reset == reset && merge_epoch != self.merge_epoch_seen;
+        let displayed_epoch = if published || self.generation.is_none() {
+            merge_epoch
+        } else {
+            self.merge_epoch_seen
+        };
+        let mut measurements = super::history_layout::begin_frame(
+            snapshot.generation,
+            displayed_epoch,
+            grid,
+            width,
+            &context,
+        );
+        // Capture before a segment release drops the previous index.
+        let prepend_anchor = merging
+            .then(|| ViewportAnchor::capture(&self.index, scroll_y))
+            .flatten();
+        let layout_changed = self.reset != reset
+            || self.grid != Some(grid)
+            || self.width != width
+            || self.context.as_ref().is_none_or(|previous| {
+                previous.language != context.language
+                    || previous.occurrence != context.occurrence
+                    || previous.surface != context.surface
+                    || !Arc::ptr_eq(&previous.theme, &context.theme)
+            });
+        let run = if merging && !layout_changed {
+            self.index
+                .canonical_items()
+                .map(|old| history_overlap(old, &snapshot.items))
+                .filter(|run| run.len > 0)
+        } else {
+            None
+        };
+        let release_all = structural_changed && run.is_none();
+        if release_all {
             for cache in caches.iter_mut() {
                 cache.evict();
+                cache.anchor_token = None;
             }
+            self.anchor_counts.clear();
             self.bytes = vec![0; caches.len()];
             self.stamps = vec![0; caches.len()];
             self.recency.clear();
             self.retained_bytes = 0;
             self.index = Arc::new(SlotIndex::default());
             self.generation = None;
-            self.structural_epoch_seen = structural_epoch;
         }
-        let global = structural_changed
-            || self.reset != reset
-            || self.grid != Some(grid)
-            || self.width != width
-            || self.context.as_ref().is_none_or(|previous| {
-                previous.language != context.language
-                    || !Arc::ptr_eq(&previous.theme, &context.theme)
-            });
+        self.structural_epoch_seen = structural_epoch;
+        let global = release_all || layout_changed;
         let changed = self.generation != Some(snapshot.generation) || self.reset != reset;
         self.invalidation = if self.reset != reset {
             "reset"
@@ -220,6 +254,8 @@ impl Transcript {
             "width"
         } else if global {
             "theme-or-language"
+        } else if run.is_some() {
+            "history-page"
         } else if changed
             && publication.generation == snapshot.generation
             && self.generation == Some(publication.previous_generation)
@@ -242,18 +278,6 @@ impl Transcript {
         } else {
             snapshot.items.len()
         };
-        // ── [REQ-C01-3 / A20] 发布**前**的锚点：旧布局此刻仍在位 ──
-        // 身份重定位的两半都必须在这里做：`self.index` 还是上一次发布的索引
-        // （旧槽位 + 旧 items），下一个分支就会把它改写成新快照的布局。`capture`
-        // 只认渲染侧事实（索引 + scroll_y），不接收任何桥接槽位号。
-        let published = self
-            .generation
-            .is_some_and(|generation| generation != snapshot.generation);
-        let prepend_anchor = if published {
-            ViewportAnchor::capture(&self.index, scroll_y)
-        } else {
-            None
-        };
         let reading_anchor = if published {
             None
         } else {
@@ -262,28 +286,56 @@ impl Transcript {
         if global || changed {
             let length = snapshot.items.len();
             let previous_length = caches.len();
-            for slot in length..caches.len() {
-                self.remove_accounting(slot);
-            }
-            caches.resize_with(length, VmCacheSlot::default);
-            self.stamps.resize(length, 0);
-            self.bytes.resize(length, 0);
-            self.animations.split_off(&changed_from);
-            self.anchors.split_off(&changed_from);
-            Arc::make_mut(&mut self.index).truncate(length);
+            let old_visible = self.index.visible_slots(
+                scroll_y.min(self.index.total_visual().saturating_sub(height)),
+                height,
+            );
+            let (prefix, suffix, pinned) = if let Some(run) = run {
+                self.move_history(caches, run, length);
+                // The first emitting entry depends on its predecessor, possibly across empty
+                // bubbles. Recheck that seam before skipping the rest of the measured run.
+                let end = run.new_start + run.len;
+                let seam = snapshot
+                    .items
+                    .iter()
+                    .skip(run.new_start)
+                    .take(run.len)
+                    .position(produces_lines)
+                    .map_or(end, |n| run.new_start + n + 1);
+                let moved =
+                    |old: usize| run.new_start + old.saturating_sub(run.old_start).min(run.len);
+                (
+                    0..seam,
+                    end..length,
+                    moved(old_visible.start)..moved(old_visible.end),
+                )
+            } else {
+                for slot in length..caches.len() {
+                    self.forget_token(caches[slot].anchor_token);
+                    self.remove_accounting(slot);
+                }
+                caches.resize_with(length, VmCacheSlot::default);
+                self.stamps.resize(length, 0);
+                self.bytes.resize(length, 0);
+                self.animations.split_off(&changed_from);
+                self.anchors.split_off(&changed_from);
+                Arc::make_mut(&mut self.index).truncate(length);
+                (changed_from..length, length..length, old_visible)
+            };
             Arc::make_mut(&mut self.index).set_source(
                 snapshot.items.clone(),
                 grid,
                 context.clone(),
                 frame,
             );
-            let pinned = self.index.visible_slots(
-                scroll_y.min(self.index.total_visual().saturating_sub(height)),
-                height,
-            );
-            for slot in changed_from..length {
+            for slot in prefix.chain(suffix) {
                 self.scanned_slots += 1;
                 let vm = &snapshot.items[slot];
+                let token = super::viewport_anchor::window_identity_token(vm);
+                if caches[slot].anchor_token != Some(token) {
+                    self.forget_token(caches[slot].anchor_token.replace(token));
+                    *self.anchor_counts.entry(token).or_default() += 1;
+                }
                 let period = vm.animation_period_frames();
                 if period != 0 {
                     self.animations.insert(slot, period);
@@ -295,10 +347,24 @@ impl Transcript {
                 // 其他 slot）；已淘汰的 slot 没有行可改，等回到视口时按当时的
                 // 转场形态渲染。
                 let transition = zone_transition(&snapshot.items, slot);
-                let transition_flipped = caches[slot].lines.is_some()
-                    && caches[slot].entry.transition() != Some(transition);
+                if run.is_some()
+                    && caches[slot].variant.is_none()
+                    && let Some(layout) = measurements
+                        .as_mut()
+                        .and_then(|page| page.take(slot, vm, transition))
+                {
+                    let cache = &mut caches[slot];
+                    cache.content_hash = vm.content_hash();
+                    cache.variant = Some(std::mem::discriminant(vm));
+                    cache.layout_transition = Some(transition);
+                    cache.wrap_width = width;
+                    cache.visual_rows = layout.visual_rows();
+                    Arc::make_mut(&mut self.index).set_cold(slot, layout);
+                    continue;
+                }
+                let transition_flipped = caches[slot].layout_transition != Some(transition);
                 if global
-                    || slot >= previous_length
+                    || (run.is_none() && slot >= previous_length)
                     || !caches[slot].matches_content(vm)
                     || transition_flipped
                 {
@@ -336,27 +402,32 @@ impl Transcript {
             self.genui_revision = genui_revision;
         }
         // ── [REQ-C01-3 / A20] 发布**后**的重定位：同一身份在新索引里重查视觉起点 ──
-        // 只在「本次发布」与「一次更早历史并入」配对时产出：`HISTORY_PREPEND_EPOCH`
-        // 仍是唯一的跨层事实（并合发生过），`merge_epoch_seen` 只在观测到发布变化时
-        // 推进——epoch 早于/晚于发布被读到都不会漏配。身份认不出（被替换 /
-        // 新窗口里出现多次）→ `relocate` 返回 `None` → 不补偿。
+        // 只为携带新并入代数的快照重定位。中间的本地折叠可能改变 generation，
+        // 其桥接元数据仍属于旧页面。被替换或不唯一的身份不补偿。
         // `from_offset` 取**未夹取**的当帧 scroll_y：它就是旧布局上视口顶行的位置。
         self.prepend = None;
         if published {
             if merge_epoch != self.merge_epoch_seen {
                 self.prepend = prepend_anchor.and_then(|anchor| {
-                    anchor
-                        .relocate(&self.index)
-                        .map(|target_offset| PrependRelocation {
-                            from_offset: scroll_y,
-                            target_offset,
-                        })
+                    let target = match run {
+                        Some(run) => {
+                            anchor.relocate_page(&self.index, run, &self.anchor_counts, caches)
+                        }
+                        None => anchor.relocate(&self.index),
+                    };
+                    target.map(|target_offset| PrependRelocation {
+                        from_offset: scroll_y,
+                        target_offset,
+                    })
                 });
             }
             self.merge_epoch_seen = merge_epoch;
         }
         let capture_scroll = scroll_y;
-        let scroll_y = scroll_y.min(self.index.total_visual().saturating_sub(height));
+        let scroll_y = self
+            .prepend
+            .map_or(scroll_y, |moved| moved.target_offset)
+            .min(self.index.total_visual().saturating_sub(height));
         let viewport = self.index.visible_slots(scroll_y, height);
         let animated: Vec<_> = self
             .animations
@@ -436,6 +507,9 @@ impl Transcript {
         } else {
             None
         };
+        if self.generation.is_none() {
+            self.merge_epoch_seen = merge_epoch;
+        }
         self.generation = Some(snapshot.generation);
         self.reset = reset;
         self.grid = Some(grid);
@@ -443,6 +517,61 @@ impl Transcript {
         self.context = Some(context);
         self.frame = Some(frame);
         Arc::clone(&self.index)
+    }
+
+    fn forget_token(&mut self, token: Option<WindowUnitToken>) {
+        if let Some(token) = token
+            && let std::collections::hash_map::Entry::Occupied(mut count) =
+                self.anchor_counts.entry(token)
+        {
+            *count.get_mut() -= 1;
+            if *count.get() == 0 {
+                count.remove();
+            }
+        }
+    }
+
+    fn move_history(&mut self, caches: &mut Vec<VmCacheSlot>, run: HistoryOverlap, len: usize) {
+        // Move the cached values themselves. Cold slots carry no lines but still have measured
+        // leaves in the layout tree. Dropping the two excluded ranges releases their payloads.
+        fn move_values<T: Default>(values: &mut Vec<T>, run: HistoryOverlap, len: usize) {
+            values.truncate(run.old_start + run.len);
+            values.splice(
+                ..run.old_start,
+                std::iter::repeat_with(T::default).take(run.new_start),
+            );
+            values.resize_with(len, T::default);
+        }
+        let old_end = run.old_start + run.len;
+        for cache in caches[..run.old_start].iter().chain(&caches[old_end..]) {
+            self.forget_token(cache.anchor_token);
+        }
+        let removed: usize = self.bytes[..run.old_start]
+            .iter()
+            .chain(&self.bytes[old_end..])
+            .sum();
+        self.retained_bytes = self.retained_bytes.saturating_sub(removed);
+        let moved = |slot: usize| {
+            (run.old_start..old_end)
+                .contains(&slot)
+                .then(|| run.new_start + (slot - run.old_start))
+        };
+        self.recency = std::mem::take(&mut self.recency)
+            .into_iter()
+            .filter_map(|(stamp, slot)| moved(slot).map(|slot| (stamp, slot)))
+            .collect();
+        self.animations = std::mem::take(&mut self.animations)
+            .into_iter()
+            .filter_map(|(slot, period)| moved(slot).map(|slot| (slot, period)))
+            .collect();
+        self.anchors = std::mem::take(&mut self.anchors)
+            .into_iter()
+            .filter_map(moved)
+            .collect();
+        move_values(caches, run, len);
+        move_values(&mut self.stamps, run, len);
+        move_values(&mut self.bytes, run, len);
+        Arc::make_mut(&mut self.index).move_history(run);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -474,22 +603,14 @@ impl Transcript {
             cache.wrap_width = width;
         }
         cache.content_hash = vm.content_hash();
+        cache.layout_transition = cache.entry.transition();
         cache.variant = Some(std::mem::discriminant(vm));
         cache.copy_button = cache.entry.copy_button().cloned();
         cache.interaction = cache.entry.interaction().cloned();
         cache.image_lines = cache.entry.image_lines().to_vec();
         cache.genui_buttons = cache.entry.genui_buttons().to_vec();
         cache.mermaid_fences = cache.entry.mermaid_fences().to_vec();
-        let lines = Arc::new(
-            (match cache.entry.markdown_lines().stable_overlay() {
-                Some((start, stable)) => {
-                    SlotLines::composite(Arc::clone(cache.entry.lines()), start, stable)
-                }
-                None => SlotLines::single(Arc::clone(cache.entry.lines())),
-            })
-            .with_genui_ranges(&cache.entry.markdown_lines().genui_ranges)
-            .with_fold_hits(Arc::clone(cache.entry.fold_hits())),
-        );
+        let lines = Arc::new(SlotLines::from_entry(&cache.entry));
         if !layout_changed {
             Arc::make_mut(&mut self.index).replace_lines(slot, Arc::clone(&lines));
         } else {

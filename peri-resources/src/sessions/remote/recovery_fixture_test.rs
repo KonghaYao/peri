@@ -256,6 +256,13 @@ impl FakeBackend {
                 Vec::new()
             };
         }
+        if spec.sql == session_sql::select_binding_statement("probe").sql {
+            return if self.session_row.load(Ordering::SeqCst) {
+                vec![vec![Value::Null; 5]]
+            } else {
+                Vec::new()
+            };
+        }
         if spec.sql == session_sql::select_session_statement("probe").sql {
             return if self.session_row.load(Ordering::SeqCst) {
                 vec![vec![Value::Null; session_sql::FACT_COLUMN_TOTAL]]

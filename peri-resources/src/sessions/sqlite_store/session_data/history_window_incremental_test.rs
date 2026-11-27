@@ -30,6 +30,9 @@ const LARGE_SESSION: &str = "incremental-large";
 const LARGE_BYTES: usize = 16 * 1024 * 1024;
 const CHUNK_BYTES: u32 = 64 * 1024;
 
+#[path = "history_own_body_inspection_test.rs"]
+mod own_body_inspection_tests;
+
 extern "C" {
     fn sqlite3_memory_highwater(reset: i32) -> i64;
     fn sqlite3_memory_used() -> i64;

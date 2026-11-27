@@ -9,6 +9,7 @@
 //! 差别只有一处：远端没有本机 workspace 登记，因此 `LegacyConfirmed` 不在数据端冒充——
 //! 它由门面按本机来源证据联合判定；远端只回答「绑定事实是否完整存在」。
 
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -93,6 +94,38 @@ impl RemoteSessionData {
         })
     }
 
+    pub(super) async fn read_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<TranscriptRestoreState> {
+        let (inherited, rows) = self
+            .store()
+            .await?
+            .read_pair(
+                session_sql::inherited_context_statement(id),
+                session_sql::active_flags_statement(id),
+            )
+            .await?;
+        let row =
+            super::mutation::sole_row(inherited)?.ok_or_else(super::session_data::not_found)?;
+        let [value] = row.as_slice() else {
+            return Err(codec::corrupt("expected one inherited context column"));
+        };
+        let inherited = match value {
+            Value::Null => InheritedContext::default(),
+            Value::Text(text) => codec::decode_inherited(Some(text))?,
+            _ => return Err(codec::corrupt("invalid inherited context column")),
+        };
+        let own_flags = rows
+            .iter()
+            .map(|row| codec::decode_flag_row(row))
+            .collect::<SessionResourceResult<_>>()?;
+        Ok(TranscriptRestoreState {
+            inherited,
+            own_flags,
+        })
+    }
+
     /// 轻量 frozen 读取：只问一列，不拉绑定、继承区或正文。
     pub(super) async fn read_frozen_state(
         &self,
@@ -156,11 +189,14 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<BindingState> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_binding_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
-        let binding = codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)?;
-        Ok(classify_binding(binding, &facts))
+        let binding = codec::decode_binding(&facts, 0)?;
+        Ok(classify_binding(
+            binding,
+            super::sql::text_at(&facts, 4).is_some(),
+        ))
     }
 
     /// 完整逻辑上下文：继承区在前、自有 payload 在后（继承快照是权威值，父会话之后的
@@ -491,6 +527,84 @@ impl RemoteSessionData {
         )
     }
 
+    pub(super) async fn read_initial_history_anchor(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        use peri_acp_types::history_page_visibility::history_body_displayable_to_client_buffered;
+
+        let store = self.store().await?;
+        let mut after = -1;
+        let mut tail = i64::MAX;
+        let mut anchor = None;
+        let mut previous: Option<String> = None;
+        let mut first_bounds = None;
+        loop {
+            // Most sessions start with a visible message. Only prefetch a short
+            // batch of size-limited candidates when the first proved hidden.
+            let limit = if anchor.is_none() { 1 } else { 32 };
+            let (bounds, rows) = store
+                .read_pair(
+                    session_sql::history_page_bounds_statement(id, previous.as_deref()),
+                    session_sql::history_anchor_rows_statement(id, after, tail, limit),
+                )
+                .await?;
+            let bounds =
+                super::mutation::sole_row(bounds)?.ok_or_else(super::session_data::not_found)?;
+            let (head, previous_exists) = decode_page_bounds(&bounds);
+            let bounds = HistoryPageBounds::try_new(head.as_deref())?;
+            if (previous.is_some() && !previous_exists)
+                || first_bounds.get_or_insert_with(|| bounds.clone()) != &bounds
+            {
+                return Err(HistoryCursorError::Expired {
+                    thread_id: id.clone(),
+                }
+                .into());
+            }
+            if let Some(first) = rows.first() {
+                tail = tail.min(
+                    super::sql::int_at(first, 3)
+                        .ok_or_else(|| codec::corrupt("history anchor scan has no tail"))?,
+                );
+            }
+            for row in &rows {
+                let message = super::sql::text_at(row, 0)
+                    .ok_or_else(|| codec::corrupt("history anchor row has no message id"))?;
+                after = super::sql::int_at(row, 1)
+                    .ok_or_else(|| codec::corrupt("history anchor row has no position"))?;
+                anchor = Some(peri_acp_types::history_page::message_id_of(message)?);
+                let large_row;
+                let body = if let Some(inline) = super::sql::text_at(row, 2) {
+                    inline
+                } else {
+                    let rows = store
+                        .fetch_rows(&session_sql::history_page_body_statement(id, message))
+                        .await?;
+                    large_row = super::mutation::sole_row(rows)?.ok_or_else(|| {
+                        HistoryCursorError::Expired {
+                            thread_id: id.clone(),
+                        }
+                    })?;
+                    super::sql::text_at(&large_row, 0)
+                        .ok_or_else(|| codec::corrupt("history anchor row has no content"))?
+                };
+                let visible = history_body_displayable_to_client_buffered(&mut body.as_bytes())
+                    .map_err(|_| codec::corrupt("history anchor visibility is unreadable"))?;
+                if visible {
+                    return Ok((bounds, anchor));
+                }
+            }
+            if rows.len() < limit as usize || after == tail {
+                return Ok((bounds, anchor));
+            }
+            // Preserve the stored UUID text, including the casing of legacy imports.
+            previous = rows
+                .last()
+                .and_then(|row| super::sql::text_at(row, 0))
+                .map(str::to_owned);
+        }
+    }
+
     /// 一次有界单行读取：浏览范围边界（见 [`HistoryPageBounds`]）。
     ///
     /// 与 [`Self::read_history_page`] 共用同一条边界语句与同一份解码
@@ -636,10 +750,10 @@ impl RemoteSessionData {
     pub(super) async fn frozen_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_frozen_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
-        Ok(super::sql::text_at(&facts, session_sql::FACT_FROZEN).map(str::to_owned))
+        Ok(super::sql::text_at(&facts, 0).map(str::to_owned))
     }
 
     /// 会话的不可变绑定（用于 child 与父会话绑定一致性核对）。
@@ -649,10 +763,10 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Option<SessionBinding>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_binding_statement(id))
             .await?
             .ok_or_else(super::session_data::not_found)?;
-        codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)
+        codec::decode_binding(&facts, 0)
     }
 
     /// 沿父链上溯到根（一次递归查询，不在本层手动循环）。
@@ -686,7 +800,10 @@ fn decode_session_facts(facts: &[Value]) -> SessionResourceResult<SessionFacts> 
         meta: codec::decode_meta(facts)?,
         binding: {
             let binding = codec::decode_binding(facts, session_sql::FACT_BINDING_VERSION)?;
-            classify_binding(binding, facts)
+            classify_binding(
+                binding,
+                super::sql::text_at(facts, session_sql::META_PARENT).is_some(),
+            )
         },
         frozen: match super::sql::text_at(facts, session_sql::FACT_FROZEN) {
             Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
@@ -784,13 +901,11 @@ fn decode_page_bounds(bounds: &[Value]) -> (Option<String>, bool) {
 /// 远端只回答绑定事实是否完整存在。执行资格由门面读取远端不可变
 /// 发现快照（root 用于定位执行目录），再复核归属关系与 cwd 可用性；
 /// 不再跑 Git，也不比较文件对象身份。缺快照不改变绑定分类。
-fn classify_binding(binding: Option<SessionBinding>, facts: &[Value]) -> BindingState {
+fn classify_binding(binding: Option<SessionBinding>, has_parent: bool) -> BindingState {
     match binding {
         Some(binding) => BindingState::Bound(binding),
         // 子会话没有绑定行：与本机同一分类（不得当作 legacy 自动接纳）。
-        None if super::sql::text_at(facts, session_sql::META_PARENT).is_some() => {
-            BindingState::ExternalOrUnregistered
-        }
+        None if has_parent => BindingState::ExternalOrUnregistered,
         None => BindingState::Missing,
     }
 }

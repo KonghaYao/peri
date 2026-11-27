@@ -9,6 +9,7 @@ pub(super) use peri_acp_types::history_page::{
     HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
 };
 pub(super) use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::history::TranscriptRestoreState;
 pub(super) use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, NewSession, PersistenceRecovery, RewindBoundary, RewindCandidate, RewindOutcome,
@@ -217,6 +218,13 @@ impl SessionDataPort for RemoteSessionData {
         self.read_active_snapshot(id).await
     }
 
+    async fn load_transcript_restore_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<TranscriptRestoreState> {
+        self.read_transcript_restore_state(id).await
+    }
+
     async fn load_frozen_state(&self, id: &ThreadId) -> SessionResourceResult<FrozenState> {
         self.read_frozen_state(id).await
     }
@@ -295,6 +303,13 @@ impl SessionDataPort for RemoteSessionData {
         byte_budget: usize,
     ) -> SessionResourceResult<HistoryPage> {
         self.read_history_page(id, cursor, limit, byte_budget).await
+    }
+
+    async fn initial_history_anchor(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<(HistoryPageBounds, Option<MessageId>)> {
+        self.read_initial_history_anchor(id).await
     }
 
     async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {

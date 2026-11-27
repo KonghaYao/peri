@@ -20,6 +20,30 @@ pub fn init(lang: Option<&str>) {
     LC.with(|lc| *lc.borrow_mut() = LcRegistry::new(lang));
 }
 
+pub(crate) fn current_language() -> String {
+    LC.with(|lc| lc.borrow().current_lang().to_owned())
+}
+
+/// Use the UI locale while calculating layout on a bridge worker. Restore that thread's
+/// own locale afterwards, including during unwinding. This doesn't publish a language change.
+pub(crate) fn with_language<T>(lang: &str, render: impl FnOnce() -> T) -> Option<T> {
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LC.with(|lc| {
+                let _ = lc.borrow_mut().switch(&self.0);
+            });
+        }
+    }
+    let previous = current_language();
+    if previous == lang {
+        return Some(render());
+    }
+    LC.with(|lc| lc.borrow_mut().switch(lang)).ok()?;
+    let _restore = Restore(previous);
+    Some(render())
+}
+
 /// 切换语言并递增 LANG_VERSION，触发所有订阅组件重渲染。
 pub fn switch(lang: &str) {
     LC.with(|lc| {

@@ -5,8 +5,8 @@ use super::dispatch;
 use super::frozen_snapshot;
 use super::host;
 use super::legacy_session;
-use super::load_shared;
 use super::notify;
+use super::shared_preparation;
 use super::workspace;
 use super::AcpError;
 use super::AcpServerConfig;
@@ -15,12 +15,14 @@ use super::BindingCheck;
 use super::BindingRecheck;
 use super::BindingState;
 use super::ConnectionFacts;
+use super::ContextOwnership;
 use super::FrozenState;
 use super::HashMap;
 use super::LoadGeneration;
 use super::LoadSessionResponse;
 use super::PreparedSessionInputs;
 use super::ReplaySender;
+use super::RestoreContext;
 use super::RestorePublication;
 use super::ResumeSessionResponse;
 use super::SessionNotification;
@@ -44,7 +46,7 @@ pub(crate) async fn assemble_for_recovery(
     thread_id: &str,
 ) -> Result<Option<RestorePublication>, AcpError> {
     let params = serde_json::json!({ "sessionId": thread_id });
-    load_shared::prepare_shared(&params, cfg, sessions)
+    shared_preparation::prepare_shared(&params, cfg, sessions, RestoreContext::Immediate)
         .await
         .map(|prepared| prepared.publication)
 }
@@ -109,12 +111,21 @@ pub(in super::super) fn view_only_error(kind: &'static str, error: AcpError) -> 
 }
 
 /// 进程内/测试入口：调用方持有的是本地 map 引用，不是生产 `SharedSessions` 锁。
-/// 生产 `ServerLoop` 的 `session/load` 走 [`load_shared::handle_load_shared`]
+/// 生产 `ServerLoop` 的 `session/load` 走 [`super::load_shared::handle_load_shared`]
 /// （短锁读取 → 锁外 I/O → 短锁写回），不得从生产路径调用本函数。
 pub(crate) async fn prepare_existing(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
+) -> Result<PreparedSession, AcpError> {
+    prepare_existing_with_context(params, cfg, sessions, RestoreContext::Immediate).await
+}
+
+pub(super) async fn prepare_existing_with_context(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    context: RestoreContext,
 ) -> Result<PreparedSession, AcpError> {
     reject_closing_session(params, cfg).await?;
     let id = params
@@ -181,30 +192,20 @@ pub(crate) async fn prepare_existing(
                 return Err(AcpError::new(-32010, "Session is closing"));
             }
             crate::host::ownership::mark_stale_if_dead(state);
-            match state.context_ownership {
-                // 内存会话状态只发布有效集合：已排除正文只留在存储侧。
-                crate::host::ContextOwnership::ReloadRequired => {
-                    let payloads =
-                        dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
-                    state.history_payloads = payloads;
-                    state.context_ownership = crate::host::ContextOwnership::Resident;
-                }
-                // 空驻留会话是唯一允许与存储重新对齐的 Resident 状态：新建会话
-                // 可能尚未观察到后来写入的 canonical 历史。非空 Resident 已有本轮
-                // 事实，不用存储覆盖；HandedOff 的正文在在途执行器里，不能再装入
-                // 第二份副本，也不能据此判断会话为空。
-                crate::host::ContextOwnership::Resident if state.history_payloads.is_empty() => {
-                    let payloads =
-                        dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
-                    state.history_payloads = payloads;
-                }
-                crate::host::ContextOwnership::Resident
-                | crate::host::ContextOwnership::HandedOff => {}
+            if context.prepare_live_context(state) {
+                state.history_payloads =
+                    dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
+                state.context_ownership = ContextOwnership::Resident;
             }
             return Ok(RestoreOutcome::AlreadyLive { identity });
         }
-        // 冷恢复同样只发布有效集合：完整 canonical 历史按需从存储读取。
-        let payloads = dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
+        let (context_ownership, payloads) = match context {
+            RestoreContext::OnFirstPrompt => (ContextOwnership::Deferred, Vec::new()),
+            RestoreContext::Immediate => (
+                ContextOwnership::Resident,
+                dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?,
+            ),
+        };
         let cwd = workspace
             .cwd
             .to_str()
@@ -281,7 +282,7 @@ pub(crate) async fn prepare_existing(
                 environment,
                 closing: false,
                 close_in_flight: 0,
-                context_ownership: crate::host::ContextOwnership::Resident,
+                context_ownership,
                 history_payloads: payloads,
                 structure_version: 0,
                 session_generation: crate::host::next_session_generation(),
@@ -581,7 +582,7 @@ pub(crate) async fn handle_metadata(
 ///   会把先前 peri 连接的能力留给重连的同一会话，未协商的标准连接因此会继承到 Peri 私有
 ///   字段（REQ §5.3、验收 A25）。
 ///
-/// 进程内/测试入口；生产 `ServerLoop` 使用 [`load_shared::handle_load_shared`]，
+/// 进程内/测试入口；生产 `ServerLoop` 使用 [`super::load_shared::handle_load_shared`]，
 /// 后者不在 `SharedSessions` 全局锁内做 DB/资源 I/O。
 pub(crate) async fn handle_load(
     params: &Value,
@@ -664,7 +665,7 @@ pub(crate) async fn handle_load(
                     "Session context is owned by an in-flight prompt",
                 ));
             }
-            crate::host::ContextOwnership::ReloadRequired => {
+            ContextOwnership::Deferred | ContextOwnership::ReloadRequired => {
                 // 防御性分支（契约上不可达）：只读存储的有效集合，绝不修改热态字段。
                 dispatch::load_active_session_payloads(cfg.controller.as_ref(), req_session_id)
                     .await?
@@ -753,7 +754,7 @@ pub(crate) async fn handle_load(
     Ok(response)
 }
 
-/// 进程内/测试入口；生产 `ServerLoop` 使用 [`load_shared::handle_resume_shared`]
+/// 进程内/测试入口；生产 `ServerLoop` 使用 [`super::load_shared::handle_resume_shared`]
 /// （短锁准备 + 锁外 I/O）。
 pub(crate) async fn handle_resume(
     params: &Value,

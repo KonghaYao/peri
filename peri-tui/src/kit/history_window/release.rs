@@ -11,7 +11,7 @@ use super::model::{PersistentEntryKey, ReleasePlan, ReleaseReason};
 /// 唯一释放事务入口：只允许在 bridge 串行链调用。
 pub fn release_window_plans(
     state: &mut crate::kit::acp_events::BridgeState,
-    mut plans: Vec<ReleasePlan>,
+    plans: Vec<ReleasePlan>,
     reason: ReleaseReason,
 ) -> ReleaseOutcome {
     tracing::debug!(
@@ -23,59 +23,60 @@ pub fn release_window_plans(
     let mut keys = HashSet::new();
     let mut outcome = ReleaseOutcome::default();
     let mut accepted = Vec::new();
-    plans.retain(|plan| {
-        let touches_anchor = anchor_entry
-            .as_ref()
-            .is_some_and(|anchor| plan.entries.iter().any(|entry| entry == anchor));
-        if touches_anchor && state.window.segment(plan.segment).is_some() {
-            state.window.pin(plan.segment, super::PinReason::Viewport);
-            outcome.skipped += 1;
-            return false;
-        }
-        if state.window.segment(plan.segment).is_some() {
-            let Some(segment) = state.window.segment(plan.segment) else {
-                return false;
-            };
+    for plan in plans {
+        let plan = if let Some(segment) = state.window.segment(plan.segment) {
+            if anchor_entry
+                .as_ref()
+                .is_some_and(|anchor| plan.entries.contains(anchor))
+            {
+                state.window.pin(plan.segment, super::PinReason::Viewport);
+                outcome.skipped += 1;
+                continue;
+            }
             if !segment.durable || segment.pins.is_pinned() {
                 outcome.skipped += 1;
-                return false;
+                continue;
             }
-            let Some(applied) = state.window.apply_release_plan(plan) else {
+            let Some(applied) = state.window.apply_release_plan(&plan) else {
                 outcome.skipped += 1;
-                return false;
+                continue;
             };
-            accepted.push(applied.plan);
+            applied.plan
         } else {
-            accepted.push(plan.clone());
+            plan
+        };
+        if state.window.pending_display_release.remove(&plan.segment) {
+            keys.extend(plan.entries.iter().cloned());
+            accepted.push(plan);
         }
-        for entry in &plan.entries {
-            keys.insert(entry.clone());
-        }
-        true
-    });
+    }
     state.window.clear_taken_release_plans();
-    if accepted.is_empty() && keys.is_empty() {
+    if accepted.is_empty() {
         return outcome;
     }
 
-    let mut ranges = state.window.take_display_ranges(&keys);
-    ranges.sort_unstable();
+    let ranges = contiguous_ranges(state.window.take_display_ranges(&keys));
     let mut removed_units = 0usize;
-    {
-        let iteration_items = ranges.iter().rev();
-        for (start, len) in iteration_items {
-            let tail = state.committed.split_off(start.saturating_add(*len));
-            let removed = state.committed.split_off(*start);
-            removed_units = removed_units.saturating_add(removed.len());
-            for unit in &removed {
-                if let crate::kit::tui_render_unit::TuiRenderUnit::TuiToolCard(card) = unit {
-                    crate::kit::acp_events::history_window::forget_released_tool(
-                        &state.active_session_id,
-                        &card.tool_id,
-                    );
-                }
-            }
+    for range in ranges.iter().rev() {
+        let removed = if range.end == state.committed.len() {
+            state.committed.split_off(range.start)
+        } else if range.start == 0 {
+            let kept = state.committed.split_off(range.end);
+            std::mem::replace(&mut state.committed, kept)
+        } else {
+            let tail = state.committed.split_off(range.end);
+            let removed = state.committed.split_off(range.start);
             state.committed.append(tail);
+            removed
+        };
+        removed_units += removed.len();
+        for unit in &removed {
+            if let crate::kit::tui_render_unit::TuiRenderUnit::TuiToolCard(card) = unit {
+                crate::kit::acp_events::history_window::forget_released_tool(
+                    &state.active_session_id,
+                    &card.tool_id,
+                );
+            }
         }
     }
     state.folded_history.invalidate();
@@ -96,9 +97,7 @@ pub fn release_window_plans(
         handle.read().clone()
     };
     if let Some(focus) = focus
-        && ranges
-            .iter()
-            .any(|(start, len)| (*start..start.saturating_add(*len)).contains(&focus.slot))
+        && ranges.iter().any(|range| range.contains(&focus.slot))
     {
         crate::kit::atoms::FOCUSED_ENTRY.set(None);
     }
@@ -124,10 +123,31 @@ pub fn release_window_plans(
         crate::kit::panels::history_detail::close_history_detail();
     }
     let (edge_before, edge_after) = state.window.edge_cursors();
-    crate::kit::history_page_consumer::note_window_cursors(edge_before, edge_after);
+    crate::kit::history_page_consumer::note_window_cursors(
+        state.window.pending_merge_request_id().as_deref(),
+        edge_before,
+        edge_after,
+    );
     crate::kit::history_window::publish_window_viewport(&state.window);
     crate::kit::history_paging::publish_window_gap_request(&state.window);
     outcome
+}
+
+/// The display ledger returns ascending, non-overlapping ranges, one per entry or live attachment.
+/// Keep unmapped gaps, and splice each contiguous block out of the persistent vector only once.
+fn contiguous_ranges(slots: Vec<(usize, usize)>) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for (start, len) in slots {
+        let end = start + len;
+        if let Some(previous) = ranges.last_mut()
+            && previous.end == start
+        {
+            previous.end = end;
+        } else {
+            ranges.push(start..end);
+        }
+    }
+    ranges
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -165,7 +185,8 @@ impl HistoryWindow {
     }
 
     pub fn clear_taken_release_plans(&mut self) {
-        self.pending_release.clear();
+        self.pending_release
+            .retain(|plan| self.pending_display_release.contains(&plan.segment));
     }
 
     pub fn set_detail_window_bytes(&mut self, bytes: usize) {

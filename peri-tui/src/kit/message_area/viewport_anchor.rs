@@ -10,13 +10,10 @@
 //!
 //! ## 语义
 //!
-//! 1. [`ViewportAnchor::capture`]（**发布前**，旧索引仍在位）：记下视口顶部那一行落在
-//!    哪个单元、该单元的稳定身份（[`UnitIdentity`]）、以及这一行相对该单元视觉起点的
-//!    位移 `offset_within_unit = scroll_y - 单元视觉起点`。
-//! 2. [`ViewportAnchor::relocate`]（**发布后**，新索引重建完成）：按同一身份在新窗口里
-//!    重查该单元的视觉起点，目标偏移 `target_offset = 新起点 + offset_within_unit`
-//!    （等价的另一种写法是任务书里的 `新起点 - within_unit_offset`，两者只差符号约定：
-//!    本实现的 `offset_within_unit ≥ 0` 表示「视口顶行在该单元内向下偏移了多少行」）。
+//! 1. [`ViewportAnchor::capture`] 读取顶行单元的稳定身份和视觉行偏移。自动生成的
+//!    turn divider 绑定紧随其后的用户气泡，保存顶行在该气泡起点之前的行数。
+//! 2. [`ViewportAnchor::relocate`] 在新索引中定位同一单元。分隔行必须仍隶属该用户
+//!    气泡前的 divider；普通正文保持原来在单元内的视觉行偏移。
 //! 3. 应用点：`scroll::auto_follow::run_auto_follow` 的并入分支（**仅浏览态**；跟随态与
 //!    非浏览态语义不变），由 [`crate::kit::message_area::viewport_anchor::PrependRelocation`]
 //!    承载一次并入的换算结果，`Transcript::prepare` 产出、渲染 body 取走、effect 消费（一次性）。
@@ -44,20 +41,8 @@
 //!    不额外补偿——夹取会把位移量悄悄改掉，反而引入第二种语义。
 //! 3. **同帧多次并入**：一帧内落了多页时，`prepare` 只按**最新**快照重定位一次
 //!    （身份重定位对「插入了多少块」不敏感，所以结果仍然正确；被折叠的是中间的诊断粒度）。
-//! 4. **跑在渲染 body 早段，快到足以「晚一帧」但不会漏配**：视口事实与快照由渲染 body
-//!    早段读入后传入 `prepare`。桥接任务若恰好在**快照读之后、并合代数读之前**推进发布，
-//!    本帧的 `published` 仍是旧发布 → 本帧不重定位；下一帧快照已是新发布、`merge_epoch_seen`
-//!    还没被推进（它只在观测到发布变化时推进）→ 正常配对，代价只是晚一帧。
-//!    反方向（代数读到新值、快照还是旧的）不需要处理：桥接侧**先推代数再发布**
-//!    （`acp_events/history_page.rs` 的 `HISTORY_PREPEND_EPOCH.set` 在 `push_view_models`
-//!    之前），所以「快照可见 = 代数可见」。**调用点必须保持「快照读早于代数读」**
-//!    （`message_area/mod.rs`：`read_render_snapshot()` 在 `HISTORY_PREPEND_EPOCH.get()`
-//!    之前）——这是本条不变量成立的唯一前提。
-//! 5. **锚点行落在纯展示行（turn divider）上**：divider 的内容身份是常量（`content_hash`
-//!    恒为 0、`label` 为 `None`），新窗口里出现 ≥2 枚即判歧义 → 不补偿。turn divider 投影
-//!    （`acp_events::render` 的 `insert_turn_dividers`：第 2 条起每条 prompt 前一行）
-//!    让这一形态在浏览态常见；修复方向是让 divider 行改按「其后真实单元 + 负偏移」派生
-//!    锚点（`offset_within_unit` 需带符号，见边界 2 的越界口径）。
+//! 4. **并入代数和快照共同提交**：桥接持 `VIEW_MODELS` 写锁发布快照及其并入/释放代数，
+//!    渲染持同一读锁取得两者。先到的本地折叠沿用上次已提交代数，等实际页面发布后再重定位。
 //!
 //! 移除条件：`SlotIndex` 能给出「单元内嵌套子项的视觉起点」后，边界 1 可以按子项身份
 //! 细化；本模块的存在理由（跨层槽位不可互换）不会因此消失。
@@ -79,8 +64,12 @@ enum UnitIdentity {
     /// 折叠键（`FoldKey`）：工具 `tool_id` / 子 agent 实例 / 交互 `request_id` /
     /// 系统提醒 id / reasoning `message_id`。
     Fold(FoldKey),
+    UserMessage(String),
     /// 其余单元：既有内容身份 hash + 单元种类判别位。
-    Content { kind: u8, hash: u64 },
+    Content {
+        kind: u8,
+        hash: u64,
+    },
 }
 
 impl UnitIdentity {
@@ -88,6 +77,9 @@ impl UnitIdentity {
     fn is(&self, vm: &TuiRenderUnit) -> bool {
         match self {
             Self::Fold(key) => FoldKey::of(vm).as_ref() == Some(key),
+            Self::UserMessage(id) => {
+                matches!(vm, TuiRenderUnit::TuiUserBubble(bubble) if bubble.message_id.as_ref() == Some(id))
+            }
             Self::Content { kind, hash } => {
                 content_kind(vm) == *kind && content_identity_hash(vm) == *hash
             }
@@ -95,12 +87,22 @@ impl UnitIdentity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorRows {
+    Inside(usize),
+    BeforePrompt(usize),
+}
+
+fn is_turn_divider(unit: &TuiRenderUnit) -> bool {
+    matches!(unit, TuiRenderUnit::TuiDivider(divider) if divider.label.is_none())
+}
+
 /// 视口顶部可见单元的锚点：身份 + 视口顶行在该单元内的位移。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ViewportAnchor {
     identity: UnitIdentity,
-    /// `scroll_y - 单元视觉起点`（≥ 0）。见模块文档第 2 条的符号约定。
-    offset_within_unit: usize,
+    slot: usize,
+    rows: AnchorRows,
 }
 
 impl ViewportAnchor {
@@ -113,10 +115,22 @@ impl ViewportAnchor {
         let items = index.canonical_items()?;
         let slot = index.visual_lookup(scroll_y)?.slot_index;
         let vm = items.get(slot)?;
-        let start = index.slot_visual_start(slot)?;
+        if is_turn_divider(vm) {
+            let prompt = slot + 1;
+            let user @ TuiRenderUnit::TuiUserBubble(_) = items.get(prompt)? else {
+                return None;
+            };
+            let distance = index.slot_visual_start(prompt)?.checked_sub(scroll_y)?;
+            return Some(Self {
+                identity: identity_of(user),
+                slot: prompt,
+                rows: AnchorRows::BeforePrompt(distance),
+            });
+        }
         Some(Self {
             identity: identity_of(vm),
-            offset_within_unit: scroll_y.saturating_sub(start),
+            slot,
+            rows: AnchorRows::Inside(scroll_y.checked_sub(index.slot_visual_start(slot)?)?),
         })
     }
 
@@ -150,30 +164,60 @@ impl ViewportAnchor {
             );
             return None;
         };
+        self.target_offset(index, slot)
+    }
+
+    /// When the measured run survives, its old slot is an exact candidate in the new
+    /// projection. Counts include duplicates outside the run (including newly added entries).
+    pub(super) fn relocate_page(
+        &self,
+        index: &SlotIndex,
+        run: crate::kit::tui_render_unit::HistoryOverlap,
+        counts: &std::collections::HashMap<WindowUnitToken, usize>,
+        caches: &[VmCacheSlot],
+    ) -> Option<usize> {
+        let token = self.window_token();
+        if counts.get(&token) != Some(&1) {
+            return None;
+        }
+        let slot = if (run.old_start..run.old_start + run.len).contains(&self.slot) {
+            run.new_start + (self.slot - run.old_start)
+        } else {
+            caches
+                .iter()
+                .position(|cache| cache.anchor_token == Some(token))?
+        };
+        self.identity
+            .is(index.canonical_items()?.get(slot)?)
+            .then_some(())?;
+        self.target_offset(index, slot)
+    }
+
+    fn target_offset(&self, index: &SlotIndex, slot: usize) -> Option<usize> {
         let start = index.slot_visual_start(slot)?;
-        Some(start.saturating_add(self.offset_within_unit))
+        match self.rows {
+            AnchorRows::Inside(rows) => Some(start.saturating_add(rows)),
+            AnchorRows::BeforePrompt(rows) => {
+                let divider = slot.checked_sub(1)?;
+                let target = start.checked_sub(rows)?;
+                let (first, end) = index.slot_visual_range(divider)?;
+                (is_turn_divider(index.canonical_items()?.get(divider)?)
+                    && (first..end).contains(&target))
+                .then_some(target)
+            }
+        }
     }
 
     pub(super) fn window_token(&self) -> WindowUnitToken {
-        match &self.identity {
-            UnitIdentity::Fold(key) => {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                key.hash(&mut hasher);
-                WindowUnitToken {
-                    kind: 0,
-                    hash: hasher.finish(),
-                }
-            }
-            UnitIdentity::Content { kind, hash } => WindowUnitToken {
-                kind: *kind,
-                hash: *hash,
-            },
-        }
+        identity_token(&self.identity)
     }
 
     #[must_use]
     pub(super) fn offset_within_unit(&self) -> usize {
-        self.offset_within_unit
+        match self.rows {
+            AnchorRows::Inside(rows) => rows,
+            AnchorRows::BeforePrompt(_) => 0,
+        }
     }
 }
 
@@ -373,6 +417,11 @@ impl PrependRelocation {
 }
 
 fn identity_of(vm: &TuiRenderUnit) -> UnitIdentity {
+    if let TuiRenderUnit::TuiUserBubble(bubble) = vm
+        && let Some(id) = &bubble.message_id
+    {
+        return UnitIdentity::UserMessage(id.clone());
+    }
     match FoldKey::of(vm) {
         Some(key) => UnitIdentity::Fold(key),
         None => UnitIdentity::Content {
@@ -384,16 +433,31 @@ fn identity_of(vm: &TuiRenderUnit) -> UnitIdentity {
 
 /// 渲染单元的稳定 token；桥接侧与视口侧共用同一口径。
 pub(crate) fn window_identity_token(vm: &TuiRenderUnit) -> WindowUnitToken {
-    match identity_of(vm) {
-        UnitIdentity::Fold(key) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key.hash(&mut hasher);
-            WindowUnitToken {
-                kind: 0,
-                hash: hasher.finish(),
-            }
-        }
-        UnitIdentity::Content { kind, hash } => WindowUnitToken { kind, hash },
+    if let TuiRenderUnit::TuiUserBubble(bubble) = vm
+        && let Some(id) = &bubble.message_id
+    {
+        return hashed_token(11, id);
+    }
+    identity_token(&identity_of(vm))
+}
+
+fn identity_token(identity: &UnitIdentity) -> WindowUnitToken {
+    match identity {
+        UnitIdentity::Fold(key) => hashed_token(0, key),
+        UnitIdentity::UserMessage(id) => hashed_token(11, id),
+        UnitIdentity::Content { kind, hash } => WindowUnitToken {
+            kind: *kind,
+            hash: *hash,
+        },
+    }
+}
+
+fn hashed_token(kind: u8, value: &impl Hash) -> WindowUnitToken {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    WindowUnitToken {
+        kind,
+        hash: hasher.finish(),
     }
 }
 

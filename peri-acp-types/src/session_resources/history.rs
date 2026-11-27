@@ -36,6 +36,36 @@ pub struct ActiveSessionSnapshot {
     pub flags: HashMap<MessageId, MessageFlags>,
 }
 
+impl From<super::SessionSnapshot> for ActiveSessionSnapshot {
+    fn from(snapshot: super::SessionSnapshot) -> Self {
+        let super::SessionSnapshot {
+            meta,
+            binding,
+            frozen,
+            inherited,
+            mut payloads,
+            mut flags,
+        } = snapshot;
+        payloads.retain(|payload| flags.get(&payload.id()).is_none_or(|mark| !mark.excluded));
+        flags.retain(|_, mark| !mark.excluded);
+        Self {
+            meta,
+            binding,
+            frozen,
+            inherited,
+            payloads,
+            flags,
+        }
+    }
+}
+
+/// Persisted state needed alongside the executor's already-owned message bodies.
+#[derive(Debug, Default)]
+pub struct TranscriptRestoreState {
+    pub inherited: InheritedContext,
+    pub own_flags: HashMap<MessageId, MessageFlags>,
+}
+
 /// rewind 边界：区分「保留到目标」与「从目标开始移除」。
 ///
 /// transcript rewind 保留目标本身，ACP 用户 rewind 移除目标及以后；两者语义不可

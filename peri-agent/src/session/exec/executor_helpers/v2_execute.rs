@@ -189,13 +189,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 Default::default(),
             ));
         };
-        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。启动只消费
-        // 执行关键的有效视图（继承区 + flags），已排除 own 正文不进入内存。
-        let snapshot = store
-            .load_active_snapshot(tid)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        Ok((snapshot.inherited, snapshot.flags))
+        let state = store.load_transcript_restore_state(tid).await?;
+        Ok((state.inherited, state.own_flags))
     }
     .await;
 

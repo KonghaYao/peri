@@ -335,6 +335,19 @@ pub(in crate::sessions::remote) fn select_meta_statement(id: &str) -> StatementS
     StatementSpec::new(SELECT_META_SQL, vec![Value::Text(id.to_owned())])
 }
 
+/// The parent marker distinguishes unregistered children from unbound roots.
+pub(in crate::sessions::remote) fn select_binding_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(
+        concat!(
+            "SELECT ",
+            binding_columns!(),
+            ", s.parent_thread_id
+                 FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id WHERE s.id = $1"
+        ),
+        vec![Value::Text(id.to_owned())],
+    )
+}
+
 /// 恢复准入的 frozen 单列读取。
 pub(in crate::sessions::remote) fn select_frozen_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_FROZEN_SQL, vec![Value::Text(id.to_owned())])
@@ -353,6 +366,14 @@ pub(in crate::sessions::remote) fn select_tree_statement(root: &str) -> Statemen
 /// 自有 payload 行（按 canonical 插入序，即 `rowid`）。
 pub(in crate::sessions::remote) fn select_messages_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_MESSAGES_SQL, vec![Value::Text(id.to_owned())])
+}
+
+pub(in crate::sessions::remote) fn active_flags_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(
+        "SELECT message_id, truncated, excluded, projection FROM messages
+         WHERE thread_id = $1 AND excluded = 0 AND (truncated = 1 OR projection IS NOT NULL)",
+        vec![Value::Text(id.to_owned())],
+    )
 }
 
 /// 有效范围的自有 payload 行（同一顺序，读取条件带未排除约束）。
@@ -407,6 +428,23 @@ pub(in crate::sessions::remote) fn history_page_bounds_statement(
                 None => Value::Null,
             },
         ],
+    )
+}
+
+/// Fetch small bodies for the current candidates. Large rows stay in storage
+/// until their specific message identity needs to be inspected.
+pub(in crate::sessions::remote) fn history_anchor_rows_statement(
+    id: &str,
+    after: i64,
+    tail: i64,
+    limit: i64,
+) -> StatementSpec {
+    StatementSpec::new(
+        "SELECT m.message_id, m.rowid, CASE WHEN octet_length(m.content) <= 8192 THEN m.content END,
+                (SELECT MAX(last.rowid) FROM messages last WHERE last.thread_id = $1 AND last.excluded = 0)
+         FROM messages m WHERE m.thread_id = $1 AND m.excluded = 0 AND m.rowid > $2 AND m.rowid <= $3
+         ORDER BY m.rowid LIMIT $4",
+        vec![Value::Text(id.to_owned()), Value::Integer(after), Value::Integer(tail), Value::Integer(limit)],
     )
 }
 

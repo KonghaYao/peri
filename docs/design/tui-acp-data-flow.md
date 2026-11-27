@@ -119,6 +119,8 @@ GenUI 按钮在有效的左键 Down 上立即分发动作。按下态仅属于�
    迟到页整页丢弃并归还预留，不合并、不留下半页。
 5. bridge 通过一次释放/接纳事务把新段并入 `committed`，登记 `DisplayLedger`、`ResidentIndex`、
    段边界游标与 `WINDOW_UNIT_KEYS`，随后只发布一次快照。
+   V1 向上滚轮或 Ctrl+Up/Home 进入距页首一个视口时，在驻留正文低于预取门槛且无在途或待并页请求时预读一页，已有缺口优先。页首按需读取；上一张更早页成功发布可见内容并推进游标后，下一次上滚可立即续读。自动触发、空页、重复游标和失败重试仍保留退避。
+   普通滚轮预读时保留正在阅读的行。顶行恰好是轮次分隔线时，用紧随其后的用户消息及两者的视觉行差来定位。历史页提供持久消息 ID 时沿用该 ID，只有能唯一对应到同一用户消息和同一分隔线才调整偏移。
 6. `peri/history_committed` 到达后按 `checkpointId` 幂等封印 durable 段；通知丢失时下一次
    `history.open` 的 `committedTail` 是唯一重新对齐入口。
 
@@ -151,7 +153,7 @@ GenUI 按钮在有效的左键 Down 上立即分发动作。按下态仅属于�
    （page(After) 从缺口下端回填）；相邻 gap 合并。翻到 gap 时按滚动方向选择 page，锚点在
    中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
 7. 窗口边界游标由**驻留布局两端段**派生（最早段的 `beforeCursor`、最晚段的 `afterCursor`），
-   在每次 admission/release 后重算并写入 consumer；单页响应只推进它负责的那一端。淘汰端段后，
+   每个非空响应的边界和读票据随当前请求暂存，成功并页后按实际驻留边缘提交。等待渲染释放确认导致接纳失败时，下一次读取仍使用同一游标和票据。空页可直接提交对应方向的边界。淘汰端段后，
    新的边缘段游标天然指向被淘汰区间，`request_window_newer_page_if_due` /
    `request_window_older_page_if_due` 据此继续双向翻页。
 8. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
