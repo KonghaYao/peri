@@ -6,6 +6,8 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
+use crate::domain::input::OFFICIAL_CANCEL_EVENT;
+use crate::domain::input_id::input_id_for_key;
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
@@ -799,11 +801,12 @@ pub fn resolve_environment(
 
 /// Resolve `POST /events` into either a turn input or an approval answer.
 pub fn resolve_event(
+    logical_id: &LogicalId,
     body: SubmitEventBody,
     headers: &HeaderMap,
 ) -> Result<SubmitEvent, SwarmError> {
     let Some(events) = body.events.as_ref() else {
-        return resolve_submission(body, headers).map(SubmitEvent::Input);
+        return resolve_submission(logical_id, body, headers).map(SubmitEvent::Input);
     };
     let Some(items) = events.as_array() else {
         return Err(official_invalid(
@@ -814,7 +817,8 @@ pub fn resolve_event(
     let approval = items.len() == 1
         && items[0].get("type").and_then(Value::as_str) == Some(OFFICIAL_APPROVAL_RESULT_EVENT);
     if !approval {
-        return resolve_official_envelope(events, &body, headers).map(SubmitEvent::Input);
+        return resolve_official_envelope(logical_id, events, &body, headers)
+            .map(SubmitEvent::Input);
     }
     if let Some(field) = native_field(&body) {
         return Err(official_invalid(
@@ -877,12 +881,7 @@ pub fn resolve_event(
             approval_decision(value, "events[0].decision")?
         }
     };
-    let input_id = idempotency_key(headers)?;
-    if let Some(input_id) = input_id.as_deref() {
-        if Uuid::parse_str(input_id).is_err() {
-            return Err(SwarmError::invalid_input("Idempotency-Key must be a UUID"));
-        }
-    }
+    let input_id = resolve_input_id(logical_id, headers)?;
     Ok(SubmitEvent::Approval(ApprovalAnswer {
         request_id,
         decision,
@@ -891,11 +890,12 @@ pub fn resolve_event(
 }
 
 pub fn resolve_submission(
+    logical_id: &LogicalId,
     body: SubmitEventBody,
     headers: &HeaderMap,
 ) -> Result<InputSubmission, SwarmError> {
     if let Some(events) = body.events.as_ref() {
-        return resolve_official_envelope(events, &body, headers);
+        return resolve_official_envelope(logical_id, events, &body, headers);
     }
     let kind = match body.kind.as_deref() {
         None | Some("user") => InputKind::User,
@@ -916,7 +916,14 @@ pub fn resolve_submission(
         }
     };
 
-    let header_id = idempotency_key(headers)?;
+    if body
+        .input_id
+        .as_deref()
+        .is_some_and(|id| Uuid::parse_str(id).is_err())
+    {
+        return Err(SwarmError::invalid_input("inputId must be a UUID"));
+    }
+    let header_id = resolve_input_id(logical_id, headers)?;
     let input_id = match (body.input_id.as_deref(), header_id.as_deref()) {
         (Some(body_id), Some(header_id)) if body_id != header_id => {
             return Err(SwarmError::invalid_input(
@@ -931,10 +938,6 @@ pub fn resolve_submission(
             ));
         }
     };
-    if Uuid::parse_str(&input_id).is_err() {
-        return Err(SwarmError::invalid_input("inputId must be a UUID"));
-    }
-
     if let Some(text) = &body.text {
         check_len("text", text, MAX_TEXT_BYTES)?;
     }
@@ -961,11 +964,9 @@ pub fn resolve_submission(
     Ok(submission)
 }
 
-/// Parse the official `{events: [...]}` envelope into the existing acceptance
-/// semantics: exactly one `agent.session.input.message` event carrying exactly
-/// one user message, plain `input_text` content, accepted as one `turn` input.
-/// Unsupported official features are reported explicitly, never dropped.
+/// 解析单条官方 message 或 cancel；不支持的字段不会被静默丢弃。
 fn resolve_official_envelope(
+    logical_id: &LogicalId,
     events: &Value,
     body: &SubmitEventBody,
     headers: &HeaderMap,
@@ -979,22 +980,31 @@ fn resolve_official_envelope(
     let Some(items) = events.as_array() else {
         return Err(official_invalid(
             "events",
-            "events must be an array containing exactly one `agent.session.input.message`",
+            "events must be an array containing exactly one event",
         ));
     };
     if items.len() != 1 {
         return Err(official_invalid(
             "events",
-            "only one event is supported; send a single `agent.session.input.message`",
+            "only one event is supported; send a single event",
         ));
     }
 
     let event: OfficialEventBody = serde_json::from_value(items[0].clone())
         .map_err(|error| official_event_shape_error(&items[0], error))?;
+    if event.kind == OFFICIAL_CANCEL_EVENT {
+        if items[0].get("input").is_some() {
+            return Err(official_invalid(
+                "events[0].input",
+                "the cancel event does not accept `input`",
+            ));
+        }
+        return official_submission(logical_id, headers, InputKind::Control, "cancel".to_owned());
+    }
     if event.kind != OFFICIAL_INPUT_EVENT {
         return Err(official_invalid(
             "events[0].type",
-            "only the `agent.session.input.message` event is supported",
+            "only `agent.session.input.message` and `agent.session.input.cancel` are supported by this path",
         ));
     }
     let Some(input) = event.input else {
@@ -1100,20 +1110,21 @@ fn resolve_official_envelope(
     // envelope therefore ends at the existing `empty_input`.
     let text = texts.join("\n");
     check_len("text", &text, MAX_TEXT_BYTES)?;
-    let input_id = match idempotency_key(headers)? {
-        Some(input_id) => input_id,
-        // Compatibility carve-out: the official envelope has no body inputId,
-        // and the official API does not promise retry idempotency without a
-        // caller key. The native path still never generates one.
-        None => Uuid::now_v7().to_string(),
-    };
-    if Uuid::parse_str(&input_id).is_err() {
-        return Err(SwarmError::invalid_input("inputId must be a UUID"));
-    }
+    official_submission(logical_id, headers, InputKind::User, text)
+}
 
+fn official_submission(
+    logical_id: &LogicalId,
+    headers: &HeaderMap,
+    kind: InputKind,
+    text: String,
+) -> Result<InputSubmission, SwarmError> {
+    // 官方信封没有 body inputId；没有调用方提供的键时不保证重试幂等。
+    let input_id =
+        resolve_input_id(logical_id, headers)?.unwrap_or_else(|| Uuid::now_v7().to_string());
     let submission = InputSubmission {
         input_id,
-        kind: InputKind::User,
+        kind,
         mode: InputMode::Turn,
         text: Some(text),
         attachments: Vec::new(),
@@ -1166,7 +1177,7 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
     {
         return official_invalid(
             format!("events[0].{extra}"),
-            "this event field is not supported by the single-message compatibility path",
+            "this event field is not supported by the single-event compatibility path",
         );
     }
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))
@@ -1634,6 +1645,19 @@ pub fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, SwarmError
         return Ok(None);
     }
     Ok(Some(text.to_owned()))
+}
+
+fn resolve_input_id(
+    logical_id: &LogicalId,
+    headers: &HeaderMap,
+) -> Result<Option<String>, SwarmError> {
+    Ok(idempotency_key(headers)?.map(|key| {
+        if Uuid::parse_str(&key).is_ok() {
+            key
+        } else {
+            input_id_for_key(logical_id, &key)
+        }
+    }))
 }
 
 fn check_len(field: &str, value: &str, max: usize) -> Result<(), SwarmError> {

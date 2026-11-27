@@ -258,6 +258,40 @@ impl SwarmError {
     }
 
     #[must_use]
+    pub fn turn_in_progress_for_mutation(logical_id: &str) -> Self {
+        Self::new(
+            ErrorKind::Conflict,
+            ErrorCode::TurnInProgress,
+            "a turn is already running; cancel it before updating or deleting the session",
+        )
+        .with_details(serde_json::json!({
+            "suggest": "cancel",
+            "event": super::input::OFFICIAL_CANCEL_EVENT,
+            "endpoint": format!("POST /v1/agents/sessions/{logical_id}/events"),
+        }))
+    }
+
+    /// 409 for a mutation blocked while no admitted slot can be cancelled.
+    ///
+    /// This covers the recovery window and an open turn whose admitted slot is
+    /// already gone: `session/cancel` would be an accepted no-op, so pointing
+    /// the caller at cancel would be a false promise. Only a new user input (or
+    /// the host finishing recovery) moves the session out of this state.
+    #[must_use]
+    pub fn turn_in_progress_awaiting_recovery(logical_id: &str) -> Self {
+        Self::new(
+            ErrorKind::Conflict,
+            ErrorCode::TurnInProgress,
+            "a turn is still open without an admitted slot; wait for recovery before updating or deleting the session",
+        )
+        .with_details(serde_json::json!({
+            "suggest": "retry_later",
+            "reason": "recovery_pending",
+            "endpoint": format!("POST /v1/agents/sessions/{logical_id}/events"),
+        }))
+    }
+
+    #[must_use]
     pub fn turn_superseded() -> Self {
         Self::new(
             ErrorKind::Conflict,
@@ -397,6 +431,20 @@ impl SwarmError {
             ErrorKind::Unavailable,
             ErrorCode::QueueUnavailable,
             "input queue is unavailable; the submission was not accepted",
+        )
+        .with_details(serde_json::json!({ "operation": operation }))
+    }
+
+    /// 503 for a cancel whose `session/cancel` never reached the host.
+    ///
+    /// No receipt is written for it, so the same `inputId` may be accepted
+    /// again; the wording must not claim the cancellation was accepted.
+    #[must_use]
+    pub fn cancel_not_delivered(operation: &str) -> Self {
+        Self::new(
+            ErrorKind::Unavailable,
+            ErrorCode::QueueUnavailable,
+            "the cancellation was not delivered; no receipt was written, retry with the same inputId",
         )
         .with_details(serde_json::json!({ "operation": operation }))
     }

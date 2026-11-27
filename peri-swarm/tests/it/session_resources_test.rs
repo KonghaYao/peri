@@ -1026,6 +1026,17 @@ async fn update_and_delete_are_refused_while_a_turn_is_open() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{error}");
     assert_eq!(error["error"]["code"], json!("turn_in_progress"));
+    assert_eq!(
+        error["error"]["details"],
+        json!({
+            "suggest": "cancel", "event": "agent.session.input.cancel",
+            "endpoint": "POST /v1/agents/sessions/agent-run/events",
+        })
+    );
+    assert!(!error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("steer"));
 
     let (status, error) = send(
         &harness.router,
@@ -1037,6 +1048,17 @@ async fn update_and_delete_are_refused_while_a_turn_is_open() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{error}");
     assert_eq!(error["error"]["code"], json!("turn_in_progress"));
+    assert_eq!(
+        error["error"]["details"],
+        json!({
+            "suggest": "cancel", "event": "agent.session.input.cancel",
+            "endpoint": "POST /v1/agents/sessions/agent-run/events",
+        })
+    );
+    assert!(!error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("steer"));
 }
 
 #[tokio::test]

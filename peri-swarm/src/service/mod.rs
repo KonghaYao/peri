@@ -5,6 +5,7 @@
 //! layer never branches on which implementation is present.
 
 mod in_memory;
+pub(crate) mod official_items;
 
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
@@ -387,7 +388,7 @@ struct TurnSeed {
 }
 
 /// A persisted turn whose opener is at or before the reconnect cursor.
-struct PreviousTurn {
+pub(crate) struct PreviousTurn {
     turn_id: String,
     created_at: i64,
     /// Last assistant final frame of this turn at or before the cursor.
@@ -421,6 +422,11 @@ enum RowFrame {
     Nothing,
 }
 
+/// 回放与 items 投影共享用户消息的开 turn 判定。
+fn user_opens_turn(has_turn: bool, has_output: bool, persisted_opener: bool) -> bool {
+    !has_turn || has_output || persisted_opener
+}
+
 /// Classify one persisted row and advance the open-turn state.
 ///
 /// Replay reads rows exactly as stored (`design §9.4`). New data holds one row
@@ -429,22 +435,13 @@ enum RowFrame {
 /// before item granularity add per-delta rows for the same `item_id`; they
 /// classify as [`RowFrame::Nothing`] and only their final `complete:true` row
 /// produces the official item. Both shapes therefore replay the same frames.
-/// Recovered root output: a merged row written after recovery without a gateway
-/// turn (`payload.recovered = true`, `design §4.2`).
-///
-/// It is a custom item only. Replay must not open a turn for it, attach it to
-/// the turn that happened to precede it, or count it as that turn's output.
-fn is_recovered_row(item: &crate::domain::ItemView) -> bool {
-    item.payload.get("recovered") == Some(&json!(true))
-}
-
 fn classify_row(
     item: &crate::domain::ItemView,
     turns: &mut Vec<ReplayTurn>,
     current: &mut Option<usize>,
     persisted: &BTreeMap<String, crate::store::SwarmTurnRow>,
 ) -> RowFrame {
-    if is_recovered_row(item) {
+    if item.is_recovered_row() {
         return RowFrame::Nothing;
     }
     if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
@@ -465,7 +462,11 @@ fn classify_row(
             // no turn is open. Before that point it is a steer of the open turn.
             let produces_output = current.is_some_and(|turn| turns[turn].completed_at.is_some());
             let turn_id = crate::domain::turn_id_for_item(&item.item_id);
-            if current.is_none() || produces_output || persisted.contains_key(&turn_id) {
+            if user_opens_turn(
+                current.is_some(),
+                produces_output,
+                persisted.contains_key(&turn_id),
+            ) {
                 turns.push(ReplayTurn {
                     turn_id,
                     created_at: crate::domain::official::unix_from_rfc3339(&item.created_at),
@@ -916,6 +917,7 @@ pub async fn replay_backlog(
             &session.logical_id,
             cursor.value(),
             &mut replay.persisted,
+            None,
         )
         .await?
     };
@@ -1062,7 +1064,7 @@ fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str
     for item in items {
         if item.kind != crate::domain::ItemKind::Message
             || !item.source.is_root()
-            || is_recovered_row(item)
+            || item.is_recovered_row()
         {
             continue;
         }
@@ -1077,27 +1079,40 @@ fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str
     None
 }
 
-/// Walk persisted rows backwards from `up_to` to the opener of the turn that
-/// was open there, together with its last assistant final frame.
+const TURN_LOOKBACK_LIMIT: &str = "turn_lookback_limit";
+
+/// 从 `up_to` 向前找当时的 turn opener 及最后一个 assistant 完成帧。
 ///
-/// The walk mirrors [`classify_row`]: a user item is a steer when no assistant
-/// final frame separates it from the next older user item. Scanning stops as
-/// soon as the opener is confirmed, so a normal session reads only the tail of
-/// the previous turn; a session whose turns never produced output reads back to
-/// its first user item. Only those two row shapes matter here, so neither the
-/// number of historical delta rows nor the merged one-row item changes it.
-async fn turn_at_cursor(
+/// 与 [`classify_row`] 一样，只有根消息影响 turn 归属；逐帧增量和恢复行都不参与。
+/// 两条用户消息之间没有完成帧且没有持久 opener 时，较新的一条是 steer。
+/// 投影限制单次回扫的页数；超限不能把尚未验证的 opener 当成真实归属。
+pub(crate) async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,
     up_to: u64,
     persisted: &mut BTreeMap<String, crate::store::SwarmTurnRow>,
+    max_pages: Option<usize>,
 ) -> Result<Option<PreviousTurn>, SwarmError> {
     // The reconnect cursor is the last delivered seq, so its row is included.
     let mut before = Some(up_to.saturating_add(1));
     let mut opener: Option<crate::domain::ItemView> = None;
     let mut newest_complete: Option<(u64, i64)> = None;
     let mut complete_since_opener = false;
+    let mut scanned_pages = 0;
     while let Some(bound) = before {
+        if max_pages == Some(scanned_pages) {
+            tracing::warn!(
+                logical_id,
+                up_to,
+                scanned_pages,
+                "条目投影达到 turn 历史回扫上限"
+            );
+            return Err(SwarmError::upstream_unavailable(TURN_LOOKBACK_LIMIT));
+        }
+        scanned_pages += 1;
+        if scanned_pages == 11 {
+            tracing::warn!(logical_id, up_to, "turn history lookup exceeds ten pages");
+        }
         let page = store
             .swarm_items_before(logical_id, Some(bound), ItemsWindow::MAX_LIMIT)
             .await
@@ -1105,14 +1120,13 @@ async fn turn_at_cursor(
         let Some(oldest_seq) = page.last().map(|row| row.seq) else {
             break;
         };
+        let has_older_rows = page.len() == ItemsWindow::MAX_LIMIT as usize && oldest_seq > 1;
         for row in page {
             let view = row.to_view();
-            // Child and thought rows are not root turn boundaries; only root
-            // messages may open, close, or steer a turn. Recovered root output
-            // has no turn at all and must not close or extend the one before it.
+            // 子 agent、thought 和恢复行都不是根 turn 的边界。
             if view.kind != crate::domain::ItemKind::Message
                 || !view.source.is_root()
-                || is_recovered_row(&view)
+                || view.is_recovered_row()
             {
                 continue;
             }
@@ -1147,8 +1161,8 @@ async fn turn_at_cursor(
                 _ => {}
             }
         }
-        // The page is descending, so the oldest row is the next exclusive bound.
-        before = (oldest_seq < bound).then_some(oldest_seq);
+        // 倒序页的首个未读区间在其最老行之前。
+        before = (has_older_rows && oldest_seq < bound).then_some(oldest_seq);
     }
     Ok(opener.map(|item| previous_turn(Some(item), newest_complete)))
 }

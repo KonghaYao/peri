@@ -32,6 +32,9 @@ use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore};
 
 const LOGICAL_ID: &str = "agent-approval-test";
 
+#[path = "service_cancel_test.rs"]
+mod cancel_tests;
+
 struct Fixture {
     service: Arc<AcpSwarmService>,
     log: Arc<ItemLog>,
@@ -1438,4 +1441,62 @@ async fn a_historical_multi_row_item_replays_row_by_row_with_one_official_item()
         }),
         "historical delta rows add no official frame: {backlog:?}"
     );
+}
+
+#[tokio::test]
+async fn an_open_turn_without_a_slot_asks_the_caller_to_retry_instead_of_cancel() {
+    let fixture = fixture(false).await;
+    // 恢复窗口/旧 turn 提前释放：turn 仍打开，但没有可下发 `session/cancel` 的 slot。
+    fixture
+        .log
+        .begin_turn("prompt-1", "turn_1")
+        .await
+        .expect("turn opens");
+    assert!(fixture.log.has_open_turn());
+    assert!(
+        fixture.runtime.turn.borrow().is_none(),
+        "no admitted slot can receive the cancel"
+    );
+
+    let update = crate::service::SessionUpdateCommand {
+        model: None,
+        mcp_tools: None,
+        metadata: crate::service::UpdateField::Keep,
+        prompt_cache_options: crate::service::UpdateField::Keep,
+    };
+    let error = fixture
+        .service
+        .update_session(&logical_id(), update)
+        .await
+        .expect_err("an open turn blocks the mutation");
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    assert_eq!(
+        error.details()["suggest"],
+        "retry_later",
+        "cancel is an accepted no-op without a slot"
+    );
+    assert_eq!(error.details()["reason"], "recovery_pending");
+    assert!(
+        error.details().get("event").is_none(),
+        "no cancel entry point is advertised: {:?}",
+        error.details()
+    );
+    assert!(error.message().contains("wait for recovery"));
+
+    let error = fixture
+        .service
+        .delete_session(&logical_id())
+        .await
+        .expect_err("an open turn blocks the delete");
+    assert_eq!(error.details()["suggest"], "retry_later");
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    // 拒绝不写状态：turn 仍在，会话行未被删除。
+    assert!(fixture.log.has_open_turn());
+    assert!(fixture
+        .store
+        .swarm_get_session(LOGICAL_ID)
+        .await
+        .unwrap()
+        .is_some());
 }

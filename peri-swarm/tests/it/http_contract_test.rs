@@ -21,6 +21,11 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "test-deployment-key";
 
+#[path = "http_contract/idempotency_keys.rs"]
+mod idempotency_keys;
+#[path = "http_contract/official_cancel.rs"]
+mod official_cancel;
+
 struct Harness {
     router: Router,
     workspace: TempDir,
@@ -941,20 +946,20 @@ async fn official_events_envelope_rejects_unknown_event_types() {
     let harness = harness();
     create_session(&harness, json!({ "logicalId": "agent-01" })).await;
 
-    let (status, _, value) = send(
-        &harness.router,
-        Method::POST,
-        "/v1/agents/sessions/agent-01/events",
-        Some(json!({
-            "events": [{ "type": "agent.session.input.cancel" }]
-        })),
-        Some(TOKEN),
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
-    assert_eq!(value["error"]["code"], json!("invalid_input"));
-    assert_eq!(value["error"]["details"]["field"], json!("events[0].type"));
+    for kind in ["tool_result", "computer_use_approval_request_result"] {
+        let (status, _, value) = send(
+            &harness.router,
+            Method::POST,
+            "/v1/agents/sessions/agent-01/events",
+            Some(json!({"events": [{"type": format!("agent.session.input.{kind}") }]})),
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}: {value}");
+        assert_eq!(value["error"]["code"], "invalid_input");
+        assert_eq!(value["error"]["details"]["field"], "events[0].type");
+    }
 }
 
 #[tokio::test]

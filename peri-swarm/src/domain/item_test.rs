@@ -1,6 +1,8 @@
 use serde_json::json;
 
 use super::*;
+use crate::domain::official_item::{MessageRole, OutputItemStatus};
+use crate::domain::OfficialContent;
 
 fn item(seq: u64) -> ItemView {
     ItemView {
@@ -51,7 +53,16 @@ fn item_page_exposes_cursor_and_has_more() {
     let page = ItemPage::new(
         "agent-01",
         vec![item(1), item(2)],
-        vec![item(2)],
+        vec![OfficialSessionItem::Message {
+            id: Some("itim_test".to_owned()),
+            content: vec![OfficialContent::InputText {
+                text: "hello".to_owned(),
+            }],
+            phase: None,
+            role: MessageRole::User,
+            status: OutputItemStatus::Completed,
+            turn_id: "turn_test".to_owned(),
+        }],
         Some(2),
         9,
         true,
@@ -65,8 +76,9 @@ fn item_page_exposes_cursor_and_has_more() {
     assert_eq!(value["hasMore"], json!(true));
     assert_eq!(value["has_more"], json!(true));
     assert_eq!(value["order"], json!("asc"));
-    // The official `CursorPage` reader consumes `data` (one last row per item);
-    // existing clients keep reading every raw row from `items`.
+    assert_eq!(value.as_object().expect("page").len(), 9);
+    assert_eq!(value["data"][0]["type"], json!("message"));
+    assert_eq!(value["data"][0]["turn_id"], json!("turn_test"));
     assert_eq!(value["data"].as_array().map(Vec::len), Some(1));
     assert_eq!(value["items"].as_array().map(Vec::len), Some(2));
 

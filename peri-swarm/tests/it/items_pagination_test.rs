@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -331,7 +331,19 @@ async fn official_cursor_page_uses_data_and_item_id_after() {
     )
     .await;
     assert_eq!(seqs(&first), [1, 2]);
-    assert_eq!(first["data"], first["items"], "CursorPage reads `data`");
+    let user_id = first["items"][0]["id"].as_str().unwrap();
+    let assistant_id = first["items"][1]["id"].as_str().unwrap();
+    let turn_id = peri_swarm::domain::turn_id_for_item(user_id);
+    assert_eq!(data_ids(&first), [user_id, assistant_id]);
+    assert_eq!(
+        first["data"],
+        json!([
+            {"type":"message", "id":user_id, "turn_id":turn_id, "role":"user", "phase":null,
+             "status":"completed", "content":[{"type":"input_text", "text":"message 1"}]},
+            {"type":"message", "id":assistant_id, "turn_id":turn_id, "role":"assistant", "phase":"final_answer",
+             "status":"completed", "content":[{"type":"output_text", "text":"fake-echo: message 1"}]}
+        ])
+    );
     assert_eq!(
         first["has_more"],
         json!(true),
@@ -403,8 +415,6 @@ async fn unknown_agent_items_is_404() {
     assert_eq!(value["error"]["code"], json!("unknown_agent"));
 }
 
-/// Persist one raw row through the store the HTTP service reads. Turn
-/// structure is irrelevant here: the pagination contract is about item rows.
 async fn append_row(harness: &Harness, seq: u64, item_id: &str, role: &str, extra: Value) {
     let mut payload = json!({ "role": role, "text": format!("{role}-{seq}") });
     if let Some(object) = extra.as_object() {
@@ -412,13 +422,17 @@ async fn append_row(harness: &Harness, seq: u64, item_id: &str, role: &str, extr
             payload[key] = value.clone();
         }
     }
+    append_item(harness, seq, item_id, ItemKind::Message, payload).await;
+}
+
+async fn append_item(harness: &Harness, seq: u64, item_id: &str, kind: ItemKind, payload: Value) {
     harness
         .store
         .swarm_append_item(SwarmItemRow {
             logical_id: "agent-01".to_owned(),
             seq,
             item_id: item_id.to_owned(),
-            kind: ItemKind::Message,
+            kind,
             source: ItemSource::root(),
             payload,
             created_at: "2026-01-01T00:00:00Z".to_owned(),
@@ -437,15 +451,8 @@ async fn seed_streamed_items(harness: &Harness) {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
-    // One long streamed message (three rows), a user item, then a short one.
-    append_row(
-        harness,
-        1,
-        "itim_msg_long",
-        "assistant",
-        json!({"delta": true}),
-    )
-    .await;
+    // 历史形状：一个开 turn 的用户条目，三帧长消息，再一个新 turn。
+    append_row(harness, 1, "itim_user_1", "user", json!({})).await;
     append_row(
         harness,
         2,
@@ -459,13 +466,21 @@ async fn seed_streamed_items(harness: &Harness) {
         3,
         "itim_msg_long",
         "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+    append_row(
+        harness,
+        4,
+        "itim_msg_long",
+        "assistant",
         json!({"complete": true}),
     )
     .await;
-    append_row(harness, 4, "itim_user_2", "user", json!({})).await;
+    append_row(harness, 5, "itim_user_2", "user", json!({})).await;
     append_row(
         harness,
-        5,
+        6,
         "itim_msg_2",
         "assistant",
         json!({"delta": true}),
@@ -473,7 +488,7 @@ async fn seed_streamed_items(harness: &Harness) {
     .await;
     append_row(
         harness,
-        6,
+        7,
         "itim_msg_2",
         "assistant",
         json!({"complete": true}),
@@ -482,21 +497,29 @@ async fn seed_streamed_items(harness: &Harness) {
 }
 
 fn data_ids(value: &Value) -> Vec<String> {
-    value["data"]
-        .as_array()
-        .expect("data")
+    let rows = value["items"].as_array().expect("items");
+    let raw_ids: HashSet<_> = rows
         .iter()
-        .map(|item| item["id"].as_str().expect("id").to_owned())
-        .collect()
-}
-
-fn data_seqs(value: &Value) -> Vec<u64> {
-    value["data"]
-        .as_array()
-        .expect("data")
+        .map(|row| row["itemId"].as_str().unwrap())
+        .collect();
+    let data = value["data"].as_array().expect("data");
+    let ids: Vec<String> = data
         .iter()
-        .map(|item| item["seq"].as_u64().expect("seq"))
-        .collect()
+        .map(|item| {
+            assert!(matches!(
+                item["type"].as_str(),
+                Some("message" | "reasoning" | "function_call" | "function_call_output")
+            ));
+            assert!(item["turn_id"].is_string());
+            let id = item["id"].as_str().expect("id");
+            assert!(raw_ids.contains(id));
+            id.to_owned()
+        })
+        .collect();
+    // `data` 每个 itemId 至多一项；具体顺序与内容仍由各用例断言。
+    let unique: HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "data repeats an itemId: {ids:?}");
+    ids
 }
 
 #[tokio::test]
@@ -512,27 +535,29 @@ async fn item_grouped_pages_keep_data_shorter_than_items() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    // The page holds one item (three rows): the row budget is spent before the
-    // next item fits, while `data` keeps one row per item.
-    assert_eq!(seqs(&first), [1, 2, 3]);
-    assert_eq!(data_ids(&first), ["itim_msg_long"]);
-    assert_eq!(data_seqs(&first), [3]);
-    assert_eq!(first["nextCursor"], json!(3));
+    assert_eq!(seqs(&first), [1, 2, 3, 4]);
+    assert_eq!(data_ids(&first), ["itim_user_1", "itim_msg_long"]);
+    assert_eq!(
+        first["data"][1]["content"],
+        json!([{"type":"output_text","text":"assistant-4"}])
+    );
+    assert_eq!(first["data"][1]["turn_id"], first["data"][0]["turn_id"]);
+    assert_eq!(first["nextCursor"], json!(4));
     assert_eq!(first["has_more"], json!(true));
-    assert_eq!(first["lastItemSeq"], json!(6));
+    assert_eq!(first["lastItemSeq"], json!(7));
 
-    // The next page starts after the whole item, so both remaining items fit.
     let (status, _, second) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=3",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=4",
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
-    assert_eq!(seqs(&second), [4, 5, 6]);
+    assert_eq!(seqs(&second), [5, 6, 7]);
     assert_eq!(data_ids(&second), ["itim_user_2", "itim_msg_2"]);
-    assert_eq!(data_seqs(&second), [4, 6]);
+    assert_eq!(second["data"][1]["content"][0]["text"], "assistant-7");
+    assert_ne!(second["data"][1]["turn_id"], first["data"][1]["turn_id"]);
     assert_eq!(second["has_more"], json!(false));
     assert_eq!(second["nextCursor"], json!(null));
 }
@@ -578,8 +603,11 @@ async fn row_budget_stops_before_the_next_item() {
     )
     .await;
     assert_eq!(seqs(&first), [1, 2, 3], "only the long item fits");
-    assert_eq!(data_ids(&first), ["itim_msg_a"]);
-    assert_eq!(first["data"].as_array().map(Vec::len), Some(1));
+    assert!(
+        data_ids(&first).is_empty(),
+        "没有 opener 的 assistant 不可投影"
+    );
+    assert_eq!(first["nextCursor"], json!(3));
     assert_eq!(first["has_more"], json!(true), "the next item still exists");
 
     let (_, _, second) = send(
@@ -590,7 +618,7 @@ async fn row_budget_stops_before_the_next_item() {
     )
     .await;
     assert_eq!(seqs(&second), [4]);
-    assert_eq!(data_ids(&second), ["itim_msg_b"]);
+    assert!(data_ids(&second).is_empty());
     assert_eq!(second["has_more"], json!(false));
     assert_eq!(second["nextCursor"], json!(null));
 }
@@ -634,8 +662,8 @@ async fn item_id_cursor_does_not_cover_frames_appended_later() {
         None,
     )
     .await;
-    assert_eq!(data_seqs(&first), [2]);
-    let cursor = first["data"][0]["id"].as_str().expect("id").to_owned();
+    assert_eq!(seqs(&first), [1, 2]);
+    let cursor = first["items"][1]["id"].as_str().expect("id").to_owned();
 
     // The message finishes after the page was read.
     append_row(
@@ -664,7 +692,11 @@ async fn item_id_cursor_does_not_cover_frames_appended_later() {
     )
     .await;
     assert_eq!(seqs(&by_seq), [1, 2, 3]);
-    assert_eq!(data_seqs(&by_seq), [3], "the final frame is visible");
+    assert_eq!(
+        by_seq["items"][2]["payload"]["complete"], true,
+        "the final frame is visible"
+    );
+    assert!(data_ids(&by_seq).is_empty());
 }
 
 #[tokio::test]
@@ -674,34 +706,32 @@ async fn ascending_item_pages_advance_strictly_and_terminate() {
 
     let mut cursors = Vec::new();
     let mut seen = Vec::new();
-    let mut after: Option<String> = None;
+    let mut after = 0;
     for _ in 0..10 {
-        let uri = match after.as_deref() {
-            Some(after) => {
-                format!("/v1/agents/sessions/agent-01/items?limit=1&order=asc&after={after}")
-            }
-            None => "/v1/agents/sessions/agent-01/items?limit=1&order=asc".to_owned(),
-        };
+        let uri = format!("/v1/agents/sessions/agent-01/items?limit=1&order=asc&after={after}");
         let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{page}");
-        assert!(page["data"].as_array().expect("data").len() <= 1);
-        // The long message needs three rows while `limit` is one.
-        assert!(!page["items"].as_array().expect("items").is_empty());
-        seen.extend(data_ids(&page));
-        match page["data"].as_array().and_then(|data| data.last()) {
-            Some(item) if page["has_more"] == json!(true) => {
-                cursors.push(item["seq"].as_u64().expect("seq"));
-                after = Some(item["id"].as_str().expect("id").to_owned());
-            }
-            _ => break,
+        let rows = page["items"].as_array().expect("items");
+        let id = rows.first().expect("nonempty page")["itemId"]
+            .as_str()
+            .unwrap();
+        assert!(rows.iter().all(|row| row["itemId"] == id));
+        seen.push(id.to_owned());
+        if page["has_more"] == false {
+            assert!(page["nextCursor"].is_null());
+            break;
         }
+        let next = page["nextCursor"].as_u64().expect("nextCursor");
+        assert_eq!(Some(next), seqs(&page).into_iter().max());
+        assert!(next > after);
+        cursors.push(next);
+        after = next;
     }
     assert_eq!(
         seen,
-        ["itim_msg_long", "itim_user_2", "itim_msg_2"],
-        "`after=<itemId>` advances past the whole item, never inside it"
+        ["itim_user_1", "itim_msg_long", "itim_user_2", "itim_msg_2"]
     );
-    assert_eq!(cursors, [3, 4], "the cursor is the item's greatest seq");
+    assert_eq!(cursors, [1, 4, 5], "the cursor is the item's greatest seq");
 }
 
 #[tokio::test]
@@ -709,37 +739,285 @@ async fn descending_item_pages_advance_strictly_and_terminate() {
     let harness = harness();
     seed_streamed_items(&harness).await;
 
-    let first = {
-        let (status, _, page) = send(
-            &harness.router,
-            Method::GET,
-            "/v1/agents/sessions/agent-01/items?limit=1&order=desc",
-            None,
-        )
-        .await;
+    let mut after = None;
+    for (id, expected_rows, expected_next) in [
+        ("itim_msg_2", &[7, 6][..], Some(7)),
+        ("itim_user_2", &[5][..], Some(5)),
+        ("itim_msg_long", &[4, 3, 2][..], Some(4)),
+        ("itim_user_1", &[1][..], None),
+    ] {
+        let mut uri = "/v1/agents/sessions/agent-01/items?limit=1&order=desc".to_owned();
+        if let Some(seq) = after {
+            uri.push_str(&format!("&after={seq}"));
+        }
+        let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{page}");
-        page
-    };
-    assert_eq!(data_seqs(&first), [6]);
-    assert_eq!(seqs(&first), [6, 5], "the page keeps every row of the item");
-
-    // `after` is the item's greatest seq and the next page takes items strictly
-    // below it, so the same item cannot reappear.
-    let uri = format!(
-        "/v1/agents/sessions/agent-01/items?limit=1&order=desc&after={}",
-        first["data"][0]["id"].as_str().expect("id")
+        assert_eq!(seqs(&page), expected_rows);
+        assert_eq!(data_ids(&page), [id]);
+        assert_eq!(page["has_more"], expected_next.is_some());
+        assert_eq!(page["nextCursor"], json!(expected_next));
+        after = expected_next;
+    }
+    let (_, _, full) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?order=desc",
+        None,
+    )
+    .await;
+    assert_eq!(
+        data_ids(&full),
+        ["itim_msg_2", "itim_user_2", "itim_msg_long", "itim_user_1"]
     );
-    let (_, _, second) = send(&harness.router, Method::GET, &uri, None).await;
-    assert_eq!(data_ids(&second), ["itim_user_2"]);
-    assert_eq!(second["nextCursor"], json!(4));
+}
 
+#[tokio::test]
+async fn internal_only_page_keeps_items_and_next_cursor() {
+    let harness = harness();
+    let (status, _, _) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({"logicalId":"agent-01"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    append_row(&harness, 1, "itim_opener", "user", json!({})).await;
+    append_item(
+        &harness,
+        2,
+        "itim_receipt",
+        ItemKind::Receipt,
+        json!({"_raw":true}),
+    )
+    .await;
+    append_item(
+        &harness,
+        3,
+        "itim_approval",
+        ItemKind::Approval,
+        json!({"state":"pending"}),
+    )
+    .await;
+    append_row(
+        &harness,
+        4,
+        "itim_answer",
+        "assistant",
+        json!({"complete":true}),
+    )
+    .await;
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?order=asc&limit=2&after=1",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seqs(&page), [2, 3]);
+    assert_eq!(page["items"][0]["kind"], "receipt");
+    assert_eq!(page["items"][1]["kind"], "approval");
+    assert_eq!(page["data"], json!([]));
+    assert_eq!(page["has_more"], true);
+    assert_eq!(page["nextCursor"], 3);
     let uri = format!(
-        "/v1/agents/sessions/agent-01/items?limit=1&order=desc&after={}",
-        second["data"][0]["id"].as_str().expect("id")
+        "/v1/agents/sessions/agent-01/items?order=asc&limit=2&after={}",
+        page["nextCursor"]
     );
-    let (_, _, third) = send(&harness.router, Method::GET, &uri, None).await;
-    assert_eq!(data_ids(&third), ["itim_msg_long"]);
-    assert_eq!(seqs(&third), [3, 2, 1]);
-    assert_eq!(third["has_more"], json!(false));
-    assert_eq!(third["nextCursor"], json!(null));
+    let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seqs(&page), [4]);
+    assert_eq!(data_ids(&page), ["itim_answer"]);
+    assert_eq!(page["has_more"], false);
+}
+
+fn item_ids(page: &Value) -> Vec<String> {
+    page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|row| row["itemId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Count how often one raw item id is delivered across the walked pages.
+fn seen(pages: &[Value], item_id: &str) -> usize {
+    pages
+        .iter()
+        .map(|page| {
+            item_ids(page)
+                .iter()
+                .filter(|id| id.as_str() == item_id)
+                .count()
+        })
+        .sum()
+}
+
+/// Walk `/items` exactly like the official `CursorPage`: the next cursor is
+/// `data[last].id`, and an empty `data` page (or `has_more=false`) ends the run.
+async fn sdk_pages(harness: &Harness, order: &str, limit: u32) -> Vec<Value> {
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let uri = match after.as_deref() {
+            Some(id) => {
+                format!("/v1/agents/sessions/agent-01/items?order={order}&limit={limit}&after={id}")
+            }
+            None => format!("/v1/agents/sessions/agent-01/items?order={order}&limit={limit}"),
+        };
+        let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let next = page["data"]
+            .as_array()
+            .and_then(|data| data.last())
+            .map(|item| item["id"].as_str().unwrap().to_owned());
+        let has_more = page["hasMore"].as_bool().unwrap();
+        pages.push(page);
+        match next {
+            Some(id) if has_more => after = Some(id),
+            _ => break,
+        }
+    }
+    pages
+}
+
+/// 官方 SDK 的自动翻页游标是 `data[last].id`（网关解析为该 item 的 `MAX(seq)`），
+/// 不是 `nextCursor`。desc 页里排在最后一个可映射条目**之前**（更新）的未映射
+/// 条目落在游标的已越过侧，下一页不会再返回它；排在它**之后**（更旧）的会在
+/// 下一页重读。需要全量原始条目时用 `nextCursor`/`afterSeq` 翻页并读 `items`。
+#[tokio::test]
+async fn sdk_data_cursor_skips_newer_unmapped_items_in_desc() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    append_row(&harness, 1, "itim_u1", "user", json!({})).await;
+    append_item(
+        &harness,
+        2,
+        "itim_r2",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(
+        &harness,
+        3,
+        "itim_a3",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+    append_item(
+        &harness,
+        4,
+        "itim_r4",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 5, "itim_u5", "user", json!({})).await;
+    append_item(
+        &harness,
+        6,
+        "itim_r6",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+
+    let pages = sdk_pages(&harness, "desc", 3).await;
+    assert_eq!(
+        pages.iter().map(item_ids).collect::<Vec<_>>(),
+        vec![
+            vec!["itim_r6", "itim_u5", "itim_r4"],
+            vec!["itim_r4", "itim_a3", "itim_r2"],
+            vec!["itim_r2", "itim_u1"],
+        ]
+    );
+    assert_eq!(
+        pages.iter().map(data_ids).collect::<Vec<_>>(),
+        vec![vec!["itim_u5"], vec!["itim_a3"], vec!["itim_u1"]],
+        "SDK 游标取 data 末项：页里更旧的未映射条目不在其中"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r6"),
+        1,
+        "desc：排在最后一个可映射条目之前（更新），下一页不再返回"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r4"),
+        2,
+        "desc：排在它之后（更旧），下一页重读"
+    );
+}
+
+/// asc 下的镜像：比 `data` 末项更旧的未映射条目只在这一页出现，更新的会重读。
+#[tokio::test]
+async fn sdk_data_cursor_skips_older_unmapped_items_in_asc() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    append_item(
+        &harness,
+        1,
+        "itim_r1",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 2, "itim_u2", "user", json!({})).await;
+    append_row(
+        &harness,
+        3,
+        "itim_a3",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+    append_item(
+        &harness,
+        4,
+        "itim_r4",
+        ItemKind::Receipt,
+        json!({"state": "delivered"}),
+    )
+    .await;
+    append_row(&harness, 5, "itim_u5", "user", json!({})).await;
+
+    let pages = sdk_pages(&harness, "asc", 2).await;
+    assert_eq!(
+        pages.iter().map(item_ids).collect::<Vec<_>>(),
+        vec![
+            vec!["itim_r1", "itim_u2"],
+            vec!["itim_a3", "itim_r4"],
+            vec!["itim_r4", "itim_u5"],
+        ]
+    );
+    assert_eq!(
+        pages.iter().map(data_ids).collect::<Vec<_>>(),
+        vec![vec!["itim_u2"], vec!["itim_a3"], vec!["itim_u5"],]
+    );
+    assert_eq!(
+        seen(&pages, "itim_r1"),
+        1,
+        "asc：排在最后一个可映射条目之前（更旧），下一页不再返回"
+    );
+    assert_eq!(
+        seen(&pages, "itim_r4"),
+        2,
+        "asc：排在它之后（更新），下一页重读"
+    );
 }

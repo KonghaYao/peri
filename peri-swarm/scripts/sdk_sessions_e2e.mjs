@@ -22,7 +22,7 @@
 // `session.in_progress` -> `turn.created` -> `turn.in_progress` start order,
 // assistant `turn.item.done` with `phase=final_answer` and non-empty
 // `output_text`, `turn.completed`, `agent.session.idle`. A deterministic
-// `control=cancel` probe against a slow stub stream asserts that the
+// `agent.session.input.cancel` probe against a slow stub stream asserts that the
 // cancellation request is accepted and the stream still reaches a terminal
 // without throwing. Cancellation is folded into
 // `turn.completed(status="cancelled")` by contract; the real host behavior is
@@ -465,32 +465,52 @@ function assertAssistantFinal(events, label) {
   return { event: done[0], item, text };
 }
 
-function assertDataRowsAreLastRows(body, label) {
+function assertOfficialItems(body, label) {
   const rows = body?.items ?? [];
   const data = body?.data ?? [];
-  const lastRows = new Map();
+  const lastSeq = new Map();
   for (const row of rows) {
-    const seen = lastRows.get(row.itemId);
-    if (seen === undefined || row.seq > seen.seq) lastRows.set(row.itemId, row);
+    lastSeq.set(row.itemId, Math.max(lastSeq.get(row.itemId) ?? 0, row.seq));
   }
-  check(`${label}: data is one row per item`, data.length === lastRows.size, {
-    data: data.length,
-    itemsInPage: lastRows.size,
-  });
+  const ids = data.map((item) => item.id);
+  check(`${label}: data projects distinct raw item ids`, new Set(ids).size === data.length
+    && ids.every((id) => lastSeq.has(id)), { ids, rawItems: lastSeq.size });
   for (const item of data) {
-    const last = lastRows.get(item.itemId);
-    check(`${label}: data row is the item's last row`, last !== undefined && item.seq === last.seq, {
-      itemId: item.itemId,
-      dataSeq: item.seq,
-      lastSeq: last?.seq,
-    });
+    const outputStatuses = ['in_progress', 'completed', 'incomplete'];
+    const callStatuses = [...outputStatuses, 'failed'];
+    let fieldsMatch = false;
+    switch (item.type) {
+      case 'message':
+        fieldsMatch = ['user', 'assistant'].includes(item.role)
+          && outputStatuses.includes(item.status)
+          && (item.role === 'user' ? item.phase === null : [null, 'commentary', 'final_answer'].includes(item.phase))
+          && Array.isArray(item.content) && item.content.length === 1
+          && item.content[0].type === (item.role === 'user' ? 'input_text' : 'output_text')
+          && typeof item.content[0].text === 'string';
+        break;
+      case 'reasoning':
+        fieldsMatch = item.status === null && Array.isArray(item.summary) && item.summary.length === 1
+          && item.summary[0].type === 'summary_text' && typeof item.summary[0].text === 'string';
+        break;
+      case 'function_call':
+        fieldsMatch = typeof item.call_id === 'string' && typeof item.name === 'string'
+          && 'arguments' in item && callStatuses.includes(item.status);
+        break;
+      case 'function_call_output':
+        fieldsMatch = typeof item.call_id === 'string' && callStatuses.includes(item.status)
+          && (item.error === null || typeof item.error === 'string')
+          && (item.output === null || typeof item.output === 'string');
+        break;
+    }
+    check(`${label}: official item fields`, typeof item.id === 'string' && typeof item.turn_id === 'string'
+      && !('seq' in item) && fieldsMatch, { id: item.id, type: item.type });
   }
-  const seqs = data.map((item) => item.seq);
+  const seqs = ids.map((id) => lastSeq.get(id));
   const ordered = body?.order === 'desc'
     ? seqs.every((seq, index) => index === 0 || seq < seqs[index - 1])
     : seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]);
-  check(`${label}: data follows the requested order`, ordered, { order: body?.order, seqs });
-  return { data, lastRows };
+  check(`${label}: official items follow the requested order`, ordered, { order: body?.order, ids });
+  return { data, rawItemCount: lastSeq.size };
 }
 
 let summary = null;
@@ -542,7 +562,7 @@ async function main() {
   recordDifference(
     '模型 stub 的失败注入能力',
     { directives: stubAtStart.directives },
-    'stub 没有独立失败开关；未知 [[tool:<name>]] 指令会返回 400，但真实 host 将其折叠为 completed 空 turn（见末尾差异）。取消路径使用 control=cancel。',
+    'stub 没有独立失败开关；未知 [[tool:<name>]] 指令会返回 400，但真实 host 将其折叠为 completed 空 turn（见末尾差异）。取消路径使用 agent.session.input.cancel。',
   );
 
   const verificationCode = crypto.randomBytes(16).toString('hex');
@@ -827,9 +847,14 @@ async function main() {
     { sdkData: initialPage.data?.length, bodyData: initialPage.body?.data?.length },
   );
   const initialItems = initialPage.body?.items ?? [];
-  const initialDataShape = assertDataRowsAreLastRows(initialPage.body, 'initial items');
-  const initialComplete = initialDataShape.data.find((item) => item.payload?.complete === true);
+  const initialDataShape = assertOfficialItems(initialPage.body, 'initial items');
+  const initialComplete = initialItems.find((row) => row.kind === 'message' && row.payload?.complete === true);
   check('first answer is a complete message item', Boolean(initialComplete), summarizeItems(initialItems));
+  const initialOfficial = initialDataShape.data.find((item) => item.id === initialComplete?.itemId);
+  check('first answer projects into the same official turn as SSE', initialOfficial?.type === 'message'
+    && initialOfficial.role === 'assistant' && initialOfficial.phase === 'final_answer'
+    && initialOfficial.status === 'completed' && initialOfficial.turn_id === createFinal.event?.turn_id
+    && initialOfficial.content[0]?.text === initialComplete?.payload?.text, initialOfficial);
   check(
     'first answer item is persisted as final_answer',
     initialComplete?.payload?.phase === 'final_answer',
@@ -1275,7 +1300,7 @@ async function main() {
         headers: CONTRACT_HEADERS,
       });
       const body = page.body ?? {};
-      const dataShape = assertDataRowsAreLastRows(body, `items ${order} page ${pages.length + 1}`);
+      const dataShape = assertOfficialItems(body, `items ${order} page ${pages.length + 1}`);
       const sdkData = page.data ?? [];
       pages.push({
         query,
@@ -1288,15 +1313,15 @@ async function main() {
         sdkDataLength: sdkData.length,
         lastItemSeq: body.lastItemSeq,
         order: body.order,
-        sdkDataSeqs: sdkData.map((item) => item.seq),
+        sdkDataIds: sdkData.map((item) => item.id),
       });
       check(`items ${order} page object is list`, body.object === 'list', body.object);
       check(`items ${order} page logical id`, body.logicalId === createdSessionId, body.logicalId);
       check(`items ${order} page order`, body.order === order, body.order);
       check(
         `items ${order} page respects the item limit`,
-        dataShape.data.length <= limit,
-        { items: dataShape.data.length, rawRows: (body.items ?? []).length, limit },
+        dataShape.rawItemCount <= limit,
+        { items: dataShape.rawItemCount, rawRows: (body.items ?? []).length, limit },
       );
       check(
         `items ${order} page lastItemSeq is a number`,
@@ -1351,8 +1376,7 @@ async function main() {
     { headers: CONTRACT_HEADERS },
   );
   const fullItems = fullAsc.body?.items ?? [];
-  const fullDataShape = assertDataRowsAreLastRows(fullAsc.body, 'full asc items');
-  const fullData = fullDataShape.data;
+  const fullData = assertOfficialItems(fullAsc.body, 'full asc items').data;
   summary.items.full = {
     count: fullItems.length,
     dataCount: fullData.length,
@@ -1362,7 +1386,7 @@ async function main() {
     sdkHasMore: fullAsc.has_more,
     sdkDataLength: (fullAsc.data ?? []).length,
     nextCursor: fullAsc.body?.nextCursor,
-    data: summarizeItems(fullData),
+    data: fullData.map(({ id, type, turn_id }) => ({ id, type, turn_id })),
     items: summarizeItems(fullItems),
   };
   check('full asc read has no next page', fullAsc.body?.has_more === false, fullAsc.body?.has_more);
@@ -1387,10 +1411,13 @@ async function main() {
     lastItemSeq: afterFollowUp.lastItemSeq,
   });
   check('full asc data is non-empty', fullData.length > 0, fullData.length);
-  check('full asc data is one row per item', fullData.length === fullDataShape.lastRows.size, {
-    data: fullData.length,
-    items: fullDataShape.lastRows.size,
-  });
+  // 本场景只写根会话的用户消息和完成的助手消息，不含纯内部页。
+  const expectedItemIds = new Set(fullItems.filter((row) => row.kind === 'message'
+    && row.source?.agentId === 'root' && !row.truncated
+    && (row.payload?.role === 'user' || row.payload?.complete === true)).map((row) => row.itemId));
+  check('full asc data covers the mappable messages in this scenario',
+    fullData.length === expectedItemIds.size && fullData.every((item) => expectedItemIds.has(item.id)),
+    { data: fullData.map((item) => item.id), expected: [...expectedItemIds] });
   for (let index = 0; index < fullItems.length; index += 1) {
     if (fullItems[index].seq !== index + 1) {
       check('item seq is 1..N without gaps', false, { index, seq: fullItems[index].seq });
@@ -1444,17 +1471,18 @@ async function main() {
     (item) => item.payload?.complete === true && item.payload?.text === followUpTurn.reply,
   );
   check('follow-up answer landed in items', Boolean(loggedFollowUp), summarizeItems(fullItems));
-  const loggedConversation = fullData.map((item) => ({
-    role: item.payload?.role,
-    text: item.payload?.text,
+  const loggedConversation = fullData.filter((item) => item.type === 'message').map((item) => ({
+    role: item.role,
+    text: item.content[0]?.text,
+    turn: item.turn_id,
   }));
   check(
-    'item history contains both user and assistant turns exactly once, in order',
+    'official history contains both user and assistant turns exactly once, in order',
     isDeepStrictEqual(loggedConversation, [
-      { role: 'user', text: initialInput },
-      { role: 'assistant', text: createFinal.text },
-      { role: 'user', text: followUp },
-      { role: 'assistant', text: verificationCode },
+      { role: 'user', text: initialInput, turn: createFinal.event?.turn_id },
+      { role: 'assistant', text: createFinal.text, turn: createFinal.event?.turn_id },
+      { role: 'user', text: followUp, turn: followUpTurnId },
+      { role: 'assistant', text: verificationCode, turn: followUpTurnId },
     ]),
     loggedConversation,
   );
@@ -1542,6 +1570,7 @@ async function main() {
   const cancelInputId = crypto.randomUUID();
   const cancelControlId = crypto.randomUUID();
   const expectedCancelTurnId = `turn_input_${cancelInputId}`;
+  const cancelText = `S9a1 cancellation probe ${cancelInputId}: stream slowly, then cancel.`;
   const cancelStream = await client.beta.agents.sessions.events.stream(
     createdSessionId,
     { after: afterFollowUp.lastItemSeq },
@@ -1576,7 +1605,7 @@ async function main() {
       inputId: cancelInputId,
       kind: 'user',
       mode: 'turn',
-      text: 'S9a1 cancellation probe: stream slowly, then cancel.',
+      text: cancelText,
     },
     headers: CONTRACT_HEADERS,
   });
@@ -1589,11 +1618,25 @@ async function main() {
     expectedTurnId: expectedCancelTurnId,
     input: cancelAccepted,
   });
+  // turn.created 先于宿主开始 provider 请求；确认 stub 已收到该轮，才测试在途取消。
+  let providerStarted = false;
+  const providerDeadline = Date.now() + 5000;
+  while (Date.now() < providerDeadline) {
+    const stats = await stubStats();
+    if (stats.turns.some((turn) => turn.lastUserText === cancelText)) {
+      providerStarted = true;
+      break;
+    }
+    await sleep(50);
+  }
+  check('cancel probe reached the model before cancellation', providerStarted);
   cancelTiming.controlSentAtMs = Date.now() - cancelStreamStarted;
-  const cancelControl = await client.post(`/agents/sessions/${createdSessionId}/events`, {
-    body: { inputId: cancelControlId, kind: 'control', text: 'cancel' },
-    headers: CONTRACT_HEADERS,
-  });
+  const cancelResponse = await sessionEvents.create(createdSessionId, {
+    'Idempotency-Key': cancelControlId,
+    events: [{ type: 'agent.session.input.cancel' }],
+  }, { headers: CONTRACT_HEADERS }).asResponse();
+  check('SDK cancel returned HTTP 202', cancelResponse.status === 202, cancelResponse.status);
+  const cancelControl = await cancelResponse.json();
   cancelTiming.controlReturnedAtMs = Date.now() - cancelStreamStarted;
   summary.timings.cancelPostMs = Date.now() - cancelStreamStarted;
   summary.cancelAccepted = { input: cancelAccepted, control: cancelControl };
@@ -1652,18 +1695,13 @@ async function main() {
     gateway_stop_reason: cancelGatewayTurn?.stopReason ?? null,
     session_status: cancelIdle?.session?.status,
   };
-  recordDifference(
-    '真实 provider 流上的 control=cancel 终态',
-    {
-      turnStartedAtMs: cancelTiming.turnStartedAtMs,
-      controlSentAtMs: cancelTiming.controlSentAtMs,
-      controlReturnedAtMs: cancelTiming.controlReturnedAtMs,
-      terminalAtMs: cancelTiming.terminalAtMs,
-      officialStatus: cancelCompleted?.turn?.status,
-      gatewayStopReason: cancelGatewayTurn?.stopReason ?? null,
-    },
-    'control 在 turn.created 后约 1ms 到达，但真实 Peri host 没有中断在途 provider 流；turn 以 completed 结束，而不是 cancelled。脚本只断言取消请求被受理、终态可收敛且不崩溃。',
-  );
+  if (cancelCompleted?.turn?.status !== 'cancelled') {
+    recordDifference(
+      '真实 provider 流上的官方取消未以 cancelled 终止',
+      { ...cancelTiming, officialStatus: cancelCompleted?.turn?.status, gatewayStopReason: cancelGatewayTurn?.stopReason ?? null },
+      '网关受理了取消，但宿主未报告 cancelled。脚本将宿主终态原样记录，不把它算作取消成功。',
+    );
+  }
 
   const afterCancelWait = await waitForSession(
     client,

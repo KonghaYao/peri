@@ -329,11 +329,11 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 
 | 优先级 | 项目 | 官方 | 我们 | 不能同步的难点 |
 | --- | --- | --- | --- | --- |
-| P1 | 批量事件 | `events.create({events:[...]})` 接受多条事件，或取消、工具结果、审批响应等消息以外的输入事件 | 多条事件或消息以外的输入事件（取消、工具结果等）→ `400 invalid_input`；单条 `agent.session.input.mcp_approval_request_result` 已受理（`202`，结算一次待办） | 受理侧按单条 message 建 turn 与幂等键；批量需要多事件原子受理、跨事件排队与部分失败语义，现有 service/actor 边界没有这个事务单位 |
+| P1 | 输入事件 | `events.create({events:[...]})` 接受多条事件，支持取消、工具结果及审批响应 | 单条 message、`agent.session.input.cancel` 和 `agent.session.input.mcp_approval_request_result` 可受理（`202`）；cancel 的 `InputOutcome` 是网关扩展。多条事件、`tool_result`、`computer_use_approval_request_result` 仍返回 `400 invalid_input` | 取消复用单条控制收据；批量需要多事件原子受理、排队及部分失败语义 |
 | P1 | 会话状态 | `requires_action`（等待一个或多个必需动作；四类：`mcp_approval_request`、`computer_use_approval_request`、`function_call`、`environment_connection`） | 只有声明了 `require_approval` 的 MCP 绑定产生 `requires_action`：`required_actions` 每条为官方嵌套形状 `{type:"mcp_approval_request",request_id,turn_id,request:{type:"mcp_tool_call",server_label,name,arguments,message}}`（`name`/`arguments` 缺失时为 `null`，host 给空工具名也投影 `null`；来源无法归属时 `server_label` 为 `""`，`message` 说明来源未知）；答复接受官方 `{request_id,response:{type:"mcp_tool_call",decision}}`（保留顶层 `decision`/`requestId` 扩展别名），回到原挂起 `session/prompt`、不新建 turn；待办结算/过期/turn 结束/actor 丢失后快照清空，硬崩溃遗留的 pending 行在恢复时结算为 `actor_lost`（turn 已结束则 `turn_ended`）；ACP `subscribe` 与生产 actor `GET /events` 共用同一 backlog 装配（先结算过期、再回放、最后追加当前快照，同一 `event_id` 幂等）；结算行落库失败返回 `503 required_action_settlement_failed` 且待办保持可答复；子 agent 继承父会话声明的审批范围，来源无法归属且无审批通道时 `PolicyDenied`，范围存在但子链无 broker 时同样 `PolicyDenied`，不静默执行。`AskUserQuestion` 仍走 ACP `elicitation/create`，不映射官方动作 | `require_approval` 只有网关扩展接受，纯官方 SDK 客户端无法声明审批，因此该状态不会被纯官方入参触发；其余三类动作（`computer_use`/`function_call`/`environment_connection`）本地没有事实；`AskUserQuestion` 没有官方类型 |
 | P1 | agent 子字段 | `agent` 是嵌套对象，必需字段含 `id`、`name`、`tools`、`multi_agent`、`reasoning`、`service_tier`、`text`（`compaction` / `experimental` 可选）；`model` 是 string | REST `agent` 只有 `model`（可空）/ `instructions`，没有 `id`；SSE `agent.session.*` 的 agent 有固定 `id: "root"` / `model`（可空）/ `instructions`，缺 `name` / `tools` / `multi_agent` / `reasoning` / `service_tier` / `text` | REST 与 SSE 都不能保证 `model` 是非空 string；REST 还缺 `id`；`name` / `tools` / `text` 可用默认值或投影补齐（schema 可新增）；subagent 调度、多 agent 配置、推理与 service tier 仍缺运行时事实 |
 | P1 | `sessions.update` 未支持字段 | `agent.reasoning`、`agent.service_tier`、`review`，以及 `agent.tools` 中的函数/内置工具 | 这些字段 → `400 invalid_request`；函数/内置工具 → `422 unsupported_tool`；`agent.model:null` → `400` | 本地没有 reasoning、service tier 与 review 的执行语义；`agent.tools` 只有 MCP 注入通道，没有函数或内置工具运行时 |
-| P1 | items 形状 | `AgentSessionItem` 联合：message、reasoning、function_call、mcp_call、web_search_call、command_execution、subagent 调用等 | 每项是 Swarm `ItemView`（`id` / `itemId` / `seq` / `kind` / `payload`）；新数据每 item 一行，历史数据 `items` 仍可能包含逐帧 delta 行 | 官方联合依赖工具调用、推理、审批等高层事实；本地持久化的是 message 与原始 ACP 帧，缺少可映射的数据源 |
+| P1 | items 形状 | `AgentSessionItem` 联合包含消息、推理、多种工具与 subagent 调用 | `data` 投影 `message`、`reasoning`、`function_call`、`function_call_output`；`items` 保留原始行（新数据每条目一行，历史数据可能包含逐帧 delta）。`data` 可以为空，`nextCursor` / `after` 语义不变 | 不伪造审批、子 agent 等条目；MCP 调用与结果以 `call_id` 关联，不发 `mcp_call`。空 `data` 页会使官方 SDK 停止自动翻页，仍可用网关 `nextCursor` 继续 |
 | P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 15 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 18 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、文本 delta、reasoning 4 种；文本 delta 需把 `item.added` 前移到首 chunk 并保留回放同一性；环境与工具增量没有运行时事实 |
 | P1 | 环境投影 | `Environment.EnvironmentResourceOpenAIHosted` 必需字段含 `capability_directories`、`files`、`network`、`packages`、`plugins`、`skills`（`container_size`、`desktop` 可选）；`AgentSession.environment` 必填 | hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 来自绑定记录的 `last_run_id`（可能是上次预留值，与当前 state 不一致）；SSE `agent.session.*` 的 `OfficialSession` 携带同一 `{type,id}` 投影（未知环境为 `{"type":"none"}`，不造 id） | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `capability_directories` / `files` / `network` / `packages` / `plugins` / `skills` 没有同步通道 |
 | P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 网关不做 token 记账；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
@@ -341,7 +341,8 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 | P2 | MCP 工具形状 | `agent.tools[].transport`：`{type:"http", server_url, headers?, authorization?}` 或 `{type:"stdio", command, cwd, ...}`；`allowed_tools` 在调用侧过滤工具 | 接受官方 `transport` 形状：`transport.type="http"` 映射为内部 `server_url`/`headers`，`transport.authorization` 在缺少同名 `Authorization` 头时写入该头——值没有 auth scheme 前缀时补 `Bearer`，已带 `Bearer`/`Basic` 等前缀则原样使用（不会出现 `Bearer Bearer`），空值 → `400 invalid_input`；平铺 `server_url`/`headers` 保留为 deprecated alias（两种形状的 URL 不一致 → `400 invalid_input`，`details.field` 指向 `transport`；一致则接受）。`transport.type="stdio"` 与未知类型 → `422 unsupported_tool`（`details.field` 指向 `transport.type`，`details.value` 是收到的类型）。`require_approval` 经宿主审批通道强制执行（产生 `requires_action`）；`allowed_tools` 只记录在 ACP `_meta`，未在调用侧强制过滤 | 本部署没有 stdio 进程运行时；`allowed_tools` 没有消费方，不能当作安全边界 |
 | P2 | `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 网关只有 root agent，子 agent 维度不存在，没有可过滤的 agent 标识 |
 | P2 | turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 还含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 见「turn 用量与错误」行；不产生 `queued` / `waiting` | 没有子 agent 调度与 `queued` / `waiting` 排队状态；turn 只由单会话串行执行产生 |
-| P2 | 删除会话 | 物理清理可异步 | 按会话同步删除，共享绑定在最后一个引用释放时删除；无 live runtime 但持久 `running` → `502 session_resume_required` | 先用新的用户输入触发交互恢复，再执行删除或更新 |
+| P2 | 删除会话 | 物理清理可异步 | 按会话同步删除，共享绑定在最后一个引用释放时删除；live 在途且有 admitted slot → `409` 且详情指向 cancel；只有开放 turn/恢复窗口而无 slot → `409` 且 `suggest=retry_later`；无 live runtime 但持久 turn 未结束 → `502`（`details.operation=session_resume_required`） | 最后一种状态 cancel 也是 `502`：只能先提交新的用户输入触发恢复（或等待宿主恢复），再执行删除或更新 |
+| P2 | 幂等键 | `events.create` 的 `Idempotency-Key` 是字符串 | 事件入口接受非空 ASCII 字符串；UUID 原样用作 `inputId`，其他键按会话派生 UUIDv5，不回显原键；原生 body `inputId` 仍必须是 UUID | 复用 `swarm_inputs`，无 schema 变更；重试须复用原键 |
 | P2 | prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | TTL 只是官方兼容字段，本地模型链尚未消费，无法影响后续 turn 的缓存 |
 | P2 | SSE 续读 | query 类型没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；追平末尾后连接保持，只发心跳 | 官方 SDK 的 query 类型没有 `after`；回放只能作为网关扩展存在，SDK 不会为它提供原生查询字段，去掉回放就失去续读能力 |
 
@@ -376,9 +377,9 @@ const response = await client.beta.agents.sessions.events.create(id, {
 }).asResponse();
 const ack = await response.json(); // HTTP 202，含 inputId 和 lastItemSeq
 
-// items：官方 CursorPage 自动翻页可用；直接读 body 时 TS 中 body 是 protected
+// items：官方 CursorPage 用 data 自动翻页；要跳过空 data 页，用网关的 body.nextCursor
 const page = await client.beta.agents.sessions.items.list(id, { order: 'asc', after, limit: 50 });
-const body = /** @type {any} */ (page).body;
+const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protected
 ```
 
 ### sessions / turns
@@ -391,8 +392,23 @@ const body = /** @type {any} */ (page).body;
 | `GET` | `/v1/agents/sessions/{logicalId}/turns` | `turns.list`：`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`after`（必须是本会话的 turn id，排他；无效 → `400 invalid_query`）；响应同上 |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | `turns.retrieve`：官方 Turn JSON；不属于该会话 → 404 |
 
-- 准入：`update`/`delete` 在 live 运行中或有未关闭 turn 时 `409 turn_in_progress`；无 live
-  runtime 但持久行 `running` 或仍有开放 turn 行时 `502 session_resume_required`。用新用户输入执行交互恢复后，可再次进行管理操作。
+- 准入：实际修改或删除在有 admitted slot 的运行 turn 中返回 `409 turn_in_progress`，详情给出
+  `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和取消入口
+  `POST /v1/agents/sessions/{logicalId}/events`。只有开放 turn/恢复窗口而没有 slot 时同样是
+  `409 turn_in_progress`，但详情改为 `suggest:"retry_later"`、`reason:"recovery_pending"`：
+  此时 cancel 只是 202 no-op，需要新的用户输入（或宿主恢复）推进。无 live runtime 但持久行
+  `running` 或仍有开放 turn 行时，修改、删除、取消都返回 `502`
+  （`error.code=upstream_unavailable`，`details.operation=session_resume_required`）；该状态
+  cancel 也不可达，只能用新用户输入恢复或等待宿主恢复。
+- 取消请求体是 `{"events":[{"type":"agent.session.input.cancel"}]}`，不带 `input`。
+  `202` 返回 `{inputId, accepted:true, disposition:"inserted"|"existing", mode:"turn", lastItemSeq}`；
+  只写控制收据，不为取消本身追加 item 或创建 turn。收据在下发**之后**写：`session/cancel`
+  送不出去时返回 `503 queue_unavailable`（`details.operation=session/cancel`，文案为“取消未
+  送达、可用同键重试”）且不留收据。空闲时受理但不作用于下一轮。下发成功但宿主 30s 内未
+  退出 slot 仍是 `202`（取消已送达，不等于已取消）；此时同键重放且该 turn 仍在 slot 中会
+  重新下发 `session/cancel`，返回 `disposition=existing`、不新增 item，且不会取消后来启动
+  的 turn（目标 turn 已离开 slot 时重放是 no-op）。网关向已准入的 turn 发送 ACP
+  `session/cancel`，宿主是否停止在途生成须看终态，不能从 `202` 推断。
 - create attach：同一 `logicalId` 已存在时，省略 metadata/prompt cache 保持原值；显式不同
   值 → `409 identity_conflict`。
 - turns 在 `begin_turn` 写入 `in_progress`，终态在 `finish_turn` 更新；pending 输入不落 turn
@@ -439,28 +455,52 @@ const body = /** @type {any} */ (page).body;
 | 帧 | payload | 聚合与终止 |
 | --- | --- | --- |
 | 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
-| assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | **仅实时**：不落库、无 `seq`、`items.list`/回放不会返回；按 `messageId` 聚合 |
-| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 该 item 的**唯一持久化行**，turn 终止时写入；最终文本以该帧为准 |
+| assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 新数据**仅实时**：不落库、无 `seq`，`items.list` 和回放不会返回；按 `messageId` 聚合 |
+| assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 新数据在 turn 结束时写入该条目的唯一持久化行；历史多行投影以**首条** complete 的 `text` 加上其后按 `seq` 排序的各帧 `text` 为最终文本 |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 
-- 恢复期（没有 gateway turn）冲刷的 assistant `complete` 行额外带 `recovered: true`，且
+- 恢复期（没有 gateway turn）写入的根 assistant `complete` 行额外带 `recovered: true`，
   不含 `phase`/`outputIndex`；回放只发 `item` 帧，不归属前后 turn，也不推导官方 item 帧。
-- `items.list` 返回 item 级游标页：`data` 每个 item 一行（该 item 的最后一行），`items`
-  是该页全部 item 的原始行；新数据每 item 一行，`items` 与 `data` 一一对应，历史数据
-  （逐 chunk 行）仍可能让 `items` 更长。`object` 为 `"list"`，`has_more` 与 `hasMore` 同值。
-- item 的 `id` 与 `itemId` 同值；新数据不能按 `id` 去重（每个 item 只有一行），实时
-  delta 与合并行同 `itemId` 但 delta 没有 `seq`，不能作为游标。
-- `limit` 计 item 数（1..=500，默认 200），不按行数截断：单个 item 超过行预算时整条返回，
-  一页行数可能大于 `limit`。
-- `nextCursor` 是页尾 item 的最大 seq，下一页传给 `after`/`afterSeq`。`after` 也接受
-  `itim_...` item id（官方 `CursorPage` 的翻页方式），请求时解析为该 item 的当前最大 seq，
-  之后追加的帧不会再由该游标返回。新数据 item 写入后不再增长；历史多行 item 仍按整条
-  重新给出，在增长中续读用 `afterSeq=<seq>`。传 `cursor` 会得到
-  `400 invalid_query`；`order` 默认 `desc`，升序需显式 `order=asc`；`order=desc` 时
-  `after` 表示「更旧于该 seq」。
-- `POST /events` 的用户输入 item 是 `kind=message`，没有 `kind=user`；同一
-  `Idempotency-Key`/`inputId` 重试返回 `existing`，不重复追加。
+- `items.list` 返回 `object:"list"`。`items` 是该页各条目的全部原始行；同一条目的历史
+  delta/complete 共享 `id`，逐帧消费不要按 `id` 去重。新数据的实时 delta 与合并行也共享
+  `itemId`，但 delta 没有 `seq`，不能用作游标。
+- `data` 是同一页的官方 `AgentSessionItem` 投影，包含 `type`、`id`（原始 `itemId`）和
+  `turn_id`，没有 `seq`。最多每个 itemId 一项：用户与助手为 `message`，thought 为
+  `reasoning`，工具调用/结果为 `function_call` / `function_call_output`。MCP 工具名保留在
+  `name`（来自 ACP `title`：宿主必须把工具名写在 `title` 里），调用与结果用
+  `call_id=toolCallId` 跨页关联。`function_call.status` 优先取同页输出；没有同页输出时，
+  所属 turn 已终止（`completed`/`cancelled`/`failed`）为 `incomplete`，仍在运行为
+  `in_progress`，跨页不回填——请结合同 `call_id` 的 `function_call_output` 判断真实结果。
+  `reasoning.summary` 承载 Peri 的**原始** thought 文本，不是官方语义的推理摘要。
+  `receipt`、`approval`、`tool_update`、子 agent、所需帧截断、恢复期根输出
+  （`payload.recovered=true`）或无法归属 turn 等条目只在 `items`。恢复行不参与 turn
+  开/闭，也不让后续用户消息被误判成新 turn。
+- `data` 的顺序取条目在该页的原始顺序（item 的 `MAX(seq)`），不是所选完成帧的 `seq`；
+  迟到 delta 让两者不一致时顺序仍按 `MAX(seq)`。页内 `seq` 缺口需要回扫历史确认 turn
+  归属，每请求最多 8 次回扫、每次最多 10 页原始行。超过任一上限后，受影响的条目只在
+  `items`，不伪造 `turn_id`；缺口过多时可减小 `limit` 或用 `afterSeq` 分段读取。
+- `limit` 仍按条目计并限制整页聚合行预算（1..=500，默认 200）；始终完整返回已选条目的
+  原始行，所以 `items.length` 可能超过 `limit`。`has_more` 与 `hasMore` 同值，按原始条目计。
+- `nextCursor` 是页尾条目的最大 `seq`，下一页传给 `after` / `afterSeq`。`after` 也接受
+  `itim_...`，请求时解析为该条目当前最大 `seq`，会越过此时已追加的帧；要按最后看过的帧续读
+  用 `afterSeq=<seq>`。传 `cursor` 会得到 `400 invalid_query`。默认 `order=desc`，`after`
+  表示更旧；升序需显式 `order=asc`。
+- SDK 自动翻页使用最后一个 `data[].id`（网关解析为该 item 的 `MAX(seq)`）。页内未映射
+  条目若排在最后一个可映射条目**之前**（升序页 `MAX(seq) < after`，降序页
+  `MAX(seq) > after`），落在游标的已越过侧，下一页不会再返回；排在它之后（页序更靠后）
+  的未映射条目会在下一页重读。即使 `has_more=true`，整页 `data=[]` 时 SDK 也会停止。
+  需要全量原始条目时用返回的 `nextCursor`/`afterSeq` 翻页并读 `items`，不把 `data`
+  是否为空或长度用作翻页条件。
+- `POST /events` 的用户输入在原始行中是 `kind=message`。事件 `Idempotency-Key` 的非 UUID 值
+  按 `UUIDv5(namespace, logicalId + "\0" + key)` 派生；键区分大小写、不 trim，空头视为缺省。
+  UUID 键按**字面**文本原样使用（花括号、无连字符、大写等非规范写法都接受），同一逻辑键
+  写成两种串会得到两条收据：重试请复用同一字节串。原生 body `inputId` 仍需 UUID，同时发送
+  header 时必须与解析后的值一致。同键同内容重试返回 `existing`，不追加 item；非 UUID 原键
+  不会持久化或回显。用户输入仍为 `kind=message`，没有 `kind=user`。
+- `/items` 的 actor `ListItems` 回复也使用 `ItemPage`。从原始 `data` 升级为官方投影时，
+  actor 与 gateway 必须用同一版本整体重启；混用版本可能使 `/items` 返回
+  `502 upstream_unavailable`（`details.operation=swarm_actor`）。
 
 ### hosted 投影
 
