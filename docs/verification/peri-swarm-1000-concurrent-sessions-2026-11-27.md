@@ -16,7 +16,7 @@
 | --- | --- |
 | 部署 | `deploy/docker-compose.yml`：2 个 `peri-swarm` 副本 + `postgres:16-alpine` + `rivet-engine` + `nginx` |
 | 入口 | `127.0.0.1:8080` |
-| 数据库 | PostgreSQL 默认 `max_connections=100`、`reserved_connections=3` |
+| 数据库 | PostgreSQL 默认 `max_connections=100`、`superuser_reserved_connections=3`（实测 `reserved_connections=0`） |
 | 压测脚本 | `python3 /tmp/peri-loadtest/run_test.py --count 1000 --concurrency 50 --tag 20261127-2345` |
 | 原始产物 | `/tmp/peri-loadtest/run-20261127-2345/`：`summary.json`、`requests.jsonl`、`samples.jsonl`、`logs/*.log`、`meta_before.json`、`probe_summary.json` |
 | 空闲观测 | `/tmp/peri-loadtest/idle-watch.log` |
@@ -84,7 +84,7 @@
 - 重连来自同一工厂，沿用打开时的策略，不会回到默认 2。
 - 连接预算（两副本、默认 `max_connections=100`）：
   `2 × (32 + 8) + 3 = 83 ≤ 100`；8 是状态库池上限
-  （`peri-swarm/src/store/postgres/mod.rs`），3 是 PostgreSQL 保留槽。32 是上限
+  （`peri-swarm/src/store/postgres/mod.rs`），3 是 `superuser_reserved_connections`。32 是上限
   不是预留，`min_connections(0)` 允许空闲池回落到 0。
 - `REQUEST_BUDGET`（20s）、`acquire_timeout` 与错误码映射均未改动。
 

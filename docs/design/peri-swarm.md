@@ -759,7 +759,8 @@ PostgreSQL：
   渲染 `postgres://host:port/db`，不含凭据。
 - 会话库连接池上限由部署选择：单 facade 默认 **2**（TUI/CLI/stdio 行为不变），Swarm
   传 **32**。默认 `max_connections=100` 下两副本预算为
-  `2 × (32 + 8) + 3 = 83 ≤ 100`（8 是状态库池上限，3 是 PostgreSQL 保留槽）。32 是
+  `2 × (32 + 8) + 3 = 83 ≤ 100`（8 是状态库池上限，3 是
+  `superuser_reserved_connections`）。32 是
   上限不是预留，`min_connections(0)` 使空闲池回落到 0；重连沿用打开时的策略。
   安装了共享句柄的部署中，`sessions.subagents` 的冷 actor 读取也复用该门面，不会按
   actor 另开池；未安装共享句柄的独立/本地部署才走 `SubagentReader` 的惰性只读打开。

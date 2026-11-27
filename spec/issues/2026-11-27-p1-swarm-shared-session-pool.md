@@ -22,7 +22,7 @@
 1. **每个 child 打开一份独立会话存储。** `peri-swarm/src/actor/runtime.rs:151-174` 的 `open_session_resources` 按 remote 环境调用 `Resources::open_deployment_in_remote_environment`；`runtime.rs:443-444` 在每次 host 装配时执行。`spawn` / `attach` / `attach_interrupted` 全部收敛到 `build`，`peri-swarm` 内没有第二条打开旁路。
 2. **每份 facade 建一个独立 sqlx 池，并在打开时立即建连。** `peri-resources/src/sessions/remote/native_postgres.rs:43-48` 使用 `max_connections(2) / min_connections(0) / acquire_timeout(20s)`，随后 `pool.connect_with(options)`（`:60-63`）。sqlx 0.9.0 的 `connect_with` 在创建池时至少建立 `max(1, min_connections)` 条连接；归还连接只进入 idle 队列，默认 `idle_timeout=10min` 才回收。因此**每个空 session 在存活期占 1 条连接**，不是用完即还。
 3. **bootstrap 已有部署级句柄但丢弃了它。** `peri-swarm/src/bootstrap.rs:635-640` 打开部署级 `Resources`，`:653` 与 `:666` 的 `into_parts()` 都把 `_session_resources` 丢弃，只保留 `store_shutdown`；`:672` 安装 `StaticDeployment` 时没有携带业务句柄。`peri-swarm/src/actor/service.rs:435` 与 `:1421` 因此只能让每个 child 自己打开。
-4. **容量耗尽。** 2 个副本各承载多个 child，每个 child 1 条连接；PostgreSQL 默认 `max_connections=100`（`reserved_connections=3`）。57 个成功 child + 43 条基线连接占满 100 个槽位（`57 = 100 − 43` 是数字吻合，标为**推断**），后续 child 在 20s 预算内反复收到 `too many clients already`，最终超时。
+4. **容量耗尽。** 2 个副本各承载多个 child，每个 child 1 条连接；PostgreSQL 默认 `max_connections=100`（`superuser_reserved_connections=3`，`reserved_connections=0`）。57 个成功 child + 43 条基线连接占满 100 个槽位（`57 = 100 − 43` 是数字吻合，标为**推断**），后续 child 在 20s 预算内反复收到 `too many clients already`，最终超时。
 5. **错误映射。** 池超时被映射为 `Timeout`，经 ACP 资源错误码后由网关输出 502 `upstream_unavailable`；因此用户看到的是连接失败，而不是可重试的容量错误。
 6. **放大环节。** `service.rs:1524-1571` 的 `live_for_creating_row` 在创建中断恢复时最多打开 2 次（先 `ensure_live`，失败再 `spawn_runtime`）；本次压测未触发，但重试场景会成倍放大连接压力。每次打开还包含身份读与一条带**全局 advisory 写锁**的 machine 行写入（`native_postgres.rs:168-180`、`connection.rs:33`），1000 次打开即 1000 次跨副本串行写。
 
@@ -61,7 +61,7 @@
 - 参数沿打开链传递：`Resources::open_deployment_in_remote_environment_with_pool` → `sessions::open_remote_in_environment` → `composition` → `RemoteSessionData::open_with_machine_and_policy` → `RemoteConnectionFactory` → `connection::connect` → `native_postgres::connect`。
 - 保留现有 `open_deployment_in_remote_environment` / `open_with_machine` 签名，委托默认策略，避免无谓测试改动。
 - Swarm bootstrap 调用新入口并传 `SessionStorePoolPolicy::new(32)`。
-- 连接预算：`2 × (32 + 8) + 3 = 83 ≤ 100`；其中 8 是状态库池上限（`peri-swarm/src/store/postgres/mod.rs:134-143`），3 是 PostgreSQL 保留槽。32 是**上限不是预留**，`min_connections(0)` 使空闲池可回落到 0。
+- 连接预算：`2 × (32 + 8) + 3 = 83 ≤ 100`；其中 8 是状态库池上限（`peri-swarm/src/store/postgres/mod.rs:134-143`），3 是 `superuser_reserved_connections`（`reserved_connections=0`）。32 是**上限不是预留**，`min_connections(0)` 使空闲池可回落到 0。
 - `REQUEST_BUDGET` 保持 20s，不改 `acquire_timeout`，不引入新的错误码映射。
 
 ### 3. 明确不做
