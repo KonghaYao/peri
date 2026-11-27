@@ -123,7 +123,11 @@ pub fn release_window_plans(
         crate::kit::panels::history_detail::close_history_detail();
     }
     let (edge_before, edge_after) = state.window.edge_cursors();
-    crate::kit::history_page_consumer::note_window_cursors(edge_before, edge_after);
+    crate::kit::history_page_consumer::note_window_cursors(
+        state.window.pending_merge_request_id().as_deref(),
+        edge_before,
+        edge_after,
+    );
     crate::kit::history_window::publish_window_viewport(&state.window);
     crate::kit::history_paging::publish_window_gap_request(&state.window);
     outcome

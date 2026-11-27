@@ -16,6 +16,8 @@ use crate::kit::history_paging::{
 use crate::kit::history_window::{HistoryWindow, HistoryWindowConfig, WindowIdentity};
 use serial_test::serial;
 
+#[path = "history_window_page_test/budget_boundary.rs"]
+mod budget_boundary;
 #[path = "history_window_page_test/late_open_and_gap.rs"]
 mod late_open_and_gap;
 #[path = "history_window_page_test/reopen_identity.rs"]

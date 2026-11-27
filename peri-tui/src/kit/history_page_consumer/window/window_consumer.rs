@@ -26,6 +26,8 @@ use crate::kit::history_window::{
     GapId, PageReservation, PersistentEntryKey, WindowIdentity, WindowLimits,
 };
 
+use super::boundary::ReceivedPageBoundary;
+
 pub(super) const WINDOW_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(super) const RETRY_BASE_MS: u64 = 1_000;
 pub(super) const RETRY_MAX_MS: u64 = 30_000;
@@ -153,6 +155,7 @@ pub struct WindowInFlight {
     pub kind: WindowInFlightKind,
     pub reservation: PageReservation,
     pub(super) prepend_epoch_at_claim: u64,
+    received_boundary: Option<ReceivedPageBoundary>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -534,6 +537,7 @@ pub(super) fn claim_request(
         kind,
         reservation,
         prepend_epoch_at_claim: atoms::HISTORY_PREPEND_EPOCH.get(),
+        received_boundary: None,
     };
     state.scroll_before = None;
     state.in_flight = Some(in_flight.clone());
@@ -548,7 +552,7 @@ pub fn settle_window_response(
 ) -> WindowSettlement {
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
-    let Some(current) = state.in_flight.clone() else {
+    let Some(mut current) = state.in_flight.clone() else {
         return WindowSettlement::Unmatched;
     };
     if current.context.request_id != in_flight.context.request_id {
@@ -610,43 +614,14 @@ pub fn settle_window_response(
     }
     state.in_flight = None;
     state.identity = Some(response.identity.clone());
-    state.read_ticket = Some(response.read_ticket.clone());
-    // 单页响应只推进它负责的那一端：before 页的 `afterCursor` 描述的是该页最新行，
-    // 不代表驻留窗口的更晚边界；反向游标由 bridge 在 admission/release 后按驻留
-    // 边缘段重算（[`note_window_cursors`]）。缺口内的 seek 不触碰窗口外边界。
-    match &current.kind {
-        WindowInFlightKind::Open { .. } => {
-            state.before_cursor = response.before_cursor.clone();
-            state.after_cursor = response.after_cursor.clone();
-        }
-        WindowInFlightKind::Page {
-            cursor: WindowPageCursor::Before(_),
-            ..
-        } => {
-            state.before_cursor = response.before_cursor.clone();
-        }
-        WindowInFlightKind::Page {
-            cursor: WindowPageCursor::After(_),
-            ..
-        } => {
-            state.after_cursor = response.after_cursor.clone();
-        }
-        WindowInFlightKind::Seek { .. } if current.context.gap.is_some() => {}
-        WindowInFlightKind::Seek { .. } => {
-            if response.before_cursor.is_some() {
-                state.before_cursor = response.before_cursor.clone();
-            }
-            if response.after_cursor.is_some() {
-                state.after_cursor = response.after_cursor.clone();
-            }
-        }
-    }
+    let boundary = ReceivedPageBoundary::from_response(&state, &current, response);
     if is_open {
         // 成功的 open 是唯一能把 consumer 从 Degraded 拉回 Ready 的路径。
         state.status = WindowPagingStatus::Ready;
         state.last_error = None;
         state.newer_exhausted = false;
     } else if response.items.is_empty()
+        && current.context.gap.is_none()
         && let WindowInFlightKind::Page {
             cursor: WindowPageCursor::After(request_cursor),
             ..
@@ -665,24 +640,44 @@ pub fn settle_window_response(
         state.window_generation = state.window_generation.saturating_add(1);
     }
     if response.items.is_empty() {
+        boundary.commit(&mut state);
         state.last_settled_request_id = Some(current.context.request_id.clone());
         state.reserved_bytes = state
             .reserved_bytes
             .saturating_sub(current.reservation.bytes);
         return WindowSettlement::AcceptedEmpty;
     }
-    state.pending_merge = Some(current.clone());
+    let accepted = Box::new(current.clone());
+    current.received_boundary = Some(boundary);
     state.last_settled_request_id = Some(current.context.request_id.clone());
-    WindowSettlement::Accepted(Box::new(current))
+    state.pending_merge = Some(current);
+    WindowSettlement::Accepted(accepted)
 }
 
 /// bridge 在 admission/release 后按驻留边缘段重算窗口游标。
 ///
 /// 窗口边界不等于单页边界：淘汰端段后，仍驻留的边缘段游标才指向被淘汰区间。
 /// `after` 非空说明下游仍有可读行，旧的“已到末尾”标记必须失效。
-pub(crate) fn note_window_cursors(before: Option<String>, after: Option<String>) {
+pub(crate) fn note_window_cursors(
+    request_id: Option<&str>,
+    before: Option<String>,
+    after: Option<String>,
+) {
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
+    if let Some(request_id) = request_id {
+        // Admission can evict at the opposite edge. Commit both resulting edges together
+        // only when this exact page is published. A late page cannot move a newer window.
+        if let Some(boundary) = state
+            .pending_merge
+            .as_mut()
+            .filter(|page| page.context.request_id == request_id)
+            .and_then(|page| page.received_boundary.as_mut())
+        {
+            boundary.stage_resident_edges(before, after);
+        }
+        return;
+    }
     if state.before_cursor != before {
         state.scroll_before = None;
     }
@@ -697,11 +692,14 @@ pub(crate) fn note_window_cursors(before: Option<String>, after: Option<String>)
 pub fn finish_window_merge(request_id: &str) -> usize {
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
     let mut state = handle.write();
-    let Some(pending) = state.pending_merge.clone() else {
+    let Some(mut pending) = state.pending_merge.clone() else {
         return 0;
     };
     if pending.context.request_id != request_id {
         return 0;
+    }
+    if let Some(boundary) = pending.received_boundary.take() {
+        boundary.commit(&mut state);
     }
     state.scroll_before =
         super::triggers::published_before_cursor(&pending, state.before_cursor.as_ref());

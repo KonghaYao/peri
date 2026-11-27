@@ -244,6 +244,10 @@ pub(in super::super) fn handle_window_page_loaded(
     if !context.is_open {
         sync_window_anchor_from_viewport(state);
     }
+    // The previous page may already be on screen since its publication sampled the budget.
+    state
+        .window
+        .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
 
     match state
         .window
@@ -491,10 +495,14 @@ pub(in super::super) fn handle_window_page_loaded(
             // 空页已由 consumer 按方向清空游标（EOF/无更多行）；再按驻留边缘回写会
             // 把该方向重新“点亮”，导致对同一 cursor 无限重试。adopt-only 页同样
             // 不建段：此时布局为空，边缘游标是 `(None, None)`，回写会覆盖
-            // `settle_window_response` 从 open 响应写入的边界。
+            // open 响应将在 finish_window_merge 时提交的边界。
             if !response.items.is_empty() && state.window.segment_count() > 0 {
                 let (edge_before, edge_after) = state.window.edge_cursors();
-                history_page_consumer::note_window_cursors(edge_before, edge_after);
+                history_page_consumer::note_window_cursors(
+                    Some(&context.request_id),
+                    edge_before,
+                    edge_after,
+                );
             }
             crate::kit::history_window::publish_window_viewport(&state.window);
             crate::kit::history_paging::publish_window_gap_request(&state.window);

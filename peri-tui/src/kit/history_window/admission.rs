@@ -119,6 +119,7 @@ pub enum AdmissionRejectionReason {
     },
     MissingReservation,
     PendingMergeLimit,
+    AwaitingReleaseAck,
     PlacementUnavailable,
     InvalidSegment(WindowModelError),
     PageExceedsBudget {
@@ -297,42 +298,31 @@ impl HistoryWindow {
                 reservation_released: true,
             });
         }
-        let mut released = Vec::new();
-        if !self.budget.has_body_capacity_for(incoming_body) {
+        let releases = if self.budget.has_body_capacity_for(incoming_body) {
+            Vec::new()
+        } else {
+            if self.pending_release_bytes() > 0 {
+                // Another publication already detached rows. Wait for its render ACK before
+                // choosing more victims; this page can be retried on its original cursor.
+                self.stats_mut().admission_blocked += 1;
+                return AdmissionDecision::Rejected(AdmissionRejection {
+                    reason: AdmissionRejectionReason::AwaitingReleaseAck,
+                    released: Vec::new(),
+                    reservation_released: true,
+                });
+            }
             let plan = self.plan_eviction(incoming_body);
-            if plan.blocked.is_some() || plan.freed_body_bytes < plan.needed_body_bytes {
+            if let Some(blocked) = plan.blocked {
                 self.stats_mut().evict_blocked_pinned += 1;
                 self.stats_mut().admission_blocked += 1;
-                let blocked = plan.blocked.unwrap_or_else(|| EvictionBlocked {
-                    needed_body_bytes: plan.needed_body_bytes,
-                    freed_body_bytes: plan.freed_body_bytes,
-                    pinned: self.pinned_report(),
-                });
                 return AdmissionDecision::Rejected(AdmissionRejection {
                     reason: AdmissionRejectionReason::EvictionBlocked(blocked),
                     released: Vec::new(),
                     reservation_released: true,
                 });
             }
-            for release in &plan.plans {
-                if let Some(applied) = self.apply_release_plan(release) {
-                    released.push(applied.plan);
-                }
-            }
-            if !self.budget.has_body_capacity_for(incoming_body) {
-                self.stats_mut().evict_blocked_pinned += 1;
-                self.stats_mut().admission_blocked += 1;
-                return AdmissionDecision::Rejected(AdmissionRejection {
-                    reason: AdmissionRejectionReason::EvictionBlocked(EvictionBlocked {
-                        needed_body_bytes: plan.needed_body_bytes,
-                        freed_body_bytes: plan.freed_body_bytes,
-                        pinned: self.pinned_report(),
-                    }),
-                    released,
-                    reservation_released: true,
-                });
-            }
-        }
+            plan.plans
+        };
         let mut segments = Vec::with_capacity(draft.segments.len());
         let mut next_placement = placement;
         for segment in draft.segments {
@@ -345,7 +335,7 @@ impl HistoryWindow {
                     self.stats_mut().admission_blocked += 1;
                     return AdmissionDecision::Rejected(AdmissionRejection {
                         reason: AdmissionRejectionReason::InvalidSegment(error),
-                        released,
+                        released: Vec::new(),
                         reservation_released: true,
                     });
                 }
@@ -362,6 +352,14 @@ impl HistoryWindow {
             }
             self.gaps.remove(&gap_id);
             self.rebuild_slots();
+        }
+        // Register at the validated placement while its neighboring segment still exists.
+        // Under pressure that very neighbor may be a victim (e.g. a one-page window).
+        let mut released = Vec::with_capacity(releases.len());
+        for release in &releases {
+            if let Some(applied) = self.apply_release_plan(release) {
+                released.push(applied.plan);
+            }
         }
         self.pending_merge = Some(PendingMerge {
             request_id: draft.request_id,
@@ -466,9 +464,10 @@ impl HistoryWindow {
         }
         let current = self.budget.total_resident_body_bytes();
         let target = self.budget.release_target_bytes(incoming_body_bytes);
+        // A page may itself exceed the release watermark while still fitting the hard limit.
         let needed = current
             .saturating_add(incoming_body_bytes)
-            .saturating_sub(target);
+            .saturating_sub(target.max(incoming_body_bytes));
         if needed == 0 {
             return EvictionPlan::default();
         }
@@ -569,21 +568,22 @@ impl HistoryWindow {
         // 计划里的槽位是决策时快照；同一轮多次释放会移动后面的段，应用时重新取一次。
         let mut applied_plan = plan.clone();
         applied_plan.slot_range = self.index().slot_range(plan.segment);
+        (applied_plan.before, applied_plan.after) = self.neighbor_entries(plan.segment);
         // gap 的回读入口必须取**内侧邻居**的游标：更晚邻居的 before 游标用于从缺口
         // 上端向下补，更早邻居的 after 游标用于从缺口下端向上补。被淘汰段自己的外侧
         // 游标指向更远处，无法回填它自身。
         let (earlier_after, later_before) = self.neighbor_cursors(plan.segment);
         let (segment, position) = self.detach_segment(plan.segment)?;
         let gap_id = self.next_gap_id();
-        let placeholder = if plan.before.is_none() {
+        let placeholder = if applied_plan.before.is_none() {
             GapPlaceholder::OlderHistory
         } else {
             GapPlaceholder::MissingMiddle
         };
         let gap = HistoryGap::new(
             gap_id,
-            plan.before.clone(),
-            plan.after.clone(),
+            applied_plan.before.clone(),
+            applied_plan.after.clone(),
             later_before,
             earlier_after,
             segment.source.clone(),

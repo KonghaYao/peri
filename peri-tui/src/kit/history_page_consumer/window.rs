@@ -13,6 +13,7 @@ use crate::kit::history_paging::{
     self, WINDOW_DEFAULT_BYTE_BUDGET, WINDOW_PAGE_LIMIT, WindowDirection, WindowPageCursor,
 };
 
+mod boundary;
 mod window_consumer;
 pub use window_consumer::*;
 

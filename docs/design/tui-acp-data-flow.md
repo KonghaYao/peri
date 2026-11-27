@@ -152,7 +152,7 @@ GenUI 按钮在有效的左键 Down 上立即分发动作。按下态仅属于�
    （page(After) 从缺口下端回填）；相邻 gap 合并。翻到 gap 时按滚动方向选择 page，锚点在
    中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
 7. 窗口边界游标由**驻留布局两端段**派生（最早段的 `beforeCursor`、最晚段的 `afterCursor`），
-   在每次 admission/release 后重算并写入 consumer；单页响应只推进它负责的那一端。淘汰端段后，
+   每个非空响应的边界和读票据随当前请求暂存，成功并页后按实际驻留边缘提交。等待渲染释放确认导致接纳失败时，下一次读取仍使用同一游标和票据。空页可直接提交对应方向的边界。淘汰端段后，
    新的边缘段游标天然指向被淘汰区间，`request_window_newer_page_if_due` /
    `request_window_older_page_if_due` 据此继续双向翻页。
 8. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
