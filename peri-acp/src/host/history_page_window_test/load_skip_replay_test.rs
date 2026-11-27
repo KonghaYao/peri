@@ -224,6 +224,8 @@ async fn stop_and_close_interrupt_blocked_first_context_read() {
         .await
         .unwrap();
     let generation = sessions.lock().await[&sid].session_generation;
+    // 刻意返回 JoinHandle 而非 await 结果：测试需要在 cancel 之后才等待该请求收尾。
+    #[allow(clippy::async_yields_async)]
     let start_blocked_prompt = |request_id: &'static str| {
         let client = Arc::clone(&client);
         let sid = sid.clone();

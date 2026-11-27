@@ -139,7 +139,6 @@ fn history_page_preserves_cold_geometry_hot_lines_and_relocates_after_release() 
         changed_from: tail,
         prepend_epoch: 2,
         structural_epoch: original_epoch + 1,
-        ..Default::default()
     };
     let live = transcript.prepare(
         &snap,
