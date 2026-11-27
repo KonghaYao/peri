@@ -62,6 +62,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   必须落在虚拟根内，workspace 登记与准入语义不在 `peri-swarm` 复制一份；相关边界见
   [存储 v2](storage-v2-machine-workspace-session.md)。`peri-swarm` 不新增通用 SQL
   端口，只通过窄的 `SwarmStore` 端口读写 Swarm 事实。
+- 每个 `peri-swarm` 进程只有一份会话存储门面/池：bootstrap 打开的部署级业务句柄由所有
+  ACP child 共享，部署持有唯一关闭权，child 不关闭共享存储；本地 SQLite 部署仍按 child
+  各自打开。见 [1000 并发验收记录](../verification/peri-swarm-1000-concurrent-sessions-2026-11-27.md)。
 
 ## 3. 身份
 
@@ -752,6 +755,10 @@ PostgreSQL：
 - 两个库都由部署提供 PostgreSQL 连接串：会话库交给 Peri 会话存储，状态库交给
   `store::postgres::SwarmStateStore`。DSN 可带 TLS 参数（SQLx rustls），日志与错误只
   渲染 `postgres://host:port/db`，不含凭据。
+- 会话库连接池上限由部署选择：单 facade 默认 **2**（TUI/CLI/stdio 行为不变），Swarm
+  传 **32**。默认 `max_connections=100` 下两副本预算为
+  `2 × (32 + 8) + 3 = 83 ≤ 100`（8 是状态库池上限，3 是 PostgreSQL 保留槽）。32 是
+  上限不是预留，`min_connections(0)` 使空闲池回落到 0；重连沿用打开时的策略。
 - 状态库首次启动自动建表；`swarm_meta` 记录 engine `postgres` 与 contract
   `peri.swarm.postgres/v1`，因此把 Loom/SQLite 文件或会话库误指过来都会显式失败。
 - 从 Loom 割接不做自动迁移，网关不读取旧库文件；需要保留旧状态库内容时停写后取只读
@@ -842,8 +849,13 @@ Bun：
 2. **跨故障域恢复**：这里覆盖仅有 Rust 宿主退出的情形。Bun、PostgreSQL 与宿主同时失效以及滚动部署仍需独立验证。
 3. **真实部署模型任务**：模型侧全部为确定性 stub；真实供应商的 tool call、长任务
    与多轮副作用未验收。
-4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
-   多副本压力证据；actor 的并发 SSE 观看者与 engine 池容量都未经真实压力验证。
+4. **1000 Agent 规模与单 engine 容量**：已有 1000 个空 session 的实测：修复前
+   943/1000 创建失败（502，PostgreSQL 连接耗尽），根因是每个 ACP child 独立打开会话
+   存储；修复改为每进程共享门面/池并把 Swarm 池上限设为 32，见
+   [验收记录](../verification/peri-swarm-1000-concurrent-sessions-2026-11-27.md)。
+   修复后复测：1000/1000 成功，7.08s，网关会话库连接 32+32、未出现
+   `too many clients already`；旧 943 个 `creating` 未清理。actor 的并发 SSE 观看者、
+   单 engine 节点容量、1000 个同时执行 turn 的 Agent 吞吐与长时内存仍无证据。
 5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；非 loopback 绑定（含
    `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关，启动时输出 WARN；
    Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。Rivet endpoint

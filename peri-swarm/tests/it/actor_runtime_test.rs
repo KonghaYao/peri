@@ -875,6 +875,7 @@ async fn idle_mq_dispatch_produces_a_turn() {
             mcp_tools: Vec::new(),
             workspace: None,
             root_session_id: uuid(40),
+            session_resources: None,
         },
         Arc::clone(&log),
     )

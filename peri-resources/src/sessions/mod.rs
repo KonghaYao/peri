@@ -30,6 +30,7 @@ mod storage_v2_plan;
 // 「凭证来源不可用」，但凭证类型不进公共 API，也不向消费侧暴露 SDK 类型或凭证值。
 pub(crate) use remote::open_remote_in_environment;
 pub use remote::RemoteWorkspaceEnvironment;
+pub use remote::SessionStorePoolPolicy;
 pub(crate) use remote::{open_remote, CredentialError, RemoteEndpoint};
 mod resources;
 mod sqlite_store;

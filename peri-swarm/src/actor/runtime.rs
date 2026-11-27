@@ -36,9 +36,9 @@ use peri_acp::transport::mpsc::{mpsc_transport_pair, MpscClientTransport};
 use peri_acp::transport::types::{AcpError, IncomingMessage};
 use peri_acp::transport::AcpTransport;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 pub use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_resources::RemoteWorkspaceEnvironment;
-use peri_resources::Resources;
+use peri_resources::{RemoteWorkspaceEnvironment, Resources, SessionStoreShutdownOwner};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
@@ -66,7 +66,7 @@ pub const WORKSPACE_MCP_SERVER_NAME: &str = "workspace";
 const META_SWARM_SANDBOX: &str = "peri.swarmSandbox";
 
 /// Everything one child needs that the service already validated.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChildConfig {
     /// Canonical absolute working directory; also the host `startup_cwd`.
     pub cwd: PathBuf,
@@ -94,6 +94,34 @@ pub struct ChildConfig {
     pub workspace: Option<SandboxMcpBinding>,
     /// Reserved root session id (UUIDv7) handed to `session/new`.
     pub root_session_id: String,
+    /// Deployment-owned session-store business handle.
+    ///
+    /// `Some` means every child of this deployment shares one facade and pool;
+    /// the handle is used as-is and the child holds **no** close right. `None`
+    /// keeps the per-child open path (local SQLite in this deployment).
+    pub session_resources: Option<Arc<dyn SessionResources>>,
+}
+
+impl std::fmt::Debug for ChildConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildConfig")
+            .field("cwd", &self.cwd)
+            .field("session_store", &self.session_store)
+            .field("machine_id", &self.machine_id)
+            .field("workspace_root", &self.workspace_root)
+            .field("settings_json", &self.settings_json)
+            .field("model", &self.model)
+            .field("instructions", &self.instructions)
+            .field("mcp_tools", &self.mcp_tools)
+            .field("workspace", &self.workspace)
+            .field("root_session_id", &self.root_session_id)
+            .field(
+                "shared_session_resources",
+                &self.session_resources.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// One failure surface for child construction and RPC calls.
@@ -140,18 +168,61 @@ pub fn local_session_store(path: Option<PathBuf>) -> SessionStoreDeployment {
     }
 }
 
-/// Open the child's session store for the configured deployment.
+/// Resolved session store for one child: business handle plus, only when this
+/// child opened the store itself, its close right.
+struct ResolvedSessionResources {
+    resources: Arc<dyn SessionResources>,
+    /// `None` when the deployment injected a shared handle: a child never owns
+    /// the process-wide pool's close right.
+    shutdown: Option<SessionStoreShutdownOwner>,
+}
+
+impl std::fmt::Debug for ResolvedSessionResources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedSessionResources")
+            .field("owns_shutdown", &self.shutdown.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Resolve the child's session store for the configured deployment.
 ///
-/// - no remote identity ⇒ the existing local `Resources::open_deployment`
-///   (S4/S5 default, unchanged);
-/// - `machine_id` **and** `workspace_root` ⇒ the remote PostgreSQL store with a
-///   virtual workspace identity (`design §4.1`);
-/// - exactly one of the two ⇒ an explicit error. Falling back to the local
-///   SQLite file here would write Swarm facts to a second database.
-async fn open_session_resources(config: &ChildConfig) -> Result<Resources, ChildError> {
-    match (config.machine_id, config.workspace_root.as_ref()) {
-        (None, None) => Resources::open_deployment(&config.session_store).await,
-        (Some(machine_id), Some(root)) => {
+/// 1. Validate the remote identity first: exactly one of `machine_id` /
+///    `workspace_root` is an explicit error even when a shared handle exists,
+///    because a half-configured identity must never be papered over by an
+///    injected facade.
+/// 2. Injected deployment handle ⇒ clone it and open nothing. The close right
+///    stays with the deployment.
+/// 3. No injected handle ⇒ the existing per-child open:
+///    - no remote identity ⇒ `Resources::open_deployment` (local SQLite);
+///    - `machine_id` **and** `workspace_root` ⇒ the remote PostgreSQL store
+///      with a virtual workspace identity (`design §4.1`);
+///    - exactly one of the two ⇒ an explicit error. Falling back to the local
+///      SQLite file would write Swarm facts to a second database.
+async fn resolve_session_resources(
+    config: &ChildConfig,
+) -> Result<ResolvedSessionResources, ChildError> {
+    let identity = match (config.machine_id, config.workspace_root.as_ref()) {
+        (None, None) => None,
+        (Some(machine_id), Some(root)) => Some((machine_id, root)),
+        _ => {
+            return Err(ChildError::Local(
+                "remote session store requires both machine_id and workspace_root; \
+                 refusing to open the local store"
+                    .to_owned(),
+            ));
+        }
+    };
+    if let Some(shared) = config.session_resources.as_ref() {
+        return Ok(ResolvedSessionResources {
+            resources: Arc::clone(shared),
+            shutdown: None,
+        });
+    }
+    let resources = match identity {
+        None => Resources::open_deployment(&config.session_store).await,
+        Some((machine_id, root)) => {
             let environment = RemoteWorkspaceEnvironment::virtual_workspace(
                 &machine_id.to_string(),
                 root.clone(),
@@ -162,15 +233,13 @@ async fn open_session_resources(config: &ChildConfig) -> Result<Resources, Child
             Resources::open_deployment_in_remote_environment(&config.session_store, environment)
                 .await
         }
-        _ => {
-            return Err(ChildError::Local(
-                "remote session store requires both machine_id and workspace_root; \
-                 refusing to open the local store"
-                    .to_owned(),
-            ));
-        }
     }
-    .map_err(|error| ChildError::Local(format!("{error:#}")))
+    .map_err(|error| ChildError::Local(format!("{error:#}")))?;
+    let (resources, shutdown) = resources.into_parts();
+    Ok(ResolvedSessionResources {
+        resources,
+        shutdown: Some(shutdown),
+    })
 }
 
 /// Stable shape of the host shutdown report, without re-exporting peri-acp types.
@@ -440,8 +509,9 @@ impl AcpChild {
             _ => provider,
         };
 
-        let resources = open_session_resources(&config).await?;
-        let (session_resources, session_store_shutdown) = resources.into_parts();
+        let resolved = resolve_session_resources(&config).await?;
+        let session_resources = resolved.resources;
+        let session_store_shutdown = resolved.shutdown;
         if entry == SessionEntry::Interrupted {
             // Ordinary prompts also set working before calling the model. A
             // dead synchronous attempt has no owner to settle it. This store
@@ -460,9 +530,13 @@ impl AcpChild {
             }
             .await;
             if let Err(error) = settlement {
-                use peri_acp_types::session_resources::SessionStoreShutdownPort;
-                if let Err(close_error) = session_store_shutdown.shutdown().await {
-                    tracing::warn!(%close_error, "failed closing interrupted session resources");
+                if let Some(shutdown) = session_store_shutdown.as_ref() {
+                    if let Err(close_error) = shutdown.shutdown().await {
+                        tracing::warn!(
+                            %close_error,
+                            "failed closing interrupted session resources"
+                        );
+                    }
                 }
                 return Err(error);
             }
@@ -482,7 +556,11 @@ impl AcpChild {
                 permission_mode,
                 session_resources,
                 workspace_id: None,
-                session_store_shutdown: Some(Box::new(session_store_shutdown)),
+                // HARD CONTRACT: an injected shared handle carries no close
+                // right. Passing `Some` here would let the first child that
+                // exits close the process-wide pool for every other session.
+                session_store_shutdown: session_store_shutdown
+                    .map(|shutdown| Box::new(shutdown) as Box<dyn SessionStoreShutdownPort>),
                 cwd: cwd.clone(),
                 // `design §0.4-5`: bare would only take over `workspace`, which
                 // blocks the future remote workspace injection. The host is

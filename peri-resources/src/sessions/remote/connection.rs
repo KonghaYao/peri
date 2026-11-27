@@ -10,6 +10,7 @@ use peri_acp_types::session_resources::SessionResourceResult;
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::failure::{self, RemoteFailureClass};
+use super::pool_policy::SessionStorePoolPolicy;
 use super::sql::{StatementSpec, Value};
 
 #[path = "native_postgres.rs"]
@@ -73,8 +74,9 @@ pub(super) async fn within_budget<T>(
 pub(super) async fn connect(
     endpoint: &RemoteEndpoint,
     credential: &SessionStoreCredential,
+    pool_policy: SessionStorePoolPolicy,
 ) -> SessionResourceResult<Arc<dyn RemoteTransport>> {
-    native::connect(endpoint, credential).await
+    native::connect(endpoint, credential, pool_policy).await
 }
 
 #[async_trait]

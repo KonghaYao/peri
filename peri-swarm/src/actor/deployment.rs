@@ -15,6 +15,8 @@
 
 use std::sync::{Arc, OnceLock};
 
+use peri_acp_types::session_resources::SessionResources;
+
 use super::service::ActorServiceConfig;
 use crate::store::SwarmStore;
 
@@ -26,6 +28,16 @@ use crate::store::SwarmStore;
 pub trait ActorDeployment: Send + Sync {
     fn store(&self) -> Arc<dyn SwarmStore>;
     fn service_config(&self) -> ActorServiceConfig;
+
+    /// Deployment-owned session-store business handle.
+    ///
+    /// Every ACP child clones this handle instead of opening its own facade and
+    /// connection pool. The deployment keeps the only close right; children
+    /// never shut the shared store down. `None` keeps the per-child open path
+    /// (local SQLite, tests, standalone actors).
+    fn session_resources(&self) -> Option<Arc<dyn SessionResources>> {
+        None
+    }
 }
 
 static DEPLOYMENT: OnceLock<Arc<dyn ActorDeployment>> = OnceLock::new();
@@ -44,16 +56,33 @@ pub fn current_deployment() -> Option<Arc<dyn ActorDeployment>> {
     DEPLOYMENT.get().cloned()
 }
 
-/// Deployment with one shared store and one service configuration.
+/// Deployment with one shared store, one service configuration and an optional
+/// deployment-owned session-store handle.
 pub struct StaticDeployment {
     store: Arc<dyn SwarmStore>,
     config: ActorServiceConfig,
+    session_resources: Option<Arc<dyn SessionResources>>,
 }
 
 impl StaticDeployment {
     #[must_use]
     pub fn new(store: Arc<dyn SwarmStore>, config: ActorServiceConfig) -> Arc<Self> {
-        Arc::new(Self { store, config })
+        Self::new_with_session_resources(store, config, None)
+    }
+
+    /// Install with the deployment's session-store business handle so every
+    /// ACP child shares one facade and pool.
+    #[must_use]
+    pub fn new_with_session_resources(
+        store: Arc<dyn SwarmStore>,
+        config: ActorServiceConfig,
+        session_resources: Option<Arc<dyn SessionResources>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            config,
+            session_resources,
+        })
     }
 }
 
@@ -62,6 +91,10 @@ impl std::fmt::Debug for StaticDeployment {
         formatter
             .debug_struct("StaticDeployment")
             .field("config", &self.config)
+            .field(
+                "shared_session_resources",
+                &self.session_resources.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -73,5 +106,9 @@ impl ActorDeployment for StaticDeployment {
 
     fn service_config(&self) -> ActorServiceConfig {
         self.config.clone()
+    }
+
+    fn session_resources(&self) -> Option<Arc<dyn SessionResources>> {
+        self.session_resources.as_ref().map(Arc::clone)
     }
 }

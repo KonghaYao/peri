@@ -12,10 +12,11 @@
 //!    different databases (the same instance is fine); a failure to open either
 //!    one stops the process instead of reusing the other.
 //!
-//! The installed [`StaticDeployment`] carries the Swarm state store, so the
-//! gateway and every actor read and write Swarm facts there. Actor children
-//! still open their own Peri session store from
-//! [`SessionStoreDeployment`](crate::actor::runtime::SessionStoreDeployment).
+//! The installed [`StaticDeployment`] carries the Swarm state store and the
+//! deployment's session-store business handle, so the gateway and every actor
+//! read and write Swarm facts there and every ACP child shares one session
+//! store facade and PostgreSQL pool. The process holds the only close right;
+//! children never close the shared store.
 //!
 //! 3. the **Rivet registry** that serves [`crate::actor::SwarmActor`] and the
 //!    **axum gateway** ([`crate::http::build_router`]). Both run on one shared
@@ -24,7 +25,7 @@
 //!
 //! This stage does not require a contactable database or a real model: the entry
 //! must fail visibly when either remote configuration is missing, and every
-//! actor child opens its own remote session store from the same deployment.
+//! actor child shares the deployment's remote session-store handle.
 //!
 //! Environment (secrets are only read by name, never rendered):
 //!
@@ -57,7 +58,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peri_acp_types::session_resources::SessionStoreShutdownPort;
-use peri_resources::{RemoteWorkspaceEnvironment, Resources};
+use peri_resources::{RemoteWorkspaceEnvironment, Resources, SessionStorePoolPolicy};
 use rivetkit::client::{Client, ClientConfig};
 use rivetkit::{EngineSpawnMode, ServeConfig};
 use tokio::net::TcpListener;
@@ -632,12 +633,23 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         machine_id = %config.machine_id,
         "opening the remote Peri session store"
     );
-    let resources = Resources::open_deployment_in_remote_environment(
+    // One deployment-wide session-store facade serves every ACP child. Connection
+    // budget with PostgreSQL's default max_connections=100:
+    //   2 replicas × (32 session + 8 state) + 3 reserved = 83 ≤ 100.
+    // 32 is a cap, not a reservation (`min_connections(0)`): an idle pool
+    // returns its connections. The single-facade default stays 2.
+    let resources = Resources::open_deployment_in_remote_environment_with_pool(
         &config.session_store_deployment(),
         environment,
+        SessionStorePoolPolicy::new(32),
     )
     .await
     .map_err(|error| BootstrapError::StoreOpen(format!("{error:#}")))?;
+
+    // The process keeps the close right for both stores and hands the session
+    // store's business handle to the deployment: every ACP child clones it
+    // instead of opening its own facade and PostgreSQL pool.
+    let (session_resources, store_shutdown) = resources.into_parts();
 
     // S6c1a: the Swarm facts live in their own database. Failing to open it
     // closes the session store that was already opened and stops the process;
@@ -650,7 +662,6 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
     let state_store = match SwarmStateStore::open(&config.state_store_config()).await {
         Ok(store) => Arc::new(store),
         Err(error) => {
-            let (_session_resources, store_shutdown) = resources.into_parts();
             if let Err(close_error) = store_shutdown.shutdown().await {
                 tracing::warn!(
                     error = %close_error,
@@ -661,15 +672,16 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         }
     };
 
-    // The process keeps the close right for both stores; actors open their own
-    // session store from the deployment.
-    let (_session_resources, store_shutdown) = resources.into_parts();
     let store: Arc<dyn SwarmStore> = state_store.clone();
 
     if crate::actor::deployment::current_deployment().is_some() {
         tracing::debug!("a swarm deployment was already installed; the first install wins");
     }
-    let deployment = install_deployment(StaticDeployment::new(store, config.actor_config()));
+    let deployment = install_deployment(StaticDeployment::new_with_session_resources(
+        store,
+        config.actor_config(),
+        Some(Arc::clone(&session_resources)),
+    ));
     let store = deployment.store();
 
     let client = Client::new(

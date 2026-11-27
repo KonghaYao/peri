@@ -17,6 +17,7 @@ use super::endpoint::RemoteEndpoint;
 use super::environment::RemoteWorkspaceEnvironment;
 use super::execution::RemoteExecution;
 use super::mutation::StoreAccess;
+use super::pool_policy::SessionStorePoolPolicy;
 use super::session_data::RemoteSessionData;
 
 /// 打开远程会话存储并装配门面。
@@ -34,6 +35,7 @@ pub(crate) async fn open_remote(
         credential,
         access,
         RemoteWorkspaceEnvironment::Native,
+        SessionStorePoolPolicy::default(),
     )
     .await
 }
@@ -43,19 +45,27 @@ pub(crate) async fn open_remote_in_environment(
     credential: &SessionStoreCredential,
     access: AccessMode,
     environment: RemoteWorkspaceEnvironment,
+    pool_policy: SessionStorePoolPolicy,
 ) -> Result<Arc<SessionResourcesImpl>> {
     let environment = environment.validated()?;
     let machine_id = match &environment {
         RemoteWorkspaceEnvironment::Native => None,
         _ => Some(environment.machine_id()?),
     };
-    open_remote_with(endpoint, credential, access, machine_id, |data, access| {
-        Ok(Arc::new(RemoteExecution::new_in_environment(
-            data,
-            access == AccessMode::ReadOnly,
-            environment,
-        )))
-    })
+    open_remote_with(
+        endpoint,
+        credential,
+        access,
+        machine_id,
+        pool_policy,
+        |data, access| {
+            Ok(Arc::new(RemoteExecution::new_in_environment(
+                data,
+                access == AccessMode::ReadOnly,
+                environment,
+            )))
+        },
+    )
     .await
 }
 
@@ -68,16 +78,18 @@ pub(super) async fn open_remote_with<F>(
     credential: &SessionStoreCredential,
     access: AccessMode,
     machine_id: Option<String>,
+    pool_policy: SessionStorePoolPolicy,
     execution_factory: F,
 ) -> Result<Arc<SessionResourcesImpl>>
 where
     F: FnOnce(Arc<RemoteSessionData>, AccessMode) -> Result<Arc<dyn LocalExecutionPort>>,
 {
-    let (data, _initialization) = RemoteSessionData::open_with_machine(
+    let (data, _initialization) = RemoteSessionData::open_with_machine_and_policy(
         endpoint,
         credential,
         StoreAccess::of(access),
         machine_id,
+        pool_policy,
     )
     .await?;
     let data = Arc::new(data);

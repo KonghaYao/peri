@@ -19,6 +19,7 @@ use super::endpoint::RemoteEndpoint;
 use super::failure::{self, RemoteFailureClass};
 use super::generation::ConnectionGate;
 use super::ledger::{self, LedgerRow, OperationId, OperationIdentity, Receipt};
+use super::pool_policy::SessionStorePoolPolicy;
 use super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
 use super::sql::StatementSpec;
 
@@ -243,7 +244,9 @@ impl RemoteStore {
         credential: &SessionStoreCredential,
         access: StoreAccess,
     ) -> Result<Self, SessionResourceError> {
-        let connection = super::connection::connect(endpoint, credential).await?;
+        let connection =
+            super::connection::connect(endpoint, credential, SessionStorePoolPolicy::default())
+                .await?;
         let gate = Arc::new(ConnectionGate::default());
         Ok(Self::new(connection, access, gate.mint(), gate))
     }

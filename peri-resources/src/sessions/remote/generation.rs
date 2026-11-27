@@ -25,6 +25,7 @@ use peri_acp_types::session_resources::SessionResourceResult;
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::mutation::{RemoteStore, StoreAccess};
+use super::pool_policy::SessionStorePoolPolicy;
 
 /// 连接代际门禁：当前服务的是哪一代、失效事实已经累积到哪一代。
 ///
@@ -123,12 +124,15 @@ pub(super) trait ConnectionFactory: Send + Sync {
     async fn connect(&self) -> SessionResourceResult<RemoteStore>;
 }
 
-/// 生产工厂：端点、凭证与访问意图在装配时定死，重建不改变它们。
+/// 生产工厂：端点、凭证、访问意图与池容量在装配时定死，重建不改变它们。
 pub(super) struct RemoteConnectionFactory {
     endpoint: RemoteEndpoint,
     credential: SessionStoreCredential,
     access: StoreAccess,
     gate: Arc<ConnectionGate>,
+    /// Reconnects minted by this factory keep the pool capacity chosen at open
+    /// time; they never fall back to the default cap.
+    pool_policy: SessionStorePoolPolicy,
 }
 
 impl RemoteConnectionFactory {
@@ -137,12 +141,14 @@ impl RemoteConnectionFactory {
         credential: SessionStoreCredential,
         access: StoreAccess,
         gate: Arc<ConnectionGate>,
+        pool_policy: SessionStorePoolPolicy,
     ) -> Self {
         Self {
             endpoint,
             credential,
             access,
             gate,
+            pool_policy,
         }
     }
 }
@@ -150,7 +156,8 @@ impl RemoteConnectionFactory {
 #[async_trait]
 impl ConnectionFactory for RemoteConnectionFactory {
     async fn connect(&self) -> SessionResourceResult<RemoteStore> {
-        let connection = super::connection::connect(&self.endpoint, &self.credential).await?;
+        let connection =
+            super::connection::connect(&self.endpoint, &self.credential, self.pool_policy).await?;
         Ok(RemoteStore::new(
             connection,
             self.access,

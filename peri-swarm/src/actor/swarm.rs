@@ -259,9 +259,10 @@ impl Actor for SwarmActor {
             }
         }
         let store = deployment.store();
-        let service = Arc::new(AcpSwarmService::new(
+        let service = Arc::new(AcpSwarmService::new_with_session_resources(
             Arc::clone(&store),
             deployment.service_config(),
+            deployment.session_resources(),
         ));
         Ok(Self {
             logical_id,

@@ -15,8 +15,8 @@ use sqlx::{Column, Encode, PgPool, Postgres, Row, Type, TypeInfo, ValueRef};
 
 use super::{
     failure, within_budget, Budgeted, RemoteEndpoint, RemoteFailureClass, RemoteTransport,
-    SessionStoreCredential, StatementSpec, TransportError, TransportResult, Value, LOCK_STORE,
-    REQUEST_BUDGET,
+    SessionStoreCredential, SessionStorePoolPolicy, StatementSpec, TransportError, TransportResult,
+    Value, LOCK_STORE, REQUEST_BUDGET,
 };
 
 pub(in super::super) struct PgTransport {
@@ -32,6 +32,7 @@ impl PgTransport {
 pub(super) async fn connect(
     endpoint: &RemoteEndpoint,
     credential: &SessionStoreCredential,
+    pool_policy: SessionStorePoolPolicy,
 ) -> SessionResourceResult<Arc<dyn RemoteTransport>> {
     let mut options: PgConnectOptions = endpoint
         .sdk_url()
@@ -42,8 +43,11 @@ pub(super) async fn connect(
     }
     let pool = PgPoolOptions::new()
         // One facade shares the pool across sessions, workspace and OAuth ports.
-        // A read can proceed alongside the store's serialized mutation.
-        .max_connections(2)
+        // A read can proceed alongside the store's serialized mutation. The cap is
+        // chosen by the deployment: a single facade keeps 2, the Swarm gateway
+        // raises it for many concurrent sessions. `min_connections(0)` keeps the
+        // cap from reserving server slots.
+        .max_connections(pool_policy.max_connections())
         .min_connections(0)
         .acquire_timeout(REQUEST_BUDGET)
         .after_connect(|conn, _| Box::pin(async move {

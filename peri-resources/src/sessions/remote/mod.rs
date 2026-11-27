@@ -13,6 +13,7 @@ mod postgres_fixture;
 mod composition;
 mod connection;
 mod credentials;
+mod pool_policy;
 mod remote_endpoint;
 use remote_endpoint as endpoint;
 mod remote_workspace_environment;
@@ -57,6 +58,7 @@ pub(crate) use endpoint::{EndpointError, RemoteEndpoint, RemoteEngine};
 pub use environment::RemoteWorkspaceEnvironment;
 #[cfg(test)]
 pub(crate) use failure::RemoteFailureClass;
+pub use pool_policy::SessionStorePoolPolicy;
 
 #[cfg(test)]
 #[path = "remote_test.rs"]
