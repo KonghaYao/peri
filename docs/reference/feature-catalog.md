@@ -225,3 +225,4 @@
 | F-SWARM-013 | L1 | 事件持久化粒度；turn 终止按 item 合并文本与推理，工具与审批逐帧 | [契约](../design/peri-swarm.md) |
 | F-SWARM-014 | L1 | 官方 items 投影；`data` 为官方条目，`items` 保留原始行，恢复行不投影 | [契约](../design/peri-swarm.md) |
 | F-SWARM-015 | L1 | 官方取消；cancel 事件受理、收据后写、首次与重发失败可分 | [契约](../design/peri-swarm.md) |
+| F-SWARM-016 | L1 | 官方文本 delta；实时逐 chunk、回放单条全文，chunk 不落库 | [契约](../design/peri-swarm.md) |

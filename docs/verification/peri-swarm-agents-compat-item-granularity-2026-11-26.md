@@ -6,6 +6,7 @@
 >
 > 相关契约：[peri-swarm.md §4.2 / §4.4 / §5.1 / §9](../design/peri-swarm.md)；
 > [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md)。
+> C=2 官方文本 delta 的验收见[官方文本 delta 验收](peri-swarm-official-text-delta-2026-11-26.md)。
 
 ## 1. 基线与范围
 

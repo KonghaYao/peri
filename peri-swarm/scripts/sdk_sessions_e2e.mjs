@@ -1178,7 +1178,7 @@ async function main() {
   recordDifference(
     '官方文本 delta 帧',
     { officialTypes: officialTypes(followUpEvents) },
-    '网关不发送 output_text.delta；文本通过自定义 item 帧与 item.done 的完整 output_text 表达。',
+    '回放为单条全文 delta，实时为逐 chunk delta；实时与回放 delta 的 event_id 不保证一致。',
   );
 
   const afterFollowUpWait = await waitForSession(
