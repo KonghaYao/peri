@@ -1,12 +1,8 @@
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
 use super::*;
-use crate::actor::reader::{ItemLog, TurnOutcome};
-use crate::domain::{EnvironmentRef, ItemKind, ItemSource, SessionState};
-use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore, SwarmTurnRow};
+use crate::domain::{ItemKind, ItemSource};
+use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmTurnRow};
 
 async fn append(
     store: &MemorySwarmStore,
@@ -737,69 +733,57 @@ async fn a_deep_lookback_stops_at_the_page_cap_and_keeps_raw_rows() {
     assert_eq!(store.items_before_calls(), MAX_TURN_LOOKBACK_PAGES);
 }
 
-fn log_session_row() -> SwarmSessionRow {
-    SwarmSessionRow {
-        logical_id: "agent-01".into(),
-        root_session_id: "0192f0c5-0000-7000-8000-000000000001".into(),
-        actor_key: "agent/agent-01".into(),
-        cwd: "/tmp".into(),
-        state: SessionState::Idle,
-        model: None,
-        instructions: None,
-        mcp_tools: Vec::new(),
-        environment: EnvironmentRef::none(),
-        metadata: Default::default(),
-        prompt_cache_options: None,
-        created_at: "2026-01-01T00:00:00Z".into(),
-        last_activity_at: "2026-01-01T00:00:00Z".into(),
-        last_item_seq: 0,
-    }
-}
-
-async fn stream_chunk(log: &ItemLog, kind: &str, message_id: &str, text: &str) {
-    log.ingest(
-        "session/update",
-        &json!({
-            "sessionId": "sess-01",
-            "update": {
-                "sessionUpdate": kind,
-                "messageId": message_id,
-                "content": { "type": "text", "text": text },
-            },
-        }),
-    )
-    .await;
-}
-
 #[tokio::test]
 async fn multi_generation_streams_project_the_first_completion_plus_late_deltas() {
-    // 真实写入器形状（`ItemLog` + `MemorySwarmStore`）：
+    // 历史写入器形状（同一 itemId 的多代 flush）：
     //   delta "hel" → complete "hel"（第一次 flush）→
-    //   delta "lo"（迟到 chunk，保留同一 itemId）→ complete "lo"（第二次 flush）
+    //   delta "lo"（迟到 chunk）→ complete "lo"（第二次 flush）
     // 第二次 complete 是该代 delta 的累计文本，不是新增文本；再追加会拼出 "hellolo"。
-    let store = Arc::new(MemorySwarmStore::new());
-    store
-        .swarm_upsert_session(log_session_row())
-        .await
-        .expect("session row");
-    let log = ItemLog::new(
-        "agent-01",
-        Arc::clone(&store) as Arc<dyn SwarmStore>,
-        tokio::sync::broadcast::channel(64).0,
-        Arc::new(AtomicU64::new(0)),
-    );
-    let (_, opener) = log
-        .record_user_input(Some("input-1"), "hi")
-        .await
-        .expect("user item");
-    let turn_id = turn_id_for_item(&opener);
-    for (message, thought) in [("hel", "rea"), ("lo", "son")] {
-        // 每代 flush 前先进入该代 turn：同一 messageId 复用同一 itemId。
-        log.begin_turn("prompt-1", &turn_id).await.expect("turn");
-        stream_chunk(&log, "agent_message_chunk", "msg-1", message).await;
-        stream_chunk(&log, "agent_thought_chunk", "msg-2", thought).await;
-        log.finish_turn("prompt-1", TurnOutcome::Completed("end_turn".into()))
-            .await;
+    //
+    // 当前 writer 在 turn 终态 flush 后丢弃迟到 chunk，不再铸造第二代
+    // （`actor/reader.rs` 的 `closed`，由 `reader_test` 覆盖），所以这个形状只能来自
+    // 旧数据。这里直接用 store 构造历史行，投影规则仍需兼容它们。
+    let store = MemorySwarmStore::new();
+    user(&store, 1, "itim_opener").await;
+    turn(&store, "itim_opener", TurnStatus::Completed).await;
+    for (seq, kind, payload) in [
+        (
+            2,
+            ItemKind::Message,
+            json!({"role":"assistant","delta":true,"text":"hel"}),
+        ),
+        (3, ItemKind::Thought, json!({"delta":true,"text":"rea"})),
+        (
+            4,
+            ItemKind::Message,
+            json!({"role":"assistant","complete":true,"text":"hel"}),
+        ),
+        (5, ItemKind::Thought, json!({"complete":true,"text":"rea"})),
+        (
+            6,
+            ItemKind::Message,
+            json!({"role":"assistant","delta":true,"text":"lo"}),
+        ),
+        (7, ItemKind::Thought, json!({"delta":true,"text":"son"})),
+        (
+            8,
+            ItemKind::Message,
+            json!({"role":"assistant","complete":true,"text":"lo"}),
+        ),
+        (9, ItemKind::Thought, json!({"complete":true,"text":"son"})),
+    ] {
+        append(
+            &store,
+            seq,
+            match kind {
+                ItemKind::Message => "itim_message",
+                _ => "itim_thought",
+            },
+            kind,
+            payload,
+            false,
+        )
+        .await;
     }
 
     let page = page(&store, ItemOrder::Asc, None, 20).await;
