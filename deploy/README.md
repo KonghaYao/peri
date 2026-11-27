@@ -41,11 +41,24 @@ chmod 600 config/peri-swarm/settings.json
 $EDITOR config/peri-swarm/settings.json
 ```
 
-如果文件被删了，从示例复制：
+如果文件被删了，先从示例复制，再按上面步骤编辑：
 
 ```bash
 cp config/peri-swarm/settings.example.json config/peri-swarm/settings.json
 ```
+
+在未启用用户命名空间重映射的 rootful Linux 上，Compose 将这个文件型 secret 绑定挂载进
+容器，保留宿主文件的属主和权限。先确认宿主 UID `10001` 没有分配给无关账号；编辑完成
+后、启动之前，将文件属主改为网关的 UID/GID `10001:10001`，保持 `0600`，不要放宽为
+全员可读：
+
+```bash
+sudo chmod 600 config/peri-swarm/settings.json
+sudo chown 10001:10001 config/peri-swarm/settings.json
+```
+
+否则两个副本都可能报 `settings secret not readable`。后续更新若替换了文件，重新设置
+属主和权限再重建容器。
 
 3. 启动：
 

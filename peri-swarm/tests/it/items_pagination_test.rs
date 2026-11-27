@@ -771,66 +771,8 @@ async fn descending_item_pages_advance_strictly_and_terminate() {
     );
 }
 
-#[tokio::test]
-async fn internal_only_page_keeps_items_and_next_cursor() {
-    let harness = harness();
-    let (status, _, _) = send(
-        &harness.router,
-        Method::POST,
-        "/v1/agents/sessions",
-        Some(json!({"logicalId":"agent-01"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    append_row(&harness, 1, "itim_opener", "user", json!({})).await;
-    append_item(
-        &harness,
-        2,
-        "itim_receipt",
-        ItemKind::Receipt,
-        json!({"_raw":true}),
-    )
-    .await;
-    append_item(
-        &harness,
-        3,
-        "itim_approval",
-        ItemKind::Approval,
-        json!({"state":"pending"}),
-    )
-    .await;
-    append_row(
-        &harness,
-        4,
-        "itim_answer",
-        "assistant",
-        json!({"complete":true}),
-    )
-    .await;
-    let (status, _, page) = send(
-        &harness.router,
-        Method::GET,
-        "/v1/agents/sessions/agent-01/items?order=asc&limit=2&after=1",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(seqs(&page), [2, 3]);
-    assert_eq!(page["items"][0]["kind"], "receipt");
-    assert_eq!(page["items"][1]["kind"], "approval");
-    assert_eq!(page["data"], json!([]));
-    assert_eq!(page["has_more"], true);
-    assert_eq!(page["nextCursor"], 3);
-    let uri = format!(
-        "/v1/agents/sessions/agent-01/items?order=asc&limit=2&after={}",
-        page["nextCursor"]
-    );
-    let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(seqs(&page), [4]);
-    assert_eq!(data_ids(&page), ["itim_answer"]);
-    assert_eq!(page["has_more"], false);
-}
+#[path = "items_official_pagination_test.rs"]
+mod official_pagination;
 
 fn item_ids(page: &Value) -> Vec<String> {
     page["items"]

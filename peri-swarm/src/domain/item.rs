@@ -188,9 +188,9 @@ impl ItemsWindow {
 /// One page of persisted items with a stable cursor.
 ///
 /// 分页以条目为单位（`design §4.2`）。`items` 返回选中条目的所有原始行：
-/// 新写入的条目只有一行，历史条目仍可包含多行。`data` 是同一页的官方投影，
-/// 每个可映射条目最多一个元素。`has_more`/`hasMore` 按原始条目计数，
-/// `nextCursor` 指向页尾条目的最大 `seq`。
+/// 新写入的条目只有一行，历史条目仍可包含多行。`data` 是官方投影；原始页不含
+/// 可投影条目时，向后找第一个有投影的页。`has_more`/`hasMore` 按原始条目计数，
+/// `nextCursor` 指向 `items` 页尾条目的最大 `seq`。
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPage {
@@ -230,7 +230,7 @@ impl Serialize for ItemPage {
 }
 
 impl ItemPage {
-    /// `items` 是原始行，`data` 是同一页的官方条目投影。
+    /// `items` 是原始行，`data` 是官方条目投影，必要时取自后续原始页。
     #[must_use]
     pub fn new(
         logical_id: impl Into<String>,

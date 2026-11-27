@@ -473,8 +473,11 @@ function assertOfficialItems(body, label) {
     lastSeq.set(row.itemId, Math.max(lastSeq.get(row.itemId) ?? 0, row.seq));
   }
   const ids = data.map((item) => item.id);
-  check(`${label}: data projects distinct raw item ids`, new Set(ids).size === data.length
-    && ids.every((id) => lastSeq.has(id)), { ids, rawItems: lastSeq.size });
+  const idsInRawPage = ids.filter((id) => lastSeq.has(id));
+  // 原始页没有投影时，data 来自后续页；原始游标仍只描述 items。
+  check(`${label}: data contains distinct item ids from one page`, new Set(ids).size === data.length
+    && (idsInRawPage.length === ids.length || (idsInRawPage.length === 0 && body?.hasMore === true)),
+    { ids, rawItems: lastSeq.size });
   for (const item of data) {
     const outputStatuses = ['in_progress', 'completed', 'incomplete'];
     const callStatuses = [...outputStatuses, 'failed'];
@@ -505,11 +508,13 @@ function assertOfficialItems(body, label) {
     check(`${label}: official item fields`, typeof item.id === 'string' && typeof item.turn_id === 'string'
       && !('seq' in item) && fieldsMatch, { id: item.id, type: item.type });
   }
-  const seqs = ids.map((id) => lastSeq.get(id));
-  const ordered = body?.order === 'desc'
-    ? seqs.every((seq, index) => index === 0 || seq < seqs[index - 1])
-    : seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]);
-  check(`${label}: official items follow the requested order`, ordered, { order: body?.order, ids });
+  if (idsInRawPage.length === ids.length) {
+    const seqs = ids.map((id) => lastSeq.get(id));
+    const ordered = body?.order === 'desc'
+      ? seqs.every((seq, index) => index === 0 || seq < seqs[index - 1])
+      : seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]);
+    check(`${label}: official items follow the requested order`, ordered, { order: body?.order, ids });
+  }
   return { data, rawItemCount: lastSeq.size };
 }
 
@@ -1108,9 +1113,11 @@ async function main() {
       });
     }
   }
-  const sseDeltas = sseItems.filter((item) => item.payload?.delta === true);
-  const sseComplete = sseItems.find((item) => item.payload?.complete === true);
-  const sseDeltaText = sseDeltas.map((item) => item.payload?.text ?? '').join('');
+  // 实时 delta 没有持久游标；只有 item 行参与 seq 和回放比较。
+  const sseDeltas = followUpEvents.filter((event) => event?.type === 'agent.session.turn.output_text.delta');
+  const sseComplete = sseItems.find((item) => item.kind === 'message' && item.payload?.complete === true);
+  const sseDeltaText = sseDeltas.map((event) => event.delta).join('');
+  summary.sse.textDeltaCount = sseDeltas.length;
   check('SSE streamed at least two text deltas', sseDeltas.length >= 2, sseDeltas.length);
   check('SSE ended with a complete message', Boolean(sseComplete), summarizeItems(sseItems));
   check('SSE deltas concatenate to the complete text', sseDeltaText === sseComplete?.payload?.text, {
@@ -1119,8 +1126,8 @@ async function main() {
   });
   check(
     'SSE deltas and the complete item share one item id',
-    sseDeltas.every((item) => item.itemId === sseComplete?.itemId),
-    { complete: sseComplete?.itemId, deltas: sseDeltas.map((item) => item.itemId) },
+    sseDeltas.every((event) => event.item_id === sseComplete?.itemId && event.turn_id === followUpTurnId),
+    { complete: sseComplete?.itemId, deltas: sseDeltas.map((event) => event.item_id) },
   );
   check(
     'assistant item.done id matches the gateway complete item',
@@ -1229,6 +1236,7 @@ async function main() {
   );
   const replayRawGaps = assertNoRawGap(replayRun.events, 'reconnect stream (raw)');
   const replayItems = replayRun.events.filter(isItemFrame);
+  const replayDeltas = replayRun.events.filter((event) => event?.type === 'agent.session.turn.output_text.delta');
   const remainingItems = sseItems.slice(1);
   summary.reconnect = {
     lastEventId: checkpoint,
@@ -1246,6 +1254,14 @@ async function main() {
     { replayed: summarizeItems(replayItems), expected: summarizeItems(remainingItems) },
   );
   assertTerminalTurnIds(replayRun.events, followUpTurnId, 'reconnect stream');
+  check(
+    'SDK reconnect replayed exactly one full-text delta',
+    replayDeltas.length === 1
+      && replayDeltas[0].turn_id === followUpTurnId
+      && replayDeltas[0].item_id === sseComplete?.itemId
+      && replayDeltas[0].delta === sseComplete?.payload?.text,
+    replayDeltas,
+  );
   const replayFinal = assertAssistantFinal(replayRun.events, 'reconnect stream');
   check(
     'SDK reconnect replayed the same assistant item and answer',

@@ -10,12 +10,12 @@ use crate::domain::{
     turn_id_for_item, ErrorCode, ItemKind, ItemOrder, ItemPage, ItemView, ItemsWindow, LogicalId,
     SwarmError, TurnStatus,
 };
-use crate::store::{store_failure, SwarmStore};
+use crate::store::{store_failure, SwarmItemPage, SwarmStore};
 
 /// 单次条目投影回扫最多读取的原始行页数。
 const MAX_TURN_LOOKBACK_PAGES: usize = 10;
 
-/// 每请求允许的 `turn_at_cursor` 回扫次数上限。
+/// 每个原始页投影允许的 `turn_at_cursor` 回扫次数上限。
 ///
 /// 历史多行（item 粒度之前）里根消息流与推理流/子 agent 流按 `seq` 交错，
 /// 页内每个缺口都要回扫到 turn opener。超过上限的缺口放弃精确归属：
@@ -35,23 +35,50 @@ pub(crate) async fn item_page(
         .await
         .map_err(|error| store_failure("item_page", error))?;
     let items: Vec<_> = page.rows.iter().map(|row| row.to_view()).collect();
-    let mut mapped = project_items(store, logical_id, &items).await?;
-    // store 已按条目的最大 seq 排列；投影所选的完成行不一定是该最大 seq。
-    let mut data: Vec<_> = page
-        .items
-        .iter()
-        .filter_map(|row| mapped.remove(row.item_id.as_str()))
-        .collect();
+    let (next_cursor, has_more) = (page.next_cursor, page.has_more);
+    let mut data = project_page(store, logical_id, &page, &items).await?;
+    let mut scan = page;
+    // 官方 SDK 在 data 为空时不会用 nextCursor 继续；只前探 data，不移动原始页。
+    while data.is_empty() && scan.has_more {
+        let Some(cursor) = scan.next_cursor else {
+            break;
+        };
+        if window.order == ItemOrder::Asc && cursor >= last_item_seq {
+            // 升序不追着并发追加的条目继续扫描。
+            break;
+        }
+        scan = store
+            .swarm_item_page(logical_id, window.order, Some(cursor), window.limit)
+            .await
+            .map_err(|error| store_failure("item_page", error))?;
+        let rows: Vec<_> = scan.rows.iter().map(|row| row.to_view()).collect();
+        data = project_page(store, logical_id, &scan, &rows).await?;
+    }
     reconcile_calls(&mut data, window.order);
     Ok(ItemPage::new(
         logical_id,
         items,
         data,
-        page.next_cursor,
+        next_cursor,
         last_item_seq,
-        page.has_more,
+        has_more,
         window.order,
     ))
+}
+
+async fn project_page(
+    store: &dyn SwarmStore,
+    logical_id: &str,
+    page: &SwarmItemPage,
+    rows: &[ItemView],
+) -> Result<Vec<OfficialSessionItem>, SwarmError> {
+    let mut mapped = project_items(store, logical_id, rows).await?;
+    // store 已按条目的最大 seq 排列；投影所选的完成行不一定是该最大 seq。
+    Ok(page
+        .items
+        .iter()
+        .filter_map(|row| mapped.remove(row.item_id.as_str()))
+        .collect())
 }
 
 async fn project_items(

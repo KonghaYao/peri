@@ -257,7 +257,8 @@ async fn orphan_and_internal_rows_do_not_change_the_raw_page_boundary() {
     .await;
     user(&store, 4, "itim_open").await;
     let first = page(&store, ItemOrder::Asc, None, 3).await;
-    assert_eq!(first["data"], json!([]));
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    assert_eq!(first["data"][0]["id"], "itim_open");
     assert_eq!(first["items"].as_array().unwrap().len(), 3);
     assert_eq!(first["has_more"], true);
     assert_eq!(first["nextCursor"], 3);

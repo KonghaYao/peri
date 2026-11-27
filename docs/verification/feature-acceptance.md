@@ -242,6 +242,14 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 | F-SWARM-015 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/request.rs)、[受理](../../peri-swarm/src/actor/service.rs)、[错误](../../peri-swarm/src/domain/error.rs)；[测试](../../peri-swarm/tests/it/http_contract/official_cancel.rs)、[actor 取消](../../peri-swarm/src/actor/service_cancel_test.rs)、[flush 失败](../../peri-swarm/src/actor/reader_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：真实宿主 30s 取消超时与重发失败的上游行为未验证；取消 turn 落库失败只记录日志 | 事件解析、202 收据、两类下发失败、管理冲突与取消 turn 保持 `cancelled` 由用例覆盖；真实宿主未跑 |
 | F-SWARM-016 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official.rs)、[实时](../../peri-swarm/src/actor/reader.rs)、[回放](../../peri-swarm/src/service/mod.rs)；[测试](../../peri-swarm/src/actor/reader_test.rs)、[回放用例](../../peri-swarm/src/service/in_memory_test.rs)、[历史多行](../../peri-swarm/src/actor/service_test.rs)；[证据](peri-swarm-official-text-delta-2026-11-26.md)；缺口：reasoning delta 未实现；回放无 chunk 边界；历史同 itemId 多条 complete 行未测；added 首段去重未用真实客户端验证；关闭-广播窄竞态未复现 | 实时 85 chunk / 回放 1 条 336 字符全文 delta 在本地 Compose 单 turn 实测；`72c10cfe9` 上 lib 421 / it 115 / 27 ignored 与 PG 20 通过；未验证项不构成验收 |
 
+### PR #614 Swarm 补充验收
+
+基线为 `bca78fb1b` 加本次补丁。以下均用本地 fixture，未重跑真实 Compose / Rivet 链路。
+
+- F-SWARM-001/004：用 [准入回归](../../peri-swarm/src/actor/service_admission_test.rs) 暂停第一条 user item 的写入，验证竞争输入无收据且可在空闲后用原键重试。
+- F-SWARM-003/014：[分页回归](../../peri-swarm/tests/it/items_official_pagination_test.rs) 保持原始行和游标；实际 `openai@7.60.0` 对进程内 HTTP 网关迭代，升降序均能跨过纯内部页，并读到完整答案。
+- F-SWARM-016：[广播回归](../../peri-swarm/src/actor/reader_broadcast_test.rs) 验证发送期间关闭方不能取走 stream、引入帧不重复，以及无订阅者时完成行补发；不代替真实客户端并发验证。
+
 ### F-TASK-001 补充验收
 
 基线为 `a2c0149` 加本次补丁。在受控本地文件和网页工具上，Luna 将 14/14 个调查委派给 explorer，另 4/4 个已知位置查询或改代码的对照任务均选对执行者。四个交付任务覆盖本地追踪、网页查证、混合核对和网页不可用。首次 3/4 满足取证要求，同一子会话补回混合核对的源码定位后达到 4/4。该模拟未测生产流量、实际联网或后台任务生命周期。

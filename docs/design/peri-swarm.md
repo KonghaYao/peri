@@ -173,8 +173,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 - 每个 item **至多持久化为一行**，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
   不存在也不影响执行。assistant 文本流在实时段逐 chunk 广播：自定义 `delta` 帧之外，
   每个 chunk 还发送官方 `agent.session.turn.output_text.delta`；首 chunk 先补
-  `item.added`/`content_part.added`。这些实时帧都没有 `seq`、不落库。turn 终止时把
-  整条流写成一条 `complete:true` 合并行；回放没有原始 chunk 边界，只从该完成行合成
+  `item.added`/`content_part.added`。实时帧不会晚于该流的完成行；若引入帧没有发给订阅
+  者，完成行补发引入帧。实时帧都没有 `seq`、不落库。turn 终止时把整条流写成一条
+  `complete:true` 合并行；回放没有原始 chunk 边界，只从该完成行合成
   **一条全文** `output_text.delta`。推理流仍只有自定义 `delta` 帧，不发官方
   `reasoning_summary_text.delta`。`tool_call`、`tool_result`、`approval`、user/receipt
   每帧一行。历史数据仍可能是「每 chunk 一行 + complete 行」的多行 item（§4.2.2），
@@ -290,9 +291,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   包含 `id`/`itemId`、`seq`、`kind`、`source` 和 `payload`。新数据每 item 一行，
   只有历史数据可能包含逐 chunk delta 行；新写入的实时增量走 SSE。回放没有原始 chunk
   行，SSE 对每条 assistant 完成行合成一条全文 `output_text.delta`（§4.2.1），
-  `/items` 投影与文本折叠规则不变。`data` 是同一页的官方
-  `AgentSessionItem` 投影，有 `type`、条目 `id`（等于 `itemId`）、`turn_id`，没有 `seq`。
-  同一 `itemId` 投影至多一次，`data.length ≤ distinct(itemId in items) ≤ items.length`。
+  `/items` 的条目投影与文本折叠规则不变。`data` 是官方 `AgentSessionItem` 投影，有
+  `type`、条目 `id`（等于 `itemId`）、`turn_id`，没有 `seq`。同一 `itemId` 投影至多
+  一次；原始页没有投影时，`data` 可以来自后续原始页（§4.2.2）。
 
 | 持久条目 | `data` 投影 |
 | --- | --- |
@@ -314,10 +315,10 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 页内 `data` 的顺序取自条目在该页的原始顺序（即 item 的 `MAX(seq)`），不是所选完成帧的
 `seq`；迟到 delta 让两者不一致时，按 `MAX(seq)` 的顺序稳定，正文仍按上文规则折叠。
 
-页内 `seq` 缺口需要回扫历史确认 turn 归属。相同缺口边界只回扫一次；`/items` 每请求
-最多发起 8 次 `turn_at_cursor` 回扫，每次最多读 10 页原始行。达到任一上限仍需回扫时，
-该组及其后的组只在 `items`，不把未验证的 turn 归属写进 `data`。遇到缺口过多时可减小
-`limit` 或按 `afterSeq` 分段读取；SSE 回放的历史查找仍不截断。
+页内 `seq` 缺口需要回扫历史确认 turn 归属。相同缺口边界只回扫一次；每个参与投影的
+原始页最多发起 8 次 `turn_at_cursor` 回扫，每次最多读 10 页原始行。达到任一上限仍需
+回扫时，该组及其后的组只在 `items`，不把未验证的 turn 归属写进 `data`。遇到缺口过多
+时可减小 `limit` 或按 `afterSeq` 分段读取；SSE 回放的历史查找仍不截断。
 
 `ItemPage` 同时是 HTTP body 和 actor `ListItems` action 的 Rivet wire 类型（`data` 从原始
 行改为官方投影是跨版本硬契约变化）。升级必须把 actor 与 gateway 作为同一版本整体重启；
@@ -348,12 +349,14 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
   出现在页里（`items` 含游标之前的帧，`data` 仍按投影条件决定是否发出）。畸形或未知
   item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回 `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页（网关把该 item 解析为它的 `MAX(seq)`）。页内
-  未映射条目若排在最后一个可映射条目**之前**（升序页 `MAX(seq) < after`，降序页
-  `MAX(seq) > after`），就落在游标的已越过侧，下一页不会返回它；排在它之后（页序更
-  靠后）的未映射条目会在下一页重读。整页 `data=[]` 即使 `has_more=true` 也会提前停止。
-  需要全量原始条目时用网关的 `nextCursor`/`afterSeq` 翻页并读 `items`；网关不为避免
-  空 `data` 或漏读扩大页边界。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页（网关把它解析为 item 的 `MAX(seq)`）。有投影
+  的原始页按原有规则返回 `data`；若原始页无投影，网关按请求顺序前探，返回第一个非空
+  的官方投影页。找不到可投影条目才返回 `data=[]`，此时 SDK 停止；升序不会追着并发
+  追加的条目继续扫描。`items`、`has_more`/`hasMore` 和 `nextCursor` 始终描述最初的
+  原始页，不会被前探改变，因此 `data` 可以引用不在当次 `items` 中的条目。
+- SDK 游标会越过所经过的未映射条目；同页排在 `data` 末项之后的原始条目可能被下一页
+  重读。需要全量原始条目时，用 `nextCursor`/`afterSeq` 翻页并读 `items`，不要用
+  `data` 的末项或是否为空决定原始分页。
 - **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
   之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
@@ -542,7 +545,8 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
 - `POST /sessions/{logicalId}/events` 的用户输入 `202` 是**受理**回执：input receipt、user
-  item 与 turn 预留都持久化后才返回，turn 在响应之后执行（actor 路径经
+  item 与 turn 预留都持久化后才返回。actor 串行处理普通 turn 的准入检查与上述写入，
+  不让第二条输入在第一条占住待运行 turn 之前通过检查。turn 在响应之后执行（actor 路径经
   `wait_until` 调度，HTTP 路径用独立任务；与流式 create 一样存在 action reply 与
   响应构造之间的短窗口，见 §4.3）。响应中的 `lastItemSeq` 是受理时刻的
   `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此

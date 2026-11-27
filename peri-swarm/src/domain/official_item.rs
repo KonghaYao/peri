@@ -162,8 +162,7 @@ impl<'a> ItemGroup<'a> {
     /// 完成帧写的是该次 flush 时该代 delta 的累计文本；一次 flush 之后同一 itemId
     /// 仍可能追加迟到 delta，并由此产生下一次 flush 的完成帧。后续完成帧只是该代
     /// delta 的累计，不是新增文本，重复追加会拼出 `hellolo`。assistant 消息与
-    /// thought 流共用本规则。这是 `peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs`
-    /// 对最终文本的定义（首条 complete.text + 迟到 delta）。
+    /// thought 流共用本规则；新写入的条目则只持久化一条全文完成行。
     fn complete_text(&self) -> Option<String> {
         let first = self
             .rows

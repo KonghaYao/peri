@@ -8,14 +8,14 @@
 //   2. read events until the `tool_call` item arrives, then abort the SSE
 //      connection (record its SSE `id`);
 //   3. while no SSE client exists, poll `GET /items` and observe the turn
-//      continue and finish (`tool_result`, message deltas, `complete`);
+//      continue and finish (`tool_result` and a full-text completion row);
 //   4. reconnect with `Last-Event-ID: <aborted id>` and collect the remaining
 //      item events; every seq must arrive exactly once, with no gap;
 //   5. reconnect with `?afterSeq=<last-1>` and verify the query cursor form;
 //   6. page `GET /items` with `limit=2` from the disconnect cursor and verify
 //      `nextCursor`/`hasMore` cover every seq once;
-//   7. fold the message deltas and `complete` row by `itemId` and compare the
-//      text with the model stub's reply.
+//   7. match the single full-text replay delta and persisted completion row
+//      against the model stub's reply.
 //
 // Idempotency scenario (environment `none`, no directive):
 //   1. two concurrent `POST /events` with the same UUID `Idempotency-Key` and
@@ -560,7 +560,9 @@ async function main() {
     });
     const sse1Ids = [...sse1.state.itemIds];
     const lastEventId = sse1Ids.at(-1) ?? 0;
-    const sse1Items = summarizeItems(sse1.state.events.filter((event) => event.event === 'item').map((event) => event.data));
+    const sse1Items = sse1.state.events
+      .filter((event) => event.event === 'item' && event.id !== null)
+      .map((event) => event.data);
     sse1.abort();
     const sse1Outcome = await sse1.ready;
     check('R: sse1 was aborted by the client', sse1Outcome === 'aborted', sse1Outcome);
@@ -582,11 +584,9 @@ async function main() {
     });
     check('R: the turn is still running while disconnected', sessionAtDisconnect.body?.state === 'running', sessionAtDisconnect.body?.state);
     check(
-      'R: items at disconnect are exactly the tool_call rows seen on sse1',
-      JSON.stringify(atDisconnect.items.map((item) => item.seq)) === JSON.stringify(sse1Ids) &&
-        atDisconnect.items.every(
-          (item) => item.kind === 'tool_call' && item.payload?.toolCallId === toolCallEvent.data?.payload?.toolCallId,
-        ),
+      'R: items at disconnect match the persisted SSE prefix ending in the tool call',
+      JSON.stringify(atDisconnect.items) === JSON.stringify(sse1Items)
+        && atDisconnect.items.at(-1)?.itemId === toolCallEvent.data?.itemId,
       summarizeItems(atDisconnect.items),
     );
     check(
@@ -597,6 +597,7 @@ async function main() {
 
     const samples = [];
     let finalPage = null;
+    let sessionAfter;
     const deadline = Date.now() + TIMEOUT_MS;
     while (Date.now() < deadline) {
       const page = await itemsPage(session.id, { limit: 500 });
@@ -606,18 +607,18 @@ async function main() {
         samples.push({ at: nowIso(), lastSeq, labels: rows.map((item) => summarizeItem(item).label) });
       }
       if (rows.some((item) => item.kind === 'message' && item.payload?.complete === true)) {
-        finalPage = page;
-        break;
+        // 完成行先落库，再等会话对外变回 idle。
+        sessionAfter = await api('GET', `/agents/sessions/${session.id}`);
+        if (sessionAfter.body?.state === 'idle') {
+          finalPage = page;
+          break;
+        }
       }
       await sleep(100);
     }
     if (finalPage === null) throw new Error('R: the turn never completed while no SSE client was attached');
-    // A late delta (S9a3b1 observation) can still land after `complete`.
-    await sleep(300);
-    finalPage = await itemsPage(session.id, { limit: 500 });
     const finalItems = finalPage.items ?? [];
     const N = finalItems.at(-1)?.seq ?? 0;
-    const sessionAfter = await api('GET', `/agents/sessions/${session.id}`);
     mark('R: turn completed while disconnected', {
       lastSeq: N,
       sessionState: sessionAfter.body?.state,
@@ -645,9 +646,9 @@ async function main() {
     mark('R: sse2 opened with Last-Event-ID', { lastEventId });
     await waitForEvent(
       sse2,
-      (event) => event.event === 'item' && Number(event.id) >= N,
+      (event) => event.event === 'agent.session.turn.item.done' && event.data?.event_id === `evt_item_${N}_done`,
       TIMEOUT_MS,
-      `sse2 to replay through seq ${N}`,
+      `sse2 to replay the official frames for the completion row at seq ${N}`,
     );
     sse2.abort();
     const sse2Outcome = await sse2.ready;
@@ -667,7 +668,7 @@ async function main() {
     );
     const finalBySeq = new Map(finalItems.map((item) => [item.seq, item]));
     const sse2MatchesItems = sse2.state.events
-      .filter((event) => event.event === 'item')
+      .filter((event) => event.event === 'item' && event.id !== null)
       .every((event) => {
         const item = finalBySeq.get(Number(event.id));
         return item !== undefined && JSON.stringify(item) === JSON.stringify(event.data);
@@ -758,39 +759,27 @@ async function main() {
       { items: afterItems.items.map((item) => item.seq), sse2: sse2Ids },
     );
 
-    // Fold by stable item id: deltas and the completion row share one id.
-    const messages = finalItems.filter((item) => item.kind === 'message');
-    const messageIds = [...new Set(messages.map((item) => item.itemId))];
-    const complete = messages.find((item) => item.payload?.complete === true);
-    const deltasBefore = complete === undefined ? [] : messages.filter((item) => item.payload?.delta === true && item.seq < complete.seq);
-    const lateDeltas = complete === undefined ? [] : messages.filter((item) => item.payload?.delta === true && item.seq > complete.seq);
-    const beforeText = deltasBefore.map((item) => item.payload?.text ?? '').join('');
-    const lateText = lateDeltas.map((item) => item.payload?.text ?? '').join('');
-    const foldedText = `${complete?.payload?.text ?? ''}${lateText}`;
-    const reread = await allItems(session.id);
-    const rereadMessageIds = [...new Set(reread.filter((item) => item.kind === 'message').map((item) => item.itemId))];
-    check('R: one turn produced one message item id', messageIds.length === 1, messageIds);
+    // 新 turn 只持久化一条 assistant 全文完成行；重连按这条行重建一条全文 delta。
+    const assistantRows = (items) => items.filter((item) => item.kind === 'message' && item.payload?.role === 'assistant');
+    const messages = assistantRows(finalItems);
+    const [complete] = messages;
+    const completeText = complete?.payload?.text;
     check(
-      'R: the message item id is stable across reads',
-      JSON.stringify(rereadMessageIds) === JSON.stringify(messageIds),
-      { first: messageIds, second: rereadMessageIds },
+      'R: the only persisted assistant row is a full-text completion',
+      messages.length === 1 && complete?.payload?.complete === true && (complete?.payload?.delta ?? false) === false
+        && typeof completeText === 'string' && completeText.length > 0,
+      summarizeItems(messages),
     );
-    check('R: the message has a completion row', complete !== undefined, summarizeItems(messages));
-    check('R: deltas were persisted before the completion row', deltasBefore.length > 0, messages.length);
+    const reread = assistantRows(await allItems(session.id));
+    check('R: the completion item id is stable across reads', reread.length === 1 && reread[0].itemId === complete?.itemId,
+      { first: complete?.itemId, second: reread[0]?.itemId });
+    const replayDeltas = sse2.state.events
+      .filter((event) => event.event === 'agent.session.turn.output_text.delta')
+      .map((event) => event.data);
     check(
-      'R: the deltas before completion concatenate to the completion text',
-      beforeText === (complete?.payload?.text ?? ''),
-      { beforeText, completeText: complete?.payload?.text },
-    );
-    check(
-      'R: the completion row carries complete=true',
-      complete?.payload?.complete === true && (complete?.payload?.delta ?? false) === false,
-      complete?.payload,
-    );
-    check(
-      'R: every delta carries delta=true',
-      deltasBefore.concat(lateDeltas).every((item) => item.payload?.delta === true && item.payload?.complete !== true),
-      deltasBefore.concat(lateDeltas).map((item) => item.payload),
+      'R: reconnect synthesized one full-text delta for the persisted item',
+      replayDeltas.length === 1 && replayDeltas[0]?.item_id === complete?.itemId && replayDeltas[0]?.delta === completeText,
+      replayDeltas,
     );
 
     const statsAfterReconnect = await stubStats();
@@ -799,14 +788,11 @@ async function main() {
     mark('R: model stub reply observed', { reply: reconnectFinal?.reply, mainCalls: statsAfterReconnect.mainCalls });
     check('R: the stub ran exactly one tool turn', reconnectTurns.filter((turn) => turn.kind === 'tool_call').length === 1, reconnectTurns);
     check('R: the stub ran exactly one final turn', reconnectTurns.filter((turn) => turn.kind === 'final').length === 1, reconnectTurns);
-    check('R: final text equals the stub reply', reconnectFinal?.reply === foldedText, { stub: reconnectFinal?.reply, foldedText });
-    summary.reconnect.messageFolding = {
-      itemId: messageIds[0] ?? null,
-      deltaCount: deltasBefore.length,
-      lateDeltas: lateDeltas.length,
-      deltaText: beforeText,
-      completeText: complete?.payload?.text ?? null,
-      foldedText,
+    check('R: persisted full text equals the stub reply', reconnectFinal?.reply === completeText, { stub: reconnectFinal?.reply, completeText });
+    summary.reconnect.message = {
+      itemId: complete?.itemId ?? null,
+      completeText: completeText ?? null,
+      replayDeltaCount: replayDeltas.length,
       stubReply: reconnectFinal?.reply ?? null,
     };
     summary.reconnect.stub = {

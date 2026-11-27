@@ -2091,7 +2091,10 @@ impl SwarmService for AcpSwarmService {
             .as_ref()
             .filter(|_| cancel)
             .map(|slot| slot.request_id.clone());
-        drop(admission);
+        // 取消下发会重新取准入锁；普通用户输入则要持锁到 user item 占住待运行的 turn。
+        if submission.kind != InputKind::User {
+            drop(admission.take());
+        }
 
         // 取消先下发、后写收据：未送达的取消不能留下“已受理”的持久事实，
         // 否则同键重试会命中收据，再也不会发第二次 `session/cancel`。
@@ -2106,6 +2109,7 @@ impl SwarmService for AcpSwarmService {
             self.note_cancel_target(logical_id, &submission.input_id, target);
         }
         if disposition == Disposition::Existing {
+            drop(admission);
             let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
             return Ok(AcceptedInput::settled(outcome));
         }
@@ -2126,6 +2130,7 @@ impl SwarmService for AcpSwarmService {
         } else {
             None
         };
+        drop(admission);
         let outcome = Self::input_outcome(store, logical_id, &submission, disposition).await?;
         // 普通 turn 仍由调用方在 202 后运行，不能在受理时等待模型。
         Ok(AcceptedInput {

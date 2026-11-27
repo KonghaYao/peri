@@ -32,6 +32,8 @@ use crate::store::{MemorySwarmStore, SwarmItemRow, SwarmSessionRow, SwarmStore};
 
 const LOGICAL_ID: &str = "agent-approval-test";
 
+#[path = "service_admission_test.rs"]
+mod admission_tests;
 #[path = "service_cancel_test.rs"]
 mod cancel_tests;
 

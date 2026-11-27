@@ -227,9 +227,7 @@ struct MessageStream {
     /// Live chunks seen for this stream; drives the deterministic live delta
     /// `event_id` (chunks are never persisted, so no `seq` exists).
     chunks: u64,
-    /// Whether at least one live delta reached subscribers. A completion row
-    /// whose chunks were all dropped (stream closed before broadcast) still
-    /// announces the item with `item.added`/`content_part.added`.
+    /// 是否已向订阅者发送实时 `item.added`；否则完成行补发条目和内容引入帧。
     live_broadcast: bool,
 }
 
@@ -631,6 +629,11 @@ impl ItemLog {
     #[must_use]
     pub fn logical_id(&self) -> &str {
         &self.logical_id
+    }
+
+    #[cfg(test)]
+    pub(super) async fn lock_seq_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.seq_lock.lock().await
     }
 
     /// Reconcile the lost host before ACP may launch any new work. A failed
@@ -2418,39 +2421,30 @@ impl ItemLog {
         for (index, entry) in entries.into_iter().enumerate() {
             match entry {
                 StagedEntry::Chunk { delta, official } => {
-                    // The stream may have been closed by a terminal after this
-                    // chunk was staged (another ingest or a direct caller can
-                    // flush in between). Broadcasting it now would deliver a
-                    // delta after the item's `complete` row and render text the
-                    // durable item does not have.
-                    let deliver = match delta_stream_key(&delta) {
-                        Some(key) => {
-                            let mut state = self.state.lock();
-                            if state.closed.contains(&key) {
-                                false
-                            } else {
-                                // Marked before the broadcast so a terminal that
-                                // flushes concurrently sees the live chunk and
-                                // does not announce the item a second time.
-                                if let Some(stream) = state.streams.get_mut(&key) {
-                                    stream.live_broadcast = true;
-                                }
-                                true
-                            }
-                        }
-                        None => true,
-                    };
-                    if deliver {
-                        self.broadcast(StreamEvent::Delta(delta));
-                        for event in official {
-                            self.broadcast(StreamEvent::Official(event));
-                        }
-                    } else {
+                    let key = delta_stream_key(&delta);
+                    let mut state = self.state.lock();
+                    if key.as_ref().is_some_and(|key| state.closed.contains(key)) {
+                        drop(state);
                         tracing::debug!(
                             logical_id = %self.logical_id,
                             item_id = %delta.item_id,
                             "dropping a staged delta whose stream closed before the broadcast"
                         );
+                        continue;
+                    }
+                    // 同步发送和引入标记必须与终态取走 stream 互斥，不能在锁中等待。
+                    self.broadcast(StreamEvent::Delta(delta));
+                    let mut introduced = false;
+                    for event in official {
+                        let added = matches!(event, OfficialEvent::TurnItemAdded { .. });
+                        if self.channel.send(StreamEvent::Official(event)).is_ok() && added {
+                            introduced = true;
+                        }
+                    }
+                    if introduced {
+                        if let Some(stream) = key.and_then(|key| state.streams.get_mut(&key)) {
+                            stream.live_broadcast = true;
+                        }
                     }
                 }
                 StagedEntry::Item { .. } => {

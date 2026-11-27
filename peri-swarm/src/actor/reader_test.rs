@@ -12,6 +12,9 @@ use crate::domain::{
 };
 use crate::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 
+#[path = "reader_broadcast_test.rs"]
+mod broadcast_tests;
+
 fn session_row() -> SwarmSessionRow {
     SwarmSessionRow {
         logical_id: "agent-1".to_owned(),
