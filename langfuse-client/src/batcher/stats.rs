@@ -17,7 +17,7 @@ use crate::spool::{SpoolError, SpoolStore, SpoolUsage};
 pub enum SpoolFallbackReason {
     /// 配置显式关闭暂存。
     Disabled,
-    /// 目标/部署没有暂存能力（WASM、无 native 适配器或缺少凭据）。
+    /// 部署没有暂存能力（无 native 适配器或缺少凭据）。
     Unsupported,
     /// 端口存在但当前不可用（目录/锁/文件系统不支持）。
     Unavailable,

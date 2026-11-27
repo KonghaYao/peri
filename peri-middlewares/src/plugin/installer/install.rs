@@ -127,9 +127,9 @@ pub async fn install_plugin(
                                     "plugin cache path must be valid UTF-8 before spawning git",
                                 ),
                             ]);
-                            #[cfg(all(unix, not(target_os = "emscripten")))]
+                            #[cfg(unix)]
                             let output = peri_process::run_output_blocking(command);
-                            #[cfg(any(not(unix), target_os = "emscripten"))]
+                            #[cfg(not(unix))]
                             let output = command.output();
                             match output {
                                 Ok(o) if o.status.success() => Ok(()),

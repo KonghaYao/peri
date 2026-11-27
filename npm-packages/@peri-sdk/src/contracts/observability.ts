@@ -4,7 +4,7 @@ import type { WorkspaceRef } from "../workspace/types";
  * 只读观测快照的公开类型。
  *
  * 快照是对 `ChatManager` + 可选 `SandboxManager` 的一次同步投影，不启动
- * WASM/ACP/sandbox，也不改变任何状态。字段只包含标识、状态与数值；token、
+ * ACP/sandbox，也不改变任何状态。字段只包含标识、状态与数值；token、
  * header 值、stdio command/args/env 与 URL 凭据不得进入本契约。
  * `lastError.message` 在 handle 与快照边界各经一次共享脱敏，文本中的 URL
  * 收敛为 origin + pathname，但仍不保证任意自由文本绝对无敏感信息。
@@ -22,12 +22,7 @@ export type ChatInstanceState =
     | "unknown";
 
 export interface ChatInstanceObservation {
-    kind: "wasm" | "transport";
     state: ChatInstanceState;
-    /** 运行后端就绪的本地时间；不可得时省略。 */
-    startedAtMs?: number;
-    /** WASM 线性内存当前容量；不可得时省略。 */
-    linearMemoryBytes?: number;
     running: boolean;
     pendingInputCount: number;
     pendingInteractionCount: number;
@@ -136,16 +131,4 @@ export interface ChatObservationSource {
 /** Manager 能提供 Sandbox 观测的最小结构；`SandboxManager.snapshot()` 满足。 */
 export interface SandboxObservationSource {
     snapshot(): SandboxObservation[];
-}
-
-/**
- * Manager 从 WASM 运行池取到的实例补充信息。
- *
- * `ChatService.observe()` 读不到 per-chat 运行池条目；由 Manager 按 chatId
- * 合并，避免 ChatService 依赖 Manager。
- */
-export interface ChatInstanceObservationSeed {
-    state: ChatInstanceState;
-    startedAtMs?: number;
-    linearMemoryBytes?: number;
 }

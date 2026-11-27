@@ -15,10 +15,6 @@ mod monitor_identity;
 mod notification_tap;
 mod oauth;
 pub(crate) mod output_store;
-#[cfg(not(target_os = "emscripten"))]
-pub(crate) mod process;
-#[cfg(target_os = "emscripten")]
-#[path = "client/process_wasm.rs"]
 pub(crate) mod process;
 mod queries;
 mod readiness;
@@ -34,16 +30,13 @@ use super::builtin::context::BuiltinContextError;
 use super::builtin::context::BuiltinInstanceContext;
 use super::builtin::runtime::BuiltinSpawnError;
 use super::builtin::runtime::BuiltinTransport;
-#[cfg(not(target_os = "emscripten"))]
 use super::builtin::runtime::TickGuard;
-#[cfg(not(target_os = "emscripten"))]
 use super::builtin::runtime::BUILTIN_TICK_INTERVAL;
 use super::config::McpCachePolicy;
 use super::config::McpServerConfig;
 use super::oauth_flow::OAuthFlowEvent;
 use lifecycle::ServiceShutdownState;
 use oauth::{OAuthFlowKey, PendingOAuthCallback};
-#[cfg(not(target_os = "emscripten"))]
 use peri_acp_types::builtin_mcp;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp::McpSubscriptionPort;
@@ -75,12 +68,14 @@ pub use oauth::OAuthStartDisposition;
 pub(crate) use readiness::{
     DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemReadinessError,
 };
+
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;
 pub(crate) use service::{
     client_capabilities_for_call, mcpp_client_info_for_profile, peer_declares_skills,
     McpServiceOwner, McpServiceWrapper, PeriClientHandler,
 };
+
 #[cfg(test)]
 pub(crate) use status::status_change_text;
 #[cfg(test)]

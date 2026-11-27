@@ -8,9 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-#[cfg(not(target_os = "emscripten"))]
 use std::fs;
-#[cfg(not(target_os = "emscripten"))]
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -399,15 +397,6 @@ impl McpResourceCache {
         drop(lock);
     }
 
-    // Emscripten has no blocking worker threads for the disk cache. Its virtual
-    // filesystem also does not persist across module instances, so cache misses
-    // should fall through to the live MCP server.
-    #[cfg(target_os = "emscripten")]
-    async fn lock(&self) -> Option<std::fs::File> {
-        None
-    }
-
-    #[cfg(not(target_os = "emscripten"))]
     async fn lock(&self) -> Option<std::fs::File> {
         let path = self.state_path.join("cache.lock");
         // root/state -> root：仅在 Unix 收紧缓存根到 0700，阻断其他 uid 进入，

@@ -24,7 +24,7 @@ rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -43,6 +43,3 @@ rmcp = { workspace = true, features = ["client", "transport-streamable-http-clie
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }

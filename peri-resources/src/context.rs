@@ -9,7 +9,6 @@ mod resources;
 #[cfg(test)]
 use resources::SessionStoreDeployment;
 
-#[cfg(not(target_os = "emscripten"))]
 #[path = "context/sqlite.rs"]
 mod sqlite;
 

@@ -15,13 +15,7 @@
 
 Agent 工具恒为后台委派：schema 不提供执行模式参数，旧 `run_in_background` 仅兼容忽略；入口 `subagent/tool/define/sub_agent_tool.rs`、`subagent/tool/execute_bg.rs`、`subagent/tool/execute_resume.rs`，结果由 `peri-agent` 会话 owner 投递给直接父会话。同步 fork 与 `status: pending` 回执已随 [Issue #450](https://github.com/KonghaYao/peri/issues/450) 移除。
 
-Emscripten 构建保留 `McpClientPool` 的远端 HTTP MCP 通路和 ACP 会话级 MCP 声明；`mcp/builtin` 在该目标的注入策略固定为空，本地 handler、stdio 子进程、cron 与 workflow 存储装配均按目标移出依赖图。
-workflow 实现不设 wasm 变体：`assembly/workflow/workflow_agent_middleware_factory.rs` 为单一装配实现，随
-`not(emscripten)` 依赖段（`peri-mcp-workflow`/`peri-mcp-workspace` 等）
-一并按目标移出——wasm 产物不打包 workflow，该目标不提供本地 workflow 运行时
-（`mcp__workflow__*` 远端通路不受影响）。
-插件 marketplace 的 git/npm 安装在该目标返回显式错误。
-配置快照加载经 `mcp/config.rs::snapshot_builtin_policy` 遵守同一目标策略；`mcp/initialize.rs::initialize_config` 再按 builtin 注册表过滤本地实例，保留远端
+配置快照加载经 `mcp/config.rs::snapshot_builtin_policy` 决定 builtin 注入策略；`mcp/initialize.rs::initialize_config` 再按 builtin 注册表过滤本地实例，保留远端
 Workspace URL 和其他远端 MCP。
 
 MCP 解析、基础来源合并、typed 校验、插件去重与 cache 关闭规则归
@@ -97,7 +91,7 @@ Builtin Workspace Bash 提醒只带退出信息与输出文件引用；提醒 me
 ### OAuth 凭证接入
 
 - `src/mcp/auth_store/per_server_credential_store.rs` 接入 `peri_mcp_credentials::OAuthCredentialClient`；独立服务与客户端入口为 `mcp-packages/credentials/src/lib.rs`、`mcp-packages/credentials/src/server/oauth_credential_mcp_server.rs`、`mcp-packages/credentials/src/client/oauth_credential_client.rs`，host 装配入口为 `peri-acp/src/host/assemble.rs`，pool 注入端口为 `src/mcp/client/oauth.rs`。
-- SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client/oauth_credential_client.rs`：原生 credentials 独立 worker runtime、WASM 事件循环 worker 的每次 poll 均在 `NoSubscriber` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
+- SDK 原始凭据载荷日志隔离位于 `mcp-packages/credentials/src/client/oauth_credential_client.rs`：原生 credentials 独立 worker runtime 的每次 poll 均在 `NoSubscriber` 作用域内执行，避免 rmcp service debug 打印 `CustomRequest`/Result；production main runtime 日志不受影响。
 - 已落地数据流由部署注入 Resources provider，经 `mcp-packages/credentials/` 受信 bootstrap MCP `CustomRequest` 消费；host assembly 把 `credentialsClient` 注入 OAuth pool，独立于尚未授权的 tool pool。契约归 `peri-acp-types/src/oauth_credentials.rs`，数据库 provider 与 scope 规则见 [Resources 索引](peri-resources.md)。
 - 凭证不落文件：不提供 `FileCredentialStore`、JSON/文件 fallback、兼容层或迁移；不新增私有 DB、HOME 路径、额外开库或锁；复用已配置 DB 与缓存 machine ID，`mcp_oauth_credentials` 不增加 schema version。MCP cache/plugins 不变，诊断内容与访问边界遵守 ARC-SECRET-001。
 - principal `local` + machine ID 是逻辑 scope，不是用户认证；server key 须绑定 endpoint/授权配置，动态连接还绑定 incarnation。bootstrap 授权、共享库暴露与 refresh 风险仍需验收，不宣称安全多租户或 CAS refresh。

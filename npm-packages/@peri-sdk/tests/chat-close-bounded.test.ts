@@ -8,7 +8,7 @@ import {
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { ChatFactObserver } from "../src/contracts/chat";
-import type { ChatRuntime, ChatLifecycleOptions } from "../src/chat/types";
+import type { ChatLifecycleOptions } from "../src/chat/types";
 import { DeadlineError } from "../src/util/deadline";
 import {
     FakeDatabase,
@@ -30,7 +30,6 @@ interface Setup {
 function setup(
     configure?: (port: FakePort) => void,
     lifecycle?: ChatLifecycleOptions,
-    runtime?: ChatRuntime,
 ): Setup {
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
@@ -40,7 +39,7 @@ function setup(
         database,
         kv: ownership,
         chatConfig: {
-            runtime: runtime ?? {
+            runtime: {
                 kind: "transport",
                 factory: () => {
                     throw new Error("ACP transport must not start");
@@ -277,40 +276,25 @@ describe("bounded shutdown", () => {
         ).toBeUndefined();
     });
 
-    test("shutdown does not close shared hosts while a chat close is incomplete", async () => {
+    test("shutdown retains state while a chat close is incomplete and succeeds on retry", async () => {
         const setupValue = setup(
             (port) => {
                 port.closeError = new Error("activation close unconfirmed");
             },
             { activationCloseTimeoutMs: 50 },
-            { kind: "wasm", moduleUrl: "about:blank" },
         );
         setupValue.database.seed(directoryEntry("session-1"));
         const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
 
-        let closeAllCalls = 0;
-        (
-            setupValue.manager as unknown as {
-                wasmRuntimes: { closeAll(): Promise<[]> };
-            }
-        ).wasmRuntimes = {
-            closeAll: async () => {
-                closeAllCalls += 1;
-                return [];
-            },
-        };
-
         await expect(setupValue.manager.shutdown()).rejects.toBeInstanceOf(
             AggregateError,
         );
-        expect(closeAllCalls).toBe(0);
         expect(setupValue.ownership.has("session-1")).toBe(true);
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
 
         delete setupValue.ports[0].closeError;
         await setupValue.manager.shutdown();
-        expect(closeAllCalls).toBe(1);
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
         expect(setupValue.ownership.size).toBe(0);
     });

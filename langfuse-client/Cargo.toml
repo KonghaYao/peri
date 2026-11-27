@@ -6,7 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 peri-time = { path = "../peri-time" }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -21,12 +21,10 @@ bytes = "1.12.1"
 # gzip 正文编码（encoding/writer，P2a 消费）；版本与锁内一致。
 flate2 = "1.1.9"
 
-# native 暂存适配器所需的宿主能力（P1c 消费）；WASM/emscripten 只保留有界内存路径，
-# 因此 fs4 与 reqwest/stream 只在 native 目标启用。
-[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))'.dependencies]
-fs4 = { version = "1.1.0", features = ["sync"] }
-reqwest = { workspace = true, features = ["stream"] }
+# native 暂存适配器所需的宿主能力（P1c 消费）：fs4 提供文件锁，
+# reqwest/stream 提供流式正文。
 futures = { workspace = true }
+fs4 = { version = "1.1.0", features = ["sync"] }
 
 [dev-dependencies]
 temp-env = "0.3"
@@ -35,6 +33,4 @@ mockito = "1"
 flate2 = "1.1.9"
 # native 暂存测试只用 open_at 临时目录，不触碰用户私有目录。
 tempfile.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
 tokio = { workspace = true, features = ["net"] }

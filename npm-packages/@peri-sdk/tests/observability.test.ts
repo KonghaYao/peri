@@ -8,8 +8,6 @@ import type {
     SandboxAdapterInstance,
     SandboxAdapterStartOptions,
 } from "../src/sandbox/types";
-import type { WasmRuntimeLease } from "../src/wasm/runtime-pool";
-import type { WasmAcpTransport } from "../src/wasm/transport";
 import { FakeDatabase, FakePort } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 
@@ -49,14 +47,6 @@ function transportSetup(configure?: (port: FakePort) => void): {
         },
     });
     return { manager, ports };
-}
-
-function fakeWasmTransport(memoryBytes: number): WasmAcpTransport {
-    return {
-        generationId: "generation-observe",
-        close: async () => {},
-        linearMemoryBytes: () => memoryBytes,
-    } as unknown as WasmAcpTransport;
 }
 
 class FakeSandboxInstance implements SandboxAdapterInstance {
@@ -165,7 +155,6 @@ describe("observeBackend chat projection", () => {
             runtimePath: TEST_WORKSPACE.runtimePath,
         });
         expect(agent.chat.instance).toEqual({
-            kind: "transport",
             state: "live",
             running: false,
             pendingInputCount: 0,
@@ -237,53 +226,6 @@ describe("observeBackend chat projection", () => {
         expect(agent.chat.bindingRevision).toBe(2);
         expect(agent.chat.phase).toBe("bound");
         expect(agent.chat.mcp).toEqual({ source: "unknown", servers: [] });
-    });
-
-    test("wasm runtime merges pool instance data and observe starts nothing", async () => {
-        let leasePromise: Promise<WasmRuntimeLease> | undefined;
-        const manager = new ChatManager({
-            store: { storage: {}, machineId: "test-machine" },
-            database: new FakeDatabase(),
-            kv: new OwnershipProbe(),
-            chatConfig: {
-                runtime: { kind: "wasm" },
-                session: {},
-            },
-            wasmRuntimeStarter: async () => fakeWasmTransport(4096),
-            instanceFactory: (context) => {
-                leasePromise = context.acquireWasmRuntime({
-                    ownerChatId: context.chatId,
-                });
-                return new FakePort();
-            },
-        });
-        const chat = manager.createChat({
-            workspace: TEST_WORKSPACE,
-            agent: {},
-        });
-        await chat.execute(
-            ChatUserAction.createNewSession({ requestId: "observe-wasm" }),
-        );
-        const lease = await leasePromise!;
-
-        const before = manager.runtimeSnapshot();
-        expect(before.instances).toHaveLength(1);
-        const agent = observeBackend({ chats: manager }).agents[0]!;
-        expect(agent.chat.instance).toMatchObject({
-            kind: "wasm",
-            state: "live",
-            linearMemoryBytes: 4096,
-            running: false,
-            pendingInputCount: 0,
-            pendingInteractionCount: 0,
-        });
-        expect(typeof agent.chat.instance?.startedAtMs).toBe("number");
-
-        observeBackend({ chats: manager });
-        expect(manager.runtimeSnapshot()).toEqual(before);
-
-        await lease.close();
-        await manager.shutdown();
     });
 
     test("empty chat is projected without starting an instance; closed is closing", async () => {

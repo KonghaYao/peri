@@ -24,10 +24,7 @@ pub(crate) enum EndpointError {
     NotARemoteUrl,
     UnsupportedScheme,
     UnparsableUrl,
-    #[cfg(not(target_os = "emscripten"))]
     UnsupportedConnectParameter,
-    #[cfg(target_os = "emscripten")]
-    InvalidHttpEndpoint,
 }
 
 impl fmt::Display for EndpointError {
@@ -38,11 +35,8 @@ impl fmt::Display for EndpointError {
             Self::UnsupportedScheme => {
                 "remote session store requires a postgres:// or postgresql:// URL"
             }
-            #[cfg(not(target_os = "emscripten"))]
             Self::UnsupportedConnectParameter => "unsupported PostgreSQL connection parameter",
             Self::UnparsableUrl => "invalid PostgreSQL session store URL",
-            #[cfg(target_os = "emscripten")]
-            Self::InvalidHttpEndpoint => "PostgreSQL HTTP endpoint requires HTTPS or loopback HTTP",
         })
     }
 }
@@ -52,8 +46,6 @@ impl std::error::Error for EndpointError {}
 #[derive(Clone)]
 pub(crate) struct RemoteEndpoint {
     url: Url,
-    #[cfg(target_os = "emscripten")]
-    http_endpoint: Option<Url>,
 }
 
 impl RemoteEndpoint {
@@ -74,7 +66,6 @@ impl RemoteEndpoint {
         }
         // SQLx logs both the name and the value of unknown connection options.
         // Fail before handing a possibly secret value to its URL parser.
-        #[cfg(not(target_os = "emscripten"))]
         for (key, _) in url.query_pairs() {
             if !matches!(
                 key.as_ref(),
@@ -101,48 +92,12 @@ impl RemoteEndpoint {
                 return Err(EndpointError::UnsupportedConnectParameter);
             }
         }
-        Ok(Self {
-            url,
-            #[cfg(target_os = "emscripten")]
-            http_endpoint: None,
-        })
+        Ok(Self { url })
     }
 
     /// The caller must never include this value in diagnostics.
     pub(crate) fn sdk_url(&self) -> &str {
         self.url.as_str()
-    }
-
-    #[cfg(target_os = "emscripten")]
-    pub(crate) fn with_http_endpoint(
-        mut self,
-        value: Option<String>,
-    ) -> Result<Self, EndpointError> {
-        if let Some(value) = value {
-            let url = Url::parse(&value).map_err(|_| EndpointError::InvalidHttpEndpoint)?;
-            let loopback = match url.host() {
-                Some(url::Host::Ipv4(address)) => address.is_loopback(),
-                Some(url::Host::Ipv6(address)) => address.is_loopback(),
-                Some(url::Host::Domain(name)) => name == "localhost",
-                None => false,
-            };
-            if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
-                || !url.has_host()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.fragment().is_some()
-                || url.query().is_some()
-            {
-                return Err(EndpointError::InvalidHttpEndpoint);
-            }
-            self.http_endpoint = Some(url);
-        }
-        Ok(self)
-    }
-
-    #[cfg(target_os = "emscripten")]
-    pub(crate) fn http_endpoint(&self) -> Option<&str> {
-        self.http_endpoint.as_ref().map(Url::as_str)
     }
 }
 

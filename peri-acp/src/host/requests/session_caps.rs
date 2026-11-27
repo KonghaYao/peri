@@ -2,7 +2,7 @@
 //!
 //! 只回显客户端声明会把「客户端想要」冒充成「端到端可用」。窗口协议依赖
 //! Store 的 bounds/page/body 读取端口；History V2 依赖 initial 与
-//! `_peri/history` 的读取端口。未实现的后端（remote/emscripten）不得因声明
+//! `_peri/history` 的读取端口。未实现的后端（remote）不得因声明
 //! 而被协商成可用。
 
 use peri_acp_types::history_v2::{

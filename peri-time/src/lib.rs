@@ -23,14 +23,7 @@ pub fn now_wall() -> SystemTime {
 /// Read a process-local monotonic clock.
 #[must_use]
 pub fn monotonic_now() -> Instant {
-    #[cfg(not(target_os = "emscripten"))]
-    {
-        tokio::time::Instant::now().into_std()
-    }
-    #[cfg(target_os = "emscripten")]
-    {
-        Instant::now()
-    }
+    tokio::time::Instant::now().into_std()
 }
 
 /// Measure elapsed process-local monotonic time since an earlier instant.

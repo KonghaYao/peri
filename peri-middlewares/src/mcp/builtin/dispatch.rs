@@ -49,7 +49,6 @@ use peri_mcp_artifact::ArtifactMcpServer;
 use peri_mcp_cron::CronMcpServer;
 use peri_mcp_monitor::MonitorMcpServer;
 use peri_mcp_web::WebMcpServer;
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workflow::WorkflowMcpServer;
 use peri_mcp_workspace::WorkspaceMcpServer;
 
@@ -66,7 +65,6 @@ pub(crate) enum BuiltinServerHandler {
     Cron(CronMcpServer),
     Monitor(MonitorMcpServer),
     Workspace(WorkspaceMcpServer),
-    #[cfg(not(target_os = "emscripten"))]
     Workflow(WorkflowMcpServer),
 }
 
@@ -80,7 +78,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Cron(server) => server.get_info(),
             Self::Monitor(server) => server.get_info(),
             Self::Workspace(server) => server.get_info(),
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.get_info(),
         }
     }
@@ -96,7 +93,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Cron(server) => server.list_tools(request, context).await,
             Self::Monitor(server) => server.list_tools(request, context).await,
             Self::Workspace(server) => server.list_tools(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.list_tools(request, context).await,
         }
     }
@@ -112,7 +108,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Cron(server) => server.call_tool(request, context).await,
             Self::Monitor(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.call_tool(request, context).await,
         }
     }
@@ -135,7 +130,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.list_resources(request, context).await,
             Self::Cron(server) => server.list_resources(request, context).await,
             Self::Workspace(server) => server.list_resources(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.list_resources(request, context).await,
             _ => Ok(ListResourcesResult::default()),
         }
@@ -148,7 +142,6 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         match self {
             Self::Workspace(server) => server.list_resource_templates(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.list_resource_templates(request, context).await,
             _ => Ok(ListResourceTemplatesResult::default()),
         }
@@ -163,7 +156,6 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.read_resource(request, context).await,
             Self::Cron(server) => server.read_resource(request, context).await,
             Self::Workspace(server) => server.read_resource(request, context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.read_resource(request, context).await,
             _ => Err(McpError::method_not_found::<
                 rmcp::model::ReadResourceRequestMethod,
@@ -195,7 +187,6 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Option<SubscriptionFilter> {
         match self {
             Self::Workspace(server) => server.accepted_subscription_filter(requested),
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.accepted_subscription_filter(requested),
             _ => None,
         }
@@ -204,7 +195,6 @@ impl ServerHandler for BuiltinServerHandler {
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
         match self {
             Self::Workspace(server) => server.listen(context).await,
-            #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.listen(context).await,
             _ => {
                 context.cancelled().await;
@@ -348,7 +338,6 @@ pub(crate) fn builtin_server_handler_with_env(
             };
             Some(BuiltinServerHandler::Workspace(server))
         }
-        #[cfg(not(target_os = "emscripten"))]
         "workflow" => ctx
             .workflow
             .as_ref()

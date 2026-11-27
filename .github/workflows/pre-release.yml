@@ -5,7 +5,7 @@ on:
         branches: [pre-release/main]
     workflow_dispatch:
         inputs:
-            # 仅用于验证「sidecar 前置失败 → build 矩阵 skipped」：build/wasm 仍受
+            # 仅用于验证「sidecar 前置失败 → build 矩阵 skipped」：build 仍受
             # pre-release/main 的 ref 守卫约束，dispatch 到其它分支不会触发发布。
             fault:
                 description: sidecar 故障注入（仅验证短路行为）
@@ -95,10 +95,7 @@ jobs:
                       ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('Cargo.lock') }}-
                       ${{ runner.os }}-${{ matrix.target }}-build-
 
-            # 预发布专用编译参数：本轮不改，也不复用 cf-wasm-*。结论与依据：
-            # - 现有 [profile.cf-wasm-size]/[profile.cf-wasm-speed] 是为 peri-wasm 的
-            #   Cloudflare 目标设计的（lto="thin"、codegen-units=16），换到这里的 native
-            #   预发布二进制会同时改变产物大小与运行性能，属于未测先改；
+            # 预发布专用编译参数：沿用正式发布的 profile，不做体积对照实验。
             # - 正式发布的 lto="fat"/codegen-units=1 本轮不动；
             # - 若要做对照实验：先记录改动前后 pre-release 运行的编译时间与
             #   dist/peri-beta-*.tar.gz 体积，实验单独提交，只有落在体积与性能约束内才合入。
@@ -148,92 +145,9 @@ jobs:
                   compression-level: 0
                   retention-days: 14
 
-    wasm:
-        name: Build (wasm32-unknown-emscripten)
-        if: github.ref == 'refs/heads/pre-release/main'
-        runs-on: ubuntu-24.04
-        timeout-minutes: 90
-        env:
-            MISE_ENV: wasm
-        defaults:
-            run:
-                shell: bash
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v7
-              with:
-                  persist-credentials: false
-
-            # 补丁身份必须在 mise 之前取：--print-patch-identity 只读
-            # patches/emscripten/*.patch，不要求本机已有 emcc（此时 emsdk 还没装）。
-            - name: Resolve Emscripten patch identity
-              id: emscripten
-              run: echo "identity=$(bash scripts/prepare-emscripten.sh --print-patch-identity)" >> "$GITHUB_OUTPUT"
-
-            # 开启 mise 工具缓存（原先 cache: false 等于每次重装）：命中时省掉 emsdk/python
-            # 的下载安装与 wasm-bindgen-cli 的源码编译（Build Next Major #61 实测工具安装
-            # 1分46秒，其中源码安装 wasm-bindgen-cli 单项约 1分38秒）。
-            # 工具来源与完整性：不引入第三方预构建产物，仍由 mise 按 mise.wasm.toml 钉死的
-            # 版本安装（emsdk 6.0.10 另有 scripts/prepare-emscripten.sh 的版本断言），
-            # mise 二进制自身由 action 用发布签名校验和验证后才执行。
-            # 身份三要素：
-            #   1. runner 镜像与架构（本 job 固定在 ubuntu-24.04）；
-            #   2. mise 配置哈希 —— mise.wasm.toml 里 rust 1.99.0、emsdk 6.0.10、
-            #      python 3.12、wasm-bindgen-cli 0.2.129 都是钉死版本，改版本即换 key；
-            #   3. Emscripten 补丁集摘要。
-            # 保存时机：本 workflow 钉在 jdx/mise-action@v4，缓存的是 mise 数据目录
-            # （默认 ~/.local/share/mise），该版本没有 post 步骤，`mise install` 之后立即
-            # 保存，而打补丁发生在其后的步骤 —— 缓存里存的是**未打补丁**的工具链，每个新
-            # runner 上仍由 scripts/prepare-emscripten.sh 重新打补丁并逐项校验。补丁摘要进
-            # key 是防御：若以后升级到会延后保存的版本（缓存将包含已打补丁的工具链），
-            # 旧补丁集处理过的工具链也不会被恢复，不会出现 stamp 与期望值不符导致脚本失败。
-            # 写入成本：精确命中不回写，所以只在工具版本或补丁集变化时重写一次，占用仓库
-            # 10GB 缓存额度的固定一部分；mise 自身的二进制也在该数据目录里，因此同样随缓存
-            # 固定到 key 变化为止（mise-action 的既定行为）。
-            # 回退方式：cache: false 即恢复原行为。
-            - name: Install WASM build tools
-              uses: jdx/mise-action@v4
-              with:
-                  cache: true
-                  cache_key: mise-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'mise.wasm.toml') }}-${{ steps.emscripten.outputs.identity }}
-
-            # 缓存命中时 mise 直接复用数据目录里的安装记录，这里就地验证工具仍可执行：
-            # 「记录在、二进制不在」这类缓存问题立刻失败，而不是等到构建/链接阶段。
-            # （emsdk 由下一步的 scripts/prepare-emscripten.sh 做版本与补丁校验。）
-            - name: Verify cached WASM tools
-              run: mise exec -- wasm-bindgen --version
-
-            - name: Cache Rust build
-              uses: Swatinem/rust-cache@v2
-              with:
-                  key: next-major-wasm32-unknown-emscripten
-
-            - name: Build peri-wasm
-              run: mise exec -- ./scripts/cargo-wasm.sh build --locked --release -p peri-wasm --target wasm32-unknown-emscripten
-
-            - name: Package WASM module
-              run: |
-                  output=target/wasm32-unknown-emscripten/release
-                  test -s "$output/peri-wasm.js"
-                  test -s "$output/peri_wasm.wasm"
-                  mkdir -p dist
-                  tar -czf dist/peri-beta-wasm32-unknown-emscripten.tar.gz -C "$output" peri-wasm.js peri_wasm.wasm
-                  (cd dist && sha256sum peri-beta-wasm32-unknown-emscripten.tar.gz > peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
-
-            - name: Upload WASM artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: peri-beta-wasm32-unknown-emscripten-${{ github.sha }}
-                  path: |
-                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz
-                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz.sha256
-                  if-no-files-found: error
-                  compression-level: 0
-                  retention-days: 14
-
     publish:
         name: Publish peri-beta
-        needs: [build, wasm]
+        needs: [build]
         runs-on: ubuntu-24.04
         permissions:
             contents: write
@@ -259,8 +173,6 @@ jobs:
                       (cd dist && sha256sum --check "peri-beta-${platform}.tar.gz.sha256")
                       bash scripts/verify-workflow-sidecar.sh "dist/peri-beta-${platform}.tar.gz" peri-beta
                   done
-                  (cd dist && sha256sum --check peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
-                  test "$(tar -tzf dist/peri-beta-wasm32-unknown-emscripten.tar.gz)" = "$(printf 'peri-wasm.js\nperi_wasm.wasm')"
 
             - name: Publish rolling beta prerelease
               env:

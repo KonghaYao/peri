@@ -14,13 +14,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_common::standalone;
 
-#[cfg(not(target_os = "emscripten"))]
 use super::builtin::router::RouterTemplate;
 
-#[cfg(not(target_os = "emscripten"))]
 pub use super::builtin::router::{CapabilityReadiness, CapabilityStatus, RouterReadiness};
 
 /// What the standalone process serves.
@@ -52,13 +49,11 @@ pub struct Options {
 }
 
 /// Serve `options.target` until the transport closes.
-#[cfg(not(target_os = "emscripten"))]
 pub async fn run(options: Options) -> Result<()> {
     let Target::Capabilities(capabilities) = options.target;
     run_router(capabilities, options.transport, options.workspace).await
 }
 
-#[cfg(not(target_os = "emscripten"))]
 async fn run_router(
     capabilities: Vec<String>,
     transport: Transport,
@@ -98,12 +93,6 @@ async fn run_router(
     }
     Ok(())
 }
-
-#[cfg(target_os = "emscripten")]
-pub async fn run(_options: Options) -> Result<()> {
-    anyhow::bail!("standalone MCP serving is not available on this target")
-}
-
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(test)]
 #[path = "standalone_test.rs"]
 mod tests;

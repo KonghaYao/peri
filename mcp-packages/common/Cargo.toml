@@ -21,7 +21,7 @@ libc = "0.2"
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -30,6 +30,3 @@ uuid.workspace = true
 tempfile.workspace = true
 # 测试面需要 `MessageQueue::*_async`（drain 夹具）；生产构建不含这些方法。
 peri-acp-types = { path = "../../peri-acp-types", features = ["test-support"] }
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }

@@ -66,7 +66,6 @@ export type {
     SessionReadyResult,
 } from "../chat/types";
 export type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
-export type { WasmRuntimePoolSnapshot, WasmRuntimeInstanceSnapshot } from "../wasm/runtime-pool";
 export type { HistoryPageOutcome, PeriInstancePort } from "../agent/port";
 export type {
     ChatBindingTarget,

@@ -81,12 +81,6 @@ F09：`SessionState.event_health` 仅保存在内存，`event_health()` 提供�
 
 普通 prompt/input 经 host → Agent 运行，不要求 reverse admission。旧 Work query/resolve、持久执行接管及持久 control 方法撤销；history list/load/resume/replay 保留。进入会话时的持久 MQ 恢复走 `host/recovery/`，用新 runtime 重新准入，不接管旧运行或加载 owner quarantine。
 
-Emscripten 的 ACP 部署入口在 `src/host/assemble/host_capabilities.rs::assemble_wasm_server_config`：
-注入 provider、配置 source、session resources 与 shutdown，复用 `AcpServerConfig`
-和 `host/requests.rs` 的单一方法分发；`transport/wire_bridge.rs` 将宿主字节流接入
-同一 ACP Host。`host/stdio` 与 `transport/stdio` 仅在原生目标编译，WASM 不装配
-builtin MCP、cron 或本地 workspace 资源。远端 MCP 仍经现有 pool 初始化。
-
 配置规则与来源权威见 [`peri-config`](peri-config.md)。ACP `provider/{config,store}.rs`
 仅 re-export core 类型与 `settings::ConfigSource`；正常 source 持有 `ConfigurationSystem`，
 提供同 scope 的 snapshot、revision 与 CAS 保存。host 装配在 MCP 初始化前注入同一
@@ -226,7 +220,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | --- | --- | --- |
 | Provider 构建 | `provider/mod.rs`；规则 `peri-config/src/provider.rs` | `LlmProvider::{from_source,from_resolved,from_config_for_alias,into_model}`；消费 `ResolvedProvider`，alias/profile/default/environment 规则归 core，ACP 将已解析的有效容量同时用于 Model metadata 与 `host/prompt.rs` 预算 |
 | Anthropic thinking 装配 | `provider/llm_provider.rs`；回归 `provider/provider_test.rs` | `LlmProvider::into_model` 按 effort 是否存在启用 thinking，保留旧手动预算计算，不在 ACP 按输出上限提前关闭；模型模式与 wire 门限由 [peri-model](peri-model.md) 的 Anthropic adapter 唯一决定。真实装配回归覆盖默认 profile effort、显式 effort、小配置/请求上限、旧模型、未知 alias、未启用与 DeepSeek 官方端点在分类器 32 tokens 请求下的 effort 保留 |
-| Responses 与订阅认证装配 | `provider/mod.rs`、`provider/subscription_auth.rs`；凭据能力 `mcp-packages/credentials/src/model_auth/` | `ResponsesModel` 使用原有主/辅助/子模型工厂；窗口取 profile，ChatGPT 输出上限未知。`RequestAuth` 经 credentials MCP custom channel 获取/刷新凭据并验证显式 subject/clientId；`provider/subscription_auth.rs` 在非 emscripten 目标 re-export `ChatGptAuthManager`、`PendingLogin`、`AccountStatus`、`AuthError`、`AuthResult`、`LogoutOutcome`，TUI `chatgpt_auth` 只消费这些安全 DTO。CLI `peri auth chatgpt` 与 TUI Login 都经该宿主入口调用。操作示例见 [OpenAI Responses](../reference/openai-responses.md) |
+| Responses 与订阅认证装配 | `provider/mod.rs`、`provider/subscription_auth.rs`；凭据能力 `mcp-packages/credentials/src/model_auth/` | `ResponsesModel` 使用原有主/辅助/子模型工厂；窗口取 profile，ChatGPT 输出上限未知。`RequestAuth` 经 credentials MCP custom channel 获取/刷新凭据并验证显式 subject/clientId；`provider/subscription_auth.rs` re-export `ChatGptAuthManager`、`PendingLogin`、`AccountStatus`、`AuthError`、`AuthResult`、`LogoutOutcome`，TUI `chatgpt_auth` 只消费这些安全 DTO。CLI `peri auth chatgpt` 与 TUI Login 都经该宿主入口调用。操作示例见 [OpenAI Responses](../reference/openai-responses.md) |
 | 配置结构 | `provider/config.rs`（re-export）；事实源 `peri-config/src/app.rs` | `PeriConfig` / `AppConfig` / `ProviderConfig` / `ProfileConfig` / `Profiles`；领域 merge 与 validation 归 core |
 | 配置加载/保存 | `provider/store.rs`（re-export）；`peri-config/src/settings/config_source.rs`、`peri-config/src/system.rs`、`peri-config/src/source.rs` | `ConfigSource::{load_at,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>`；caller 在编辑开始捕获 token，成功后消费 accepted snapshot；正常 source 持有 `ConfigurationSystem`，固定布局/同文件不拆层，workspace 相对差异保存与字节 CAS 保留兄弟域；输入 I/O 经独立配置 MCP，布局/校验失败不可误写全局；reload 显式，不热替换旧 pool 或 session prefix |
 
@@ -287,7 +281,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | 装配 | `host/assemble.rs` | `assemble_server_config`；`build_legacy_frozen_data` 按保存目录准备配置与插件输入；新建 MCP pool 在初始化前绑定 `ConfigSource` snapshot，host Langfuse 消费同快照的 observability；观测成功时安装指标出口，未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main|local}` 资源（`AgentsMdMiddleware` 为纯 adapter、不读盘） |
-| workflow 宿主面 | host/session_workflow_chain.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）按 `not(emscripten)` 门控：wasm 产物不打包本地 workflow 运行时，该目标不建链、不绑定；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill`，不随目标门控（远端通路保留） |
+| workflow 宿主面 | host/session_workflow_chain.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill` |
 | initialize 终端认证 | host/requests/session_lifecycle/session_lifecycle_dispatch.rs + dispatch/init.rs | `dispatch::terminal_auth_methods`：只从 initialize params 判定 `clientCapabilities.auth.terminal`、`clientCapabilities._meta["terminal-auth"]` 与顶层 `_meta["terminal-auth"]`，至多返回一个 `AuthMethod::Terminal`（id `peri-setup`，`args:["--setup"]`，`env:{"PERI_ACP_SETUP":"1"}`）；`build_auth_required_initialize_response` 供降级宿主复用同一能力形状。回归 `dispatch/init_auth_test.rs`、`host/stdio/auth_required_gate_test.rs` |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；常规配置缺 provider（非 `--settings-stdin`）时 `StdioAssembly::NeedsSetup` → `auth_required_gate::run_auth_required_gate`，在同一 `StdioTransport` 上只答 `initialize` 并以 `-32000` 拒绝 `session/*`；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路）与 `auth_required_gate_test.rs` |
 

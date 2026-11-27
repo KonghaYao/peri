@@ -488,11 +488,8 @@ impl AcpChild {
                 lazy_workspace: true,
                 drive_cron_tick: false,
                 builtin_assembly_mode: None,
-                #[cfg(not(target_os = "emscripten"))]
                 workspace_input: None,
-                #[cfg(not(target_os = "emscripten"))]
                 workspace_resources: None,
-                #[cfg(not(target_os = "emscripten"))]
                 workflow_input: None,
                 builtin_closed: Default::default(),
                 skills_face_closed: false,

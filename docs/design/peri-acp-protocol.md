@@ -289,7 +289,7 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 `load_history_body_chunk` 与 inherited 冻结读取；canonical inherited 分页/seek 按冻结布局的
 数组下标与原始 span 增量计算长度，正文分块经 blob 句柄增量读取；只有非 canonical 信封才
 回退 `json_each` keyset 与 `substr`。`ancestor_thread_id` 取 `threads.parent_thread_id`（旧数据
-无该字段时为 `null`）。remote/emscripten adapter 未覆写这些端口，默认返回 `Unsupported`
+无该字段时为 `null`）。remote adapter 未覆写这些端口，默认返回 `Unsupported`
 （出口 `-32603`），不得返回空页或空历史；能力协商成功不等于后端支持，因此这些后端不构成
 可用的窗口/继承实现。窗口能力默认关闭；未启用时旧分页路径保持原行为。
 
@@ -321,7 +321,7 @@ beta 默认关闭，未开启时继续走 V1（见 [beta flags](beta-flags.md)�
 "selectedProfile": "windowed", "limits": { ... } }`。未声明不产生 V2；
 声明了旧 `peri.historyPagination` / `peri.historyWindowV1` 又声明 V2、版本/模式不支持、
 或后端未实现时，`initialize` 显式失败（`unsupported_version` / `invalid_request`），
-不得静默回退为标准全量回放。remote/emscripten 未覆写端口，因此永远不能协商成可用。
+不得静默回退为标准全量回放。remote 未覆写端口，因此永远不能协商成可用。
 
 **initial。** 协商成功后，`session/load` 的 `_meta["peri.history"]` 可携带
 `{ "action": "initial", "requestKey": "...", "limit": 50, "targetBytes": 524288 }`。

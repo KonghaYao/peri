@@ -24,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 futures.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 # P5.1: SubAgent stub 需要 tokio_util::sync::CancellationToken（原 v1 AgentCancellationToken 别名）。
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
 tokio-util = { workspace = true }
@@ -42,6 +42,7 @@ rmcp = { workspace = true, features = [
     "client",
     "transport-streamable-http-client-reqwest",
     "auth",
+    "transport-child-process",
 ] }
 reqwest = { workspace = true, features = ["gzip", "brotli", "deflate"] }
 url.workspace = true
@@ -58,7 +59,14 @@ peri-resources = { path = "../peri-resources" }
 peri-mcp-core.workspace = true
 peri-mcp-credentials.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
-
+peri-mcp-common.workspace = true
+peri-process = { path = "../peri-process" }
+peri-mcp-web.workspace = true
+peri-mcp-artifact.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-monitor.workspace = true
+peri-mcp-workspace.workspace = true
+peri-mcp-workflow.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -69,15 +77,3 @@ peri-acp-types = { path = "../peri-acp-types", features = ["test-support"] }
 # 测试面虚拟时钟（`tokio::time::pause`）：R29 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-peri-mcp-common.workspace = true
-tokio = { workspace = true, features = ["full"] }
-peri-process = { path = "../peri-process" }
-peri-mcp-web.workspace = true
-peri-mcp-artifact.workspace = true
-peri-mcp-cron.workspace = true
-peri-mcp-monitor.workspace = true
-peri-mcp-workspace.workspace = true
-peri-mcp-workflow.workspace = true
-rmcp = { workspace = true, features = ["transport-child-process"] }

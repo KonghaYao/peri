@@ -1,17 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": ".",
-    "allowJs": true,
-    "checkJs": true,
-    "noImplicitAny": false
+    "rootDir": "."
   },
   "include": [
     "src",
-    "examples/demo/**/*.ts",
-    "examples/workers/worker.js",
-    "examples/workers/smoke.mjs",
-    "examples/workers/build-worker.mjs",
-    "types/emscripten.d.ts"
+    "examples/demo/**/*.ts"
   ]
 }

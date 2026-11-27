@@ -33,11 +33,11 @@ const manager = new ChatManager({
     database: storage,
     kv: managedAgentStorage,
     chatConfig: {
-        // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
-        // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
+        // 执行装配由调用方选择：runtime.kind="transport" 注入宿主自己的 ACP transport。
+        // SDK 不启动 Peri 或 Workspace 进程；factory 收到 path、signal、chatId 与 agentConfig。
         runtime: {
-            kind: "wasm",
-            moduleUrl: new URL("./peri-wasm.js", import.meta.url),
+            kind: "transport",
+            factory: (path, options) => openAcpTransport(path, options),
         },
         session: {
             // cwd 由 workspace.runtimePath 派生；这里只声明 instructions 与额外 MCP。

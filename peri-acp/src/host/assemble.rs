@@ -37,15 +37,8 @@ pub(crate) use host_capabilities::discover_prepared_plugins;
 
 pub use host_capabilities::PreparedPlugins;
 
-pub use host_capabilities::HostAssemblyInput;
-
-#[cfg(target_os = "emscripten")]
-pub use host_capabilities::WasmHostAssemblyInput;
-
-#[cfg(target_os = "emscripten")]
-pub use host_capabilities::assemble_wasm_server_config;
-
 pub(super) use host_capabilities::build_session_end_task;
+pub use host_capabilities::HostAssemblyInput;
 
 /// 组装 settings hook 组（实现见 `host/hook_groups.rs`：plugin → global →
 /// project → local，顺序即迁移前 TUI/print/stdio 三处一致的既有顺序）。

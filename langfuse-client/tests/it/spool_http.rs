@@ -1,5 +1,3 @@
-#![cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
-
 //! 真实 HTTP 的 spool 断言（契约 §3.5、§8 的 `tests/spool_http.rs` 行）。
 //!
 //! 覆盖三件事，全部落在真实字节上，不以「只判 200」代替：

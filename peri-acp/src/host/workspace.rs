@@ -1,6 +1,5 @@
 //! A session owns one verified execution environment and its resource lifetime.
 
-#[cfg(not(target_os = "emscripten"))]
 #[path = "workspace_workflow.rs"]
 mod workflow;
 

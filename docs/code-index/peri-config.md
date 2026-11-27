@@ -85,4 +85,4 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 
 ## 配置 I/O 适配
 
-`peri-config::io` 是配置读取与写入的部署边界。原生目标转发给 `peri-mcp-config` 的 MCP 数据面；Emscripten 目标在虚拟文件系统中读写文件，因此 WASM 依赖图不引入 `mcp-packages/config`。
+`peri-config::io` 是配置读取与写入的部署边界，全部入口转发给 `peri-mcp-config` 的 MCP 数据面。

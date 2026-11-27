@@ -23,21 +23,17 @@ pub(crate) mod context;
 pub(crate) mod runtime;
 
 // standalone：进程内 CLI serving（`peri mcp-start <instance>`）的 handler 构造。
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) mod standalone;
 
 // router：v5 单出口（`peri`）聚合与能力级隔离。
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) mod router;
 
 // workspace_subscription：`workspace` 实例的默认订阅（git ref 资源；Git Watch 下沉的
 // 宿主落点，D-5）。默认层注入只在本模块的 `builtin_default_entry` / 规则 2 消费它；
 // 客户端消费侧（`mcp::client::subscription`）经下面的再导出判定「哪些实例的哪些 URI
 // 有宿主内置提醒映射」，避免第二份实例名字面量。
-#[cfg(not(target_os = "emscripten"))]
 mod workspace_subscription;
 
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) use workspace_subscription::default_subscriptions_for;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -53,7 +49,6 @@ use thiserror::Error;
 mod tests;
 
 // 实例名 → 独立插件 handler 的工厂；runtime 是宿主 task 的唯一入口。
-#[cfg(not(target_os = "emscripten"))]
 mod dispatch;
 
 mod builtin_registry;
@@ -62,8 +57,6 @@ pub(crate) use builtin_registry::builtin_injection_policy_from_env;
 pub(crate) use builtin_registry::capability_closed;
 pub(crate) use builtin_registry::closed_capabilities;
 pub(crate) use builtin_registry::closed_instances;
-#[cfg(target_os = "emscripten")]
-pub(crate) use builtin_registry::default_subscriptions_for;
 pub(crate) use builtin_registry::enabled_capabilities;
 pub(crate) use builtin_registry::is_capability_closed;
 pub(crate) use builtin_registry::is_closed;

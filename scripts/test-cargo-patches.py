@@ -2,7 +2,6 @@
 """Verify locked Cargo resolution uses the repository's patched dependencies."""
 
 import json
-from itertools import product
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,16 +23,14 @@ class CargoPatchTests(unittest.TestCase):
         lockfile = REPO_ROOT / "Cargo.lock"
         original_lockfile = lockfile.read_bytes()
         with tempfile.TemporaryDirectory(prefix="peri-cargo-patches-") as temporary:
-            for directory, platform in product(
-                (REPO_ROOT, Path(temporary)), (host, "wasm32-unknown-emscripten"),
-            ):
-                with self.subTest(directory=directory, platform=platform):
+            for directory in (REPO_ROOT, Path(temporary)):
+                with self.subTest(directory=directory):
                     result = subprocess.run(
                         [
                             str(REPO_ROOT / "scripts/cargo-rmcp-patched.sh"),
                             "metadata", "--locked", "--offline",
                             "--manifest-path", str(REPO_ROOT / "Cargo.toml"),
-                            "--format-version", "1", "--filter-platform", platform,
+                            "--format-version", "1", "--filter-platform", host,
                         ],
                         cwd=directory, capture_output=True, text=True, timeout=120,
                     )
@@ -42,25 +39,18 @@ class CargoPatchTests(unittest.TestCase):
                     metadata = json.loads(result.stdout)
                     packages = metadata["packages"]
                     resolved_ids = {node["id"] for node in metadata["resolve"]["nodes"]}
-                    for name, version in (
-                        ("rmcp", "3.9.0"), ("hyper-util", "0.1.21"),
-                        ("tokio", "1.53.1"), ("mio", "1.2.3"),
-                    ):
-                        matches = [package for package in packages if package["name"] == name]
-                        self.assertEqual(len(matches), 1, name)
-                        package = matches[0]
-                        self.assertIn(package["id"], resolved_ids, name)
-                        self.assertEqual(package["version"], version, name)
-                        if name in ("rmcp", "hyper-util"):
-                            self.assertIsNone(package["source"], name)
-                            expected = REPO_ROOT / "target" / f"peri-{name}-patches"
-                            self.assertTrue(
-                                Path(package["manifest_path"]).is_relative_to(expected), name,
-                            )
-                        else:
-                            self.assertTrue(package["source"].startswith(
-                                f"git+https://github.com/guybedford/{name}?tag={version}-cf.emscripten#"
-                            ), name)
+                    matches = [
+                        package for package in packages if package["name"] == "rmcp"
+                    ]
+                    self.assertEqual(len(matches), 1, "rmcp")
+                    package = matches[0]
+                    self.assertIn(package["id"], resolved_ids, "rmcp")
+                    self.assertEqual(package["version"], "3.9.0", "rmcp")
+                    self.assertIsNone(package["source"], "rmcp")
+                    expected = REPO_ROOT / "target" / "peri-rmcp-patches"
+                    self.assertTrue(
+                        Path(package["manifest_path"]).is_relative_to(expected), "rmcp",
+                    )
                     self.assertEqual(lockfile.read_bytes(), original_lockfile)
 
 

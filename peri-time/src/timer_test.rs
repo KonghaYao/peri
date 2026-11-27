@@ -53,7 +53,6 @@ async fn test_interval_first_tick_is_immediate() {
     assert!(super::timeout(Duration::ZERO, ticker.tick()).await.is_ok());
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test(start_paused = true)]
 async fn test_monotonic_now_tracks_tokio_paused_clock() {
     let started = crate::monotonic_now();

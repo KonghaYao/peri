@@ -31,7 +31,7 @@ use crate::transport::types::AcpError;
 const WORKFLOW_INSTANCE: &str = "workflow";
 
 /// run 索引资源 URI（与 `peri_mcp_workflow::resources::RUNS_URI` 同值；
-/// ACP 侧按协议面字面量引用，避免为非 emscripten 依赖加条件编译）。
+/// ACP 侧按协议面字面量引用，不新增对 `peri-mcp-workflow` 的引用）。
 const RUNS_URI: &str = "workflow://runs";
 
 /// 会话无 workflow 消费面（无池）时的错误。

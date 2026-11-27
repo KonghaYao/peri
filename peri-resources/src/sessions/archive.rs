@@ -21,7 +21,6 @@ pub(crate) const METADATA_SQL: &str = "SELECT message_id,
  AND (CAST($6 AS TEXT) IS NULL OR rowid > (SELECT rowid FROM messages WHERE thread_id = $1 AND message_id = $6))
 
  ORDER BY rowid LIMIT $7";
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) const CHUNK_SQL: &str =
     "SELECT substr(CAST(content AS BLOB), ?4 + 1, ?5), length(CAST(content AS BLOB))
  FROM messages WHERE thread_id = ?1 AND message_id = ?2
@@ -93,7 +92,6 @@ pub(crate) fn page(
 
 /// Grants are read only from the current session's frozen inherited flags. The
 /// requested anchor must be inside the persisted root range and committed tail.
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) const INHERITED_GRANT_SQL: &str = "SELECT root.value
  FROM threads child, json_each(child.inherited_context, '$.flags') flag,
  json_each(flag.value, '$.projection.archive_roots') root

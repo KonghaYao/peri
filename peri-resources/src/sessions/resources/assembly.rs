@@ -4,18 +4,15 @@ use super::{
     Arc, Lifecycle, LocalExecutionPort, MutationGate, SessionDataHome, SessionDataPort,
     SessionResourcesImpl,
 };
-#[cfg(not(target_os = "emscripten"))]
 use super::{LocalExecution, Path, PathBuf, ReadOnlyThreadStoreError};
 
 impl SessionResourcesImpl {
     /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。
-    #[cfg(not(target_os = "emscripten"))]
     pub async fn open(db_path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Ok(Self::from_local(LocalExecution::open(db_path).await?))
     }
 
     /// 以只读方式打开已存在的会话库；不创建目录、库、schema 或锁文件。
-    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_existing_read_only(
         db_path: impl AsRef<Path>,
     ) -> Result<Self, ReadOnlyThreadStoreError> {
@@ -25,7 +22,6 @@ impl SessionResourcesImpl {
     }
 
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
-    #[cfg(not(target_os = "emscripten"))]
     pub fn default_database_path() -> anyhow::Result<PathBuf> {
         LocalExecution::default_database_path()
     }
@@ -34,7 +30,6 @@ impl SessionResourcesImpl {
     ///
     /// 本机组合：数据面与执行面由同一个库句柄回答（同一条连接真相），两个端口因此只是
     /// 同一实现的两张面孔。
-    #[cfg(not(target_os = "emscripten"))]
     pub(in crate::sessions) fn from_local(local: LocalExecution) -> Self {
         let data = Arc::new(local.data_port());
         Self::from_ports(data, Arc::new(local), SessionDataHome::LocalLibrary)

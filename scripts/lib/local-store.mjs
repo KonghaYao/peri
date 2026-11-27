@@ -1,4 +1,4 @@
-// Real PostgreSQL + Neon SQL-over-HTTP proxy for the WASM smoke tests.
+// Real PostgreSQL + Neon SQL-over-HTTP proxy for the E2E storage tests.
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,7 @@ export async function lookupEnv() {
   if (external) return { url: external, httpEndpoint: endpoint, logs: async () => '', stop: async () => {} };
   if (endpoint) throw new Error('PERI_TEST_STORAGE_HTTP_ENDPOINT requires PERI_TEST_STORAGE_URL');
 
-  const project = 'peri-wasm-' + randomUUID();
+  const project = 'peri-e2e-' + randomUUID();
   const password = randomUUID();
   const env = { ...process.env, PERI_FIXTURE_PASSWORD: password };
   const args = ['compose', '-p', project, '-f', composeFile];

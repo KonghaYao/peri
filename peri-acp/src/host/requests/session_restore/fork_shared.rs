@@ -9,9 +9,6 @@ use serde_json::Value;
 
 use super::super::ForkSessionResponse;
 use super::super::SessionId;
-// 本地 workflow 运行时不在 emscripten 构建面内（wasm 产物不打包 workflow），
-// 对应名称在该目标不存在；调用处已有同条件 cfg。
-// 本文件其余会话类型与端口仍在所有目标可用。
 use crate::dispatch;
 
 use crate::host::notify;
@@ -142,7 +139,6 @@ pub(crate) async fn handle_fork_shared(
     );
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
 
-    #[cfg(not(target_os = "emscripten"))]
     let workflow_chain = if super::super::workflow_face_closed(&frozen_data) {
         None
     } else {
@@ -153,7 +149,6 @@ pub(crate) async fn handle_fork_shared(
             &frozen_data,
         ))
     };
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
         // 消费者接线等待 MCP 初始化终态；激活必须先于 attach（与 session/new
         // 同序），否则池初始化永远等不到 activation。

@@ -28,7 +28,6 @@ export interface ChatObservationInput {
     bindingRevision: number;
     mcpSource: "session-init" | "unknown";
     sessionInit: ChatSessionInit;
-    runtimeKind: "wasm" | "transport";
     port?: {
         running: boolean;
         pendingInputCount: number;
@@ -96,23 +95,10 @@ function buildInstanceObservation(
         port?.pendingInputCount ?? 0,
         input.pendingInputs,
     );
-    if (input.runtimeKind === "wasm") {
-        // ChatService 不持有运行池；有激活但不知道池状态时如实标记 unknown，
-        // 由 ChatManager.observe() 按 chatId 补充。
-        if (port == null) return null;
-        return {
-            kind: "wasm",
-            state: "unknown",
-            running: port.running,
-            pendingInputCount,
-            pendingInteractionCount: port.pendingInteractionCount,
-        };
-    }
     if (port == null) return null;
     return {
-        kind: "transport",
-        // SDK 持有激活记录，但没有更细的 transport 生命周期；running 仍按端口值。
         state: "live",
+        // SDK 持有激活记录，但没有更细的 transport 生命周期；running 仍按端口值。
         running: port.running,
         pendingInputCount,
         pendingInteractionCount: port.pendingInteractionCount,

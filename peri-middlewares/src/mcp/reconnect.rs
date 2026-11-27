@@ -217,7 +217,6 @@ impl McpClientPool {
                 }
                 connected
             }
-            #[cfg(not(target_os = "emscripten"))]
             TransportConfig::Stdio { command, args, env } => {
                 if !self.stdio_available.load(Ordering::Acquire) {
                     let reason = crate::platform::STDIO_UNAVAILABLE.to_string();
@@ -256,13 +255,6 @@ impl McpClientPool {
                         });
                     }
                 }
-            }
-            #[cfg(target_os = "emscripten")]
-            TransportConfig::Stdio { .. } => {
-                return Err(McpPoolError::ConnectionFailed {
-                    server: server_name.to_owned(),
-                    reason: crate::platform::STDIO_UNAVAILABLE.into(),
-                });
             }
             TransportConfig::StreamableHttp {
                 url,

@@ -5,7 +5,7 @@
 
 功能定义与评级只在 [功能目录](../reference/feature-catalog.md)；本表维护当前实现、源码定位和证据缺口。“相关测试”是已定位的候选证据入口，仍须逐断言确认覆盖范围，不能据此声称整行边界已验证。各行“未复验”指本次文档变更未重跑对应运行行为，并非已确认产品缺陷。所有 L1–L4 的场景 ID、关键断言和固定产品/测试 SHA 对账交 [peri-e2e #10](https://github.com/KonghaYao/peri-e2e/issues/10)，不在 Peri 复制测试编排。L5 没有自动新增 E2E 的义务。
 
-已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。下表 F-MCP-015/016 已单独按 `b71c5e82` 对齐 #449 合入状态；其余行仍沿用各自注明的证据基线。浏览器网关 `peri-browser-gateway` 已于 2026-11-26 移除，F-EXT-016 退役；其验收记录随组件删除，历史由 Git 保留。
+已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。下表 F-MCP-015/016 已单独按 `b71c5e82` 对齐 #449 合入状态；其余行仍沿用各自注明的证据基线。浏览器网关 `peri-browser-gateway` 已于 2026-11-26 移除，F-EXT-016 退役；其验收记录随组件删除，历史由 Git 保留。`peri-wasm` 与 Emscripten/WASM 构建链已于 2026-11-24 移除，F-PLATFORM-001/002 退役；原验收基线由 Git 历史保留。
 
 ### PostgreSQL 会话存储验收
 
@@ -197,8 +197,8 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 | F-SDK-005 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/execution)；缺口：会话执行归属的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-SDK-006 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/transport)；缺口：Runtime 适配的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-SDK-007 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/storage)；缺口：SDK 数据库的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-PLATFORM-001 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../peri-wasm/src)；缺口：WASM 运行的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-PLATFORM-002 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../peri-wasm/src)；缺口：执行环境身份的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
+| F-PLATFORM-001 | 已退役 | [契约](../design/serverless-execution-identity.md) | 源码已随 Emscripten/WASM 构建链移除（见 Git 历史）；原缺口：WASM 运行的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
+| F-PLATFORM-002 | 已退役 | [契约](../design/serverless-execution-identity.md) | 源码已随 Emscripten/WASM 构建链移除（见 Git 历史）；原缺口：执行环境身份的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-PLATFORM-003 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../npm-packages/peri-sandbox/src)；缺口：Sandbox 启动的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-PLATFORM-004 | 源码存在 | [契约](../design/time-runtime.md) | [源码](../../peri-time/src)；缺口：时间适配的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-PLATFORM-005 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../peri-js-runtime/src)；缺口：JS Runtime的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |

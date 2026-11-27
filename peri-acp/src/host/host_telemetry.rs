@@ -80,7 +80,6 @@ fn open_spool_capability(config: &LangfuseConfig) -> Option<Arc<dyn SpoolStore>>
 }
 
 /// native 适配器装配；不支持 native 持久化的目标显式返回 `None`（有界内存模式）。
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 fn native_spool(
     route: langfuse_client::spool::RouteFingerprint,
     quota_bytes: u64,
@@ -92,14 +91,6 @@ fn native_spool(
             None
         }
     }
-}
-
-#[cfg(any(target_arch = "wasm32", target_os = "emscripten"))]
-fn native_spool(
-    _route: langfuse_client::spool::RouteFingerprint,
-    _quota_bytes: u64,
-) -> Option<Arc<dyn SpoolStore>> {
-    None
 }
 
 #[cfg(test)]

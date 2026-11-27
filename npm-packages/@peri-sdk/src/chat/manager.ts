@@ -1,21 +1,9 @@
 import { KvSessionOwnership, LocalSessionIndex } from "./ownership";
 import { createChatSessionIndex } from "./session-index";
-import {
-    WasmRuntimePool,
-    type WasmRuntimeAcquireOptions,
-    type WasmRuntimeLease,
-    type WasmRuntimePoolSnapshot,
-    type WasmRuntimeStarter,
-} from "../wasm/runtime-pool";
-import { startWasmRuntime, type WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import { withDeadline } from "../util/deadline";
 import { compareObservationIds } from "../util/observability";
 import type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
-import type {
-    ChatInstanceObservationSeed,
-    ChatInstanceState,
-    ChatObservation,
-} from "../contracts/observability";
+import type { ChatObservation } from "../contracts/observability";
 import type {
     ChatSessionInit,
     ChatSessionOptions,
@@ -42,12 +30,10 @@ import type { ChatInstanceFactory, ChatSessionIndex } from "./service-context";
  * Phase 4 接入真实 PeriInstance 的内部入口。
  *
  * 公开的 `ChatManagerOptions` 不含这些字段：Manager 默认装配真实工厂；
- * 测试可注入 fake port 或替代的 WASM 启动器。
+ * 测试可注入 fake port。
  */
 export interface ChatManagerInternalOptions extends ChatManagerOptions {
     readonly instanceFactory?: ChatInstanceFactory;
-    /** 测试接缝：替代默认 `startWasmRuntime`，仍然接收 per-chat 启动配置。 */
-    readonly wasmRuntimeStarter?: WasmRuntimeStarter;
 }
 
 /**
@@ -70,7 +56,6 @@ export class ChatManager implements ChatManagerContract {
     private readonly runtime: ChatRuntime;
     private readonly defaultSessionInit?: ChatSessionOptions;
     private readonly instanceFactory: ChatInstanceFactory;
-    private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
 
     private accepting = true;
@@ -98,11 +83,10 @@ export class ChatManager implements ChatManagerContract {
             !options.chatConfig ||
             typeof options.chatConfig !== "object" ||
             !options.chatConfig.runtime ||
-            (options.chatConfig.runtime.kind !== "wasm" &&
-                options.chatConfig.runtime.kind !== "transport")
+            options.chatConfig.runtime.kind !== "transport"
         ) {
             throw new TypeError(
-                'ChatManager requires chatConfig.runtime of { kind: "wasm" } or { kind: "transport" }',
+                'ChatManager requires chatConfig.runtime of { kind: "transport" }',
             );
         }
 
@@ -110,45 +94,16 @@ export class ChatManager implements ChatManagerContract {
         this.store = snapshotChatStore(options.store);
         this.database = options.database;
         this.sessionOwnership = sessionOwnership;
-        // 运行后端配置在构造时快照；env 也复制，避免调用方后续修改影响所有 Chat。
-        const configuredRuntime = { ...options.chatConfig.runtime };
-        this.runtime = configuredRuntime.kind === "wasm" &&
-            configuredRuntime.env !== undefined
-            ? { ...configuredRuntime, env: { ...configuredRuntime.env } }
-            : configuredRuntime;
+        // 运行后端配置在构造时快照，避免调用方后续修改影响所有 Chat。
+        this.runtime = { ...options.chatConfig.runtime };
         // Manager 级 session 只是默认值；未配置时不伪造空配置对象。
         this.defaultSessionInit = options.chatConfig.session === undefined
             ? undefined
             : copyChatSessionInit(options.chatConfig.session);
-        this.lifecycle = resolveChatLifecycle(
-            this.runtime.kind,
-            options.chatConfig.lifecycle,
-        );
+        this.lifecycle = resolveChatLifecycle(options.chatConfig.lifecycle);
         // 默认工厂直接使用 per-chat context；生命周期预算已由 ChatService 合并。
         this.instanceFactory = options.instanceFactory ?? createChatInstance;
         this.index = createChatSessionIndex(this.sessions);
-
-        if (this.runtime.kind === "wasm") {
-            const runtime = this.runtime;
-            const starter: WasmRuntimeStarter = options.wasmRuntimeStarter
-                ?? (({ signal, configJson, env, onDiagnostic }) => {
-                    if (configJson === undefined) {
-                        throw new Error(
-                            "WASM runtime requires a per-chat agentConfig snapshot",
-                        );
-                    }
-                    return startWasmRuntime({
-                        // 每个 Chat 传入自己的 configJson；Manager 不再持有全局配置。
-                        configJson,
-                        moduleUrl: runtime.moduleUrl,
-                        moduleFactory: runtime.moduleFactory,
-                        env: env ?? runtime.env,
-                        signal,
-                        onDiagnostic: onDiagnostic ?? runtime.onDiagnostic,
-                    });
-                });
-            this.wasmRuntimes = new WasmRuntimePool(starter);
-        }
     }
 
     /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
@@ -164,7 +119,7 @@ export class ChatManager implements ChatManagerContract {
             options.workspace,
             options.sessionPath,
         );
-        const { agentConfig, agentConfigJson } = resolveChatAgentConfig(
+        const { agentConfig } = resolveChatAgentConfig(
             this.store,
             options.agent,
             runtimeRoot,
@@ -178,10 +133,8 @@ export class ChatManager implements ChatManagerContract {
         };
         const lifecycle = mergeChatLifecycle(
             this.lifecycle,
-            this.runtime.kind,
             options.lifecycle,
         );
-        const perChatRuntime = this.resolvePerChatRuntime(options.runtime);
         const payloadBudgets = options.payloadBudgets === undefined
             ? undefined
             : { ...options.payloadBudgets };
@@ -192,18 +145,13 @@ export class ChatManager implements ChatManagerContract {
             sessionCwd,
             sessionInit,
             agentConfig,
-            agentConfigJson,
-            runtime: perChatRuntime.runtime,
-            runtimeEnv: perChatRuntime.env,
-            onRuntimeDiagnostic: perChatRuntime.onDiagnostic,
+            runtime: this.runtime,
             payloadBudgets,
             database: this.database,
             ownership: this.sessionOwnership,
             index: this.index,
             instanceFactory: this.instanceFactory,
             lifecycle,
-            acquireWasmRuntime: (acquireOptions) =>
-                this.acquireWasmRuntime(acquireOptions),
             onClosed: (chatId) => this.removeChat(chatId),
         });
         this.chats.set(id, chat);
@@ -235,52 +183,20 @@ export class ChatManager implements ChatManagerContract {
     }
 
     /**
-     * 只读 WASM 运行后端快照；transport runtime 没有 WASM 池时返回空快照。
-     * 读取不会启动运行后端。
-     */
-    runtimeSnapshot(): WasmRuntimePoolSnapshot {
-        return this.wasmRuntimes?.snapshot()
-            ?? { instances: [], starting: 0, unconfirmed: false };
-    }
-
-    /**
      * 只读 Chat 观测快照，按 chatId 稳定排序。
      *
-     * WASM 实例按运行池的 ownerChatId 合并；同一 Chat 有多条时优先 live，
-     * 再按启动时间取最新。读取不会启动运行后端，也不改变绑定/队列。
+     * 读取不会启动运行后端，也不改变绑定/队列。
      */
     observe(): ChatObservation[] {
-        const seeds = new Map<string, ChatInstanceObservationSeed>();
-        for (const instance of this.runtimeSnapshot().instances) {
-            if (instance.chatId === null) continue;
-            const candidate: ChatInstanceObservationSeed = {
-                state: instance.state,
-                startedAtMs: instance.startedAtMs,
-                ...(instance.linearMemoryBytes === null
-                    ? {}
-                    : { linearMemoryBytes: instance.linearMemoryBytes }),
-            };
-            const current = seeds.get(instance.chatId);
-            const rank = instanceStateRank(candidate.state);
-            if (
-                current === undefined ||
-                rank < instanceStateRank(current.state) ||
-                (rank === instanceStateRank(current.state) &&
-                    (candidate.startedAtMs ?? 0) >
-                        (current.startedAtMs ?? 0))
-            ) {
-                seeds.set(instance.chatId, candidate);
-            }
-        }
         return [...this.chats.values()]
-            .map((chat) => this.observeChat(chat, seeds.get(chat.id)))
+            .map((chat) => chat.observe())
             .sort((left, right) =>
                 compareObservationIds(left.chatId, right.chatId),
             );
     }
 
     /**
-     * 先封闭新准入，再结算在途绑定与关闭，最后关闭 WASM 运行后端。
+     * 先封闭新准入，再结算在途绑定与关闭。
      * 失败聚合上报并保留句柄/ownership；可再次调用重试。
      */
     shutdown(): Promise<void> {
@@ -317,24 +233,6 @@ export class ChatManager implements ChatManagerContract {
             if (result.status === "rejected") failures.push(result.reason);
         }
 
-        // 任一 Chat 未确认关闭时保留运行后端：其可能仍被未释放的激活使用。
-        if (failures.length === 0 && this.wasmRuntimes) {
-            try {
-                const reports = await this.wasmRuntimes.closeAll();
-                for (const report of reports) {
-                    if (report.confirmed) continue;
-                    failures.push(
-                        new Error(
-                            `Peri WASM runtime ${report.generationId} close is unconfirmed`,
-                            { cause: report.error },
-                        ),
-                    );
-                }
-            } catch (error) {
-                failures.push(error);
-            }
-        }
-
         if (failures.length > 0) {
             throw new AggregateError(
                 failures,
@@ -344,83 +242,8 @@ export class ChatManager implements ChatManagerContract {
         this.sessions.clear();
     }
 
-    private resolvePerChatRuntime(
-        override?: ChatCreateOptions["runtime"],
-    ): {
-        runtime: ChatRuntime;
-        env?: Readonly<Record<string, string>>;
-        onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
-    } {
-        if (this.runtime.kind !== "wasm") return { runtime: this.runtime };
-        const baseEnv = this.runtime.env;
-        const env = override?.env === undefined
-            ? (baseEnv === undefined ? undefined : { ...baseEnv })
-            : { ...(baseEnv ?? {}), ...override.env };
-        const onDiagnostic = override?.onDiagnostic ?? this.runtime.onDiagnostic;
-        const runtime: ChatRuntime = {
-            ...this.runtime,
-            ...(env === undefined ? {} : { env }),
-            ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
-        };
-        return { runtime, env, onDiagnostic };
-    }
-
-    private acquireWasmRuntime(
-        options?: WasmRuntimeAcquireOptions,
-    ): Promise<WasmRuntimeLease> {
-        if (!this.wasmRuntimes) {
-            throw new Error(
-                'runtime.kind "transport" does not use a WASM runtime pool',
-            );
-        }
-        return this.wasmRuntimes.acquire(options);
-    }
-
-    private observeChat(
-        chat: ChatService,
-        seed?: ChatInstanceObservationSeed,
-    ): ChatObservation {
-        const observation = chat.observe();
-        if (this.runtime.kind !== "wasm" || seed === undefined) {
-            return observation;
-        }
-        const current = observation.instance;
-        return {
-            ...observation,
-            instance: {
-                kind: "wasm",
-                state: seed.state,
-                ...(seed.startedAtMs === undefined
-                    ? {}
-                    : { startedAtMs: seed.startedAtMs }),
-                ...(seed.linearMemoryBytes === undefined
-                    ? {}
-                    : { linearMemoryBytes: seed.linearMemoryBytes }),
-                running: current?.running ?? false,
-                pendingInputCount: current?.pendingInputCount ?? 0,
-                pendingInteractionCount:
-                    current?.pendingInteractionCount ?? 0,
-            },
-        };
-    }
-
     private removeChat(id: string): void {
         this.chats.delete(id);
         this.sessions.removeChat(id);
-    }
-}
-
-function instanceStateRank(state: ChatInstanceState): number {
-    switch (state) {
-        case "live":
-            return 0;
-        case "closing":
-            return 1;
-        case "close-unconfirmed":
-            return 2;
-        case "closed":
-            return 3;
-        default:
-            return 4;
     }
 }

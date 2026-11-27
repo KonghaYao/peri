@@ -15,7 +15,6 @@ function observation(overrides: {
         phaseLimited: true,
         workspace: { id: "workspace_1", runtimePath: "/workspace" },
         instance: {
-            kind: "wasm",
             state: "live",
             running: overrides.running ?? false,
             pendingInputCount: overrides.queued ?? 0,

@@ -8,7 +8,6 @@
 //! 自己保证（见 `docs/design/thread-mq.md` §5.4）。
 
 use peri_acp_types::session::{MqEntry, MqFilter, MqReceiveItemOutcome, MqReceiveStatus};
-#[cfg(not(target_os = "emscripten"))]
 use peri_acp_types::session::{MqHeader, MqWatermark};
 use peri_acp_types::session_resources::SessionResourceResult;
 
@@ -29,7 +28,6 @@ pub(in crate::sessions) const SELECT_THREAD_MQ_BY_ID_SQL: &str =
 ///
 /// 行在 `thread_mq` 里就是「尚未移交」。工作意图收尾据此确认没有仍要求继续处理
 /// 的新工作（`docs/design/session-durability.md` §5.1）。
-#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) const SELECT_THREAD_MQ_POLICIES_SQL: &str =
     "SELECT policy_json FROM thread_mq WHERE thread_id = $1";
 
@@ -132,7 +130,6 @@ pub(in crate::sessions) struct RawMqRow<'row> {
 }
 
 /// 控制面行的文本形态：没有正文列。
-#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) struct RawMqHeader<'row> {
     pub id: &'row str,
     pub enqueued_at: &'row str,
@@ -142,7 +139,6 @@ pub(in crate::sessions) struct RawMqHeader<'row> {
 }
 
 /// 文本行 → 控制面事实；不接触 `payload_json`。
-#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn decode_header(row: RawMqHeader<'_>) -> SessionResourceResult<MqHeader> {
     let kind = serde_json::from_value(serde_json::Value::String(row.kind.to_owned()))
         .map_err(|_| super::failure::corrupt("MQ row has an unknown message kind"))?;
@@ -196,7 +192,6 @@ pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceRes
 /// 行内策略是否要求「继续处理」：收尾判定复用同一份领域规则，不按来源或 kind 猜。
 ///
 /// 读不懂的策略按损坏失败关闭：把一条待发行当成无需处理会让收尾提前写 `idle`。
-#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn policy_ensures_processing(
     policy_json: &str,
 ) -> SessionResourceResult<bool> {
@@ -264,7 +259,6 @@ pub(in crate::sessions) fn item_outcome(
 }
 
 /// 水位比较：`(enqueued_at, id)` 字典序。
-#[cfg(not(target_os = "emscripten"))]
 pub(in crate::sessions) fn is_same_watermark(entry: &MqEntry, watermark: &MqWatermark) -> bool {
     entry.enqueued_at == watermark.enqueued_at && entry.id == watermark.id
 }

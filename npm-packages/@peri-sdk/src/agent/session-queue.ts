@@ -6,7 +6,7 @@ const QUEUE_REJECTED_CODE = -32602;
 /**
  * 输入队列已换代：Peri 在持久化不一致后丢弃 mailbox，下一次请求新建换代队列。
  *
- * 旧代次的写入不可再信；宿主必须重建 runtime（新进程 / WASM 实例）后重新
+ * 旧代次的写入不可再信；宿主必须重建 runtime（新进程 / 新实例）后重新
  * `session/load`，不能只重试输入。SDK 也据此不自动重放用户内容。
  */
 export class SessionQueueStaleError extends Error {

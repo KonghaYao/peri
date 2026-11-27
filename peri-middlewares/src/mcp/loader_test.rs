@@ -395,7 +395,6 @@ fn case_folded_server_keys_get_distinct_loader_names() {
     assert_ne!(names[0], names[1]);
 }
 
-#[cfg(not(target_os = "emscripten"))]
 const ECHO_SERVER: &str = r#"
 const readline = require('node:readline').createInterface({ input: process.stdin });
 function handle(line) {
@@ -436,7 +435,6 @@ readline.on('line', handle);
 "#;
 
 /// 成功加载绑定配置，返回目录事实；再次调用复用同一连接。
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loader_loads_bound_config_and_reports_ready_catalog() {
     let fixture = Fixture::new();
@@ -488,7 +486,6 @@ async fn loader_loads_bound_config_and_reports_ready_catalog() {
 
 /// B5：加载提交后准备当前会话目录——下一轮可搜完整 schema，当前 Act 视图不变，
 /// 失效目标由既有 call gate 拒绝（plan 7 / 8 / 12-B5）。
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_prepares_the_next_reason_without_replacing_the_current_act() {
     let fixture = Fixture::new();
@@ -588,7 +585,6 @@ async fn load_prepares_the_next_reason_without_replacing_the_current_act() {
 }
 
 /// 服务器有工具但本会话全部过滤：仍可 ready，但必须明确没有可调用工具。
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_reports_zero_session_tools_when_the_session_filters_them_all() {
     let fixture = Fixture::new();
@@ -637,7 +633,6 @@ async fn load_reports_zero_session_tools_when_the_session_filters_them_all() {
     fixture.shutdown().await;
 }
 /// 连接与发现成功但当前会话目录构造失败：返回目录阶段错误，连接仍归 pool 所有。
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_fails_at_the_catalog_stage_without_closing_the_connection() {
     struct FailingCatalog;
@@ -688,7 +683,6 @@ async fn load_fails_at_the_catalog_stage_without_closing_the_connection() {
 
 /// 需要 OAuth 的 dynamic server：加载报告失败而不是 ready，且不留下可调用连接
 /// 或 OAuth 流程（plan 10 / 12-B6 授权面）。
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 async fn load_requiring_authorization_is_not_ready_and_starts_no_flow() {
     let fixture = Fixture::new();
