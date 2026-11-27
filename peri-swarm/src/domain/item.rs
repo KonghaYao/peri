@@ -3,6 +3,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::domain::error::{ErrorCode, ErrorKind, SwarmError};
+use crate::domain::official_item::OfficialSessionItem;
 
 /// Maximum serialized payload retained in `swarm_items.payload_json`.
 pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -81,6 +82,11 @@ pub struct ItemView {
 }
 
 impl ItemView {
+    /// 恢复期合并的根输出没有网关 turn，且只有 JSON 布尔值 `true` 才标记恢复行。
+    pub(crate) fn is_recovered_row(&self) -> bool {
+        self.payload.get("recovered").and_then(Value::as_bool) == Some(true)
+    }
+
     /// Payload is truncated to a marker when it exceeds [`MAX_PAYLOAD_BYTES`];
     /// `itemId`/`seq`/`kind` stay intact (`design §2.6`).
     #[must_use]
@@ -102,6 +108,31 @@ impl ItemView {
     pub fn new_item_id() -> String {
         format!("itim_{}", Uuid::now_v7())
     }
+}
+
+/// One live chunk of an assistant/thought stream (`design §9`).
+///
+/// It has **no `seq`**: a delta is never persisted, never returned by
+/// `/items` and never part of backlog replay, so it must not advance
+/// `Last-Event-ID`. The merged row of the same `item_id` (payload
+/// `complete: true`, written when the turn terminates) is the only durable
+/// fact a reconnect reads.
+///
+/// Rejected alternatives, kept here so they are not reopened: merging in place
+/// with `UPDATE` breaks append-only replay (a client resuming from `seq=N` would
+/// never see the final text); allocating an in-memory `seq` conflicts with the
+/// persisted cursor; renaming the frame (`item.delta`) gains nothing because
+/// clients render `item` and a missing `id` is already the signal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDelta {
+    /// Mirrors `item_id` so SDK types that extend `{ id }` can traverse it.
+    pub id: String,
+    pub item_id: String,
+    pub kind: ItemKind,
+    pub source: ItemSource,
+    pub payload: Value,
+    pub created_at: String,
 }
 
 /// Query window for `GET /items` (`design §2.6` plus the SDK `order` field).
@@ -156,14 +187,10 @@ impl ItemsWindow {
 
 /// One page of persisted items with a stable cursor.
 ///
-/// Pagination is **item-grouped** (`design §4.2`): `limit` counts items, and
-/// every row of the selected items is returned in `items`. `data` is the
-/// official `CursorPage` view of the same page — one row per item, the item's
-/// last persisted row (greatest `seq`). Because one assistant message can span
-/// several delta rows plus its `complete:true` row, `data` is usually shorter
-/// than `items`; `items` remains the raw row list existing delta consumers
-/// read. `has_more`/`hasMore` count items, and `nextCursor` is the greatest
-/// `seq` of the last item of the page in page order.
+/// 分页以条目为单位（`design §4.2`）。`items` 返回选中条目的所有原始行：
+/// 新写入的条目只有一行，历史条目仍可包含多行。`data` 是官方投影；原始页不含
+/// 可投影条目时，向后找第一个有投影的页。`has_more`/`hasMore` 按原始条目计数，
+/// `nextCursor` 指向 `items` 页尾条目的最大 `seq`。
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPage {
@@ -171,8 +198,8 @@ pub struct ItemPage {
     pub object: String,
     /// Raw rows of the page's items, in `order`.
     pub items: Vec<ItemView>,
-    /// One row per item (the item's last row), in page order.
-    pub data: Vec<ItemView>,
+    /// 可映射的官方条目，保持页内条目顺序。
+    pub data: Vec<OfficialSessionItem>,
     /// Last item's greatest `seq` when more items exist; `null` otherwise.
     pub next_cursor: Option<u64>,
     pub last_item_seq: u64,
@@ -203,13 +230,12 @@ impl Serialize for ItemPage {
 }
 
 impl ItemPage {
-    /// `items` are the raw rows in `order`; `data` is one last row per item in
-    /// page order.
+    /// `items` 是原始行，`data` 是官方条目投影，必要时取自后续原始页。
     #[must_use]
     pub fn new(
         logical_id: impl Into<String>,
         items: Vec<ItemView>,
-        data: Vec<ItemView>,
+        data: Vec<OfficialSessionItem>,
         next_cursor: Option<u64>,
         last_item_seq: u64,
         has_more: bool,

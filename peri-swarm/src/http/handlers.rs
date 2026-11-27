@@ -230,7 +230,7 @@ pub async fn submit_event(
 ) -> Result<Response, SwarmError> {
     let Json(body) = body.map_err(from_json_rejection)?;
     let logical_id = LogicalId::parse(&logical_id)?;
-    let submission = match request::resolve_event(body, &headers)? {
+    let submission = match request::resolve_event(&logical_id, body, &headers)? {
         request::SubmitEvent::Input(submission) => submission,
         request::SubmitEvent::Approval(answer) => {
             // The answer goes back to the still-suspended `session/prompt`; it

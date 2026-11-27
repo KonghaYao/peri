@@ -68,6 +68,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | 历史设计（Emscripten/WASM 部署已移除）；保留移除前的目标设计与验收边界 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
+| Swarm 事件日志粒度 | [peri-swarm.md §9](peri-swarm.md#9-已批准目标事件日志粒度与回放置位已实施) | 文本/推理按 item 合并落库、`tool`/`approval` 保持逐帧、实时 delta 帧不带 seq、回放真源固定 PostgreSQL 且不引入 Redis；已实施，验收见 [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md) |
 | Peri Swarm 本地开发宿主 | [peri-swarm.md](peri-swarm.md) | 五路由 HTTP 面、Rivet actor、Peri 会话库与独立 Swarm 状态库（均为 PostgreSQL）、Bun 沙箱与 MCP 注入、仅杀 Rust 的 reattach；副本组与外部 engine 配置（默认 loopback，显式非 loopback 开关）；本地验收见[验收记录](../verification/peri-swarm-local-dev.md)与[状态库迁移](../verification/peri-swarm-postgres-state-2026-11-24.md)，跨机、TLS、单 engine 多副本与规模未验收 |
 
 ## 维护要求

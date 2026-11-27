@@ -213,12 +213,16 @@
 | F-SWARM-001 | L1 | 会话 HTTP 面；sessions/events/items/turns 路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
 | F-SWARM-003 | L1 | 事件续读；无游标只送实时（不读行）、显式回放；lookback 播种与末尾终态；官方 `agent.session.*` 帧；items 分页默认 `desc`、行预算 | [契约](../design/peri-swarm.md) |
-| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message；受理持久化后 202、turn 后台执行 | [契约](../design/peri-swarm.md) |
+| F-SWARM-004 | L1 | 输入幂等；任意非空 ASCII `Idempotency-Key` 派生 UUIDv5，同键同文复用、异文 409；官方信封单条 message；受理后 202 | [契约](../design/peri-swarm.md) |
 | F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
-| F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
+| F-SWARM-006 | L2 | MCP 注入；agent.tools 官方 `transport` 形状与平铺别名映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
 | F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |
 | F-SWARM-008 | L2 | 空闲回收；请求与后台 MCP 任务保活，保留工作区并按需唤醒 | [契约](../design/peri-swarm.md) |
 | F-SWARM-009 | L2 | 宿主恢复；按交互重新挂接，持久 MQ 恢复，同步中断可继续追问 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
 | F-SWARM-011 | L3 | 副本组部署面；外部 engine（字面 endpoint 限私网/环回，域名由部署保证）、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |
 | F-SWARM-012 | L1 | 官方会话资源面；list/update/delete/turns，官方默认字段与环境 `none` 投影，空对象 update no-op，未映射资源显式 404 | [契约](../design/peri-swarm.md) |
+| F-SWARM-013 | L1 | 事件持久化粒度；turn 终止按 item 合并文本与推理，工具与审批逐帧 | [契约](../design/peri-swarm.md) |
+| F-SWARM-014 | L1 | 官方 items 投影；`data` 为官方条目，`items` 保留原始行，恢复行不投影 | [契约](../design/peri-swarm.md) |
+| F-SWARM-015 | L1 | 官方取消；cancel 事件受理、收据后写、首次与重发失败可分 | [契约](../design/peri-swarm.md) |
+| F-SWARM-016 | L1 | 官方文本 delta；实时逐 chunk、回放单条全文，chunk 不落库 | [契约](../design/peri-swarm.md) |

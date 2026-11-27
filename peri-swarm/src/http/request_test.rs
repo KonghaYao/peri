@@ -1,8 +1,28 @@
 use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
-use super::{resolve_submission, resolve_tools, CreateSessionBody, SubmitEventBody};
-use crate::domain::{ErrorCode, ErrorKind, InputKind, InputMode};
+use super::{resolve_tools, resolve_tools_value, CreateSessionBody, SubmitEventBody};
+use crate::domain::{
+    ErrorCode, ErrorKind, InputKind, InputMode, InputSubmission, LogicalId, SwarmError,
+};
+
+fn session_id() -> LogicalId {
+    LogicalId::parse("agent-01").expect("test session id")
+}
+
+fn resolve_submission(
+    body: SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<InputSubmission, SwarmError> {
+    super::resolve_submission(&session_id(), body, headers)
+}
+
+fn resolve_event(
+    body: SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<super::SubmitEvent, SwarmError> {
+    super::resolve_event(&session_id(), body, headers)
+}
 
 fn body(value: serde_json::Value) -> CreateSessionBody {
     serde_json::from_value(value).expect("create body")
@@ -65,6 +85,266 @@ fn official_mcp_shape_is_accepted_at_the_agent_position() {
     assert_eq!(tool.require_approval, Some(json!("never")));
     assert_eq!(tool.allowed_tools, Some(json!(["read_wiki_structure"])));
     assert_eq!(tool.extra["defer_loading"], json!(true));
+}
+
+#[test]
+fn official_transport_shape_maps_onto_the_flat_spec() {
+    let tools = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "agent": {
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "headers": { "X-Trace": "abc" },
+                    "authorization": "caller-token"
+                },
+                "allowed_tools": ["get_time"]
+            }]
+        }
+    })))
+    .expect("official transport");
+
+    let tool = &tools[0];
+    assert_eq!(tool.server_label, "get-time");
+    assert_eq!(tool.server_url, "https://mcp.example.test/mcp");
+    assert_eq!(
+        tool.headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("Authorization", "Bearer caller-token"), ("X-Trace", "abc"),],
+        "authorization 补成 Bearer 头，headers 参与同一规范化排序"
+    );
+    assert_eq!(tool.allowed_tools, Some(json!(["get_time"])));
+    assert!(
+        !tool.extra.contains_key("transport"),
+        "transport 已被解析，不再落进 extra"
+    );
+}
+
+#[test]
+fn an_explicit_authorization_header_wins_over_transport_authorization() {
+    let tools = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "get-time",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp",
+                "headers": { "authorization": "Bearer explicit" },
+                "authorization": "ignored"
+            }
+        }]
+    })))
+    .expect("transport");
+
+    assert_eq!(tools[0].headers.len(), 1);
+    assert_eq!(tools[0].headers[0].name, "authorization");
+    assert_eq!(tools[0].headers[0].value, "Bearer explicit");
+}
+
+#[test]
+fn transport_authorization_only_gains_a_missing_bearer_scheme() {
+    for (authorization, expected) in [
+        ("token", "Bearer token"),
+        ("Bearer token", "Bearer token"),
+        ("Basic abc", "Basic abc"),
+        ("bearer token", "bearer token"),
+    ] {
+        let tools = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect("transport");
+
+        let authorization_headers = tools[0]
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authorization_headers.len(),
+            1,
+            "authorization 只能产生一条头：{authorization}"
+        );
+        assert_eq!(authorization_headers[0].value, expected, "{authorization}");
+        assert!(
+            !authorization_headers[0].value.contains("Bearer Bearer"),
+            "不应重复 Bearer 前缀：{authorization}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_transport_authorization_is_rejected() {
+    for authorization in ["", "   "] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": authorization
+                }
+            }]
+        })))
+        .expect_err("empty authorization");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(field(&error), "tools[0].transport.authorization");
+        assert!(
+            error.message().contains("empty"),
+            "理由应写明不能为空：{}",
+            error.message()
+        );
+    }
+}
+
+#[test]
+fn flat_and_transport_server_urls_must_agree() {
+    let accepted = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "get-time",
+            "server_url": "https://mcp.example.test/mcp",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp"
+            }
+        }]
+    })))
+    .expect("same URL in both shapes");
+    assert_eq!(accepted[0].server_url, "https://mcp.example.test/mcp");
+
+    let error = resolve_tools(&body(json!({
+        "logicalId": "agent-01",
+        "agent": {
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "server_url": "https://legacy.example.test/mcp",
+                "transport": {
+                    "type": "http",
+                    "server_url": "https://mcp.example.test/mcp"
+                }
+            }]
+        }
+    })))
+    .expect_err("disagreeing URLs");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "agent.tools[0].transport");
+}
+
+#[test]
+fn stdio_and_unknown_transports_are_a_stated_gap() {
+    for (transport, expected) in [
+        (
+            json!({ "type": "stdio", "command": "uvx", "cwd": "/tmp" }),
+            "stdio",
+        ),
+        (
+            json!({ "type": "sse", "server_url": "https://mcp.test" }),
+            "sse",
+        ),
+    ] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": transport
+            }]
+        })))
+        .expect_err("unsupported transport");
+        assert_eq!(error.code(), ErrorCode::UnsupportedTool, "{error:?}");
+        assert_eq!(error.kind(), ErrorKind::Unprocessable);
+        assert_eq!(field(&error), "tools[0].transport.type");
+        assert_eq!(error.details()["value"], json!(expected));
+        assert_eq!(error.details()["supported"], json!(["http"]));
+    }
+}
+
+#[test]
+fn a_malformed_transport_reports_its_nested_path() {
+    for (transport, expected) in [
+        (json!("http"), "tools[0].transport"),
+        (
+            json!({ "server_url": "https://mcp.test" }),
+            "tools[0].transport.type",
+        ),
+        (json!({ "type": 7 }), "tools[0].transport.type"),
+        (json!({ "type": "http" }), "tools[0].transport.server_url"),
+        (
+            json!({ "type": "http", "server_url": "" }),
+            "tools[0].transport.server_url",
+        ),
+        (
+            json!({
+                "type": "http",
+                "server_url": "https://mcp.test",
+                "headers": "X-Trace: abc"
+            }),
+            "tools[0].transport.headers",
+        ),
+        (
+            json!({
+                "type": "http",
+                "server_url": "https://mcp.test",
+                "authorization": 7
+            }),
+            "tools[0].transport.authorization",
+        ),
+    ] {
+        let error = resolve_tools(&body(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "get-time",
+                "transport": transport
+            }]
+        })))
+        .expect_err("malformed transport");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{error:?}");
+        assert_eq!(field(&error), expected);
+    }
+}
+
+#[test]
+fn sessions_update_tools_accept_the_official_transport_shape() {
+    let tools = resolve_tools_value(
+        &json!([{
+            "type": "mcp",
+            "server_label": "get-time",
+            "transport": {
+                "type": "http",
+                "server_url": "https://mcp.example.test/mcp",
+                "authorization": "caller-token"
+            },
+            "allowed_tools": ["get_time"]
+        }]),
+        "agent.tools",
+    )
+    .expect("update tools");
+
+    assert_eq!(tools[0].server_url, "https://mcp.example.test/mcp");
+    assert_eq!(tools[0].headers[0].name, "Authorization");
+    assert_eq!(tools[0].headers[0].value, "Bearer caller-token");
+    assert_eq!(tools[0].allowed_tools, Some(json!(["get_time"])));
 }
 
 #[test]
@@ -350,12 +630,12 @@ fn official_events_envelope_maps_to_one_user_turn() {
 
 #[test]
 fn official_events_envelope_reuses_the_idempotency_key() {
-    let input_id = uuid::Uuid::now_v7().to_string();
+    let input_id = "0192F0C5-0000-7000-8000-0000000000C1";
     let submission = resolve_submission(
         event_body(official_envelope(json!([
             { "type": "input_text", "text": "via header" }
         ]))),
-        &idempotency_headers(&input_id),
+        &idempotency_headers(input_id),
     )
     .expect("official envelope with key");
 
@@ -364,17 +644,78 @@ fn official_events_envelope_reuses_the_idempotency_key() {
 }
 
 #[test]
-fn official_events_envelope_rejects_a_non_uuid_idempotency_key() {
-    let error = resolve_submission(
-        event_body(official_envelope(json!([
-            { "type": "input_text", "text": "hello" }
-        ]))),
-        &idempotency_headers("not-a-uuid"),
-    )
-    .expect_err("non-UUID key");
+fn official_events_envelope_derives_a_stable_id_for_an_opaque_key() {
+    let headers = idempotency_headers("submit-hello");
+    let envelope = official_envelope(json!([{ "type": "input_text", "text": "hello" }]));
+    let first = resolve_submission(event_body(envelope.clone()), &headers).unwrap();
+    let retry = resolve_submission(event_body(envelope), &headers).unwrap();
+    assert_eq!(first.input_id, "4f126633-b225-54ae-83d3-25fcc0285b6e");
+    assert_eq!(retry.input_id, first.input_id);
+}
 
+/// [回归测试] 兼容非 UUID header 后，原生 `inputId` 仍须通过原有 UUID 校验。
+#[test]
+fn official_events_accept_an_opaque_header_but_native_input_id_rejects_it() {
+    let key = "not-a-uuid";
+    let headers = idempotency_headers(key);
+    let official = official_envelope(json!([{ "type": "input_text", "text": "hello" }]));
+    let input = resolve_submission(event_body(official), &headers).expect("opaque header");
+    assert_eq!(
+        uuid::Uuid::parse_str(&input.input_id)
+            .unwrap()
+            .get_version_num(),
+        5
+    );
+    assert_eq!(input.text.as_deref(), Some("hello"));
+
+    let native = event_body(json!({"inputId": key, "text": "hello"}));
+    let error = resolve_submission(native, &headers).expect_err("non-UUID body inputId");
     assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(error.message(), "inputId must be a UUID");
+}
+
+#[test]
+fn native_input_id_must_be_a_uuid_and_match_the_resolved_header_id() {
+    let headers = idempotency_headers("submit-hello");
+    let with_header_only =
+        resolve_submission(event_body(json!({"text":"hello"})), &headers).unwrap();
+    let id = &with_header_only.input_id;
+    let body = event_body(json!({"inputId": id, "text":"hello"}));
+    assert_eq!(
+        resolve_submission(body, &headers).unwrap(),
+        with_header_only
+    );
+    for (body_id, expected) in [
+        (
+            "0192f0c5-0000-7000-8000-0000000000c1",
+            "inputId and Idempotency-Key disagree",
+        ),
+        ("submit-hello", "inputId must be a UUID"),
+    ] {
+        let error = resolve_submission(
+            event_body(json!({"inputId":body_id,"text":"hello"})),
+            &headers,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BadRequest);
+        assert_eq!(error.message(), expected);
+        assert!(error.details().is_null());
+    }
+}
+
+#[test]
+fn empty_and_non_ascii_idempotency_headers_keep_the_existing_boundary() {
+    let body = || event_body(json!({"text":"hello"}));
+    let missing = resolve_submission(body(), &idempotency_headers("")).unwrap_err();
+    assert!(missing.message().contains("inputId is required"));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "idempotency-key",
+        HeaderValue::from_bytes(&[0xc3, 0xa9]).unwrap(),
+    );
+    let error = resolve_submission(body(), &headers).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::BadRequest);
+    assert_eq!(error.message(), "Idempotency-Key must be ASCII");
 }
 
 #[test]
@@ -457,7 +798,8 @@ fn official_events_envelope_rejects_image_content_at_its_index() {
 #[test]
 fn official_events_envelope_rejects_unknown_event_types_by_name() {
     for kind in [
-        "agent.session.input.cancel",
+        "agent.session.input.tool_result",
+        "agent.session.input.computer_use_approval_request_result",
         "mcp_approval_request_result",
         "agent.session.input.unknown",
     ] {
@@ -469,6 +811,82 @@ fn official_events_envelope_rejects_unknown_event_types_by_name() {
         assert_eq!(error.code(), ErrorCode::InvalidInput, "{kind}");
         assert_eq!(field(&error), "events[0].type", "{kind}");
         assert!(error.message().contains("agent.session.input.message"));
+    }
+}
+
+#[test]
+fn official_cancel_resolves_to_control_without_a_user_input() {
+    for (key, resolved) in [
+        (None, None),
+        (
+            Some("0192f0c5-0000-7000-8000-0000000000c1"),
+            Some("0192f0c5-0000-7000-8000-0000000000c1"),
+        ),
+        (
+            Some("submit-hello"),
+            Some("4f126633-b225-54ae-83d3-25fcc0285b6e"),
+        ),
+    ] {
+        let headers = key.map(idempotency_headers).unwrap_or_default();
+        let event = resolve_event(
+            event_body(json!({"events": [{"type":"agent.session.input.cancel"}]})),
+            &headers,
+        )
+        .expect("cancel");
+        let super::SubmitEvent::Input(input) = event else {
+            panic!("expected control input")
+        };
+        assert_eq!(input.kind, InputKind::Control);
+        assert_eq!(input.mode, InputMode::Turn);
+        assert_eq!(input.text.as_deref(), Some("cancel"));
+        assert!(
+            input.attachments.is_empty()
+                && input.plugin_selections.is_empty()
+                && input.original_draft.is_none()
+        );
+        if let Some(expected) = resolved {
+            assert_eq!(input.input_id, expected);
+        } else {
+            assert_eq!(
+                uuid::Uuid::parse_str(&input.input_id)
+                    .unwrap()
+                    .get_version_num(),
+                7
+            );
+        }
+    }
+}
+
+#[test]
+fn official_cancel_rejects_input_fields_mixed_shapes_and_batches() {
+    let cancel = "agent.session.input.cancel";
+    for (body, expected) in [
+        (
+            json!({"events": [{"type": cancel, "input": []}]}),
+            "events[0].input",
+        ),
+        (
+            json!({"events": [{"type": cancel, "input": null}]}),
+            "events[0].input",
+        ),
+        (
+            json!({"events": [{"type": cancel, "reason": "stop"}]}),
+            "events[0].reason",
+        ),
+        (
+            json!({"events": [{"type": cancel}, {"type":"agent.session.input.message"}]}),
+            "events",
+        ),
+        (
+            json!({"events": [{"type": cancel}], "kind":"control"}),
+            "kind",
+        ),
+    ] {
+        let error =
+            resolve_event(event_body(body), &HeaderMap::new()).expect_err("malformed cancel");
+        assert_eq!(error.kind(), ErrorKind::BadRequest);
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert_eq!(field(&error), expected);
     }
 }
 
@@ -532,7 +950,7 @@ fn official_events_envelope_keeps_the_existing_empty_input_check() {
 
 #[test]
 fn an_approval_result_event_resolves_to_a_decision() {
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -556,7 +974,7 @@ fn an_approval_result_event_resolves_to_a_decision() {
 
 #[test]
 fn the_native_top_level_decision_alias_still_resolves() {
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -575,8 +993,28 @@ fn the_native_top_level_decision_alias_still_resolves() {
 }
 
 #[test]
+fn an_approval_result_uses_the_same_derived_id_for_an_opaque_key() {
+    let event = resolve_event(
+        event_body(json!({"events": [{
+            "type":"agent.session.input.mcp_approval_request_result",
+            "request_id":"appr_1",
+            "response":{"type":"mcp_tool_call", "decision":"approve"},
+        }]})),
+        &idempotency_headers("submit-hello"),
+    )
+    .unwrap();
+    let super::SubmitEvent::Approval(answer) = event else {
+        panic!("expected an approval answer");
+    };
+    assert_eq!(
+        answer.input_id.as_deref(),
+        Some("4f126633-b225-54ae-83d3-25fcc0285b6e")
+    );
+}
+
+#[test]
 fn an_approval_response_type_must_be_mcp_tool_call() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -595,7 +1033,7 @@ fn an_approval_response_type_must_be_mcp_tool_call() {
 #[test]
 fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions() {
     let key = "0192f0c5-0000-7000-8000-0000000000bb";
-    let event = super::resolve_event(
+    let event = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -612,7 +1050,7 @@ fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions(
     assert_eq!(answer.input_id.as_deref(), Some(key));
     assert_eq!(answer.decision, crate::domain::ApprovalDecision::Cancel);
 
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -630,7 +1068,7 @@ fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions(
 
 #[test]
 fn an_approval_result_requires_the_pending_id() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -645,7 +1083,7 @@ fn an_approval_result_requires_the_pending_id() {
 
 #[test]
 fn an_approval_result_requires_the_official_response_object() {
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",
@@ -657,7 +1095,7 @@ fn an_approval_result_requires_the_official_response_object() {
     .expect_err("missing response");
     assert_eq!(field(&error), "events[0].response");
 
-    let error = super::resolve_event(
+    let error = resolve_event(
         event_body(json!({
             "events": [{
                 "type": "agent.session.input.mcp_approval_request_result",

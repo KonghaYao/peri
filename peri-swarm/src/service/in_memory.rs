@@ -8,9 +8,10 @@ use serde_json::json;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
+use super::official_items::item_page;
 use super::{
-    resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
-    EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
+    AcceptedInput, CreateSessionCommand, CreateSessionResult, EventSubscription, PendingTurn,
+    SessionUpdateCommand, SwarmService,
 };
 use crate::config::SwarmConfig;
 use crate::domain::official::{unix_from_rfc3339, unix_now};
@@ -108,6 +109,8 @@ pub struct InMemorySwarmService {
     config: ServiceConfig,
     inner: Mutex<ServiceInner>,
     seq_lock: AsyncMutex<()>,
+    // 防止 fake 的开轮写入与取消终态交错。
+    turn_lock: AsyncMutex<()>,
 }
 
 impl std::fmt::Debug for InMemorySwarmService {
@@ -126,6 +129,7 @@ impl InMemorySwarmService {
             config,
             inner: Mutex::new(ServiceInner::default()),
             seq_lock: AsyncMutex::new(()),
+            turn_lock: AsyncMutex::new(()),
         }
     }
 
@@ -384,8 +388,9 @@ impl InMemorySwarmService {
     /// A user item accepted while no turn is open opens a turn: the session
     /// enters `in_progress`, then `turn.created`, `turn.in_progress` and the
     /// item. Assistant items use the open turn and report completion through the
-    /// item, content-part and output-text frames. Delta frames are skipped; the
-    /// final `complete:true` frame is the item the SDK consumes.
+    /// item, content-part and output-text frames. This fake completes in one
+    /// step and has no live chunks, so its live path sends no delta; replay
+    /// synthesizes one full-text delta from the completion row.
     async fn broadcast_official_item(&self, logical_id: &LogicalId, view: &ItemView) {
         if !view.source.is_root() || view.kind != ItemKind::Message {
             // Thought chunks share the answer's `messageId`; child items have
@@ -528,12 +533,16 @@ impl InMemorySwarmService {
         let message =
             OfficialMessageItem::assistant(&view.item_id, turn_id, text).with_phase(Some(phase));
         for event in [
-            OfficialEvent::turn_item_added(view.seq, logical_id.as_str(), turn_id, message.clone()),
-            OfficialEvent::turn_content_part_added(
-                view.seq,
+            OfficialEvent::turn_assistant_item_added(
+                &view.item_id,
                 logical_id.as_str(),
                 turn_id,
+                message.clone(),
+            ),
+            OfficialEvent::turn_content_part_added(
                 &view.item_id,
+                logical_id.as_str(),
+                turn_id,
                 output_index,
                 text,
             ),
@@ -701,19 +710,19 @@ impl InMemorySwarmService {
         text: &str,
         turn_id: &str,
     ) -> Result<u64, SwarmError> {
-        let request_id = Uuid::now_v7().to_string();
-        let started_at = peri_time::now_utc_rfc3339();
-        let created_at = unix_now();
+        let _turn = self.turn_lock.lock().await;
+        let active = ActiveTurn {
+            request_id: Uuid::now_v7().to_string(),
+            turn_id: turn_id.to_owned(),
+            started_at: peri_time::now_utc_rfc3339(),
+            created_at: unix_now(),
+        };
+        let request_id = &active.request_id;
+        let created_at = active.created_at;
         self.with_inner(|inner| {
-            inner.turns.insert(
-                logical_id.as_str().to_owned(),
-                ActiveTurn {
-                    request_id: request_id.clone(),
-                    turn_id: turn_id.to_owned(),
-                    started_at: started_at.clone(),
-                    created_at,
-                },
-            );
+            inner
+                .turns
+                .insert(logical_id.as_str().to_owned(), active.clone());
         });
         self.set_session_state(logical_id, SessionState::Running, None)
             .await?;
@@ -762,73 +771,117 @@ impl InMemorySwarmService {
         {
             Ok(seq) => seq,
             Err(error) => {
-                self.fail_turn(logical_id, &request_id, turn_id, &error)
+                self.fail_turn(logical_id, request_id, turn_id, &error)
                     .await;
                 return Err(error);
             }
         };
 
         if self.config.turn_policy == TurnPolicy::Immediate {
-            self.with_inner(|inner| {
-                inner.turns.remove(logical_id.as_str());
-            });
-            if let Err(error) = self
-                .persist_turn(SwarmTurnRow {
-                    logical_id: logical_id.as_str().to_owned(),
-                    turn_id: turn_id.to_owned(),
-                    status: TurnStatus::Completed,
-                    created_at,
-                    started_at: Some(created_at),
-                    completed_at: Some(unix_now()),
-                    error: None,
-                    usage: None,
-                    subagent_id: None,
-                })
-                .await
-            {
-                tracing::warn!(
-                    logical_id = logical_id.as_str(),
-                    error = %error,
-                    "failed to persist the completed turn row"
-                );
-            }
-            self.set_session_state(logical_id, SessionState::Idle, Some(seq))
+            self.with_inner(|inner| inner.turns.remove(logical_id.as_str()));
+            self.finish_turn(logical_id, active, TurnStatus::Completed, "end_turn", seq)
                 .await?;
-            self.broadcast(
-                logical_id.as_str(),
-                StreamEvent::Turn(TurnEvent::completed(request_id, turn_id, "end_turn")),
-            );
-            let completed_turn = OfficialTurn::new(
-                logical_id.as_str(),
-                turn_id,
-                TurnStatus::Completed,
-                created_at,
-                Some(unix_now()),
-            );
-            self.broadcast(
-                logical_id.as_str(),
-                StreamEvent::Official(OfficialEvent::turn_completed(
-                    logical_id.as_str(),
-                    turn_id,
-                    completed_turn,
-                )),
-            );
-            match self
-                .official_session(logical_id, SessionStatus::Idle, None)
-                .await
-            {
-                Ok(session) => self.broadcast(
-                    logical_id.as_str(),
-                    StreamEvent::Official(OfficialEvent::session_idle(turn_id, session)),
-                ),
-                Err(read_error) => tracing::warn!(
-                    logical_id = logical_id.as_str(),
-                    error = %read_error,
-                    "official session.idle snapshot was not readable"
-                ),
-            }
         }
         Ok(seq)
+    }
+
+    async fn finish_turn(
+        &self,
+        logical_id: &LogicalId,
+        active: ActiveTurn,
+        status: TurnStatus,
+        stop_reason: &str,
+        last_seq: u64,
+    ) -> Result<(), SwarmError> {
+        let ActiveTurn {
+            request_id,
+            turn_id,
+            created_at,
+            ..
+        } = active;
+        let completed_at = Some(unix_now());
+        if let Err(error) = self
+            .persist_turn(SwarmTurnRow {
+                logical_id: logical_id.as_str().to_owned(),
+                turn_id: turn_id.clone(),
+                status,
+                created_at,
+                started_at: Some(created_at),
+                completed_at,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+        {
+            tracing::warn!(logical_id = logical_id.as_str(), error = %error, "failed to persist the terminal turn row");
+        }
+        self.set_session_state(logical_id, SessionState::Idle, Some(last_seq))
+            .await?;
+        self.broadcast(
+            logical_id.as_str(),
+            StreamEvent::Turn(TurnEvent::completed(request_id, &turn_id, stop_reason)),
+        );
+        let completed_turn = OfficialTurn::new(
+            logical_id.as_str(),
+            &turn_id,
+            status,
+            created_at,
+            completed_at,
+        );
+        self.broadcast(
+            logical_id.as_str(),
+            StreamEvent::Official(OfficialEvent::turn_completed(
+                logical_id.as_str(),
+                &turn_id,
+                completed_turn,
+            )),
+        );
+        match self
+            .official_session(logical_id, SessionStatus::Idle, None)
+            .await
+        {
+            Ok(session) => self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::session_idle(&turn_id, session)),
+            ),
+            Err(read_error) => tracing::warn!(
+                logical_id = logical_id.as_str(), error = %read_error, "official session.idle snapshot was not readable"
+            ),
+        }
+        Ok(())
+    }
+
+    async fn cancel_turn(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+    ) -> Result<(), SwarmError> {
+        let _turn = self.turn_lock.lock().await;
+        let last_seq = self.last_seq(logical_id).await?;
+        let active = self.with_inner(|inner| {
+            let id = logical_id.as_str();
+            if inner
+                .turns
+                .get(id)
+                .is_some_and(|active| active.request_id == request_id)
+            {
+                inner.turns.remove(id)
+            } else {
+                None
+            }
+        });
+        if let Some(active) = active {
+            self.finish_turn(
+                logical_id,
+                active,
+                TurnStatus::Cancelled,
+                "cancelled",
+                last_seq,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Persist the create's initial input and either run it or defer it.
@@ -1037,7 +1090,9 @@ impl SwarmService for InMemorySwarmService {
     ) -> Result<SessionView, SwarmError> {
         let row = self.require_session(logical_id).await?;
         if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
-            return Err(SwarmError::turn_in_progress());
+            return Err(SwarmError::turn_in_progress_for_mutation(
+                logical_id.as_str(),
+            ));
         }
         if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             return Err(SwarmError::upstream_unavailable("session_resume_required"));
@@ -1071,7 +1126,9 @@ impl SwarmService for InMemorySwarmService {
     async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
         let row = self.require_session(logical_id).await?;
         if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
-            return Err(SwarmError::turn_in_progress());
+            return Err(SwarmError::turn_in_progress_for_mutation(
+                logical_id.as_str(),
+            ));
         }
         if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             return Err(SwarmError::upstream_unavailable("session_resume_required"));
@@ -1137,6 +1194,23 @@ impl SwarmService for InMemorySwarmService {
         }
 
         let row = self.require_session(logical_id).await?;
+        let cancel_request = if submission.is_cancel() {
+            self.with_inner(|inner| {
+                inner
+                    .turns
+                    .get(logical_id.as_str())
+                    .map(|active| active.request_id.clone())
+            })
+        } else {
+            None
+        };
+        if submission.is_cancel() && cancel_request.is_none() {
+            // 与 actor 的取消门禁一致：没有 live turn 但持久 turn 仍未完成时，
+            // `session/cancel` 没有可达目标，不能只写一张“已受理”的收据。
+            if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+                return Err(SwarmError::upstream_unavailable("session_resume_required"));
+            }
+        }
         if submission.mode == InputMode::Turn
             && submission.kind == InputKind::User
             && row.state == SessionState::Running
@@ -1182,6 +1256,9 @@ impl SwarmService for InMemorySwarmService {
             turn_id = Some(turn_id_for_item(&item_id));
         }
 
+        if let Some(request_id) = cancel_request {
+            self.cancel_turn(logical_id, &request_id).await?;
+        }
         if submission.kind == InputKind::Control || row.state == SessionState::Running {
             let last_item_seq = self.last_seq(logical_id).await?;
             return Ok(AcceptedInput::settled(InputOutcome::new(
@@ -1250,23 +1327,7 @@ impl SwarmService for InMemorySwarmService {
             return Err(SwarmError::invalid_query("limit must be within 1..=500"));
         }
         let last_item_seq = self.last_seq(logical_id).await?;
-        let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
-        let page = self
-            .store
-            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
-            .await
-            .map_err(|error| store_failure("item_page", error))?;
-        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
-        let data = page.items.into_iter().map(|row| row.to_view()).collect();
-        Ok(ItemPage::new(
-            logical_id.as_str(),
-            items,
-            data,
-            page.next_cursor,
-            last_item_seq,
-            page.has_more,
-            window.order,
-        ))
+        item_page(self.store.as_ref(), logical_id, window, last_item_seq).await
     }
 
     async fn subscribe(

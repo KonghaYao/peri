@@ -354,6 +354,12 @@ impl AcpChild {
         }
     }
 
+    /// Test-only: close the in-memory transport so the next delivery fails.
+    #[cfg(test)]
+    pub(crate) fn close_transport(&self) {
+        self.client.close();
+    }
+
     /// Assemble the host, spawn it, negotiate `initialize`, and create the session.
     ///
     /// `root_session_id` is reserved by the caller and passed through

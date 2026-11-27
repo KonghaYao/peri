@@ -128,9 +128,10 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         .expect("encode the canonical MCP declaration")
         .expect("a non-empty declaration has canonical JSON");
 
-    // The child's item log writes into the **state** database: S4 persists one
-    // row per text delta with a stable `itemId`, and the turn terminal adds a
-    // complete row with the same id. `swarm_items` allows that repeated id.
+    // The child's item log writes into the **state** database: S4 broadcasts
+    // one live delta per chunk but persists at most one row per item — the
+    // assistant stream becomes a single `complete:true` row at the terminal.
+    // `swarm_items` only repeats an id for legacy multi-row history.
     let item_store: Arc<dyn SwarmStore> = store_rows.clone();
 
     // The Swarm session row for the Peri root session: the same identity
@@ -164,7 +165,7 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
 
     // ── a. real Peri host on the remote store, one turn ─────────────────────
     // Open the Swarm turn exactly like `AcpSwarmService::run_turn`: the log owns
-    // `running`, the delta rows and the terminal.
+    // `running`, the merged rows and the terminal.
     let request_id = "state-turn-1";
     log.begin_turn(request_id, "turn_state-1")
         .await
@@ -228,9 +229,9 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
     );
 
     // The turn is projected into `swarm_items` through the real state store:
-    // every delta and the terminal complete row reuse **one** item id, each at
-    // its own strictly increasing seq. Both are checked here (state + row
-    // shape), not assumed.
+    // the assistant stream is **one** row (the merged `complete:true` row at
+    // the terminal), so no live delta reaches the database. Shape and the
+    // cached projection are checked here, not assumed.
     let child_session_live = store_rows
         .swarm_get_session(logical.as_str())
         .await
@@ -246,36 +247,40 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         .await
         .expect("child swarm items after the turn");
     let seqs: Vec<u64> = child_items.iter().map(|row| row.seq).collect();
-    assert!(
-        seqs.len() >= 2,
-        "the streamed answer must persist several rows: {child_items:?}"
+    assert_eq!(
+        seqs.len(),
+        1,
+        "the answer is the turn's only persisted row (the prompt is direct): {child_items:?}"
     );
     assert_eq!(seqs.first(), Some(&1), "seq starts at 1: {seqs:?}");
     assert!(
         seqs.windows(2).all(|pair| pair[0] < pair[1]),
         "seq is strictly increasing: {seqs:?}"
     );
-    let deltas: Vec<_> = child_items
-        .iter()
-        .filter(|row| row.payload["delta"].as_bool() == Some(true))
-        .collect();
+    assert!(
+        !child_items
+            .iter()
+            .any(|row| row.payload["delta"].as_bool() == Some(true)),
+        "live deltas are never persisted: {child_items:?}"
+    );
     let completes: Vec<_> = child_items
         .iter()
         .filter(|row| row.payload["complete"].as_bool() == Some(true))
         .collect();
-    assert!(
-        deltas.len() >= 2,
-        "at least two delta rows share the stream id: {child_items:?}"
-    );
     assert_eq!(
         completes.len(),
         1,
-        "the turn terminal appends exactly one complete row: {child_items:?}"
+        "the answer is exactly one merged row for the turn: {child_items:?}"
     );
     let stream_id = completes[0].item_id.as_str();
-    assert!(
-        child_items.iter().all(|row| row.item_id == stream_id),
-        "every delta/complete row reuses the stable item id {stream_id}: {child_items:?}"
+    let answer_rows: Vec<_> = child_items
+        .iter()
+        .filter(|row| row.item_id == stream_id)
+        .collect();
+    assert_eq!(
+        answer_rows.len(),
+        1,
+        "the assistant item owns exactly one row {stream_id}: {child_items:?}"
     );
     assert_eq!(
         completes[0].payload["text"].as_str(),
@@ -303,11 +308,12 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         child_items.len(),
         "the database holds exactly the rows the store read"
     );
+    let mut seen_ids = std::collections::HashSet::new();
     for row in &item_rows {
-        assert_eq!(
-            row.get::<String, _>(1),
-            stream_id,
-            "every persisted row reuses item id {stream_id}"
+        let item_id: String = row.get(1);
+        assert!(
+            seen_ids.insert(item_id.clone()),
+            "one item owns one row; {item_id} repeated across rows"
         );
     }
     let payloads: Vec<String> = item_rows
@@ -323,12 +329,10 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         "the complete row is persisted in the state database: {payloads:?}"
     );
     assert!(
-        payloads
+        !payloads
             .iter()
-            .filter(|payload| payload.contains("\"delta\":true"))
-            .count()
-            >= 2,
-        "delta rows are persisted in the state database: {payloads:?}"
+            .any(|payload| payload.contains("\"delta\":true")),
+        "no live delta is persisted in the state database: {payloads:?}"
     );
     eprintln!(
         "state store: swarm item rows={} seqs={:?} item_id={stream_id}",
@@ -605,8 +609,8 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         Some(mq_text.to_owned())
     );
 
-    // Swarm rows: the child session with its real delta/complete item rows, and
-    // every row written in `b`.
+    // Swarm rows: the child session with its merged answer row, and every row
+    // written in `b`.
     let child_session = reopened_swarm
         .swarm_get_session(logical.as_str())
         .await
@@ -628,7 +632,7 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
         .expect("child swarm items after reopen");
     assert_eq!(
         reopened_child_items, child_items,
-        "the delta rows and the complete row survive the close/reopen unchanged"
+        "the merged rows survive the close/reopen unchanged"
     );
     assert_eq!(
         child_session.last_item_seq,

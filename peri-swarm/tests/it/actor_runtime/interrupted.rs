@@ -143,9 +143,19 @@ async fn exercise_interrupted_entry(durable_work: bool) {
             Disposition::Existing
         );
     }
-    next.accept_input(&logical, control_input(&uuid(95), "cancel"))
+    let cancel_id = uuid(95);
+    let cancel = next
+        .accept_input(&logical, control_input(&cancel_id, "cancel"))
         .await
-        .unwrap();
+        .expect_err("未恢复的持久 turn 没有可取消的 host");
+    assert_eq!(cancel.kind(), ErrorKind::BadGateway);
+    assert_eq!(cancel.code(), ErrorCode::UpstreamUnavailable);
+    assert_eq!(cancel.details()["operation"], "session_resume_required");
+    assert!(store
+        .swarm_get_input(logical.as_str(), &cancel_id)
+        .await
+        .unwrap()
+        .is_none());
     let retry = next
         .create_session(create_command(
             &logical,
@@ -222,4 +232,72 @@ async fn interrupted_synchronous_turn_is_failed_only_on_fresh_user_input() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupted_session_hands_durable_work_to_acp_before_fresh_input() {
     exercise_interrupted_entry(true).await;
+}
+
+/// ILOG-5: a crash after the initial input's user item must not record it twice.
+///
+/// The external process-kill verifier covers the real crash; here the dead
+/// attempt is reproduced from its durable half: the create had persisted its
+/// reserved identity, the user item (`seq = 1`) and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crash_after_user_item_keeps_initial_input_once() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("workspace");
+    let cfg = service_config(&base_url, &tmp);
+    let store = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("interrupted-initial").expect("logical id");
+
+    let first = AcpSwarmService::new(store.clone(), cfg.clone());
+    let mut command = create_command(&logical, tmp.path(), Some("side-effecting initial input"));
+    command.defer_initial_turn = true;
+    let created = first.create_session(command).await.expect("create");
+    let deferred = created.pending_initial.expect("the turn is deferred");
+    // The durable half of the create ran; the prompt never reached the model.
+    let admitted = items_of(&first, &logical).await;
+    assert_eq!(
+        admitted.len(),
+        1,
+        "the create recorded one user item: {admitted:?}"
+    );
+    assert_eq!(admitted[0].0, 1);
+    assert_eq!(stub.main_calls(), 0, "no turn was executed");
+    drop(deferred);
+    first.shutdown_all().await;
+
+    // A crash before the create replied leaves the row `Creating`.
+    store
+        .swarm_update_session(SwarmSessionUpdate {
+            logical_id: logical.as_str().to_owned(),
+            state: SessionState::Creating,
+            last_item_seq: 1,
+            last_activity_at: peri_time::now_utc_rfc3339(),
+        })
+        .await
+        .expect("rewrite the interrupted row");
+
+    let next = AcpSwarmService::new(store.clone(), cfg);
+    let retried = next
+        .create_session(create_command(
+            &logical,
+            tmp.path(),
+            Some("side-effecting initial input"),
+        ))
+        .await
+        .expect("recover the interrupted create");
+    assert!(
+        retried.pending_initial.is_none(),
+        "a persisted user item means the initial input is already recorded"
+    );
+    assert_eq!(
+        items_of(&next, &logical).await,
+        admitted,
+        "recovery does not append a second user item"
+    );
+    assert_eq!(
+        stub.main_calls(),
+        0,
+        "recovery must not replay the initial prompt into the model"
+    );
+    next.shutdown_all().await;
 }

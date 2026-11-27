@@ -6,6 +6,8 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
+use crate::domain::input::OFFICIAL_CANCEL_EVENT;
+use crate::domain::input_id::input_id_for_key;
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
@@ -76,6 +78,10 @@ struct McpToolBody {
     server_url: Option<Value>,
     #[serde(default)]
     headers: Option<Value>,
+    /// Official `transport` object (`openai@7.60.0`, `agents.d.ts:3726`).
+    /// Kept as a raw value so the normalizer names the offending nested path.
+    #[serde(default)]
+    transport: Option<Value>,
     #[serde(default)]
     require_approval: Option<Value>,
     #[serde(default)]
@@ -375,10 +381,18 @@ fn merge_agent_field(
 /// Normalize caller-declared tools into typed MCP declarations (`design §2.2`).
 ///
 /// Accepts the OpenAI Agents API MCP tool shape at both the flat and the nested
-/// `agent` position. Nothing is filtered by name, URL or credential policy:
-/// only shapes that cannot be represented as an [`McpToolSpec`] are rejected,
-/// and every rejection names its field path. Non-MCP tool types are an
-/// implementation gap reported as `unsupported_tool`, never silently dropped.
+/// `agent` position. The official `transport` object wins: `transport.type ==
+/// "http"` maps its `server_url`/`headers` onto [`McpToolSpec`] and its
+/// `authorization` becomes an `Authorization` header unless that header is
+/// already present; a value without an auth scheme gets the `Bearer` prefix,
+/// while `"Bearer ..."`/`"Basic ..."` is kept verbatim. The earlier flat
+/// `server_url`/`headers` shape remains as a deprecated alias; when both shapes
+/// carry a URL they must agree. `stdio` and unknown transport types are a
+/// stated gap (`unsupported_tool`), never a misleading `server_url` report. Nothing is filtered by name, URL or
+/// credential policy: only shapes that cannot be represented as an
+/// [`McpToolSpec`] are rejected, and every rejection names its field path.
+/// Non-MCP tool types are an implementation gap reported as `unsupported_tool`,
+/// never silently dropped.
 pub fn resolve_tools(body: &CreateSessionBody) -> Result<Vec<McpToolSpec>, SwarmError> {
     let flat = declared_tools(body.tools.as_ref(), "tools")?;
     let nested = match body.agent.as_ref() {
@@ -439,11 +453,52 @@ fn normalize_tool(prefix: &str, index: usize, value: &Value) -> Result<McpToolSp
         return Err(SwarmError::unsupported_tool(kind, &format!("{path}.type")));
     }
 
+    let transport = match body.transport.as_ref() {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(official_transport(&path, value)?),
+    };
+    let server_url = match &transport {
+        None => required_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?,
+        Some(transport) => {
+            let legacy =
+                optional_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?;
+            if let Some(legacy) = legacy {
+                if legacy != transport.server_url {
+                    return Err(invalid_tool(
+                        format!("{path}.transport"),
+                        "top-level `server_url` and `transport.server_url` disagree",
+                    ));
+                }
+            }
+            transport.server_url.clone()
+        }
+    };
+    // The official `transport.headers` object wins when both shapes supply
+    // headers; the flat `headers` field is the deprecated alias.
+    let mut headers = match transport
+        .as_ref()
+        .and_then(|transport| transport.headers.as_ref())
+    {
+        Some(headers) => normalize_headers(Some(headers), &format!("{path}.transport.headers"))?,
+        None => normalize_headers(body.headers.as_ref(), &format!("{path}.headers"))?,
+    };
     let mut spec = McpToolSpec::new(
         required_tool_string(body.server_label.as_ref(), &format!("{path}.server_label"))?,
-        required_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?,
+        server_url,
     );
-    spec.headers = normalize_headers(body.headers.as_ref(), &format!("{path}.headers"))?;
+    if let Some(authorization) = transport.and_then(|transport| transport.authorization) {
+        let has_authorization = headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("authorization"));
+        if !has_authorization {
+            headers.push(McpHeader {
+                name: "Authorization".to_owned(),
+                value: authorization_header_value(&authorization),
+            });
+            headers.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+    }
+    spec.headers = headers;
     spec.require_approval = verbatim_tool_value(
         body.require_approval.as_ref(),
         &format!("{path}.require_approval"),
@@ -462,20 +517,142 @@ fn invalid_tool(field: impl Into<String>, reason: &str) -> SwarmError {
     SwarmError::invalid_input(reason).with_details(json!({ "field": field.into() }))
 }
 
-fn required_tool_string(value: Option<&Value>, field: &str) -> Result<String, SwarmError> {
-    let Some(value) = value else {
+/// One official `McpTransportParam` entry (`agents.d.ts:3726`) after
+/// validation. Only `type: "http"` maps onto an [`McpToolSpec`]; this
+/// deployment has no process runtime for `stdio`.
+struct OfficialTransport {
+    server_url: String,
+    headers: Option<Value>,
+    authorization: Option<String>,
+}
+
+fn official_transport(path: &str, value: &Value) -> Result<OfficialTransport, SwarmError> {
+    let Some(object) = value.as_object() else {
         return Err(invalid_tool(
-            field,
-            "field is required by the MCP tool shape",
+            format!("{path}.transport"),
+            "transport must be an object in the OpenAI Agents API shape",
         ));
     };
+    let transport_path = format!("{path}.transport");
+    let kind = match object.get("type") {
+        Some(Value::String(kind)) => kind.as_str(),
+        Some(_) => {
+            return Err(invalid_tool(
+                format!("{transport_path}.type"),
+                "transport type must be a string",
+            ));
+        }
+        None => {
+            return Err(invalid_tool(
+                format!("{transport_path}.type"),
+                "transport must declare `type`",
+            ));
+        }
+    };
+    // `stdio` is part of the official union but cannot be executed here; an
+    // unknown transport type is equally explicit instead of a misleading
+    // `server_url` report.
+    if kind != "http" {
+        return Err(SwarmError::unsupported_mcp_transport(
+            kind,
+            &format!("{transport_path}.type"),
+        ));
+    }
+    let server_url_path = format!("{transport_path}.server_url");
+    let server_url = match optional_tool_string(object.get("server_url"), &server_url_path)? {
+        Some(url) => url,
+        None => {
+            return Err(invalid_tool(
+                server_url_path,
+                "field is required by the MCP transport shape",
+            ));
+        }
+    };
+    Ok(OfficialTransport {
+        server_url,
+        headers: match object.get("headers") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.clone()),
+        },
+        authorization: optional_tool_string(
+            object.get("authorization"),
+            &format!("{transport_path}.authorization"),
+        )?,
+    })
+}
+
+fn required_tool_string(value: Option<&Value>, field: &str) -> Result<String, SwarmError> {
+    optional_tool_string(value, field)?
+        .ok_or_else(|| invalid_tool(field, "field is required by the MCP tool shape"))
+}
+
+fn optional_tool_string(value: Option<&Value>, field: &str) -> Result<Option<String>, SwarmError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
     let Some(text) = value.as_str() else {
         return Err(invalid_tool(field, "field must be a string"));
     };
     if text.trim().is_empty() {
         return Err(invalid_tool(field, "field must not be empty"));
     }
-    Ok(text.to_owned())
+    Ok(Some(text.to_owned()))
+}
+
+/// Build the `Authorization` header value from official
+/// `transport.authorization`.
+///
+/// Official clients send both the bare token (Responses API: "provide the
+/// token here") and a complete credential (`"Bearer token"`, `"Basic ..."`;
+/// Agents API: "the authorization value sent to the MCP server"), so the
+/// `Bearer` prefix is only added when no auth scheme is present.
+fn authorization_header_value(authorization: &str) -> String {
+    if has_auth_scheme_prefix(authorization) {
+        authorization.to_owned()
+    } else {
+        format!("Bearer {authorization}")
+    }
+}
+
+/// Whether `value` starts with an HTTP auth scheme token (RFC 7235) followed
+/// by whitespace, e.g. `Bearer ` or `Basic `. Equivalent to the anchored
+/// pattern `^[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+`.
+fn has_auth_scheme_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let is_scheme_char = byte.is_ascii_alphabetic()
+            || (index > 0
+                && (byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                            | b'-'
+                    )));
+        if !is_scheme_char {
+            break;
+        }
+        index += 1;
+    }
+    index > 0
+        && bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
 }
 
 fn normalize_headers(value: Option<&Value>, field: &str) -> Result<Vec<McpHeader>, SwarmError> {
@@ -624,11 +801,12 @@ pub fn resolve_environment(
 
 /// Resolve `POST /events` into either a turn input or an approval answer.
 pub fn resolve_event(
+    logical_id: &LogicalId,
     body: SubmitEventBody,
     headers: &HeaderMap,
 ) -> Result<SubmitEvent, SwarmError> {
     let Some(events) = body.events.as_ref() else {
-        return resolve_submission(body, headers).map(SubmitEvent::Input);
+        return resolve_submission(logical_id, body, headers).map(SubmitEvent::Input);
     };
     let Some(items) = events.as_array() else {
         return Err(official_invalid(
@@ -639,7 +817,8 @@ pub fn resolve_event(
     let approval = items.len() == 1
         && items[0].get("type").and_then(Value::as_str) == Some(OFFICIAL_APPROVAL_RESULT_EVENT);
     if !approval {
-        return resolve_official_envelope(events, &body, headers).map(SubmitEvent::Input);
+        return resolve_official_envelope(logical_id, events, &body, headers)
+            .map(SubmitEvent::Input);
     }
     if let Some(field) = native_field(&body) {
         return Err(official_invalid(
@@ -702,12 +881,7 @@ pub fn resolve_event(
             approval_decision(value, "events[0].decision")?
         }
     };
-    let input_id = idempotency_key(headers)?;
-    if let Some(input_id) = input_id.as_deref() {
-        if Uuid::parse_str(input_id).is_err() {
-            return Err(SwarmError::invalid_input("Idempotency-Key must be a UUID"));
-        }
-    }
+    let input_id = resolve_input_id(logical_id, headers)?;
     Ok(SubmitEvent::Approval(ApprovalAnswer {
         request_id,
         decision,
@@ -716,11 +890,12 @@ pub fn resolve_event(
 }
 
 pub fn resolve_submission(
+    logical_id: &LogicalId,
     body: SubmitEventBody,
     headers: &HeaderMap,
 ) -> Result<InputSubmission, SwarmError> {
     if let Some(events) = body.events.as_ref() {
-        return resolve_official_envelope(events, &body, headers);
+        return resolve_official_envelope(logical_id, events, &body, headers);
     }
     let kind = match body.kind.as_deref() {
         None | Some("user") => InputKind::User,
@@ -741,7 +916,14 @@ pub fn resolve_submission(
         }
     };
 
-    let header_id = idempotency_key(headers)?;
+    if body
+        .input_id
+        .as_deref()
+        .is_some_and(|id| Uuid::parse_str(id).is_err())
+    {
+        return Err(SwarmError::invalid_input("inputId must be a UUID"));
+    }
+    let header_id = resolve_input_id(logical_id, headers)?;
     let input_id = match (body.input_id.as_deref(), header_id.as_deref()) {
         (Some(body_id), Some(header_id)) if body_id != header_id => {
             return Err(SwarmError::invalid_input(
@@ -756,10 +938,6 @@ pub fn resolve_submission(
             ));
         }
     };
-    if Uuid::parse_str(&input_id).is_err() {
-        return Err(SwarmError::invalid_input("inputId must be a UUID"));
-    }
-
     if let Some(text) = &body.text {
         check_len("text", text, MAX_TEXT_BYTES)?;
     }
@@ -786,11 +964,9 @@ pub fn resolve_submission(
     Ok(submission)
 }
 
-/// Parse the official `{events: [...]}` envelope into the existing acceptance
-/// semantics: exactly one `agent.session.input.message` event carrying exactly
-/// one user message, plain `input_text` content, accepted as one `turn` input.
-/// Unsupported official features are reported explicitly, never dropped.
+/// 解析单条官方 message 或 cancel；不支持的字段不会被静默丢弃。
 fn resolve_official_envelope(
+    logical_id: &LogicalId,
     events: &Value,
     body: &SubmitEventBody,
     headers: &HeaderMap,
@@ -804,22 +980,31 @@ fn resolve_official_envelope(
     let Some(items) = events.as_array() else {
         return Err(official_invalid(
             "events",
-            "events must be an array containing exactly one `agent.session.input.message`",
+            "events must be an array containing exactly one event",
         ));
     };
     if items.len() != 1 {
         return Err(official_invalid(
             "events",
-            "only one event is supported; send a single `agent.session.input.message`",
+            "only one event is supported; send a single event",
         ));
     }
 
     let event: OfficialEventBody = serde_json::from_value(items[0].clone())
         .map_err(|error| official_event_shape_error(&items[0], error))?;
+    if event.kind == OFFICIAL_CANCEL_EVENT {
+        if items[0].get("input").is_some() {
+            return Err(official_invalid(
+                "events[0].input",
+                "the cancel event does not accept `input`",
+            ));
+        }
+        return official_submission(logical_id, headers, InputKind::Control, "cancel".to_owned());
+    }
     if event.kind != OFFICIAL_INPUT_EVENT {
         return Err(official_invalid(
             "events[0].type",
-            "only the `agent.session.input.message` event is supported",
+            "only `agent.session.input.message` and `agent.session.input.cancel` are supported by this path",
         ));
     }
     let Some(input) = event.input else {
@@ -925,20 +1110,21 @@ fn resolve_official_envelope(
     // envelope therefore ends at the existing `empty_input`.
     let text = texts.join("\n");
     check_len("text", &text, MAX_TEXT_BYTES)?;
-    let input_id = match idempotency_key(headers)? {
-        Some(input_id) => input_id,
-        // Compatibility carve-out: the official envelope has no body inputId,
-        // and the official API does not promise retry idempotency without a
-        // caller key. The native path still never generates one.
-        None => Uuid::now_v7().to_string(),
-    };
-    if Uuid::parse_str(&input_id).is_err() {
-        return Err(SwarmError::invalid_input("inputId must be a UUID"));
-    }
+    official_submission(logical_id, headers, InputKind::User, text)
+}
 
+fn official_submission(
+    logical_id: &LogicalId,
+    headers: &HeaderMap,
+    kind: InputKind,
+    text: String,
+) -> Result<InputSubmission, SwarmError> {
+    // 官方信封没有 body inputId；没有调用方提供的键时不保证重试幂等。
+    let input_id =
+        resolve_input_id(logical_id, headers)?.unwrap_or_else(|| Uuid::now_v7().to_string());
     let submission = InputSubmission {
         input_id,
-        kind: InputKind::User,
+        kind,
         mode: InputMode::Turn,
         text: Some(text),
         attachments: Vec::new(),
@@ -991,7 +1177,7 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
     {
         return official_invalid(
             format!("events[0].{extra}"),
-            "this event field is not supported by the single-message compatibility path",
+            "this event field is not supported by the single-event compatibility path",
         );
     }
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))
@@ -1459,6 +1645,19 @@ pub fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, SwarmError
         return Ok(None);
     }
     Ok(Some(text.to_owned()))
+}
+
+fn resolve_input_id(
+    logical_id: &LogicalId,
+    headers: &HeaderMap,
+) -> Result<Option<String>, SwarmError> {
+    Ok(idempotency_key(headers)?.map(|key| {
+        if Uuid::parse_str(&key).is_ok() {
+            key
+        } else {
+            input_id_for_key(logical_id, &key)
+        }
+    }))
 }
 
 fn check_len(field: &str, value: &str, max: usize) -> Result<(), SwarmError> {

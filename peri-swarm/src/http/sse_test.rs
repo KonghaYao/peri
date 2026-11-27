@@ -11,8 +11,8 @@ use tokio::sync::broadcast;
 
 use super::{create_response, event_stream};
 use crate::domain::{
-    AgentView, EnvironmentRef, ItemKind, ItemSource, ItemView, OfficialEvent, OfficialTurn,
-    SessionState, SessionStatus, SessionView, StreamEvent, TurnStatus, TurnView,
+    AgentView, EnvironmentRef, ItemDelta, ItemKind, ItemSource, ItemView, OfficialEvent,
+    OfficialTurn, SessionState, SessionStatus, SessionView, StreamEvent, TurnStatus, TurnView,
 };
 use crate::service::{CreateSessionResult, EventSubscription};
 
@@ -26,6 +26,22 @@ fn item(seq: u64) -> StreamEvent {
         payload: json!({ "text": format!("item {seq}") }),
         created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
         truncated: false,
+    })
+}
+
+fn delta(text: &str) -> StreamEvent {
+    StreamEvent::Delta(ItemDelta {
+        id: "itim_test".to_owned(),
+        item_id: "itim_test".to_owned(),
+        kind: ItemKind::Message,
+        source: ItemSource::root(),
+        payload: json!({
+            "role": "assistant",
+            "messageId": "msg-1",
+            "text": text,
+            "delta": true,
+        }),
+        created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
     })
 }
 
@@ -155,6 +171,57 @@ async fn attach_stream_does_not_emit_session_created() {
             .iter()
             .any(|(event, _)| event == "agent.session.created"),
         "attach must not fabricate a created frame: {frames:?}"
+    );
+}
+
+/// A live delta frame arrives between two persisted items: it shares the
+/// `item` event name but has no `id` and no `seq`, so it neither advances
+/// `Last-Event-ID` nor displaces the rows around it.
+#[tokio::test]
+async fn a_delta_frame_has_no_id_and_does_not_displace_persisted_items() {
+    let (sender, receiver) = broadcast::channel(8);
+    let subscription = EventSubscription::new(Vec::new(), receiver, Arc::new(AtomicU64::new(0)));
+    let response = axum::response::Sse::new(event_stream(
+        subscription,
+        Duration::from_secs(60),
+        Vec::new(),
+    ))
+    .into_response();
+    sender.send(item(1)).expect("item 1");
+    sender.send(delta("hel")).expect("delta");
+    sender.send(item(2)).expect("item 2");
+    drop(sender);
+
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the closed channel ends the stream")
+    .expect("body");
+    let text = String::from_utf8_lossy(&body);
+
+    let ids: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("id: "))
+        .collect();
+    assert_eq!(ids, vec!["id: 1", "id: 2"], "{text}");
+    assert_eq!(
+        text.matches("event: item").count(),
+        3,
+        "the delta keeps the `item` event name: {text}"
+    );
+    let delta_block = text
+        .split("\n\n")
+        .find(|block| block.contains("\"delta\":true"))
+        .expect("delta frame");
+    assert!(
+        !delta_block.contains("id: "),
+        "an unpersisted delta cannot be a resume cursor: {delta_block}"
+    );
+    assert!(
+        !delta_block.contains("\"seq\""),
+        "the delta payload carries no seq: {delta_block}"
     );
 }
 

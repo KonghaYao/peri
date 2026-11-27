@@ -6,9 +6,14 @@
 //! - `turn_id` is derived from the persisted user item that opened the turn
 //!   ([`turn_id_for_item`]); it survives a reconnect because replay derives it
 //!   from the same row.
-//! - `event_id` is derived from that `turn_id`, or from the persisted item
-//!   `seq` for [`OfficialEvent::TurnItemAdded`]. No clock or random source is
-//!   involved, so live delivery and backlog replay produce the same ids.
+//! - `event_id` is derived from that `turn_id`, from the persisted item `seq`,
+//!   or — for an assistant item's added/content-part frames — from the stable
+//!   `item_id`. No clock or random source is involved, so live delivery and
+//!   backlog replay produce the same ids for those frames.
+//! - The one deliberate exception is [`OfficialEvent::TurnOutputTextDelta`]:
+//!   live chunks have no persisted `seq`, so their ids use an in-process chunk
+//!   counter while replay uses the completion row's `seq`. The two deliveries
+//!   therefore do not share a delta `event_id` (`design §4.2.1`).
 //!
 //! Field names follow the SDK's snake_case JSON; timestamps are Unix seconds.
 
@@ -48,9 +53,32 @@ pub fn turn_item_done_event_id(seq: u64) -> String {
     format!("evt_item_{seq}_done")
 }
 
+/// Assistant `item.added` is keyed by the stable item id, so the first live
+/// chunk and replay name the frame the same way. The user item keeps the
+/// `seq`-derived id that predates live deltas.
 #[must_use]
-pub fn turn_item_part_added_event_id(seq: u64) -> String {
-    format!("evt_item_{seq}_part_added")
+pub fn turn_assistant_item_added_event_id(item_id: &str) -> String {
+    format!("evt_item_{item_id}_added")
+}
+
+#[must_use]
+pub fn turn_item_part_added_event_id(item_id: &str) -> String {
+    format!("evt_item_{item_id}_part_added")
+}
+
+/// Live text delta: deterministic within one process, keyed by the stream's
+/// stable item id and its chunk ordinal. It cannot be derived from a persisted
+/// `seq` because chunks are never stored.
+#[must_use]
+pub fn turn_output_text_delta_event_id(item_id: &str, chunk: u64) -> String {
+    format!("evt_item_{item_id}_delta_{chunk}")
+}
+
+/// Replay text delta: one full-text delta per completion row, keyed by that
+/// row's `seq`. It intentionally differs from the live chunk id.
+#[must_use]
+pub fn turn_output_text_delta_replay_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_text_delta")
 }
 
 #[must_use]
@@ -533,9 +561,9 @@ impl OfficialSessionError {
 ///
 /// `requires_action` is emitted only for a declared MCP approval that is
 /// currently pending. `turn.cancelled`, budget and subagent frames are not
-/// emitted: the local runtime has no corresponding fact. Text deltas,
-/// reasoning frames and environment frames are likewise absent (`design
-/// §4.2.1`); completion is reported through the item/part events below.
+/// emitted: the local runtime has no corresponding fact. Assistant
+/// `output_text.delta` is derived from live chunks and from completion rows on
+/// replay; reasoning and environment frames are absent (`design §4.2.1`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum OfficialEvent {
@@ -598,6 +626,16 @@ pub enum OfficialEvent {
         content_index: u32,
         output_index: u32,
         part: OfficialContent,
+    },
+    #[serde(rename = "agent.session.turn.output_text.delta")]
+    TurnOutputTextDelta {
+        event_id: String,
+        session_id: String,
+        turn_id: Option<String>,
+        item_id: String,
+        content_index: u32,
+        output_index: u32,
+        delta: String,
     },
     #[serde(rename = "agent.session.turn.output_text.done")]
     TurnOutputTextDone {
@@ -706,6 +744,26 @@ impl OfficialEvent {
         }
     }
 
+    /// Assistant item introduction keyed by the stable item id.
+    ///
+    /// The first live chunk sends this before the first delta; replay sends it
+    /// from the completion row. Both deliveries therefore use the same id.
+    #[must_use]
+    pub fn turn_assistant_item_added(
+        item_id: &str,
+        session_id: &str,
+        turn_id: &str,
+        item: OfficialMessageItem,
+    ) -> Self {
+        Self::TurnItemAdded {
+            event_id: turn_assistant_item_added_event_id(item_id),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            output_index: None,
+            item,
+        }
+    }
+
     #[must_use]
     pub fn turn_item_done(
         seq: u64,
@@ -725,15 +783,14 @@ impl OfficialEvent {
 
     #[must_use]
     pub fn turn_content_part_added(
-        seq: u64,
+        item_id: &str,
         session_id: &str,
         turn_id: &str,
-        item_id: &str,
         output_index: u32,
         text: &str,
     ) -> Self {
         Self::TurnContentPartAdded {
-            event_id: turn_item_part_added_event_id(seq),
+            event_id: turn_item_part_added_event_id(item_id),
             session_id: session_id.to_owned(),
             turn_id: Some(turn_id.to_owned()),
             item_id: item_id.to_owned(),
@@ -784,6 +841,48 @@ impl OfficialEvent {
             content_index: 0,
             output_index,
             text: text.to_owned(),
+        }
+    }
+
+    /// One live chunk's text delta.
+    #[must_use]
+    pub fn turn_output_text_delta_live(
+        item_id: &str,
+        chunk: u64,
+        session_id: &str,
+        turn_id: &str,
+        output_index: u32,
+        delta: &str,
+    ) -> Self {
+        Self::TurnOutputTextDelta {
+            event_id: turn_output_text_delta_event_id(item_id, chunk),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            item_id: item_id.to_owned(),
+            content_index: 0,
+            output_index,
+            delta: delta.to_owned(),
+        }
+    }
+
+    /// One full-text replay delta for a completion row.
+    #[must_use]
+    pub fn turn_output_text_delta_replay(
+        seq: u64,
+        session_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        output_index: u32,
+        text: &str,
+    ) -> Self {
+        Self::TurnOutputTextDelta {
+            event_id: turn_output_text_delta_replay_event_id(seq),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            item_id: item_id.to_owned(),
+            content_index: 0,
+            output_index,
+            delta: text.to_owned(),
         }
     }
 
@@ -855,6 +954,7 @@ impl OfficialEvent {
             Self::TurnItemDone { .. } => "agent.session.turn.item.done",
             Self::TurnContentPartAdded { .. } => "agent.session.turn.content_part.added",
             Self::TurnContentPartDone { .. } => "agent.session.turn.content_part.done",
+            Self::TurnOutputTextDelta { .. } => "agent.session.turn.output_text.delta",
             Self::TurnOutputTextDone { .. } => "agent.session.turn.output_text.done",
             Self::TurnCompleted { .. } => "agent.session.turn.completed",
             Self::TurnFailed { .. } => "agent.session.turn.failed",
@@ -877,6 +977,7 @@ impl OfficialEvent {
             | Self::TurnItemDone { event_id, .. }
             | Self::TurnContentPartAdded { event_id, .. }
             | Self::TurnContentPartDone { event_id, .. }
+            | Self::TurnOutputTextDelta { event_id, .. }
             | Self::TurnOutputTextDone { event_id, .. }
             | Self::TurnCompleted { event_id, .. }
             | Self::TurnFailed { event_id, .. }

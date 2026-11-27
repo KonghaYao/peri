@@ -73,3 +73,26 @@ fn content_blocks_accept_only_text_and_reject_unknown_fields() {
     }));
     assert!(unknown_field.is_err());
 }
+
+#[test]
+fn is_cancel_matches_only_control_inputs_spelling_cancel() {
+    let control = |text: Option<&str>, blocks: Vec<ContentBlock>| {
+        let mut input = submission("input-1", text.unwrap_or_default());
+        input.kind = InputKind::Control;
+        input.text = text.map(str::to_owned);
+        input.attachments = blocks;
+        input
+    };
+    for text in ["cancel", "Cancel", "CANCEL", " \tCancel\n "] {
+        assert!(control(Some(text), Vec::new()).is_cancel(), "{text:?}");
+    }
+    for text in ["cancelled", "cancel now", "stop", "", "cance"] {
+        assert!(!control(Some(text), Vec::new()).is_cancel(), "{text:?}");
+    }
+    // 文本块参与同一判定（`effective_text`），大小写与空白仍按同一规则。
+    assert!(control(None, vec![ContentBlock::text(" cancel ")]).is_cancel());
+    // 只有 control 输入是取消；用户消息里写 "cancel" 不是。
+    let mut user = submission("input-1", "cancel");
+    user.mode = InputMode::Turn;
+    assert!(!user.is_cancel());
+}

@@ -5,8 +5,9 @@ use super::{
     session_in_progress_event_id, turn_completed_event_id, turn_created_event_id,
     turn_error_event_id, turn_failed_event_id, turn_id_for_item, turn_in_progress_event_id,
     turn_item_added_event_id, turn_item_done_event_id, turn_item_part_added_event_id,
-    turn_item_part_done_event_id, turn_item_text_done_event_id, unix_from_rfc3339, OfficialEvent,
-    OfficialMessageItem, OfficialSession, OfficialTurn, TurnStatus,
+    turn_item_part_done_event_id, turn_item_text_done_event_id, turn_output_text_delta_event_id,
+    turn_output_text_delta_replay_event_id, unix_from_rfc3339, OfficialEvent, OfficialMessageItem,
+    OfficialSession, OfficialTurn, TurnStatus,
 };
 use crate::domain::{SessionState, SessionStatus};
 
@@ -102,9 +103,20 @@ fn message_items_carry_the_official_content_blocks() {
 #[test]
 fn completion_event_ids_derive_from_the_persisted_facts() {
     assert_eq!(turn_item_done_event_id(7), "evt_item_7_done");
-    assert_eq!(turn_item_part_added_event_id(7), "evt_item_7_part_added");
+    assert_eq!(
+        turn_item_part_added_event_id("itim_msg_x"),
+        "evt_item_itim_msg_x_part_added"
+    );
     assert_eq!(turn_item_part_done_event_id(7), "evt_item_7_part_done");
     assert_eq!(turn_item_text_done_event_id(7), "evt_item_7_text_done");
+    assert_eq!(
+        turn_output_text_delta_event_id("itim_msg_x", 2),
+        "evt_item_itim_msg_x_delta_2"
+    );
+    assert_eq!(
+        turn_output_text_delta_replay_event_id(7),
+        "evt_item_7_text_delta"
+    );
     assert_eq!(
         turn_in_progress_event_id("turn_a"),
         "evt_turn_a_in_progress"
@@ -139,6 +151,45 @@ fn completion_event_ids_derive_from_the_persisted_facts() {
 }
 
 #[test]
+fn assistant_added_ids_are_item_keyed_and_live_delta_ids_differ_from_replay() {
+    let message = OfficialMessageItem::assistant("itim_msg_x", "turn_a", "hel");
+    let added =
+        OfficialEvent::turn_assistant_item_added("itim_msg_x", "agent-1", "turn_a", message);
+    assert_eq!(added.event_id(), "evt_item_itim_msg_x_added");
+    assert_eq!(added.event_type(), "agent.session.turn.item.added");
+
+    let part = OfficialEvent::turn_content_part_added("itim_msg_x", "agent-1", "turn_a", 0, "hel");
+    assert_eq!(part.event_id(), "evt_item_itim_msg_x_part_added");
+
+    let live =
+        OfficialEvent::turn_output_text_delta_live("itim_msg_x", 2, "agent-1", "turn_a", 0, "lo");
+    let replay =
+        OfficialEvent::turn_output_text_delta_replay(7, "agent-1", "turn_a", "itim_msg_x", 0, "lo");
+    assert_eq!(live.event_type(), "agent.session.turn.output_text.delta");
+    assert_eq!(live.event_id(), "evt_item_itim_msg_x_delta_2");
+    assert_eq!(replay.event_id(), "evt_item_7_text_delta");
+    assert_ne!(
+        live.event_id(),
+        replay.event_id(),
+        "chunks are not persisted, so live and replay delta ids cannot be shared"
+    );
+    let value = serde_json::to_value(&live).expect("serialize");
+    assert_eq!(
+        value,
+        json!({
+            "type": "agent.session.turn.output_text.delta",
+            "event_id": "evt_item_itim_msg_x_delta_2",
+            "session_id": "agent-1",
+            "turn_id": "turn_a",
+            "item_id": "itim_msg_x",
+            "content_index": 0,
+            "output_index": 0,
+            "delta": "lo",
+        })
+    );
+}
+
+#[test]
 fn completion_frames_match_the_local_sdk_shape() {
     let message =
         OfficialMessageItem::assistant("itim_msg_x", "turn_a", "hi").with_phase(Some("commentary"));
@@ -156,14 +207,13 @@ fn completion_frames_match_the_local_sdk_shape() {
     assert_eq!(value["item"]["content"][0]["text"], json!("hi"));
     assert_eq!(value["item"]["turn_id"], json!("turn_a"));
 
-    let added =
-        OfficialEvent::turn_content_part_added(3, "agent-1", "turn_a", "itim_msg_x", 1, "hi");
+    let added = OfficialEvent::turn_content_part_added("itim_msg_x", "agent-1", "turn_a", 1, "hi");
     let value = serde_json::to_value(&added).expect("serialize");
     assert_eq!(
         value["type"],
         json!("agent.session.turn.content_part.added")
     );
-    assert_eq!(value["event_id"], json!("evt_item_3_part_added"));
+    assert_eq!(value["event_id"], json!("evt_item_itim_msg_x_part_added"));
     assert_eq!(value["content_index"], json!(0));
     assert_eq!(value["output_index"], json!(1));
     assert_eq!(

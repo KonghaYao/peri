@@ -180,11 +180,13 @@ impl SwarmItemRow {
 /// PostgreSQL pages cannot disagree on the boundary rule.
 ///
 /// A page's own item rows are what `/items` returns, so a page of `limit` long
-/// messages would otherwise serialize thousands of rows twice (`items` and
-/// `data`). The row budget stops adding a *next* item once the page already
-/// holds `limit` rows. The first item is always kept, even when it alone
-/// exceeds the budget: dropping it would lose its final frame, and
-/// `items.list` is an item-oriented read (delta frames belong on SSE).
+/// historical messages would otherwise serialize thousands of rows twice
+/// (`items` and `data`). New data writes one row per item, so `items` and
+/// `data` normally agree and the budget only matters for history. The row
+/// budget stops adding a *next* item once the page already holds `limit` rows.
+/// The first item is always kept, even when it alone exceeds the budget:
+/// dropping it would lose its final frame, and `items.list` is an item-oriented
+/// read (live delta frames belong on SSE).
 #[must_use]
 pub(crate) fn grouped_item_page(
     rows: Vec<SwarmItemRow>,
@@ -268,15 +270,17 @@ pub struct SwarmInputRow {
 
 /// One item-grouped page of `swarm_items` (`design §4.2`).
 ///
-/// The page unit is the item (`item_id`), not the row: a streamed assistant
-/// message persists one row per delta plus its final `complete:true` row. Item
+/// The page unit is the item (`item_id`), not the row. New data writes one row
+/// per item (an assistant/thought stream is one merged `complete:true` row);
+/// history written before item granularity persists one row per delta plus its
+/// final row, so a page may still contain several rows of one item. Item
 /// membership is defined by the item's greatest `seq`, so `after` (a seq or an
 /// item id resolved to one) advances strictly past a whole item instead of
 /// landing inside it and re-reading the same item forever.
 ///
 /// `limit` is both the item cap and the aggregate row budget. A page therefore
 /// normally holds fewer `items` (and rows) than a pure item count would allow
-/// when messages have many deltas; an item whose own row count exceeds the
+/// for historical multi-row items; an item whose own row count exceeds the
 /// budget is still returned whole.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwarmItemPage {

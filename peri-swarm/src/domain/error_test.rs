@@ -31,6 +31,26 @@ fn error_codes_are_stable_strings() {
         "session_creation_pending"
     );
     assert_eq!(ErrorCode::SeqConflict.as_str(), "seq_conflict");
+    assert_eq!(
+        ErrorCode::CancelRedeliveryFailed.as_str(),
+        "cancel_redelivery_failed"
+    );
+}
+
+#[test]
+fn mutation_conflict_points_to_the_official_cancel_event() {
+    let error = SwarmError::turn_in_progress_for_mutation("agent-01");
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    assert!(!error.message().contains("steer"));
+    assert_eq!(
+        error.details(),
+        &serde_json::json!({
+            "suggest": "cancel",
+            "event": "agent.session.input.cancel",
+            "endpoint": "POST /v1/agents/sessions/agent-01/events",
+        })
+    );
 }
 
 #[test]
