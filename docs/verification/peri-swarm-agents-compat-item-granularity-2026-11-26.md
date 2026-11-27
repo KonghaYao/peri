@@ -40,7 +40,7 @@
 | crate 测试（合并基线） | lib **417 passed / 0 failed / 20 ignored**；集成 **115 passed / 0 failed / 7 ignored**；doctest 0；合计 **532 passed / 0 failed / 27 ignored** | fix2 合并部署报告，`/tmp/peri-swarm-fix2-gates2/test.log` |
 | PostgreSQL 契约（显式 ignored） | **20 passed / 0 failed**，PostgreSQL **16.16**；使用 `postgres` 维护库的私有 schema，运行后残留 schema 为 0 | 同上，`/tmp/peri-swarm-fix2-gates2/pg.log` |
 
-27 个 ignored 中已显式运行 20 个 PG 契约；其余 7 个需要其他外部环境，未运行。
+27 个 ignored 中已显式运行 20 个 PG 契约；其余 7 个未运行。
 
 ### 2.2 镜像与容器
 
@@ -193,8 +193,8 @@
   发版验收，也不代表长会话或高并发。
 - PostgreSQL 契约使用 `postgres` 维护库的私有 schema，不接触部署库
   `peri_swarm_state`/`peri_session`；运行后残留 schema 为 0。
-- 27 个 ignored 中只显式跑了 20 个 PG 契约；Rivet engine 相关入口、两库部署用例与
-  ACP 测量用例未运行。
+- 27 个 ignored 中只显式跑了 20 个 PG 契约；其余 7 个默认 ignored 用例未运行，未据此
+  声称 Rivet、两库部署或 ACP 测量覆盖。
 - 容器/镜像 ID 是 2026-11-26 的时点值；重新构建会得到不同 ID。
 
 ## 6. 结论
