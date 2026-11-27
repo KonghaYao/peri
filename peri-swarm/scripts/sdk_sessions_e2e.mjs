@@ -473,6 +473,7 @@ function assertOfficialItems(body, label) {
     lastSeq.set(row.itemId, Math.max(lastSeq.get(row.itemId) ?? 0, row.seq));
   }
   const ids = data.map((item) => item.id);
+  const idsInRawPage = ids.filter((id) => lastSeq.has(id));
   check(`${label}: data contains distinct item ids from the raw page`,
     new Set(ids).size === data.length && ids.every((id) => lastSeq.has(id)),
     { ids, rawItems: lastSeq.size });

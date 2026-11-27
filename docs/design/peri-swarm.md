@@ -343,20 +343,26 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   即返回，不再探页；如果一直无投影，读到确证的末尾才返回 `data=[]`（`has_more=false`）。
   `items` 包含所有纳入的组，按 `seq` 随 `order` 排序，行数可以超过 `limit`；`data` 按
   item id 去重且最多 `limit` 项。`has_more`/`hasMore` 和 `nextCursor` 描述最后纳入的存储页。
-- **请求级预算**：含首个存储页最多读取 100 页（`MAX_ITEM_PAGE_READS`），最多纳入 2000
-  条原始行（`MAX_SELECTED_RAW_ROWS`）。纳入前检查，单组超过行上限也不能部分返回。
-  若仍需续查但预算不足，或探页游标无法严格推进，返回 `422 items_scan_limit`，不返回
+- **请求级预算**：含首个存储页最多读取 100 页（`MAX_ITEM_PAGE_READS`）。2000 条
+  （`MAX_SELECTED_RAW_ROWS`）是**纳入**上限，不是读取上限：PostgreSQL 会先取 `limit+1`
+  个候选组的全部帧，再丢弃未纳入的组；历史回扫读取的行不计入这 2000 条。纳入按 `seq`
+  保持集合语义，组因并发追加而后移并被再次选中时，已纳入的帧不重复计数。
+  若仍需续查但纳入预算不足，或探页游标无法严格推进，返回 `422 items_scan_limit`，不返回
   部分页或游标。上游读失败一律返回 `502 upstream_unavailable`，不降级为成功空页。
+- **升序观察上界**：探页遇到下一页游标 `>= lastItemSeq` 时停止，返回已累积的页而不是错误。
+  `lastItemSeq` 是请求开始时的观察上界；首读之后追加的条目可能属于并发写入，升序不追尾，
+  但首读本身仍可能包含越过该值的并发帧。降序不受此限。
 - `nextCursor` 是页内最后一个 item 的最大 `seq`，仅在还有条目时给出。升序下一页严格
   前进；降序页的游标是页内最旧组的最大 `seq`，下一页只取更小的组。`after=<itemId>`
   解析为该 item 的最大 `seq`。十进制 `after`/`afterSeq` 同样按 item 边界解释：游标
   落在多帧 item 中间时，要么按组最大 `seq` 选入整个 item（含游标之前的帧），要么
   整组排除。畸形或未知 item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
   `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页。历史范围稳定、投影未因 turn 回扫上限降级时，
-  `nextCursor` 与 SDK 游标（含交替使用）覆盖同一批官方条目，不重复、不遗漏。同页排在
-  `data` 末项之后的无投影原始条目可能被 SDK 重扫，这是额外读取成本；完整原始行遍历应使用
-  `nextCursor`/`afterSeq` 并读 `items`，不要用 `data` 的末项或是否为空决定原始分页。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页。它与 `nextCursor` 覆盖同一批可投影条目，但 SDK
+  续页会从该 `id` 之后重扫内部原始行；因此在 100 页/2000 行预算边界上，SDK 可能比原生
+  `nextCursor` 更早触发 `items_scan_limit`。升序响应也可能包含 `lastItemSeq` 之后的并发
+  追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读 `items`，不要用 `data` 的
+  末项或是否为空决定原始分页。
 - **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
   之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按

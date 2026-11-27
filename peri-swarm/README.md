@@ -501,11 +501,15 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
   数字游标 `afterSeq` / `after` 和 `after=itim_...` 都按组最大 `seq` 排他；后者用请求时的
   组最大 `seq`，会越过此时已追加的帧。传 `cursor` 会得到 `400 invalid_query`。
   默认 `order=desc`（`after` 指向更旧的组），升序需显式 `order=asc`。
-- 单次请求最多读 100 个存储页（含首页）、纳入 2000 条原始行，不截断条目组。超出预算或
-  游标无法推进时返回 `422 items_scan_limit`，可减小 `limit` 或从更近的游标重试；上游读取
-  失败返回 `502 upstream_unavailable`。两类错误均不返回部分页或游标。
-- SDK 用最后一个 `data[].id`，与 `nextCursor` 覆盖同一批可投影条目；SDK 可能重扫该 id
-  之后的内部行。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读 `items`。
+- 单次请求最多读 100 个存储页（含首页）；2000 条是**纳入**上限，不是读取上限：存储层先取
+  `limit+1` 个候选组的全部帧再丢弃未纳入的组，历史回扫不计入。纳入按 `seq` 去重。升序探到
+  下一页游标 `>= lastItemSeq` 时停止（不追并发追加），返回已累积页。超出纳入预算或游标
+  无法推进时返回 `422 items_scan_limit`，可减小 `limit` 或从更近的游标重试；上游读取失败
+  返回 `502 upstream_unavailable`。两类错误均不返回部分页或游标。
+- SDK 用最后一个 `data[].id`，与 `nextCursor` 覆盖同一批可投影条目；SDK 续页会重扫该 id
+  之后的内部行，因此在预算边界上可能比原生更早触发 `items_scan_limit`；升序响应也可能
+  包含 `lastItemSeq` 之后的并发追加帧。完整原始行遍历应使用 `nextCursor`/`afterSeq` 并读
+  `items`。
 - `POST /events` 的用户输入在原始行中是 `kind=message`。事件 `Idempotency-Key` 的非 UUID 值
   按 `UUIDv5(namespace, logicalId + "\0" + key)` 派生；键区分大小写、不 trim，空头视为缺省。
   UUID 键按**字面**文本原样使用（花括号、无连字符、大写等非规范写法都接受），同一逻辑键

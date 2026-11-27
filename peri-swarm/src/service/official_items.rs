@@ -34,6 +34,8 @@ pub(crate) async fn item_page(
     let mut cursor = resolve_window_after(store, logical_id, &window).await?;
     let logical_id = logical_id.as_str();
     let mut items = Vec::new();
+    // 组会因并发追加而改变最大 seq 并被后续页再次选中；按 seq 保持集合语义。
+    let mut seen = std::collections::BTreeSet::new();
     let mut reads = 0;
     let (mut data, next_cursor, has_more) = loop {
         let page = store
@@ -41,13 +43,23 @@ pub(crate) async fn item_page(
             .await
             .map_err(|error| store_failure("item_page", error))?;
         reads += 1;
-        if items.len() + page.rows.len() > MAX_SELECTED_RAW_ROWS {
+        let rows: Vec<_> = page.rows.iter().map(|row| row.to_view()).collect();
+        // 只有尚未纳入的 seq 计入 2000 行预算；重复帧不重复计数。
+        let new_rows: std::collections::BTreeSet<_> = rows
+            .iter()
+            .map(|row| row.seq)
+            .filter(|seq| !seen.contains(seq))
+            .collect();
+        if items.len() + new_rows.len() > MAX_SELECTED_RAW_ROWS {
             return Err(SwarmError::items_scan_limit());
         }
-        let rows: Vec<_> = page.rows.iter().map(|row| row.to_view()).collect();
         // 每个存储页独立投影；前面已经确认没有投影的页不再消耗回扫预算。
         let data = project_page(store, logical_id, &page, &rows).await?;
-        items.extend(rows);
+        for row in rows {
+            if seen.insert(row.seq) {
+                items.push(row);
+            }
+        }
         if !data.is_empty() || !page.has_more {
             break (data, page.next_cursor, page.has_more);
         }
@@ -60,6 +72,10 @@ pub(crate) async fn item_page(
                 })
             })
             .ok_or_else(SwarmError::items_scan_limit)?;
+        if window.order == ItemOrder::Asc && next >= last_item_seq {
+            // `last_item_seq` 是请求开始时的观察上界；之后追加的条目不属于本次请求。
+            break (data, page.next_cursor, page.has_more);
+        }
         if reads == MAX_ITEM_PAGE_READS {
             return Err(SwarmError::items_scan_limit());
         }

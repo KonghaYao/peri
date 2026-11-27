@@ -443,6 +443,13 @@ enum ReadFault {
     FollowupPage,
     TurnHistory,
     StalledCursor,
+    /// 每次读取存储页前追加一条独立 receipt，模拟请求期间的并发写入。
+    AppendReceiptBeforeRead,
+    /// 首次页读取后向无正文 thought 组追加一帧，并追加独立 answer。
+    GrowFirstGroupAfterFirstRead {
+        thought_seq: u64,
+        answer_seq: u64,
+    },
 }
 
 /// 记录回扫与探页调用，并能在指定读取处注入故障。
@@ -578,10 +585,48 @@ impl crate::store::SwarmStore for CountingStore {
                 "test second page failure".into(),
             ));
         }
+        if self.fault == Some(ReadFault::AppendReceiptBeforeRead) {
+            let seq = 3 + index as u64;
+            append(
+                &self.inner,
+                seq,
+                &format!("itim_concurrent_{seq}"),
+                ItemKind::Receipt,
+                json!({}),
+                false,
+            )
+            .await;
+        }
         let mut page = self
             .inner
             .swarm_item_page(logical_id, order, after, limit)
             .await?;
+        if index == 0 {
+            if let Some(ReadFault::GrowFirstGroupAfterFirstRead {
+                thought_seq,
+                answer_seq,
+            }) = self.fault
+            {
+                append(
+                    &self.inner,
+                    thought_seq,
+                    "itim_thought_empty",
+                    ItemKind::Thought,
+                    json!({"complete": true}),
+                    false,
+                )
+                .await;
+                append(
+                    &self.inner,
+                    answer_seq,
+                    "itim_answer",
+                    ItemKind::Message,
+                    json!({"role": "assistant", "complete": true, "text": "answer"}),
+                    false,
+                )
+                .await;
+            }
+        }
         if self.fault == Some(ReadFault::StalledCursor) && page.has_more {
             page.next_cursor = after;
         }
@@ -766,6 +811,157 @@ async fn an_empty_page_with_a_stalled_cursor_fails_in_both_orders() {
         assert_eq!(error.code(), ErrorCode::ItemsScanLimit);
         assert_eq!(store.item_page_calls(), 1);
     }
+}
+
+#[tokio::test]
+async fn an_ascending_probe_stops_at_the_request_observation_bound() {
+    let store = CountingStore {
+        fault: Some(ReadFault::AppendReceiptBeforeRead),
+        ..CountingStore::new()
+    };
+    user(&store.inner, 1, "itim_opener").await;
+    append(
+        &store.inner,
+        2,
+        "itim_receipt_2",
+        ItemKind::Receipt,
+        json!({}),
+        false,
+    )
+    .await;
+
+    // 请求开始时最后 seq 是 2；之后每次读页前都会追加一条新 receipt。
+    let page = item_page(
+        &store,
+        &LogicalId::parse("agent-01").unwrap(),
+        ItemsWindow {
+            order: ItemOrder::Asc,
+            after: Some(1),
+            after_id: None,
+            limit: 1,
+        },
+        2,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(store.item_page_calls(), 1, "升序不追并发追加的条目");
+    assert!(page.data.is_empty());
+    assert_eq!(page.next_cursor, Some(2));
+    assert!(page.has_more);
+    let seqs: Vec<_> = page.items.iter().map(|row| row.seq).collect();
+    assert_eq!(seqs, [2]);
+}
+
+#[tokio::test]
+async fn a_group_grown_between_pages_keeps_each_seq_once() {
+    let store = CountingStore {
+        fault: Some(ReadFault::GrowFirstGroupAfterFirstRead {
+            thought_seq: 4,
+            answer_seq: 5,
+        }),
+        ..CountingStore::new()
+    };
+    user(&store.inner, 1, "itim_opener").await;
+    append(
+        &store.inner,
+        2,
+        "itim_thought_empty",
+        ItemKind::Thought,
+        json!({"complete": true}),
+        false,
+    )
+    .await;
+    append(
+        &store.inner,
+        3,
+        "itim_receipt_3",
+        ItemKind::Receipt,
+        json!({}),
+        false,
+    )
+    .await;
+
+    let page = item_page(
+        &store,
+        &LogicalId::parse("agent-01").unwrap(),
+        ItemsWindow {
+            order: ItemOrder::Asc,
+            after: Some(1),
+            after_id: None,
+            limit: 1,
+        },
+        900,
+    )
+    .await
+    .unwrap();
+
+    // 首读后 thought 的最大 seq 从 2 变为 4，下一轮会把 [2, 4] 整组再选出一次。
+    let seqs: Vec<_> = page.items.iter().map(|row| row.seq).collect();
+    assert_eq!(seqs, [2, 3, 4, 5]);
+    let unique: std::collections::BTreeSet<_> = seqs.iter().copied().collect();
+    assert_eq!(unique.len(), seqs.len(), "同一响应内 seq 必须唯一");
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&page).unwrap()["data"][0]["id"],
+        "itim_answer"
+    );
+    assert_eq!(page.next_cursor, None);
+}
+
+#[tokio::test]
+async fn repeated_frames_do_not_consume_the_inclusion_budget() {
+    let store = CountingStore {
+        fault: Some(ReadFault::GrowFirstGroupAfterFirstRead {
+            thought_seq: 1003,
+            answer_seq: 1004,
+        }),
+        ..CountingStore::new()
+    };
+    user(&store.inner, 1, "itim_opener").await;
+    for seq in 2..=1001 {
+        append(
+            &store.inner,
+            seq,
+            "itim_thought_empty",
+            ItemKind::Thought,
+            json!({"complete": true}),
+            false,
+        )
+        .await;
+    }
+    // 首读必须还有下一个组，否则末尾页本来就不会探页。
+    append(
+        &store.inner,
+        1002,
+        "itim_receipt_1002",
+        ItemKind::Receipt,
+        json!({}),
+        false,
+    )
+    .await;
+
+    let page = item_page(
+        &store,
+        &LogicalId::parse("agent-01").unwrap(),
+        ItemsWindow {
+            order: ItemOrder::Asc,
+            after: Some(1),
+            after_id: None,
+            limit: 1,
+        },
+        5000,
+    )
+    .await
+    .unwrap();
+
+    // 1000 行组增长后重选，只多出 1 条新帧；重复行不能把纳入量推到 2000 以上。
+    let seqs: Vec<_> = page.items.iter().map(|row| row.seq).collect();
+    assert_eq!(seqs, (2..=1004).collect::<Vec<_>>());
+    let unique: std::collections::BTreeSet<_> = seqs.iter().copied().collect();
+    assert_eq!(unique.len(), seqs.len());
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(store.item_page_calls(), 4);
 }
 
 #[tokio::test]

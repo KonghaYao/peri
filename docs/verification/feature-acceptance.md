@@ -267,7 +267,16 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
    SDK `data` 末项 id 或交替游标遍历，官方 id 不重不漏；SDK 可重扫内部原始行。
 6. [SDK 会话 E2E 断言](../../peri-swarm/scripts/sdk_sessions_e2e.mjs)：`data.length <= min(limit, 原始组数)`、
    `data` id 唯一且来自 `items`；有续页时 `nextCursor` 等于末组最大 `seq`，否则为 `null`。
-   同类断言由分页探针覆盖；会话 E2E 脚本本轮只做语法检查，未跑真实网关。
+   已用提取函数体的最小 harness 实际执行 `assertOfficialItems`：正常合并页不抛错、
+   `data.length <= min(limit, rawItemCount)`、`nextCursor` 为末组最大 `seq`；未跑真实网关。
+7. [升序并发追加](../../peri-swarm/src/service/official_items_test.rs)：请求开始 `lastItemSeq=2`，
+   每次读页前追加一条独立 receipt；响应 200、只读 1 页、游标停在 2 且不追尾（上限为 100 页）。
+8. [组增长去重](../../peri-swarm/src/service/official_items_test.rs)：首读后向无正文 thought
+   追加第 4 帧并追加 answer 5；同一响应 `seq=[2,3,4,5]` 唯一。1000 行组增长后只新增 1 帧，
+   重复行不把纳入量推到 2000 以上，也不误报 `items_scan_limit`。
+9. [SDK 重扫预算差异](../../peri-swarm/scripts/sdk_items_pagination_test.mjs)：SDK 用 `data`
+   末项续页会重扫内部原始行，预算边界上可能比原生游标更早触发 `items_scan_limit`；本轮在
+   Memory store 验证重扫行为，未在真实 2000 行边界或 Postgres/Compose/全链路 E2E 上实测。
 
 ### F-TASK-001 补充验收
 
