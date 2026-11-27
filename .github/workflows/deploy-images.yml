@@ -1,0 +1,104 @@
+name: Deploy images
+
+on:
+    pull_request:
+        branches: [main, pre-release/main]
+        paths:
+            - 'deploy/**'
+            - 'peri-swarm/**'
+            - 'patches/**'
+            - scripts/cargo-rmcp-patched.sh
+            - Cargo.toml
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .github/workflows/deploy-images.yml
+    push:
+        branches: [main, pre-release/main]
+        paths:
+            - 'deploy/**'
+            - 'peri-swarm/**'
+            - 'patches/**'
+            - scripts/cargo-rmcp-patched.sh
+            - Cargo.toml
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .github/workflows/deploy-images.yml
+    workflow_dispatch:
+        inputs:
+            push:
+                description: '是否将镜像推送到 GHCR'
+                type: boolean
+                default: false
+
+permissions:
+    contents: read
+    packages: write
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            # GHCR 镜像名要求小写；PR 只构建和加载，不登录或推送。
+            - name: Set image options
+              env:
+                  REPOSITORY_OWNER: ${{ github.repository_owner }}
+                  SHOULD_PUSH: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true)) && 'true' || 'false' }}
+              shell: bash
+              run: |
+                  owner="$(printf '%s' "$REPOSITORY_OWNER" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+                  {
+                      printf 'IMAGE_OWNER=%s\n' "$owner"
+                      printf 'IMAGE_NAME=ghcr.io/%s/peri-swarm\n' "$owner"
+                      printf 'PUSH_IMAGE=%s\n' "$SHOULD_PUSH"
+                  } >> "$GITHUB_ENV"
+
+            - name: Log in to GHCR
+              if: env.PUSH_IMAGE == 'true'
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Generate image metadata
+              id: meta
+              uses: docker/metadata-action@v5
+              with:
+                  images: ${{ env.IMAGE_NAME }}
+                  tags: |
+                      type=sha,format=short
+                      type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+                      type=ref,event=pr
+
+            - name: Build image
+              uses: docker/build-push-action@v6
+              with:
+                  context: .
+                  file: deploy/images/Dockerfile
+                  target: peri-swarm
+                  push: ${{ env.PUSH_IMAGE == 'true' }}
+                  load: ${{ env.PUSH_IMAGE != 'true' }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
+
+            - name: Summarize image build
+              env:
+                  IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+              run: |
+                  {
+                      printf '### 镜像构建\n\n'
+                      printf -- '- 镜像：`%s`\n' "$IMAGE_NAME"
+                      printf -- '- 是否推送：`%s`\n\n' "$PUSH_IMAGE"
+                      printf '镜像标签：\n\n```\n%s\n```\n' "$IMAGE_TAGS"
+                  } >> "$GITHUB_STEP_SUMMARY"
