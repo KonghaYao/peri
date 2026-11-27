@@ -399,6 +399,30 @@ Panel/Popup/Inline block 是同一 durable interaction 的不同投影，不是�
 可以 claim/respond，但不得触碰 TUI atom。审批的交互安全与目标 Workbench 见
 [TUI Chat Workbench](tui-chat-workbench.md)。
 
+## 终端恢复上报（OSC 7577）
+
+终端支持 Program Resume Protocol 时会注入 `OSC7577_TOKEN`。Peri 在 `main()` 首行取走
+token 并从进程环境删除，此后创建的子进程（MCP server、shell 工具等）不会继承；token
+只参与签名，不写日志，也不出现在序列以外的输出里。协议规范：
+<https://www.superlogical.com/rex/docs/build/program-resume>。
+
+- 上报时机：`ACTIVE_SESSION_ID` 变化且非空时，AppShell effect 上报
+  `ESC ] 7577 ; pid=…:time=…:argv=…[:cwd=…]:mac=… ESC \`（ST 结尾）。命令为
+  `[current_exe, "--resume", <session id>]`；启动命令行显式给出的 `--db-path` /
+  `--session-store*` 白名单参数按原拼写与值追加（`--opt=value` 规范化为
+  `--opt value`），cwd 取发送时的绝对路径。相同命令去重，
+  会话切换或新建会话后重新上报。
+- 协议无法承载的命令不上报：argv 为空、超过 64 个参数、序列超过 2048 字节、argv[0]
+  既非裸命令名也非绝对路径、cwd 相对、元素含控制字符。若终端已持有旧命令，改发
+  `clear=1`，避免重启后恢复过期命令。
+- 清除语义：正常退出（`/exit`、两次 Ctrl+C）发 `clear=1`；终端本来没有本进程记录时
+  （如启动早期失败）不发。收到 SIGTERM 时
+  先标记信号退出，fullscreen 返回后跳过 clear——终端正要消失，恢复命令必须保留。
+  SIGHUP 未处理，进程直接退出，同样不清理。
+- 开关与边界：仅 stdout 是 TTY 时写；`PERI_PROGRAM_RESUME=0|off|false|no` 关闭（未知
+  取值按开启）；无 token 天然关闭；`--print`/meta 等非 TUI 模式只取走 token，不上报也
+  不清除。写失败只记 debug，不重试。
+
 ## 焦点、后台与管理面
 
 Panel、Popup、transcript 和 composer 的 focus/事件优先级由 TUI router 管理。组件只执行已有

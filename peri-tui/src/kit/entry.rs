@@ -743,6 +743,9 @@ pub async fn run_kit_fullscreen(
                 _ = sigterm_shutdown.cancelled() => {}
                 _ = sigterm.recv() => {
                     tracing::info!("SIGTERM received; requesting graceful TUI shutdown");
+                    // OSC 7577：终端正要消失，恢复命令必须保留，fullscreen 返回后的
+                    // clear 会读到这个标记并跳过。
+                    crate::kit::program_resume::mark_signal_exit();
                     atoms::EXIT_REQUESTED.set(true);
                     atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
                 }
@@ -759,6 +762,9 @@ pub async fn run_kit_fullscreen(
 
     // 正常退出：清除 OSC 7501 根记录——done/error 会跨进程存活，不清会留在外层。
     crate::kit::program_status::clear();
+    // 正常退出同样清除 OSC 7577 恢复命令；SIGTERM 触发的退出跳过（终端正要消失，
+    // 恢复命令必须保留），SIGHUP 未处理，进程直接退出，天然不清理。
+    crate::kit::program_resume::clear();
 
     // 5b. 退出提示——fullscreen 返回时 ratatui-kit 已 restore 终端（RestoreGuard），
     //     此处 stdout 只归本线程写；无会话（setup 取消、离线模式）不打印。

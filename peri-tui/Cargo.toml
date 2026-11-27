@@ -67,6 +67,7 @@ parking_lot.workspace = true
 arboard = "3"
 png = "0.18"
 base64 = { version = "0.23.1", features = ["alloc"] }
+sha2.workspace = true
 peri-theme = { path = "../peri-theme" }
 peri-config.workspace = true
 peri-acp = { path = "../peri-acp" }
