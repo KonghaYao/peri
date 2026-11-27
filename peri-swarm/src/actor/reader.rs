@@ -10,9 +10,12 @@
 //! stream is buffered in memory and written as one merged row when the turn
 //! terminates (`payload.complete = true`, full text); live chunks travel as
 //! [`StreamEvent::Delta`] frames that are never persisted and carry no `seq`, so
-//! they cannot advance a resume cursor. New data therefore replays one row per
-//! item and never re-emits live deltas (`design §9`); historical per-chunk rows
-//! still replay row by row as `item` frames, which clients fold by `itemId`. A
+//! they cannot advance a resume cursor. Each root assistant chunk also emits an
+//! official `output_text.delta`; the first chunk introduces the item with
+//! `item.added`/`content_part.added`, so the terminal only closes it. New data
+//! therefore replays one row per item and one synthetic full-text delta, never
+//! the live chunk boundaries (`design §9`); historical per-chunk rows still
+//! replay row by row as `item` frames, which clients fold by `itemId`. A
 //! chunk that arrives after its stream was flushed by a terminal is dropped: it
 //! cannot rewrite the durable terminal, must not leak into the next turn's
 //! flush, and is re-checked at broadcast time in case the terminal closed the
@@ -217,6 +220,17 @@ struct MessageStream {
     /// the same arrival order the chunk seqs used to encode; it only orders the
     /// terminal flush and is never written to a payload.
     order: u64,
+    /// Official `outputIndex` for a root assistant message, fixed when the
+    /// first chunk opens the stream. The completion row persists this same
+    /// value, so live deltas and replay agree without a new stored field.
+    output_index: Option<u32>,
+    /// Live chunks seen for this stream; drives the deterministic live delta
+    /// `event_id` (chunks are never persisted, so no `seq` exists).
+    chunks: u64,
+    /// Whether at least one live delta reached subscribers. A completion row
+    /// whose chunks were all dropped (stream closed before broadcast) still
+    /// announces the item with `item.added`/`content_part.added`.
+    live_broadcast: bool,
 }
 
 /// Whether an append also moves the session's durable cursor/state.
@@ -256,7 +270,14 @@ struct StagedItems {
 /// flush and broadcast only after its group commits, so a failed group skips
 /// exactly its own rows.
 enum StagedEntry {
-    Chunk(ItemDelta),
+    /// A live chunk: the custom `item` frame plus the official frames it
+    /// implies. The first chunk of a root assistant stream also carries
+    /// `item.added` and `content_part.added`; later chunks carry only the
+    /// official delta.
+    Chunk {
+        delta: ItemDelta,
+        official: Vec<OfficialEvent>,
+    },
     Item {
         projected: ProjectedItem,
         item_id: Option<String>,
@@ -304,6 +325,10 @@ struct LogState {
     streams: BTreeMap<StreamKey, MessageStream>,
     /// Arrival order assigned to the next text stream that opens.
     stream_order: u64,
+    /// Next official `outputIndex` for a root assistant message in this turn.
+    /// In-memory only: the value is persisted in the completion payload, never
+    /// as a new column or field on the chunk.
+    next_output_index: u32,
     /// Streams already flushed by a turn terminal (or a recovered-root
     /// terminal). `(agentId, messageId, kind)` is not reused within a session,
     /// so a later chunk of one of these is dropped instead of opening a second
@@ -918,6 +943,8 @@ impl ItemLog {
             state.generation = None;
             state.failure = None;
             state.streams.clear();
+            // Output indexes belong to one turn and restart with its streams.
+            state.next_output_index = 0;
             // `stream_order` and `closed` are not reset: the order only needs to
             // be monotonic, and a late chunk from a flushed stream of the
             // previous turn must stay rejected instead of opening a stream the
@@ -2237,7 +2264,7 @@ impl ItemLog {
     fn stage_item(&self, item: ProjectedItem, staged: &mut StagedItems) {
         if let Some((key, message_id, text)) = stream_parts(&item) {
             let created_at = peri_time::now_utc_rfc3339();
-            let delta = {
+            let (delta, official) = {
                 let mut state = self.state.lock();
                 if state.closed.contains(&key) {
                     tracing::debug!(
@@ -2255,9 +2282,24 @@ impl ItemLog {
                     .cloned()
                     .unwrap_or_else(ItemView::new_item_id);
                 state.identities.insert(key.clone(), item_id.clone());
+                // Only a root assistant message is an official output. The
+                // turn must have actually started: recovered root text shares
+                // the stream shape but has no gateway turn to name.
+                let official_output = state.active.is_some()
+                    && state.turn_id.is_some()
+                    && item.kind == ItemKind::Message
+                    && item.source.is_root();
+                let turn_id = state.turn_id.clone();
                 if !state.streams.contains_key(&key) {
                     let order = state.stream_order;
                     state.stream_order = order.saturating_add(1);
+                    let output_index = if official_output {
+                        let index = state.next_output_index;
+                        state.next_output_index = index.saturating_add(1);
+                        Some(index)
+                    } else {
+                        None
+                    };
                     state.streams.insert(
                         key.clone(),
                         MessageStream {
@@ -2265,6 +2307,9 @@ impl ItemLog {
                             item_id: item_id.clone(),
                             text: String::new(),
                             order,
+                            output_index,
+                            chunks: 0,
+                            live_broadcast: false,
                         },
                     );
                 }
@@ -2273,10 +2318,45 @@ impl ItemLog {
                     .get_mut(&key)
                     .expect("the stream was inserted above");
                 stream.text.push_str(&text);
+                stream.chunks = stream.chunks.saturating_add(1);
+                let chunk = stream.chunks;
+                let output_index = stream.output_index;
+                let official = match (official_output, turn_id, output_index) {
+                    (true, Some(turn_id), Some(output_index)) => {
+                        let mut events = Vec::with_capacity(if chunk == 1 { 3 } else { 1 });
+                        if chunk == 1 {
+                            // The item is introduced before its first text
+                            // delta; the completion row will only close it.
+                            events.push(OfficialEvent::turn_assistant_item_added(
+                                &item_id,
+                                &self.logical_id,
+                                &turn_id,
+                                OfficialMessageItem::assistant(&item_id, &turn_id, &text),
+                            ));
+                            events.push(OfficialEvent::turn_content_part_added(
+                                &item_id,
+                                &self.logical_id,
+                                &turn_id,
+                                output_index,
+                                &text,
+                            ));
+                        }
+                        events.push(OfficialEvent::turn_output_text_delta_live(
+                            &item_id,
+                            chunk,
+                            &self.logical_id,
+                            &turn_id,
+                            output_index,
+                            &text,
+                        ));
+                        events
+                    }
+                    _ => Vec::new(),
+                };
                 // Deltas keep the `messageId` so a client that joins mid-stream
                 // can associate a chunk with the merged item. `role` lets it
                 // filter assistant frames without assuming a kind.
-                ItemDelta {
+                let delta = ItemDelta {
                     id: item_id.clone(),
                     item_id,
                     kind: item.kind,
@@ -2288,9 +2368,10 @@ impl ItemLog {
                         "delta": true,
                     }),
                     created_at,
-                }
+                };
+                (delta, official)
             };
-            staged.entries.push(StagedEntry::Chunk(delta));
+            staged.entries.push(StagedEntry::Chunk { delta, official });
             return;
         }
         staged.entries.push(StagedEntry::Item {
@@ -2336,22 +2417,40 @@ impl ItemLog {
         };
         for (index, entry) in entries.into_iter().enumerate() {
             match entry {
-                StagedEntry::Chunk(delta) => {
+                StagedEntry::Chunk { delta, official } => {
                     // The stream may have been closed by a terminal after this
                     // chunk was staged (another ingest or a direct caller can
                     // flush in between). Broadcasting it now would deliver a
                     // delta after the item's `complete` row and render text the
                     // durable item does not have.
-                    let closed = delta_stream_key(&delta)
-                        .is_some_and(|key| self.state.lock().closed.contains(&key));
-                    if closed {
+                    let deliver = match delta_stream_key(&delta) {
+                        Some(key) => {
+                            let mut state = self.state.lock();
+                            if state.closed.contains(&key) {
+                                false
+                            } else {
+                                // Marked before the broadcast so a terminal that
+                                // flushes concurrently sees the live chunk and
+                                // does not announce the item a second time.
+                                if let Some(stream) = state.streams.get_mut(&key) {
+                                    stream.live_broadcast = true;
+                                }
+                                true
+                            }
+                        }
+                        None => true,
+                    };
+                    if deliver {
+                        self.broadcast(StreamEvent::Delta(delta));
+                        for event in official {
+                            self.broadcast(StreamEvent::Official(event));
+                        }
+                    } else {
                         tracing::debug!(
                             logical_id = %self.logical_id,
                             item_id = %delta.item_id,
                             "dropping a staged delta whose stream closed before the broadcast"
                         );
-                    } else {
-                        self.broadcast(StreamEvent::Delta(delta));
                     }
                 }
                 StagedEntry::Item { .. } => {
@@ -2618,8 +2717,17 @@ impl ItemLog {
 
     /// Broadcast one persisted item and the official frames it implies.
     fn publish(&self, view: &ItemView) {
+        self.publish_completion(view, true);
+    }
+
+    /// Broadcast a completion row, optionally re-announcing its item.
+    ///
+    /// A row whose live chunks reached subscribers already sent
+    /// `item.added`/`content_part.added` at the first chunk, so only the done
+    /// frames remain. A row without a live chunk keeps the original sequence.
+    fn publish_completion(&self, view: &ItemView, emit_added: bool) {
         self.broadcast(StreamEvent::Item(view.clone()));
-        for event in self.official_frames(view) {
+        for event in self.official_frames(view, emit_added) {
             self.broadcast(StreamEvent::Official(event));
         }
     }
@@ -2673,12 +2781,20 @@ impl ItemLog {
         let mut root_message_index = 0usize;
         let mut items = Vec::with_capacity(streams.len());
         for (_, (agent_id, message_id, _), stream) in streams {
-            let root_message =
-                turn_id.is_some() && agent_id == "root" && stream.kind == ItemKind::Message;
+            let MessageStream {
+                kind,
+                item_id,
+                text,
+                order: _,
+                output_index,
+                chunks: _,
+                live_broadcast,
+            } = stream;
+            let root_message = turn_id.is_some() && agent_id == "root" && kind == ItemKind::Message;
             let mut payload = json!({
                 "role": "assistant",
                 "messageId": message_id,
-                "text": stream.text,
+                "text": text,
                 "complete": true,
             });
             if turn_id.is_none() {
@@ -2694,25 +2810,29 @@ impl ItemLog {
                 } else {
                     "commentary"
                 });
-                payload["outputIndex"] = json!(root_message_index);
+                // The same in-memory index the first live chunk announced; a
+                // stream opened before this index existed falls back to flush
+                // order so old in-flight turns still persist a valid payload.
+                payload["outputIndex"] = json!(output_index.unwrap_or(root_message_index as u32));
                 root_message_index += 1;
             }
             items.push((
                 ProjectedItem {
-                    kind: stream.kind,
+                    kind,
                     source: ItemSource {
                         agent_id,
                         task_id: None,
                     },
                     payload,
                 },
-                Some(stream.item_id),
+                Some(item_id),
+                live_broadcast,
             ));
         }
         let keyed = items
-            .into_iter()
+            .iter()
             .enumerate()
-            .map(|(index, (item, item_id))| (index, item, item_id))
+            .map(|(index, (item, item_id, _))| (index, item.clone(), item_id.clone()))
             .collect();
         let mut committed = BTreeMap::new();
         let result = self
@@ -2720,9 +2840,14 @@ impl ItemLog {
             .await;
         // Broadcast every committed group first: one rejected store group must
         // not hide the rows of the same flush that are already durable.
-        for view in committed.into_values() {
+        for (index, view) in committed {
             if turn_id.is_some() {
-                self.publish(&view);
+                // A stream whose chunks reached subscribers already announced
+                // its item; only close it now. Without a live chunk (for
+                // example all chunks were dropped by a closing terminal), keep
+                // the original added-then-done sequence.
+                let emit_added = items.get(index).is_none_or(|(_, _, live)| !live);
+                self.publish_completion(&view, emit_added);
             } else {
                 // Recovered text has no turn: the row is readable from
                 // `/items`, but no `turn.item.added` may name a turn that never
@@ -2768,7 +2893,11 @@ impl ItemLog {
     /// run. A user item that arrives while a turn is open is a steer and is
     /// published against that turn immediately. Assistant deltas are skipped;
     /// only the final `complete:true` frame is the item the SDK consumes.
-    fn official_frames(&self, view: &ItemView) -> Vec<OfficialEvent> {
+    ///
+    /// `emit_added` is false when the first live chunk already announced the
+    /// assistant item and its content part: the completion then only closes
+    /// them. User, tool and recovered rows are unaffected.
+    fn official_frames(&self, view: &ItemView, emit_added: bool) -> Vec<OfficialEvent> {
         if !view.source.is_root() || view.kind != ItemKind::Message {
             return Vec::new();
         }
@@ -2828,45 +2957,46 @@ impl ItemLog {
                 let (turn_id, phase, output_index) = facts;
                 let item = OfficialMessageItem::assistant(&view.item_id, &turn_id, text)
                     .with_phase(Some(&phase));
-                vec![
-                    OfficialEvent::turn_item_added(
-                        view.seq,
+                let mut events = Vec::with_capacity(if emit_added { 5 } else { 3 });
+                if emit_added {
+                    events.push(OfficialEvent::turn_assistant_item_added(
+                        &view.item_id,
                         &self.logical_id,
                         &turn_id,
                         item.clone(),
-                    ),
-                    OfficialEvent::turn_content_part_added(
-                        view.seq,
+                    ));
+                    events.push(OfficialEvent::turn_content_part_added(
+                        &view.item_id,
                         &self.logical_id,
                         &turn_id,
-                        &view.item_id,
                         output_index,
                         text,
-                    ),
-                    OfficialEvent::turn_output_text_done(
-                        view.seq,
-                        &self.logical_id,
-                        &turn_id,
-                        &view.item_id,
-                        output_index,
-                        text,
-                    ),
-                    OfficialEvent::turn_content_part_done(
-                        view.seq,
-                        &self.logical_id,
-                        &turn_id,
-                        &view.item_id,
-                        output_index,
-                        text,
-                    ),
-                    OfficialEvent::turn_item_done(
-                        view.seq,
-                        &self.logical_id,
-                        &turn_id,
-                        output_index,
-                        item,
-                    ),
-                ]
+                    ));
+                }
+                events.push(OfficialEvent::turn_output_text_done(
+                    view.seq,
+                    &self.logical_id,
+                    &turn_id,
+                    &view.item_id,
+                    output_index,
+                    text,
+                ));
+                events.push(OfficialEvent::turn_content_part_done(
+                    view.seq,
+                    &self.logical_id,
+                    &turn_id,
+                    &view.item_id,
+                    output_index,
+                    text,
+                ));
+                events.push(OfficialEvent::turn_item_done(
+                    view.seq,
+                    &self.logical_id,
+                    &turn_id,
+                    output_index,
+                    item,
+                ));
+                events
             }
             _ => Vec::new(),
         }

@@ -1470,6 +1470,60 @@ async fn a_historical_multi_row_item_replays_row_by_row_with_one_official_item()
         }),
         "historical delta rows add no official frame: {backlog:?}"
     );
+    let deltas: Vec<_> = official
+        .iter()
+        .filter_map(|event| match event {
+            crate::domain::OfficialEvent::TurnOutputTextDelta {
+                event_id,
+                item_id,
+                delta,
+                output_index,
+                ..
+            } => Some((
+                event_id.as_str(),
+                item_id.as_str(),
+                delta.as_str(),
+                *output_index,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        [("evt_item_4_text_delta", item_id, "hello", 0)],
+        "the complete row contributes one full-text delta, not historical chunk rows"
+    );
+
+    // A window that starts inside the historical item still announces the item
+    // from its complete row; there is no chunk-boundary reconstruction.
+    let middle = fixture
+        .service
+        .replay_after(&logical_id(), EventCursor::after(2))
+        .await
+        .expect("mid-item replay");
+    let middle_official: Vec<_> = middle
+        .iter()
+        .filter_map(|event| match event {
+            crate::domain::StreamEvent::Official(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        middle_official
+            .iter()
+            .filter(|event| event.event_type() == "agent.session.turn.item.added")
+            .count(),
+        1,
+        "the complete row still announces the item: {middle:?}"
+    );
+    let middle_deltas: Vec<_> = middle_official
+        .iter()
+        .filter_map(|event| match event {
+            crate::domain::OfficialEvent::TurnOutputTextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(middle_deltas, ["hello"], "{middle:?}");
 }
 
 #[tokio::test]

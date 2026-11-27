@@ -287,6 +287,7 @@ async fn a_batched_burst_keeps_host_order_and_consecutive_seqs() {
     assert_eq!(live_deltas.len(), 2);
     let kinds: Vec<&str> = seen
         .iter()
+        .filter(|event| !matches!(event, StreamEvent::Official(_)))
         .map(|event| match event {
             StreamEvent::Item(_) => "item",
             StreamEvent::Delta(_) => "delta",
@@ -771,6 +772,8 @@ async fn assistant_completion_reports_item_parts_and_final_phase() {
         [
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -779,10 +782,12 @@ async fn assistant_completion_reports_item_parts_and_final_phase() {
         ],
         "{seen:?}"
     );
-    let completion_seq = seen
+    let (completion_seq, completion_id) = seen
         .iter()
         .find_map(|event| match event {
-            StreamEvent::Item(item) if item.payload["complete"] == json!(true) => Some(item.seq),
+            StreamEvent::Item(item) if item.payload["complete"] == json!(true) => {
+                Some((item.seq, item.item_id.clone()))
+            }
             _ => None,
         })
         .expect("completion item");
@@ -821,13 +826,232 @@ async fn assistant_completion_reports_item_parts_and_final_phase() {
     assert_eq!(
         ids,
         [
-            format!("evt_item_{completion_seq}_added"),
-            format!("evt_item_{completion_seq}_part_added"),
+            format!("evt_item_{completion_id}_added"),
+            format!("evt_item_{completion_id}_part_added"),
+            format!("evt_item_{completion_id}_delta_1"),
+            format!("evt_item_{completion_id}_delta_2"),
             format!("evt_item_{completion_seq}_text_done"),
             format!("evt_item_{completion_seq}_part_done"),
             format!("evt_item_{completion_seq}_done"),
         ]
     );
+}
+
+#[tokio::test]
+async fn live_chunks_emit_one_official_item_and_three_deltas() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let chunks = ["one", "two", "three"];
+    for text in chunks {
+        log.ingest("session/update", &chunk(text)).await;
+    }
+    let live = drain(&mut events);
+    let added: Vec<_> = live
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                if item.role == "assistant" =>
+            {
+                Some(item.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(added.len(), 1, "one item introduction: {live:?}");
+    let item_id = added[0].id.clone();
+    let deltas: Vec<_> = live
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event @ OfficialEvent::TurnOutputTextDelta { .. }) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas.len(), 3, "one official delta per chunk: {live:?}");
+    for (index, event) in deltas.iter().enumerate() {
+        let OfficialEvent::TurnOutputTextDelta {
+            event_id,
+            session_id,
+            turn_id,
+            item_id: delta_item,
+            content_index,
+            output_index,
+            delta,
+            ..
+        } = event
+        else {
+            unreachable!("filtered to deltas");
+        };
+        assert_eq!(delta_item, &item_id);
+        assert_eq!(session_id, "agent-1");
+        assert_eq!(turn_id.as_deref(), Some("turn_1"));
+        assert_eq!(*content_index, 0);
+        assert_eq!(*output_index, 0);
+        assert_eq!(delta.as_str(), chunks[index]);
+        assert_eq!(
+            event_id,
+            &format!("evt_item_{item_id}_delta_{}", index + 1),
+            "live ids are deterministic per in-process chunk"
+        );
+    }
+    let part_added: Vec<_> = live
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(event @ OfficialEvent::TurnContentPartAdded { .. }) => {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(part_added.len(), 1, "the part is added once: {live:?}");
+    let OfficialEvent::TurnContentPartAdded { output_index, .. } = part_added[0] else {
+        unreachable!("filtered to parts");
+    };
+    assert_eq!(*output_index, 0);
+    assert_eq!(
+        official_types(&live),
+        [
+            "agent.session.turn.item.added",
+            "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
+            "agent.session.turn.output_text.delta",
+            "agent.session.turn.output_text.delta",
+        ],
+        "the first chunk introduces the item and part; later chunks are deltas only: {live:?}"
+    );
+    let position =
+        |predicate: &dyn Fn(&StreamEvent) -> bool| live.iter().position(predicate).expect("frame");
+    let added_at = position(&|event| {
+        matches!(
+            event,
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                if item.role == "assistant"
+        )
+    });
+    let part_at = position(&|event| {
+        matches!(
+            event,
+            StreamEvent::Official(OfficialEvent::TurnContentPartAdded { .. })
+        )
+    });
+    let first_delta_at = position(&|event| {
+        matches!(
+            event,
+            StreamEvent::Official(OfficialEvent::TurnOutputTextDelta { .. })
+        )
+    });
+    assert!(added_at < part_at && part_at < first_delta_at, "{live:?}");
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let completion = drain(&mut events);
+    assert_eq!(
+        official_types(&completion),
+        [
+            "agent.session.turn.output_text.done",
+            "agent.session.turn.content_part.done",
+            "agent.session.turn.item.done",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "a live-chunked item is only closed at the terminal: {completion:?}"
+    );
+    assert!(
+        !completion.iter().any(|event| matches!(
+            event,
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { .. })
+        )),
+        "the terminal must not repeat item.added: {completion:?}"
+    );
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "three chunks still merge into one row: {rows:?}"
+    );
+    assert_eq!(rows[0].kind, ItemKind::Message);
+    assert_eq!(rows[0].payload["text"], json!("onetwothree"));
+    assert_eq!(rows[0].payload["complete"], json!(true));
+    assert_eq!(rows[0].payload["outputIndex"], json!(0));
+    assert!(
+        rows.iter().all(|row| row.payload.get("delta").is_none()),
+        "no chunk row is persisted: {rows:?}"
+    );
+    let done = completion
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemDone {
+                output_index, item, ..
+            }) => Some((*output_index, item)),
+            _ => None,
+        })
+        .expect("item.done");
+    assert_eq!(done.0, 0, "done reuses the live output index");
+    assert_eq!(done.1.id, item_id);
+}
+
+#[tokio::test]
+async fn live_deltas_do_not_change_a_cancelled_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    log.ingest("session/update", &chunk("sto")).await;
+    log.ingest("session/update", &chunk("p")).await;
+    assert_eq!(
+        official_types(&drain(&mut events))
+            .iter()
+            .filter(|event| **event == "agent.session.turn.output_text.delta")
+            .count(),
+        2,
+        "both chunks streamed before the cancel"
+    );
+
+    log.finish_turn("req-1", TurnOutcome::Completed("cancelled".into()))
+        .await;
+    let seen = drain(&mut events);
+    let completed = seen
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnCompleted { turn, .. }) => Some(turn),
+            _ => None,
+        })
+        .expect("turn.completed");
+    assert_eq!(completed.status, "cancelled");
+    assert_eq!(
+        official_types(&seen),
+        [
+            "agent.session.turn.output_text.done",
+            "agent.session.turn.content_part.done",
+            "agent.session.turn.item.done",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "deltas neither repeat the item nor change the cancelled terminal: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Failed { .. }))),
+        "cancelled output must not turn into a failure: {seen:?}"
+    );
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].payload["text"], json!("stop"));
 }
 
 #[tokio::test]
@@ -1323,7 +1547,12 @@ async fn recovered_root_flushes_one_merged_row_without_official_frames() {
     } = fixture().await;
     log.ingest("session/update", &chunk("hel")).await;
     log.ingest("session/update", &chunk("lo")).await;
-    assert_eq!(deltas(&drain(&mut events)).len(), 2, "chunks stream live");
+    let buffered = drain(&mut events);
+    assert_eq!(deltas(&buffered).len(), 2, "chunks stream live");
+    assert!(
+        official_types(&buffered).is_empty(),
+        "recovered chunks have no turn, so no official added/delta frame: {buffered:?}"
+    );
 
     log.finish_recovered_root().await;
 
@@ -1430,10 +1659,10 @@ async fn a_lagged_subscriber_can_resume_from_the_last_item() {
     // cursor) so the next three broadcasts are the ones the subscriber misses.
     while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = events.try_recv() {}
 
-    log.ingest("session/update", &chunk("hel")).await; // delta, position 0
+    log.ingest("session/update", &chunk("hel")).await; // delta + 3 official
     log.ingest("session/update", &tool_call("call-1", "read"))
-        .await; // item seq 1, position 1
-    log.ingest("session/update", &chunk("lo")).await; // delta, position 2
+        .await; // item seq 1
+    log.ingest("session/update", &chunk("lo")).await; // delta + 1 official
 
     let skipped = loop {
         match events.recv().await {
@@ -1443,14 +1672,17 @@ async fn a_lagged_subscriber_can_resume_from_the_last_item() {
         }
     };
     assert_eq!(
-        skipped, 1,
-        "only the first delta was lost; the persisted item stayed readable"
+        skipped, 5,
+        "the first chunk's custom item and official introduction, the persisted item, \
+         and the next two events were dropped: non-persisted frames share the channel"
     );
     // The SSE writer ends here: one gap frame names the dropped upper bound.
+    // Non-persisted official/delta frames inflate the count, so `toSeq` may
+    // exceed the session cursor; the durable item stays readable.
     let gap = crate::event_stream::FrameWriter::new(0).gap(skipped);
     assert!(gap.starts_with("event: gap"), "{gap}");
     assert_eq!(
-        gap, "event: gap\ndata: {\"fromSeq\":1,\"toSeq\":1}\n\n",
+        gap, "event: gap\ndata: {\"fromSeq\":1,\"toSeq\":5}\n\n",
         "the gap starts after the last delivered item seq"
     );
 
@@ -1498,6 +1730,8 @@ async fn a_single_turn_keeps_the_official_sequence() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",

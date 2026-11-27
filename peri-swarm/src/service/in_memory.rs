@@ -388,8 +388,9 @@ impl InMemorySwarmService {
     /// A user item accepted while no turn is open opens a turn: the session
     /// enters `in_progress`, then `turn.created`, `turn.in_progress` and the
     /// item. Assistant items use the open turn and report completion through the
-    /// item, content-part and output-text frames. Delta frames are skipped; the
-    /// final `complete:true` frame is the item the SDK consumes.
+    /// item, content-part and output-text frames. This fake completes in one
+    /// step and has no live chunks, so its live path sends no delta; replay
+    /// synthesizes one full-text delta from the completion row.
     async fn broadcast_official_item(&self, logical_id: &LogicalId, view: &ItemView) {
         if !view.source.is_root() || view.kind != ItemKind::Message {
             // Thought chunks share the answer's `messageId`; child items have
@@ -532,12 +533,16 @@ impl InMemorySwarmService {
         let message =
             OfficialMessageItem::assistant(&view.item_id, turn_id, text).with_phase(Some(phase));
         for event in [
-            OfficialEvent::turn_item_added(view.seq, logical_id.as_str(), turn_id, message.clone()),
-            OfficialEvent::turn_content_part_added(
-                view.seq,
+            OfficialEvent::turn_assistant_item_added(
+                &view.item_id,
                 logical_id.as_str(),
                 turn_id,
+                message.clone(),
+            ),
+            OfficialEvent::turn_content_part_added(
                 &view.item_id,
+                logical_id.as_str(),
+                turn_id,
                 output_index,
                 text,
             ),

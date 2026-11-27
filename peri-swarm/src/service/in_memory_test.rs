@@ -1004,11 +1004,13 @@ async fn replay_keeps_every_assistant_message_of_one_turn() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1022,12 +1024,14 @@ async fn replay_keeps_every_assistant_message_of_one_turn() {
     assert_eq!(ids[1].1, "evt_turn_input_x_created");
     assert_eq!(ids[2].1, "evt_turn_input_x_in_progress");
     assert_eq!(ids[3].1, "evt_item_1_added");
-    assert_eq!(ids[4].1, "evt_item_2_added");
-    assert_eq!(ids[8].1, "evt_item_2_done");
-    assert_eq!(ids[9].1, "evt_item_3_added");
-    assert_eq!(ids[13].1, "evt_item_3_done");
-    assert_eq!(ids[14].1, "evt_turn_input_x_completed");
-    assert_eq!(ids[15].1, "evt_turn_input_x_idle");
+    assert_eq!(ids[4].1, "evt_item_itim_msg_1_added");
+    assert_eq!(ids[6].1, "evt_item_2_text_delta");
+    assert_eq!(ids[9].1, "evt_item_2_done");
+    assert_eq!(ids[10].1, "evt_item_itim_msg_2_added");
+    assert_eq!(ids[12].1, "evt_item_3_text_delta");
+    assert_eq!(ids[15].1, "evt_item_3_done");
+    assert_eq!(ids[16].1, "evt_turn_input_x_completed");
+    assert_eq!(ids[17].1, "evt_turn_input_x_idle");
     let added: Vec<_> = backlog
         .iter()
         .filter_map(|event| match event {
@@ -1055,6 +1059,148 @@ async fn replay_keeps_every_assistant_message_of_one_turn() {
             (1, Some("final_answer".to_owned())),
         ],
         "legacy payloads replay as final answers with sequential indices"
+    );
+}
+
+#[tokio::test]
+async fn replay_emits_one_full_text_delta_per_assistant_item() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    let user_seq = append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_full",
+        json!({
+            "role": "assistant",
+            "messageId": "msg_full",
+            "text": "full answer",
+            "complete": true
+        }),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    let assert_window = |backlog: &[StreamEvent], label: &str| {
+        let assistant = backlog
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                    if item.role == "assistant" =>
+                {
+                    Some(item.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label}: assistant item: {backlog:?}"));
+        let frames: Vec<&OfficialEvent> = backlog
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Official(event) => match event {
+                    OfficialEvent::TurnItemAdded { item, .. } if item.id == assistant.id => {
+                        Some(event)
+                    }
+                    OfficialEvent::TurnContentPartAdded { item_id, .. }
+                    | OfficialEvent::TurnOutputTextDelta { item_id, .. }
+                    | OfficialEvent::TurnOutputTextDone { item_id, .. }
+                    | OfficialEvent::TurnContentPartDone { item_id, .. }
+                        if item_id == &assistant.id =>
+                    {
+                        Some(event)
+                    }
+                    OfficialEvent::TurnItemDone { item, .. } if item.id == assistant.id => {
+                        Some(event)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|event| event.event_type())
+                .collect::<Vec<_>>(),
+            [
+                "agent.session.turn.item.added",
+                "agent.session.turn.content_part.added",
+                "agent.session.turn.output_text.delta",
+                "agent.session.turn.output_text.done",
+                "agent.session.turn.content_part.done",
+                "agent.session.turn.item.done",
+            ],
+            "{label}: added -> delta -> done, no special mid-item frames: {backlog:?}"
+        );
+        let deltas: Vec<&OfficialEvent> = frames
+            .iter()
+            .copied()
+            .filter(|event| matches!(event, OfficialEvent::TurnOutputTextDelta { .. }))
+            .collect();
+        assert_eq!(deltas.len(), 1, "{label}: exactly one delta: {backlog:?}");
+        let OfficialEvent::TurnOutputTextDelta {
+            event_id,
+            session_id,
+            turn_id,
+            item_id,
+            content_index,
+            output_index,
+            delta,
+            ..
+        } = deltas[0]
+        else {
+            unreachable!("filtered to one delta");
+        };
+        assert_eq!(event_id, "evt_item_2_text_delta");
+        assert_eq!(session_id, "agent-01");
+        assert_eq!(turn_id.as_deref(), Some("turn_input_x"));
+        assert_eq!(item_id, &assistant.id);
+        assert_eq!(*content_index, 0);
+        assert_eq!(*output_index, 0);
+        assert_eq!(
+            delta.as_str(),
+            "full answer",
+            "{label}: the whole text once"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|event| matches!(event, OfficialEvent::TurnItemAdded { .. }))
+                .count(),
+            1,
+            "{label}: no repeated item.added: {backlog:?}"
+        );
+    };
+
+    let full = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::START,
+        )
+        .await
+        .expect("afterSeq=0");
+    assert_window(&full, "afterSeq=0");
+
+    let middle = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(user_seq),
+        )
+        .await
+        .expect("mid-turn cursor");
+    assert_window(&middle, "mid-turn");
+    assert!(
+        !middle.iter().any(|event| matches!(
+            event,
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                if item.role == "user"
+        )),
+        "the window starts inside the turn: {middle:?}"
     );
 }
 
@@ -1366,6 +1512,7 @@ async fn replay_marks_a_failed_last_turn_failed_after_partial_output() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1375,9 +1522,9 @@ async fn replay_marks_a_failed_last_turn_failed_after_partial_output() {
         ],
         "a persisted assistant frame must not turn a failed turn into a completion: {ids:?}"
     );
-    assert_eq!(ids[9].1, "evt_turn_input_x_failed");
-    assert_eq!(ids[10].1, "evt_turn_input_x_error");
-    assert_eq!(ids[11].1, "evt_turn_input_x_session_failed");
+    assert_eq!(ids[10].1, "evt_turn_input_x_failed");
+    assert_eq!(ids[11].1, "evt_turn_input_x_error");
+    assert_eq!(ids[12].1, "evt_turn_input_x_session_failed");
     let error = backlog
         .iter()
         .find_map(|event| match event {
@@ -1436,6 +1583,7 @@ async fn replay_from_inside_a_turn_seeds_the_turn_identity() {
         [
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1444,9 +1592,10 @@ async fn replay_from_inside_a_turn_seeds_the_turn_identity() {
         ],
         "{ids:?}"
     );
-    assert_eq!(ids[0].1, "evt_item_3_added");
-    assert_eq!(ids[4].1, "evt_item_3_done");
-    assert_eq!(ids[5].1, "evt_turn_input_x_completed");
+    assert_eq!(ids[0].1, "evt_item_itim_msg_1_added");
+    assert_eq!(ids[2].1, "evt_item_3_text_delta");
+    assert_eq!(ids[5].1, "evt_item_3_done");
+    assert_eq!(ids[6].1, "evt_turn_input_x_completed");
     let item = backlog
         .iter()
         .find_map(|event| match event {
@@ -1485,6 +1634,7 @@ async fn replay_leaves_a_live_turn_open() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1566,6 +1716,7 @@ async fn replay_from_a_steer_keeps_the_opener_turn_id() {
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
             "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.delta",
             "agent.session.turn.output_text.done",
             "agent.session.turn.content_part.done",
             "agent.session.turn.item.done",
@@ -1575,9 +1726,9 @@ async fn replay_from_a_steer_keeps_the_opener_turn_id() {
         "{ids:?}"
     );
     assert_eq!(ids[0].1, "evt_item_3_added");
-    assert_eq!(ids[1].1, "evt_item_4_added");
+    assert_eq!(ids[1].1, "evt_item_itim_msg_1_added");
     assert_eq!(
-        ids[6].1, "evt_turn_input_x_completed",
+        ids[7].1, "evt_turn_input_x_completed",
         "the steer belongs to the opener's turn: {ids:?}"
     );
     let turn_ids: Vec<_> = backlog
@@ -1912,13 +2063,53 @@ async fn live_and_replay_agree_on_the_official_type_and_event_id_sequence() {
         .replay_after(&id, EventCursor::START)
         .await
         .expect("replay");
+    let live_ids = official_ids(&live_events);
+    let replay_ids = official_ids(&backlog);
+    assert!(
+        live_ids
+            .iter()
+            .all(|(kind, _)| kind != "agent.session.turn.output_text.delta"),
+        "the completion-only fake has no live chunks, so it sends no delta: {live_events:?}"
+    );
+    let replay_deltas: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnOutputTextDelta {
+                delta,
+                item_id,
+                output_index,
+                ..
+            }) => Some((delta.clone(), item_id.clone(), *output_index)),
+            _ => None,
+        })
+        .collect();
+    let assistant_id = backlog
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. })
+                if item.role == "assistant" =>
+            {
+                Some(item.id.clone())
+            }
+            _ => None,
+        })
+        .expect("assistant item");
     assert_eq!(
-        official_ids(&live_events),
-        official_ids(&backlog),
-        "live and replay must deliver the same identities: live={live_events:?}"
+        replay_deltas,
+        [("fake-echo: hello".to_owned(), assistant_id, 0)],
+        "replay has no chunk boundaries and sends the full text exactly once"
+    );
+    let without_delta: Vec<_> = replay_ids
+        .into_iter()
+        .filter(|(kind, _)| kind != "agent.session.turn.output_text.delta")
+        .collect();
+    assert_eq!(
+        live_ids, without_delta,
+        "live and replay keep the same identities outside the replay-only delta: \
+         live={live_events:?}"
     );
     assert!(
-        official_ids(&live_events).len() > 5,
+        live_ids.len() > 5,
         "the parity covers the completion frames, not only the terminal"
     );
 }

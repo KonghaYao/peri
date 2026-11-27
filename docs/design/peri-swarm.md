@@ -171,10 +171,14 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 ### 4.2 SSE 与 items
 
 - 每个 item **至多持久化为一行**，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
-  不存在也不影响执行。assistant 文本流与推理流在实时段按 chunk 广播（`delta` 帧，无
-  `seq`、不落库），turn 终止时把整条流写成一条 `complete:true` 合并行；`tool_call`、
-  `tool_result`、`approval`、user/receipt 每帧一行。历史数据仍可能是「每 chunk 一行 +
-  complete 行」的多行 item（§4.2.2），新写入不再产生该形状。
+  不存在也不影响执行。assistant 文本流在实时段逐 chunk 广播：自定义 `delta` 帧之外，
+  每个 chunk 还发送官方 `agent.session.turn.output_text.delta`；首 chunk 先补
+  `item.added`/`content_part.added`。这些实时帧都没有 `seq`、不落库。turn 终止时把
+  整条流写成一条 `complete:true` 合并行；回放没有原始 chunk 边界，只从该完成行合成
+  **一条全文** `output_text.delta`。推理流仍只有自定义 `delta` 帧，不发官方
+  `reasoning_summary_text.delta`。`tool_call`、`tool_result`、`approval`、user/receipt
+  每帧一行。历史数据仍可能是「每 chunk 一行 + complete 行」的多行 item（§4.2.2），
+  新写入不再产生该形状。
 - 用户输入在 `swarm_inputs` 受理（`disposition=inserted`）后写成一条单帧
   `message` item：`payload={role:"user",text,inputId}`，`id`/`itemId` 为
   `itim_input_<inputId>`，没有 `delta`/`complete` 字段。host 的
@@ -191,8 +195,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标。新写入的数据每个 `itemId` 只有一条 `complete` 行，回放不会重复；历史多行
   item 在回放中仍按 `seq` 逐行发出 `item` 帧，客户端需按 `itemId` 自行折叠
-  （§4.2.2）。实时 delta 帧与合并行同 `itemId`，但 delta 帧没有 `seq`，不能作为
-  游标，也不参与 `id` 去重。
+  （§4.2.2）。实时 `delta` 帧与官方 `output_text.delta` 同合并行共用 `itemId`，但都
+  没有 `seq`，不能作为游标，也不参与 `id` 去重。
 - SSE 帧只有**持久化 item** 带 `id`（等于 `seq`）；实时 `delta`、`turn`、官方
   `agent.session.*` 与 `gap` 不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发
   `started`，终止帧是 `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn`
@@ -229,7 +233,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   情况已由 lookback 修复。
 - turn 内未 flush 的 assistant/thought 流在 turn 终止时一次写入状态库；进程在
   turn 执行中崩溃会丢失该 turn 尚未 flush 的文本（已落库的 user/tool/approval 行不受
-  影响），恢复只按行重放，不逐 chunk 重播增量。完成组按存储批次提交：失败批次不广播，
+  影响），恢复只按行重放，不逐 chunk 重播增量；assistant 完成行在回放时合成一条全文
+  delta。完成组按存储批次提交：失败批次不广播，
   已提交批次先广播；任何未持久化的完成组都会让非取消 turn 以 `turn.failed` 收尾
   （不静默成功）。取消 turn 的完成行落库失败只记录日志，终态仍是
   `turn.completed(status="cancelled")`，会话回到 `idle`。合并 payload 超过
@@ -283,7 +288,9 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   那一次工具调用，turn 仍由 host 结果收尾。
 - `GET /items` 按 **item 分组**分页（§4.2.2）。`items` 是当页选中条目的全部原始行，
   包含 `id`/`itemId`、`seq`、`kind`、`source` 和 `payload`。新数据每 item 一行，
-  只有历史数据可能包含逐 chunk delta 行；新写入的实时增量走 SSE。`data` 是同一页的官方
+  只有历史数据可能包含逐 chunk delta 行；新写入的实时增量走 SSE。回放没有原始 chunk
+  行，SSE 对每条 assistant 完成行合成一条全文 `output_text.delta`（§4.2.1），
+  `/items` 投影与文本折叠规则不变。`data` 是同一页的官方
   `AgentSessionItem` 投影，有 `type`、条目 `id`（等于 `itemId`）、`turn_id`，没有 `seq`。
   同一 `itemId` 投影至多一次，`data.length ≤ distinct(itemId in items) ≤ items.length`。
 
@@ -366,9 +373,10 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 | `agent.session.in_progress` | turn 真正开始，**先于** `turn.created` | 会话行快照（`in_progress`） | `evt_<turnId>_session_in_progress` |
 | `agent.session.turn.created` | turn 真正开始（`begin_turn`），**不是**受理时 | 打开 turn 的 user item | `evt_<turnId>_created` |
 | `agent.session.turn.in_progress` | 紧跟 `turn.created` | 同一 turn 快照（`in_progress`） | `evt_<turnId>_in_progress` |
-| `agent.session.turn.item.added` | user item 开启 turn/steer 时、assistant `complete:true` 落库后 | 持久化 item 的 `seq`、`itemId`、text | `evt_item_<seq>_added` |
-| `agent.session.turn.content_part.added` | assistant 完成行落库后，紧跟 `item.added` | 该行的 `text`、`outputIndex`；`content_index=0` | `evt_item_<seq>_part_added` |
-| `agent.session.turn.output_text.done` | 同上 | 同上 | `evt_item_<seq>_text_done` |
+| `agent.session.turn.item.added` | user item 开启 turn/steer 时；assistant 实时首 chunk，或回放每条完成行 | user：持久化 `seq`、`itemId`、text；assistant：稳定 `itemId` 与首 chunk 文本 | user `evt_item_<seq>_added`；assistant `evt_item_<itemId>_added` |
+| `agent.session.turn.content_part.added` | assistant 首 chunk（实时）或完成行（回放），紧跟 `item.added` | 首 chunk 文本 / 完成行全文、`outputIndex`；`content_index=0` | `evt_item_<itemId>_part_added` |
+| `agent.session.turn.output_text.delta` | 实时每个 chunk；回放每条 assistant 完成行**一条全文** | 该 chunk 文本 / 完成行全文；`content_index=0`，`outputIndex` 与合并行一致 | 实时 `evt_item_<itemId>_delta_<chunk>`；回放 `evt_item_<seq>_text_delta`；**两者不保证一致** |
+| `agent.session.turn.output_text.done` | assistant 完成行落库后 | 完成行全文 | `evt_item_<seq>_text_done` |
 | `agent.session.turn.content_part.done` | 同上 | 同上 | `evt_item_<seq>_part_done` |
 | `agent.session.turn.item.done` | 同上 | 同一完成 item（`phase` 来自 payload） | `evt_item_<seq>_done` |
 | `agent.session.turn.completed` | 成功终态 | turn 的 `created_at` 与完成时刻 | `evt_<turnId>_completed` |
@@ -377,25 +385,36 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 | `agent.session.idle` | **紧接** `turn.completed` 之后 | 会话行快照 | `evt_<turnId>_idle` |
 | `agent.session.failed` | **紧接** `error` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
 
-- `item.added`/`content_part.*`/`item.done` 仍由 `complete:true` 行推导，与写入粒度
-  无关；实时 delta 帧不产生官方 item 帧。多行 item 是历史数据形状（§4.2.2），
-  新数据同一 item 只有这一条完成行。
+- assistant 的 `item.added`/`content_part.added` 在实时首 chunk 就发出，完成行落库后
+  只补 `output_text.done` → `content_part.done` → `item.done`，不再重复 added；回放没有
+  原始 chunk，仍从完成行按 `item.added` → `content_part.added` → 全文
+  `output_text.delta` → done 发出。没有实时 chunk 的完成行（如内存 fake 或 chunk 全被
+  drop）保持 added 开头的原序列。`Thought`、child 行与 `recovered` 行不产生官方文本帧；
+  历史多行 item 只在完成行上投影（§4.2.2），新数据同一 item 只有一条完成行。
 - `turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`。它由已持久化的 user
   item 派生，不用 ACP `messageId`，不含时钟或随机源；重连后由同一行重算，值不变。
-- `event_id` 只由 `turnId`、`sessionId` 或持久化 item `seq` 派生，因此实时投递与
-  backlog 重放给出完全相同的 identity；客户端的 `event_id` 去重窗口可跨重连生效。
+- `event_id` 由 `turnId`、`sessionId`、持久化 item `seq` 或 assistant 的稳定 `itemId`
+  派生。user `item.added`、done 系列与 turn/session 帧在实时投递与 backlog 重放中
+  相同；assistant 的 `item.added`/`content_part.added` 也因按 `itemId` 派生而相同。
+  唯一例外是 `output_text.delta`：实时用进程内 chunk 序号，回放用完成行 `seq`，两者
+  **不保证一致**，这是不持久化 chunk 的直接结果；跨重连按 `event_id` 去重时必须把
+  delta 排除，或接受同一文本的两次 delta 事件。
 - 受理只持久化 user item，不发 `turn.created`/`turn.item.added`。turn 真正开始时
   官方帧按 `session.in_progress` → `turn.created` → `turn.in_progress` →
   `turn.item.added`（user）发出，随后是自定义 `turn: started`；从未执行的 turn 不会
   留下只有 created 没有终态的悬空 turn。实时与回放使用同一顺序。
-- 每条 assistant 完成消息按 `turn.item.added` → `content_part.added` →
-  `output_text.done` → `content_part.done` → `turn.item.done` 发出。`item.done.item`
-  是 `AgentSessionAssistantMessage`（`status:"completed"`，`content` 为单个
-  `output_text`），`content_index` 恒为 `0`。
+- 实时 assistant 有 chunk 时，官方序列是首 chunk 的 `turn.item.added` →
+  `content_part.added` → 每个 chunk 的 `output_text.delta`，turn 终止后的
+  `output_text.done` → `content_part.done` → `turn.item.done`。回放每条 assistant 完成
+  行的序列是 `turn.item.added` → `content_part.added` → 一条全文
+  `output_text.delta` → `output_text.done` → `content_part.done` → `turn.item.done`。
+  `item.done.item` 是 `AgentSessionAssistantMessage`（`status:"completed"`，`content`
+  为单个 `output_text`），`content_index` 恒为 `0`。
 - 同一模型调用的 reasoning 与 answer 共享 `messageId`。流键是
   `(agentId, messageId, kind)`，`Message` 与 `Thought` 分开累积、各自拥有稳定
-  `itemId`；delta 只走实时，turn 终止时各自写一条合并行，reasoning 先到不会把 answer
-  并进 Thought。
+  `itemId`；自定义 delta 只走实时，turn 终止时各自写一条合并行，reasoning 先到不会把
+  answer 并进 Thought。reasoning 官方帧本轮**未实现**：`Thought` 只投影为自定义
+  `item`（`reasoning.summary`），没有 `reasoning_summary_text.delta`/done。
 - assistant `phase`/`outputIndex` **只对 root 的 `Message` 完成行计算**：同一 turn 内
   按**首次到达顺序**（首次打开该流时的 `MessageStream.order`）排序，最后一条 root
   Message 是 `final_answer`，其余是
@@ -458,8 +477,9 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   （`server_label` + wire 工具名），不是工具名；会话级 `PermissionMode` 仍是
   `Bypass`，只有命中声明的 server 进入审批通道。无法归属到声明的调用 fail-closed：
   进入待办等待，不默认放行。
-- 本批**不覆盖**的官方事件（本地没有对应持久事实）：`output_text.delta` 等文本
-  delta、四种 `reasoning_summary.*`、八种 `environment.*`、三种 `subagent.*`。
+- 本批**不覆盖**的官方事件（本地没有对应持久事实）：四种
+  `reasoning_summary.*`、八种 `environment.*`、三种 `subagent.*`。assistant 的
+  `output_text.delta` 已实现（实时逐 chunk、回放单条全文）；reasoning delta 仍未实现。
   `AgentSession.environment` 已随会话行投影（§4.5）；快照只包含网关实际持久化的
   字段，未知环境为 `{"type":"none"}`。
 
@@ -844,17 +864,20 @@ Bun：
    不作为真相。
 3. **清理策略不变**：仍只有显式 `DELETE /v1/agents/sessions/{logicalId}` 级联删除。
    保留期/TTL 是独立可选项，默认关闭，未批准实施。
-4. **不变项**：官方 15 种事件序列、`/items` 分页与 `after` 语义、审批
+4. **不变项**：官方事件序列（C=2 后为 16 种）、`/items` 分页与 `after` 语义、审批
    `pending`/`settled` 折叠、崩溃恢复的 initial input 幂等。
 5. **兼容与回退**：无 schema 变更；历史 chunk 行与新 item 行按 `seq` 单调共存，
    回放不重写数据；回退只需恢复原写入路径。
-6. **已知代价**：回放不再逐 chunk 重播增量文本；实时流式不受影响。
+6. **已知代价（C=2 更新）**：回放不保留原始 chunk 边界；assistant 完成行只合成
+   **一条全文** `output_text.delta`，实时仍逐 chunk。实时 chunk 没有持久 `seq`，所以
+   实时 delta 的 `event_id` 与回放 delta 不保证一致；assistant 的 `item.added`/
+   `content_part.added` 已改为按稳定 `itemId` 派生，跨投递一致。reasoning delta 未实现。
 7. **取代关系**：本节第 1 条已取代 §4.2 中逐 chunk 行的表述（“不能用 `id` 去重
-   delta 帧”等）；§4.2 现在描述合并行与实时 delta 的现行契约，历史多行数据只在
-   §4.2.2 保留说明。
+   delta 帧”等）；§4.2 现在描述合并行、实时逐 chunk delta 与回放单条全文 delta 的
+   现行契约，历史多行数据只在 §4.2.2 保留说明。
 
-**2026-11-26 追加裁决（C=2，实施待定）**：实时与回放都发送官方 delta 事件，包括
-`agent.session.turn.output_text.delta` 与 `agent.session.turn.reasoning_summary_text.delta`。
-持久化方式尚未裁决——恢复逐 chunk 行、新增 delta 表（需要 schema 批准）或在回放时
-合成——因此**当前实现仍是本节第 6 条「回放不再逐 chunk 重播增量文本」**。本段只记录
-目标，不改变 §4.2 与 §9 第 1、6 条的现行契约，也不表示已实施。
+**2026-11-26 C=2 实施（非持久化）**：`agent.session.turn.output_text.delta` 已在实时
+逐 chunk 发送，首 chunk 先发 `item.added`/`content_part.added`；回放从合并行合成一条
+全文 delta。`reasoning_summary_text.delta` 未实现。chunk 不入库、不新增 schema/字段，
+`swarm_items` 仍是一条 assistant 合并行，§9 第 1 条的合并落库裁决继续有效；本段不是
+回退，也不改变 `/items` 投影。
