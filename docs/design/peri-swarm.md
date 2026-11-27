@@ -361,9 +361,13 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
   落在多帧 item 中间时，要么按组最大 `seq` 选入整个 item（含游标之前的帧），要么
   整组排除。畸形或未知 item id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
   `400 conflicting_cursor`。
-- 官方 SDK 以 `data` 末项 `id` 自动翻页。只有在**已返回的 item 不再增长**时，它才与
-  `nextCursor` 覆盖同一批可投影条目；此时 SDK 续页会从该 `id` 之后重扫内部原始行，因此在
-  100 页/2000 行预算边界上，SDK 可能比原生 `nextCursor` 更早触发 `items_scan_limit`。
+- 官方 SDK 以 `data` 末项 `id` 自动翻页。只有在**每次续页都正常返回非空 `data`**、
+  且**已返回的 item 不再增长**时，它才与 `nextCursor` 覆盖同一批可投影条目；此时 SDK
+  续页会从该 `id` 之后重扫内部原始行，因此在 100 页/2000 行预算边界上，SDK 可能比原生
+  `nextCursor` 更早触发 `items_scan_limit`。命中升序观察上界而 `data=[]` 时同样产生分叉，
+  item 未增长也不例外：例如已返回 `seq=1`，续页的分页边界停在 `seq=2` 的内部条目并
+  命中上界（`data=[]`、游标 2），并发写入的 `seq=3` 可投影条目对 SDK 不可见，
+  原生从游标 2 继续则能读到。
   已返回的 item 若又追加了帧，`after=<itemId>` 按请求时该 item 的**当前** `MAX(seq)` 解析，
   可能越过中间尚未读到的可投影 item：例如 SDK 末项 `seq=2`、`nextCursor=3`、`seq=4`
   有可投影条目，末项增长到 `seq=5` 后 `after=<itemId>` 解析为 5，跳过了 `seq=4`，而数字
@@ -380,7 +384,7 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 
 | HTTP | `/items` 错误码 | 含义 |
 | --- | --- | --- |
-| 422 | `items_scan_limit` | 扫描预算耗尽或游标不能推进；恢复方式取决于成因：纳入超 2000 行需把游标移到该 item 之后（单个 item 就超过 2000 行时存储层整组返回，减小 `limit` 无效），100 页读取预算触顶时减小 `limit` 只会更快耗尽，游标不能严格推进时重试或改用 `afterSeq`。 |
+| 422 | `items_scan_limit` | 扫描预算耗尽或游标不能推进；恢复方式取决于成因：目标 item 之前累计 2000 条内部行时，用 `afterSeq`（取这些行的最大 `seq`）或 `after=<内部 item id>` 移到它们之后、目标 item 之前再读，不要越过目标 item；单个 item 自身超 2000 条时只能跳过该 item 再读（存储层整组返回、无法纳入，其帧不会出现在响应里，减小 `limit` 无效）；100 页读取预算触顶时减小 `limit` 只会更快耗尽，应改用更近的游标；游标不能严格推进时重试或改用 `afterSeq`。 |
 | 502 | `upstream_unavailable` | 存储页或投影依赖读取失败；`details.operation` 指明操作，不返回部分页。 |
 
 #### 4.2.1 官方事件映射
