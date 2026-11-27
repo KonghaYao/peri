@@ -17,7 +17,6 @@ pub(crate) async fn fetch_github(
 }
 
 /// 通用的 git 仓库（任意 git URL）
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn fetch_git(
     name: &str,
     url: &str,
@@ -72,19 +71,6 @@ pub(crate) async fn fetch_git(
     })?;
     super::read_manifest_from_path(&manifest_path)
 }
-
-#[cfg(target_os = "emscripten")]
-pub(crate) async fn fetch_git(
-    _name: &str,
-    _url: &str,
-    _cache_base: &Path,
-    _auto_update: bool,
-) -> Result<MarketplaceManifest, MarketplaceError> {
-    Err(MarketplaceError::GitFailed(
-        "git marketplace requires a local process".into(),
-    ))
-}
-
 pub(crate) async fn fetch_url(
     name: &str,
     url: &str,
@@ -152,7 +138,6 @@ pub(crate) fn read_directory(path: &Path) -> Result<MarketplaceManifest, Marketp
     super::read_manifest_from_path(&manifest_path)
 }
 
-#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn fetch_npm(
     name: &str,
     package: &str,
@@ -216,15 +201,4 @@ pub(crate) async fn fetch_npm(
         }
     })?;
     super::read_manifest_from_path(&manifest_path)
-}
-
-#[cfg(target_os = "emscripten")]
-pub(crate) async fn fetch_npm(
-    _name: &str,
-    _package: &str,
-    _cache_base: &Path,
-) -> Result<MarketplaceManifest, MarketplaceError> {
-    Err(MarketplaceError::NpmFailed(
-        "npm marketplace requires a local process".into(),
-    ))
 }

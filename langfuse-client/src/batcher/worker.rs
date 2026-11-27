@@ -56,8 +56,8 @@ use crate::spool::SpoolStore;
 mod recover;
 
 // 端到端发送回归挂在 worker 侧：它驱动的是本模块的批次发送单元，native 暂存用例只在
-// 有文件系统的目标上编译（WASM/emscripten 只保留有界内存路径）。
-#[cfg(all(test, not(target_arch = "wasm32"), not(target_os = "emscripten")))]
+// 有文件系统的目标上编译。
+#[cfg(test)]
 #[path = "send_test.rs"]
 mod tests;
 

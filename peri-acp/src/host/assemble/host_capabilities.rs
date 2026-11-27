@@ -225,7 +225,6 @@ pub struct HostAssemblyInput {
     pub drive_cron_tick: bool,
     pub builtin_assembly_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
     /// 遗留测试输入槽；生产传 `None`，Workspace Bash 在 MCP 侧自持任务。
-    #[cfg(not(target_os = "emscripten"))]
     pub workspace_input: Option<peri_mcp_workspace::WorkspaceInstanceInput>,
     /// builtin `workspace` 实例的**资源面**输入（资源根 / builtin 关闭位 / 预算），
     /// 随 builtin 实例上下文一次注入 pool，早于
@@ -234,7 +233,6 @@ pub struct HostAssemblyInput {
     /// `None` = 资源面未接线（`resources/list` 只有 git ref）：顶层三路径保持 `None`
     /// ——它们不产生会话，资源面没有消费者；会话环境装配传 `Some`，其内容由装配期
     /// 已有事实源构造（本层不第二次读配置）。
-    #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<peri_mcp_workspace::WorkspaceResourcesInput>,
     /// builtin `workflow` 实例的运行时槽位（会话装配期创建、session/new 之后绑定）。
     ///
@@ -242,7 +240,6 @@ pub struct HostAssemblyInput {
     /// 装配（`host/workspace.rs`）传 `Some`，并在会话就绪后用**同一份**会话旧链的
     /// `WorkflowRuntime` 绑定进去（双轨期两条面共享同一状态，见
     /// `peri_middlewares::assembly::bind_workflow_runtime`）。
-    #[cfg(not(target_os = "emscripten"))]
     pub workflow_input: Option<peri_mcp_workflow::WorkflowInstanceInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
@@ -289,60 +286,6 @@ pub struct HostAssemblyInput {
     /// [`AcpServerConfig::reserved_root_session_id`] 由此装配）。TUI / print / stdio
     /// 装配路径一律保持 `false`：默认仍由宿主生成 UUIDv7。
     pub reserved_root_session_id: bool,
-}
-
-/// Emscripten deployment inputs. The ACP Host and request dispatch remain the
-/// same as the native deployment; only local capabilities are omitted.
-#[cfg(target_os = "emscripten")]
-pub struct WasmHostAssemblyInput {
-    pub provider: LlmProvider,
-    pub peri_config: Arc<RwLock<PeriConfig>>,
-    pub config_source: Arc<crate::provider::ConfigSource>,
-    pub permission_mode: Arc<SharedPermissionMode>,
-    pub session_resources: Arc<dyn SessionResources>,
-    pub session_store_shutdown: Option<Box<dyn SessionStoreShutdownPort>>,
-    pub cwd: String,
-}
-
-#[cfg(target_os = "emscripten")]
-pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpServerConfig {
-    assemble_server_config_with_capabilities(
-        HostAssemblyInput {
-            provider: input.provider,
-            peri_config: input.peri_config,
-            config_source: input.config_source,
-            permission_mode: input.permission_mode,
-            session_resources: input.session_resources,
-            workspace_id: None,
-            session_store_shutdown: input.session_store_shutdown,
-            cwd: input.cwd,
-            bare: false,
-            // 浏览器部署没有 lazy cold workspace。
-            lazy_workspace: false,
-            drive_cron_tick: false,
-            builtin_assembly_mode: None,
-            // Browser deployments do not discover plugins from a local home directory.
-            prepared_plugins: Some(PreparedPlugins {
-                data: None,
-                skill_roots: Vec::new(),
-                discovery_failed: false,
-            }),
-            session_mcp_servers: None,
-            builtin_closed: Default::default(),
-            skills_face_closed: false,
-            plugin_face_closed: false,
-            // 浏览器部署没有可信宿主身份层：预留根会话 ID 保持关闭。
-            reserved_root_session_id: false,
-        },
-        HostCapabilities {
-            builtin_mcp: false,
-            stdio_mcp: false,
-            cron: false,
-            plugins: false,
-            settings_hooks: false,
-        },
-    )
-    .await
 }
 
 /// Construct terminal hook execution; the session environment owns admission and joining.
@@ -396,10 +339,7 @@ pub fn build_session_manager(
         // 装配注入面：Agent 管理 session registry，工具环境提供本地 shell 执行。
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
         Some(Arc::new(|| {
-            #[cfg(not(target_os = "emscripten"))]
             let manager = peri_mcp_common::create_local_task_manager();
-            #[cfg(target_os = "emscripten")]
-            let manager = peri_agent::agent::async_tasks::TaskManager::new();
             Arc::new(manager) as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         agent_catalog,
@@ -476,11 +416,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         lazy_workspace,
         drive_cron_tick,
         builtin_assembly_mode,
-        #[cfg(not(target_os = "emscripten"))]
         workspace_input,
-        #[cfg(not(target_os = "emscripten"))]
         workspace_resources,
-        #[cfg(not(target_os = "emscripten"))]
         workflow_input,
         prepared_plugins,
         session_mcp_servers,
@@ -540,22 +477,17 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
     // ——同一 scheduler 任一时刻至多一个驱动，tick 随该代 supervisor 关闭。
     // 部署层不建 MCP 池；其 tick 策略经 WorkspaceAssembly 原样传入会话。
-    #[cfg(not(target_os = "emscripten"))]
     let cron_scheduler_concrete = capabilities.cron.then(|| {
         Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
             tokio::sync::mpsc::unbounded_channel().0,
         )))
     });
-    #[cfg(not(target_os = "emscripten"))]
     let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> =
         cron_scheduler_concrete.as_ref().map(|scheduler| {
             Arc::new(peri_mcp_cron::CronSchedulerPortHandle(Arc::clone(
                 scheduler,
             ))) as Arc<dyn CronSchedulerPort>
         });
-    #[cfg(target_os = "emscripten")]
-    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = None;
-
     // ── 会话 MCP 池（bare 仅装配 workspace；后台初始化不阻塞）──
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
@@ -623,10 +555,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // `TaskManager` + session 级 `on_bg_complete`），由会话环境装配原样转交，
         // 本层不包装、不派生；`None` = 可见但退化（handler 照常构造，只是 `Bash`
         // 失去后台任务那一路），不是「实例不可装配」——无 `instance_input_ready` arm。
-        #[allow(unused_mut)] // Emscripten omits all builtin inputs.
         let mut builtin_context =
             peri_middlewares::assembly::BuiltinInstanceContext::new(cwd.clone());
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(scheduler) = &cron_scheduler_concrete {
             builtin_context =
                 builtin_context.with_cron(peri_middlewares::assembly::CronInstanceInput {
@@ -634,19 +564,16 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
                     tick_enabled: drive_cron_tick,
                 });
         }
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace_input) = workspace_input {
             builtin_context = builtin_context.with_workspace(workspace_input);
         }
         // 资源面输入与 session 级输入同批（同一上下文、同一次注入）：`None` 保持
         // 「资源面未接线」的既有行为。
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace_resources) = workspace_resources {
             builtin_context = builtin_context.with_workspace_resources(workspace_resources);
         }
         // `workflow` 实例的运行时槽位：会话环境装配创建，session/new 之后由会话旧链
         // 绑定（同一份运行时）；`None` = 该实例不可装配（顶层三路径）。
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(workflow_input) = workflow_input {
             builtin_context = builtin_context.with_workflow(workflow_input);
         }
@@ -807,9 +734,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // A6 面③：workflow agent 的工具面必须同样保留 Web / Artifact 能力（迁移后为
     // builtin 实例的 direct bridge `mcp__web__*` 等），因此装配点把 deployment pool
     // 交给工厂；bare 池同样保留 workspace，无 pool 时为 None。
-    // Emscripten：本地 workflow 运行时不在构建面内，不构造该工厂
-    // （`AcpServerConfig` 同名字段随目标移出）。
-    #[cfg(not(target_os = "emscripten"))]
     let workflow_middleware_factory =
         peri_middlewares::assembly::default_workflow_middleware_factory_with_pool(
             mcp_pool_concrete.clone(),
@@ -967,7 +891,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_manager,
         settings_hooks,
         shared_tools,
-        #[cfg(not(target_os = "emscripten"))]
         workflow_middleware_factory,
         session_resources: session_resources.clone(),
         session_store_shutdown,

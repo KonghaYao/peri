@@ -61,7 +61,6 @@ impl SessionStoreShutdownPort for SessionStoreShutdownOwner {
 impl Resources {
     /// Open a remote Session store with a deployment supplied virtual workspace
     /// identity. Local locators are rejected before any I/O.
-    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_deployment_in_remote_environment(
         deployment: &SessionStoreDeployment,
         environment: crate::sessions::RemoteWorkspaceEnvironment,
@@ -85,7 +84,7 @@ impl Resources {
     /// 打开全部资源（当前为会话存储）。
     ///
     /// 原生目标的默认路径 `~/.peri/threads/threads.db` 写打开失败时会降级为只读打开，
-    /// 见 [`Resources::open_with`]。Emscripten 不提供本机库。
+    /// 见 [`Resources::open_with`]。
     pub async fn open() -> Result<Self> {
         Self::open_request(SessionStoreOpenRequest::local(
             None,
@@ -121,7 +120,7 @@ impl Resources {
     /// 只读意图绝不做写探测，也不退回写打开再降级。
     ///
     /// 后端选择只发生在这里：原生本机 locator 走 SQLite 装配，远程 locator 走
-    /// PostgreSQL adapter。Emscripten 不提供本机库；其可写远端部署须显式提供稳定的
+    /// PostgreSQL adapter。可写远端部署须显式提供稳定的
     /// 虚拟工作区身份，见 `Resources::open_postgres_writable`。
     ///
     /// 环境变量只在两处被读取：`--session-store env:` 形式的 locator，以及远程 adapter
@@ -130,62 +129,19 @@ impl Resources {
     pub async fn open_deployment(deployment: &SessionStoreDeployment) -> Result<Self> {
         Self::open_request(SessionStoreOpenRequest::from_deployment(deployment)?).await
     }
-
-    /// Open a writable PostgreSQL store for a WASM host with a virtual workspace.
-    /// The host must persist this machine UUID and root across module restarts so
-    /// that existing sessions can regain execution eligibility.
-    #[cfg(target_os = "emscripten")]
-    pub async fn open_postgres_writable(
-        locator: &str,
-        http_endpoint: Option<String>,
-        workspace_root: PathBuf,
-        machine_id: &str,
-    ) -> Result<Self> {
-        let environment = crate::sessions::RemoteWorkspaceEnvironment::virtual_workspace(
-            machine_id,
-            workspace_root,
-        )?;
-        crate::sessions::set_explicit_machine_id(machine_id)?;
-        let endpoint =
-            crate::sessions::RemoteEndpoint::parse(locator)?.with_http_endpoint(http_endpoint)?;
-        crate::sessions::open_remote_in_environment(
-            &endpoint,
-            &Default::default(),
-            peri_acp_types::session_resources::AccessMode::ReadWrite,
-            environment,
-        )
-        .await
-        .map(Self::from_facade)
-    }
-
     /// 唯一的后端选择点（typed 请求版本，供 crate 内装配调用）。
     ///
     /// 原生本机只读意图走独立只读 seam：不创建目录、库、锁或迁移 schema；
     /// 原生本机写打开失败且历史仍可读时降级只读。
     pub(crate) async fn open_request(request: SessionStoreOpenRequest) -> Result<Self> {
-        #[cfg(not(target_os = "emscripten"))]
         let read_only = request.intent().is_read_only();
         match request.resolve_locator()? {
-            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Default if read_only => Self::open_local_read_only(None).await,
-            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Default => Self::open_local(None).await,
-            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Local(path) if read_only => {
                 Self::open_local_read_only(Some(path)).await
             }
-            #[cfg(not(target_os = "emscripten"))]
             ResolvedLocator::Local(path) => Self::open_local(Some(path)).await,
-            #[cfg(target_os = "emscripten")]
-            ResolvedLocator::Default | ResolvedLocator::Local(_) => {
-                Err(LocatorError::LocalStoreUnsupported.into())
-            }
-            #[cfg(target_os = "emscripten")]
-            ResolvedLocator::Remote(_)
-                if request.access() != peri_acp_types::session_resources::AccessMode::ReadOnly =>
-            {
-                Err(LocatorError::ExecutionUnsupported.into())
-            }
             ResolvedLocator::Remote(endpoint) => Self::open_remote(&request, &endpoint).await,
         }
     }
@@ -294,7 +250,6 @@ pub fn classify_open_failure(error: &anyhow::Error) -> StoreOpenFailure {
                 _ => {}
             }
         }
-        #[cfg(not(target_os = "emscripten"))]
         if let Some(read_only) = current.downcast_ref::<crate::sessions::ReadOnlyThreadStoreError>()
         {
             return match read_only {

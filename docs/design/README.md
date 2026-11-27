@@ -58,7 +58,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | --- | --- | --- |
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；builtin 实例最小隔离单位条款已被 [v5 单出口设计](mcp-v5-single-exit.md) 取代，六实例仅保留为兼容期路径；迁移状态以代码与契约测试为准 |
 | MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；`peri` 已是宿主默认装配，旧 policy 键保留为确定性映射 adapter（M4 删除），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚到 M4 截止决定；Sandbox workspace 代理接线与端到端验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
-| 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
+| 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；入口见 [peri-time 索引](../code-index/peri-time.md) |
 | RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)；恢复只按意图建新运行，不接管旧执行 |
 | Session Durability | [session-durability.md](session-durability.md) | 进入会话时按持久工作意图建立新运行；不恢复旧执行身份；后端能力与验收缺口见本文 |
 | Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
@@ -66,7 +66,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
-| Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
+| Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | 历史设计（Emscripten/WASM 部署已移除）；保留移除前的目标设计与验收边界 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
 | Swarm 事件日志粒度 | [peri-swarm.md §9](peri-swarm.md#9-已批准目标事件日志粒度与回放置位已实施) | 文本/推理按 item 合并落库、`tool`/`approval` 保持逐帧、实时 delta 帧不带 seq、回放真源固定 PostgreSQL 且不引入 Redis；已实施，验收见 [active spec](../../spec/issues/2026-11-26-swarm-event-log-granularity.md) |
 | Peri Swarm 本地开发宿主 | [peri-swarm.md](peri-swarm.md) | 五路由 HTTP 面、Rivet actor、Peri 会话库与独立 Swarm 状态库（均为 PostgreSQL）、Bun 沙箱与 MCP 注入、仅杀 Rust 的 reattach；副本组与外部 engine 配置（默认 loopback，显式非 loopback 开关）；本地验收见[验收记录](../verification/peri-swarm-local-dev.md)与[状态库迁移](../verification/peri-swarm-postgres-state-2026-11-24.md)，跨机、TLS、单 engine 多副本与规模未验收 |

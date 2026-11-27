@@ -6,14 +6,6 @@ rust-version.workspace = true
 description = "Model-neutral protocol types and stream-first model interface for Peri"
 license = "Apache-2.0"
 
-[features]
-cloudflare = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
-
-[[example]]
-name = "cloudflare-contract"
-path = "src/transport/cloudflare_contract_test.rs"
-required-features = ["cloudflare"]
-
 [dependencies]
 peri-time = { path = "../peri-time" }
 async-trait.workspace = true
@@ -29,12 +21,3 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net"] }
-
-[target.'cfg(target_os = "emscripten")'.dependencies]
-wasm-bindgen = { version = "=0.2.129", optional = true }
-wasm-bindgen-futures = { version = "=0.4.79", optional = true }
-js-sys = { version = "0.3", optional = true }
-
-[target.'cfg(target_os = "emscripten")'.dev-dependencies]
-wasm-bindgen = "=0.2.129"
-js-sys = "0.3"

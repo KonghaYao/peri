@@ -92,7 +92,7 @@ impl SessionResourcesImpl {
     }
 
     /// 测试用：本机组合背后的 SQLite 连接池（逐条构造事实的夹具使用）。
-    #[cfg(all(test, not(target_os = "emscripten")))]
+    #[cfg(test)]
     pub(in crate::sessions) fn local_pool(&self) -> &sqlx::SqlitePool {
         self.gate
             .local()

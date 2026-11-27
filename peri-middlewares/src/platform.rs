@@ -2,16 +2,14 @@
 //! 派生 MCP 装配的策略与拒绝口径。
 //!
 //! 装配点（builtin overlay、实例上下文、stdio 准入、本地 workflow、市场与图片
-//! 等本地进程能力）只查询本模块；`target_os` 条件编译仅出现在依赖 Emscripten
-//! 不编译的类型 / package 的定义处（handler 枚举、实例输入类型、进程所有权、
-//! 模块级替身）。新增平台差异时先在此登记能力位，再由装配点查询；不得在装配点
-//! 各自写 `target_os` 业务判断。
+//! 等本地进程能力）只查询本模块；新增平台差异时先在此登记能力位，再由装配点
+//! 查询；不得在装配点各自写 `target_os` 业务判断。
 
 /// 本部署是否托管进程内 builtin MCP 实例（web / artifact / cron / workspace）。
-pub(crate) const IN_PROCESS_BUILTINS: bool = cfg!(not(target_os = "emscripten"));
+pub(crate) const IN_PROCESS_BUILTINS: bool = true;
 
 /// 本部署是否支持 stdio 子进程传输。
-pub(crate) const STDIO_TRANSPORT: bool = cfg!(not(target_os = "emscripten"));
+pub(crate) const STDIO_TRANSPORT: bool = true;
 
 /// 部署不支持 stdio 时的统一拒绝文案（进程检查与各准入点共用）。
 pub(crate) const STDIO_UNAVAILABLE: &str = "stdio subprocesses are unavailable in this deployment";

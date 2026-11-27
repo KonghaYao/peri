@@ -266,7 +266,7 @@ I/O 成本随偏移增长。
   导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部
   不插入独立占位行。
 - beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，且 TUI 只在启动读取一次、无热重载。
-- remote/emscripten adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名；
+- remote adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名；
   rewind 不确定态仍依赖集中文本 marker。
 
 ## 状态模型

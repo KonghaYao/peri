@@ -89,7 +89,6 @@ fn normalize_endpoint(endpoint: &str) -> Result<String, LangfuseError> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 pub mod native;
 
 #[cfg(test)]

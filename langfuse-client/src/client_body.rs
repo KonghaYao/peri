@@ -2,13 +2,12 @@
 //!
 //! 两条正文来源各有自己的桥接方式，都不重新编码：内存正文克隆 payload 里那份受 permit
 //! 约束的 `Bytes`（底层缓冲共享，permit 由 payload 借用保活），文件正文把读泵容量 2 的
-//! 桥接 channel 适配成分块流。文件泵只在 native 目标存在（契约 §7 P1d：WASM 仅有界内存，
-//! 无文件泵），因此流式桥接也只在 native 编译，其余目标显式失败而不是伪装成内存正文。
+//! 桥接 channel 适配成分块流。文件泵只在 native 目标存在（契约 §7 P1d），流式桥接与
+//! 之同条件编译。
 
 use bytes::Bytes;
 use reqwest::Body;
 
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 use tokio::sync::mpsc;
 
 use crate::error::LangfuseError;
@@ -22,23 +21,12 @@ pub(crate) fn memory_body(bytes: Bytes) -> Body {
 ///
 /// 通道里的每一块都由读泵在 blocking job 中按固定大小填充；`drain` 只 await 读泵的 join，
 /// 不在 async runtime 上做磁盘 IO。
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 pub(crate) fn file_body(
     mut chunks: mpsc::Receiver<Result<Bytes, std::io::Error>>,
 ) -> Result<Body, LangfuseError> {
     Ok(Body::wrap_stream(futures::stream::poll_fn(move |cx| {
         chunks.poll_recv(cx)
     })))
-}
-
-/// 非 native 目标没有文件泵：文件正文不能静默退化成整份内存正文。
-#[cfg(any(target_arch = "wasm32", target_os = "emscripten"))]
-pub(crate) fn file_body(
-    _chunks: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
-) -> Result<Body, LangfuseError> {
-    Err(LangfuseError::Config(
-        "file-backed telemetry bodies require the native spool".into(),
-    ))
 }
 
 /// direct ingest 的无暂存端口。

@@ -1,7 +1,7 @@
 /**
  * 只读实例观测入口：组合 Chat 与 Sandbox 快照，供调用方按自身节奏轮询。
  *
- * 不启动 WASM/ACP/sandbox，不写任何状态，也不提供订阅通道。Agent 分组规则：
+ * 不启动 ACP/sandbox，不写任何状态，也不提供订阅通道。Agent 分组规则：
  * 一个 Chat 就是一个 Agent 节点，`agentId` 使用 `chatId`；sandbox 仅通过
  * MCP endpoint（origin + pathname）与 Chat 匹配，每个 Chat 最多关联一个，
  * 同一 sandbox 可被多个 Chat 共享引用。
@@ -141,17 +141,7 @@ function normalizeChat(chat: ChatObservation): ChatObservation {
             chat.instance === null
                 ? null
                 : {
-                      kind: chat.instance.kind,
                       state: chat.instance.state,
-                      ...(chat.instance.startedAtMs === undefined
-                          ? {}
-                          : { startedAtMs: chat.instance.startedAtMs }),
-                      ...(chat.instance.linearMemoryBytes === undefined
-                          ? {}
-                          : {
-                                linearMemoryBytes:
-                                    chat.instance.linearMemoryBytes,
-                            }),
                       running: chat.instance.running,
                       pendingInputCount: chat.instance.pendingInputCount,
                       pendingInteractionCount:

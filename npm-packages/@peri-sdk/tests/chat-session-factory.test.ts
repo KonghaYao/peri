@@ -7,9 +7,9 @@ import {
     readChatSessionState,
 } from "../src/chat/session-factory";
 import type { CreateChatSessionInput } from "../src/chat/session-factory";
+import type { ChatInstanceContext } from "../src/chat/service-context";
 import type { ChatConfig } from "../src/chat/types";
-import type { WasmRuntimeStarterOptions } from "../src/wasm/runtime-pool";
-import { FakeDatabase } from "./chat-fixtures";
+import { FakeDatabase, FakePort } from "./chat-fixtures";
 import { TestTransport } from "./chat-transport-fixture";
 import { OwnershipProbe } from "./ownership-probe";
 
@@ -196,8 +196,8 @@ describe("createChatSession", () => {
 });
 
 describe("createChatSessionInternal seams", () => {
-    test("per-session WASM pool starts with the session agentConfig snapshot", async () => {
-        const starts: WasmRuntimeStarterOptions[] = [];
+    test("injected instance factory receives the session agentConfig", async () => {
+        const contexts: ChatInstanceContext[] = [];
         const chat = await createChatSessionInternal({
             ...input({
                 target: {
@@ -205,29 +205,22 @@ describe("createChatSessionInternal seams", () => {
                     agent: { settings: { chat: true } },
                     storage: { url: "postgresql://session", httpEndpoint: "https://proxy.example.org/sql" },
                 },
-                chatConfig: {
-                    runtime: { kind: "wasm", env: { BASE: "1" } },
-                },
             }),
-            // 默认 instanceFactory 走真实 PeriInstance；只替换运行后端启动器。
-            wasmRuntimeStarter: async (options) => {
-                starts.push(options);
-                return new TestTransport(undefined, "session-wasm") as never;
+            instanceFactory: (context) => {
+                contexts.push(context);
+                const port = new FakePort();
+                port.bindNewSessionId = "session-internal";
+                return port;
             },
         });
 
         const ready = await chat.execute(
-            ChatUserAction.createNewSession({ requestId: "wasm-1" }),
+            ChatUserAction.createNewSession({ requestId: "internal-1" }),
         );
 
-        expect(ready.sessionId).toBe("session-wasm");
-        expect(starts).toHaveLength(1);
-        expect(starts[0]!.env).toEqual({ BASE: "1" });
-        const snapshot = JSON.parse(starts[0]!.configJson!) as Record<
-            string,
-            unknown
-        >;
-        expect(snapshot).toMatchObject({
+        expect(ready.sessionId).toBe("session-internal");
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0]!.agentConfig).toMatchObject({
             cwd: "/workspace",
             settings: { chat: true },
             storage: { url: "postgresql://session", httpEndpoint: "https://proxy.example.org/sql" },
@@ -238,9 +231,9 @@ describe("createChatSessionInternal seams", () => {
         await chat.close();
     });
 
-    test("transport runtime assembles without a WASM pool", async () => {
+    test("transport runtime assembles without a live runtime", async () => {
         const chat = await createChatSessionInternal(input());
-        // transport 句柄不建立运行池；装配后仍是未绑定状态。
+        // transport 句柄在首次激活前不建立连接；装配后仍是未绑定状态。
         expect(chat.phase).toBe("empty");
         await chat.close();
         expect(chat.phase).toBe("closed");

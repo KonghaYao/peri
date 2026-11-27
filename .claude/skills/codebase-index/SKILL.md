@@ -19,13 +19,13 @@ description: 代码库速查索引 —— docs/code-index/ 下的 crate 速查�
 - 需要设计理由或目标边界：读 `docs/design/`，索引不解释原理。
 
 先按根 `CLAUDE.md` 的任务路由锁定 crate，再读该 crate 的索引。**不要一次读入
-`docs/code-index/` 全部文件**：24 个文件约 61 万字节（以 `wc -c` 为准）、15 万 tokens 以上，
+`docs/code-index/` 全部文件**：23 个文件约 67 万字节（以 `wc -c` 为准）、16 万 tokens 以上，
 会挤占任务上下文。单文件中位约 11 KB（约 3.5k tokens），最大的 4 个各约 75–95 KB。
 
 ## 索引是什么
 
 - 位置：`docs/code-index/<crate>.md`；专题或非 workspace 模块也有同名索引
-  （如 `peri-ts-sdk.md`、`peri-wasm.md`、`mcp-packages.md` 合并覆盖多个 mcp crate）。
+  （如 `peri-ts-sdk.md`、`mcp-packages.md` 合并覆盖多个 mcp crate）。
 - 本质：**行为 → 文件/符号** 的速查表。查询者带着「我想改 X 的 Y」进来，带着文件路径和入口符号出去。
 - 原则：只给定位信息 + 一句话行为契约；不解释原理、不复制规范正文、不替代设计文档。
 - 事实源关系：路径、符号、测试名和 ARC 编号必须可解析；索引不写固定源码行号。

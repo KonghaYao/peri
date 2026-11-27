@@ -66,7 +66,7 @@ graph TB
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过标记改变模型视图，不改变消息本体
 - **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-acp-types/src/messages/`，`peri-agent/src/messages/` 负责 re-export 与工具配对适配；`MessageTranscript` 实现在 `peri-agent/src/session/transcript/message_transcript.rs`；`MessageQueue` 入口为 `peri-acp-types/src/session/message_queue.rs`。
-- **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
+- **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
 - **Act 工具交换提交**：Reason 的调用正文不单独追加到 canonical 历史。Act 分派收集结果后，先经 writer 原子提交完整的 assistant/tool-result 交换，再发布 canonical 视图。若错误或取消发生在交换提交之后，已提交消息仍保留并同步给宿主；不能当作回到 turn 开始前，也不据此判断工具外部副作用。Transcript 自身的 staging helper 不是该生产提交路径。
 
 ### 2.3 Thread MQ
@@ -197,7 +197,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 - 结构性失效目前清空全部渲染 slot，尚未按段精准清理。
 - 旧 `HISTORY_PAGING` 路径仍使用轻量静态 `PENDING_TOOL_ENDS` 表，未完全迁移到 `ResidentIndex`；窗口路径与旧路径共享该表的清理入口。
 - 超大条目详情与 inherited 详情已交付（`HistoryDetailPanel`、`session/history/body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文（模型支持分块流式）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送该形状。
-- remote/emscripten adapter 未覆写窗口/继承读取端口，默认返回 `Unsupported`（出口 `-32603`），不能宣称这些后端已支持窗口。
+- remote adapter 未覆写窗口/继承读取端口，默认返回 `Unsupported`（出口 `-32603`），不能宣称这些后端已支持窗口。
 - `readTicket` 是进程内不透明值与精确匹配，没有密码学签名；它绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce，但不是访问授权。
 - ACP host rewind 的错误出口仍由集中后的文本 marker 判定持久化不确定（`PERSISTENCE_UNCERTAIN_MARKER`）；底层资源错误与 Transcript rewind 已使用 `MutationOutcome`，host 的错误出口尚未完整传递该类型。
 - beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，TUI 启动只读一次、无热重载。

@@ -111,7 +111,6 @@ fn rejected_endpoints_never_echo_credentials() {
 ///
 /// 开关的**生产**构造门控属 P3c 的 session 接线（本阶段不接线），此处按冻结规则复核
 /// 「禁用即不进入 native 构造」这一配置面语义。
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 #[test]
 fn disabled_spool_never_opens_native_and_leaves_the_spool_directory_untouched() {
     use crate::config::TelemetryConfig;
@@ -165,7 +164,6 @@ fn disabled_spool_never_opens_native_and_leaves_the_spool_directory_untouched() 
 }
 
 /// 目录观测：相对路径集合 + 文件长度与字节内容；不比较 mtime，故只声称「集合与内容」不变。
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
 fn spool_tree(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64, Vec<u8>)> {
     let mut entries = Vec::new();
     let mut pending = vec![root.to_path_buf()];

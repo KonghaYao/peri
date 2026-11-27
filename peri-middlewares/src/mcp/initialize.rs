@@ -431,7 +431,6 @@ impl McpClientPool {
             publish_config_failure(&pool, &status_tx, &error.to_string());
             return;
         }
-        #[allow(unused_variables)] // Emscripten cannot spawn stdio transports.
         let cwd = match pool.bind_execution_cwd(cwd) {
             Ok(cwd) => cwd,
             Err(error) => {
@@ -650,17 +649,6 @@ impl McpClientPool {
                             commit_discovery_failure(&pool, name, false);
                             continue;
                         }
-                        #[cfg(target_os = "emscripten")]
-                        true => {
-                            Self::insert_failed(
-                                &pool,
-                                name,
-                                crate::platform::STDIO_UNAVAILABLE.into(),
-                            );
-                            commit_discovery_failure(&pool, name, false);
-                            continue;
-                        }
-                        #[cfg(not(target_os = "emscripten"))]
                         true => match pool.spawn_stdio_transport(name, command, args, env, cwd) {
                             Ok(transport) => {
                                 client::serve_client_auto_for_server(

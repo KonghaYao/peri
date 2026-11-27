@@ -768,16 +768,20 @@ pub(crate) fn wait_ready(
     }
 }
 
-/// 单测钩子：该来源在当前预算键上是否登记为 Pending（后台编码在途）。
+/// 单测钩子：该来源在当前预算键上是否已有缓存条目（Pending / Ready / Failed）。
+///
+/// 用于验证「下一帧重新 request 已登记」：登记发生在 `begin` 同步阶段，后台编码
+/// 可能已完成（Ready）甚至失败，故不锁定瞬态 Pending。条目缺失说明 effect 未
+/// 重试或 deps 缺 `revision()`，与编码速度无关。
 #[cfg(test)]
-pub(crate) fn has_pending(source: ImageSource<'_>, budget: Budget) -> bool {
+pub(crate) fn has_registered(source: ImageSource<'_>, budget: Budget) -> bool {
     let mut guard = cache().lock();
     let Some(cell_px) = guard.observed_cell_px else {
         return false;
     };
     let epoch = guard.upload_epoch;
     let source = source_ref(&source, epoch, budget, cell_px);
-    matches!(guard.lookup(source), Some(ImageState::Pending))
+    guard.lookup(source).is_some()
 }
 
 /// 单测钩子：下一次请求 `Deferred` 后立即 bump revision（模拟槽位在同一帧内释放）。

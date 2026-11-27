@@ -54,7 +54,7 @@ ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
 # 用，与 ratatui-image 锁一致 0.25.x。
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tokio-util.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -87,6 +87,8 @@ rand = "0.10"
 fuzzy-matcher = "0.3"
 im = "15"
 reqwest.workspace = true
+# 启动层能力（非 UI 数据流）：`peri workflow` 子命令在配置/会话初始化前直连 CLI。
+peri-workflow = { path = "../peri-workflow" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -104,8 +106,3 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true
 tikv-jemalloc-sys.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-tokio = { workspace = true, features = ["full"] }
-# 启动层能力（非 UI 数据流）：`peri workflow` 子命令在配置/会话初始化前直连 CLI。
-peri-workflow = { path = "../peri-workflow" }

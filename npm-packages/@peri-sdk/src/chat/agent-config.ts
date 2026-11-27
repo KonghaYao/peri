@@ -11,10 +11,9 @@ import type { ChatStoreConfig } from "./types";
  */
 const RESERVED_KEYS = ["storage", "machineId"] as const;
 
-/** 单个 Chat 的最终运行配置：冻结 JSON 值 + 该 Chat 独立的序列化快照。 */
+/** 单个 Chat 的最终运行配置：冻结后的 JSON 值。 */
 export interface ResolvedChatAgentConfig {
     readonly agentConfig: unknown;
-    readonly agentConfigJson: string;
 }
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -130,8 +129,5 @@ export function resolveChatAgentConfig(
     defineEntry(composed, "machineId", store.machineId);
     // 二次深拷贝：storage 是 Manager 快照，不能让多个 Chat 共享同一 JSON 对象。
     const frozen = cloneJsonValue(composed, "agentConfig");
-    return {
-        agentConfig: frozen,
-        agentConfigJson: JSON.stringify(frozen),
-    };
+    return { agentConfig: frozen };
 }

@@ -9,7 +9,6 @@ import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-context";
 import type { ChatFact } from "../src/contracts/chat";
-import type { WasmRuntimeAcquireOptions } from "../src/wasm/runtime-pool";
 import { FakeDatabase, directoryEntry } from "./chat-fixtures";
 import { TestTransport } from "./chat-transport-fixture";
 import { OwnershipProbe } from "./ownership-probe";
@@ -21,7 +20,6 @@ function context(
         chatId: "chat-1",
         path: "/handle-path",
         agentConfig: {},
-        agentConfigJson: "{}",
         sessionInit: {},
         runtime: {
             kind: "transport",
@@ -36,9 +34,6 @@ function context(
             startupSettleTimeoutMs: 5000,
             activationCloseTimeoutMs: 5000,
             shutdownChatTimeoutMs: 15000,
-        },
-        acquireWasmRuntime: () => {
-            throw new Error("WASM runtime must not be acquired in transport tests");
         },
         ...overrides,
     };
@@ -81,39 +76,6 @@ describe("createChatInstance", () => {
         transport.closeError = undefined;
         await instance.close();
         expect(transport.closeCalls).toBe(2);
-    });
-
-    test("WASM runtime uses the per-chat startup config and maps its close report", async () => {
-        const transport = new TestTransport();
-        let closed = 0;
-        let acquired: WasmRuntimeAcquireOptions | undefined;
-        const diagnostic = (): void => {};
-        const instance = createChatInstance(context({
-            runtime: { kind: "wasm" },
-            agentConfigJson: '{"cwd":"/runtime"}',
-            runtimeEnv: { PERI_FLAG: "1" },
-            onRuntimeDiagnostic: diagnostic,
-            acquireWasmRuntime: async (value) => {
-                acquired = value;
-                return {
-                    transport,
-                    close: async () => {
-                        closed += 1;
-                        return { confirmed: true, generationId: "generation-1" };
-                    },
-                } as never;
-            },
-        }));
-
-        await instance.bindNew({ path: "/workspace" });
-        expect(acquired?.signal?.aborted).toBe(false);
-        expect(acquired?.configJson).toBe('{"cwd":"/runtime"}');
-        expect(acquired?.env).toEqual({ PERI_FLAG: "1" });
-        expect(acquired?.onDiagnostic).toBe(diagnostic);
-        await instance.close();
-
-        expect(closed).toBe(1);
-        expect(transport.closeCalls).toBe(0);
     });
 
     test("loading a session reads the persisted cwd and never falls back to the handle path", async () => {

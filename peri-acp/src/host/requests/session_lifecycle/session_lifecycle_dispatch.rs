@@ -47,10 +47,6 @@ pub(super) fn fork_source_error(error: anyhow::Error) -> AcpError {
 /// 构造收拢在 host 装配面（`host/workflow_agent.rs`：executor 注入面 +
 /// `WorkflowRuntime` 创建）；P5 起运行时是 MCP 实例与消费者的共享权威，
 /// 旧链 middleware 端口已删除。返回链路（运行时 + 执行依赖 + 通知句柄）。
-///
-/// `not(emscripten)`：本地 workflow 运行时随 `peri-mcp-workflow` 目标依赖移出
-/// 构建面（wasm 产物不打包 workflow），该目标无链可建。
-#[cfg(not(target_os = "emscripten"))]
 pub(in super::super) fn create_session_workflow_chain(
     cfg: &AcpServerConfig,
     cwd: &str,
@@ -81,7 +77,6 @@ pub(in super::super) fn create_session_workflow_chain(
 /// 是非物理投影关闭，本特例经裁决，注记见 `docs/design/workflow-mcp.md` §4.4）。
 ///
 /// 门控同 [`create_session_workflow_chain`]：该特例只对本地 workflow 运行时生效。
-#[cfg(not(target_os = "emscripten"))]
 pub(in super::super) fn workflow_face_closed(
     frozen_data: &crate::session::executor::FrozenSessionData,
 ) -> bool {
@@ -100,10 +95,6 @@ pub(in super::super) fn workflow_face_closed(
 /// - 首次绑定与同一实例重复绑定（幂等）成立；
 /// - 槽位已绑定不同实例是装配异常：返回错误，由调用方排空环境并撤销未发布的
 ///   创建 —— 不得降级为警告后带病发布（否则实例面永久未绑定或两份状态）。
-///
-/// `not(emscripten)`：本地 workflow 运行时不在构建面内，该目标没有链可绑定
-/// （调用点随之不产生链，不会调用本函数）。
-#[cfg(not(target_os = "emscripten"))]
 pub(in super::super) async fn attach_session_workflow(
     environment: Option<&Arc<super::super::super::workspace::SessionEnvironment>>,
     chain: &crate::host::workflow_agent::SessionWorkflowChain,
@@ -138,7 +129,7 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     info!(protocol_version = %version, "ACP initialize");
 
     // 解析 clientCapabilities._meta 中的 peri 自定义 flag，并按后端实际能力收敛：
-    // 客户端声明不能让未实现窗口端口（remote/emscripten）变成端到端可用。
+    // 客户端声明不能让未实现窗口端口（remote）变成端到端可用。
     let peri_caps = super::super::session_caps::effective_peri_caps(cfg, params)?;
 
     // 暂存 caps，session/new 时 consume
@@ -519,8 +510,6 @@ pub(crate) async fn new_session_from_prepared(
 
     // Create session-scoped workflow runtime at session/new (GAP-05: inject frozen data)。
     // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
-    // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
-    #[cfg(not(target_os = "emscripten"))]
     let workflow_chain = if workflow_face_closed(&frozen_data) {
         None
     } else {
@@ -534,7 +523,6 @@ pub(crate) async fn new_session_from_prepared(
     // P5：builtin `workflow` 实例与本运行时共享同一份状态（会话发布之前绑定，
     // 实例面对外可见时槽位必然已就绪）。绑定失败按会话初始化失败处理
     // （design §6.2）：先排空已起环境、再撤销未发布的创建，不发布半可用会话。
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
         if let Err(error) = attach_session_workflow(environment.as_ref(), chain).await {
             drain_and_abandon(environment.as_ref(), &initialization).await?;
@@ -576,7 +564,6 @@ pub(crate) async fn new_session_from_prepared(
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
             title: None,
             tags: Vec::new(),
         },
@@ -878,8 +865,6 @@ pub(crate) async fn handle_fork(
     );
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
-    // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
-    #[cfg(not(target_os = "emscripten"))]
     let workflow_chain = if workflow_face_closed(&frozen_data) {
         None
     } else {
@@ -893,7 +878,6 @@ pub(crate) async fn handle_fork(
     // fork 会话同样绑定 builtin `workflow` 实例槽位（同一份运行时）。
     // 绑定失败按会话初始化失败处理（design §6.2）：先排空已建环境，**排空确认之后**
     // 才撤销未发布的创建（顺序不变量），不发布半可用会话。
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
         // 消费者接线等待 MCP 初始化终态；激活必须先于 attach（与 session/new
         // 同序），否则池初始化永远等不到 activation。
@@ -949,7 +933,6 @@ pub(crate) async fn handle_fork(
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
             title: None,
             tags: Vec::new(),
         },

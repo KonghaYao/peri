@@ -10,28 +10,18 @@ use peri_acp_types::session_resources::SessionResourceResult;
 use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::failure::{self, RemoteFailureClass};
-#[cfg(any(test, target_os = "emscripten"))]
-use super::sql;
 use super::sql::{StatementSpec, Value};
 
-#[cfg(not(target_os = "emscripten"))]
 #[path = "native_postgres.rs"]
 mod native;
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(test)]
 pub(super) use native::PgTransport;
-
-#[cfg(any(test, target_os = "emscripten"))]
-#[path = "wasm_postgres.rs"]
-mod wasm_postgres;
 
 pub(super) const REQUEST_BUDGET: Duration = Duration::from_secs(20);
 
-/// The HTTP transport submits one request per batch. Native SQLx needs a
-/// round trip per statement, in addition to the transaction setup and commit.
+/// Native SQLx needs a round trip per statement, in addition to the
+/// transaction setup and commit.
 pub(super) fn batch_budget(statements: usize) -> Duration {
-    if cfg!(target_os = "emscripten") {
-        return REQUEST_BUDGET;
-    }
     const ROUND_TRIP_ALLOWANCE: Duration = Duration::from_millis(250);
     const MAX_BATCH_BUDGET: Duration = Duration::from_secs(300);
     let additional = u32::try_from(statements.saturating_sub(1)).unwrap_or(u32::MAX);
@@ -84,10 +74,7 @@ pub(super) async fn connect(
     endpoint: &RemoteEndpoint,
     credential: &SessionStoreCredential,
 ) -> SessionResourceResult<Arc<dyn RemoteTransport>> {
-    #[cfg(target_os = "emscripten")]
-    return wasm_postgres::connect(endpoint, credential).await;
-    #[cfg(not(target_os = "emscripten"))]
-    return native::connect(endpoint, credential).await;
+    native::connect(endpoint, credential).await
 }
 
 #[async_trait]
@@ -109,11 +96,7 @@ mod budget_tests {
     fn batch_deadline_accounts_for_round_trips_and_stays_bounded() {
         assert_eq!(batch_budget(0), REQUEST_BUDGET);
         assert_eq!(batch_budget(1), REQUEST_BUDGET);
-        if cfg!(target_os = "emscripten") {
-            assert_eq!(batch_budget(usize::MAX), REQUEST_BUDGET);
-        } else {
-            assert_eq!(batch_budget(501), Duration::from_secs(145));
-            assert_eq!(batch_budget(usize::MAX), Duration::from_secs(300));
-        }
+        assert_eq!(batch_budget(501), Duration::from_secs(145));
+        assert_eq!(batch_budget(usize::MAX), Duration::from_secs(300));
     }
 }

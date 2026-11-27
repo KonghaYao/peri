@@ -33,7 +33,6 @@ fn old_remote_adapters_are_rejected() {
 }
 
 #[test]
-#[cfg(not(target_os = "emscripten"))]
 fn unknown_driver_options_are_rejected_without_logging_their_values() {
     let error = RemoteEndpoint::parse("postgres://db.invalid/peri?apikey=secret").unwrap_err();
     assert_eq!(error, EndpointError::UnsupportedConnectParameter);

@@ -22,8 +22,6 @@ use crate::host::SessionState;
 use crate::session::frozen_snapshot;
 use crate::transport::types::AcpError;
 
-// 本地 workflow 运行时不在 emscripten 构建面内（wasm 产物不打包 workflow）。
-// 以下模块保留全目标会话契约；workflow 调用处单独使用该条件。
 #[path = "legacy_session.rs"]
 mod legacy_session;
 

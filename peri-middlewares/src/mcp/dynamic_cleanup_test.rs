@@ -258,10 +258,7 @@ impl Fixture {
             .pool
             .existing_server_slot("lazy")
             .expect("fixture slot must exist");
-        #[cfg(not(target_os = "emscripten"))]
         let processes = slot.processes.lock().len();
-        #[cfg(target_os = "emscripten")]
-        let processes = 0;
         let services = slot.services.lock().len();
         (services, processes)
     }

@@ -1,5 +1,3 @@
-import { WasmRuntimePool, type WasmRuntimeStarter } from "../wasm/runtime-pool";
-import { startWasmRuntime } from "../wasm/runtime";
 import type { ChatDatabase } from "../contracts/chat";
 import type { WorkspaceRef } from "../workspace/types";
 import { snapshotChatStore, resolveChatAgentConfig } from "./agent-config";
@@ -48,10 +46,9 @@ export interface CreateChatSessionInput {
     readonly chatConfig: ChatConfig;
 }
 
-/** 测试接缝：替代默认 WASM 启动器；公开入口不导出该字段。 */
+/** 测试接缝：替代默认实例工厂；公开入口不导出该字段。 */
 export interface CreateChatSessionInternalInput extends CreateChatSessionInput {
     readonly instanceFactory?: ChatServiceOptions["instanceFactory"];
-    readonly wasmRuntimeStarter?: WasmRuntimeStarter;
 }
 
 /** 单次装配的封闭标记；`onClosed` 只改这里，不触碰任何跨会话条目。 */
@@ -81,8 +78,8 @@ export function readChatSessionState(
  * 为一个 Session 装配单个 `ChatService`（等价于 `ChatManager.createChat` 的单会话路径）。
  *
  * 装配顺序与 Manager 一致：workspace → agentConfig → sessionInit → ownership/索引 →
- * 实例工厂 → 每会话 WASM 池。任何一个校验或构造步骤失败都原样抛出，且不残留半开资源：
- * 运行后端只在首次激活时获取租约，构造期间不启动进程或 transport。
+ * 实例工厂。任何一个校验或构造步骤失败都原样抛出，且不残留半开资源：
+ * 运行后端只在首次激活时获取 transport，构造期间不启动进程或 transport。
  */
 export async function createChatSession(
     input: CreateChatSessionInput,
@@ -91,7 +88,7 @@ export async function createChatSession(
 }
 
 /**
- * 包内装配入口，允许注入实例工厂与 WASM 启动器。
+ * 包内装配入口，允许注入实例工厂。
  *
  * 公开面只用 `createChatSession`；这里不导出到 `entries/chat.ts`。
  */
@@ -102,15 +99,11 @@ export async function createChatSessionInternal(
         ...(input.instanceFactory === undefined
             ? {}
             : { instanceFactory: input.instanceFactory }),
-        ...(input.wasmRuntimeStarter === undefined
-            ? {}
-            : { wasmRuntimeStarter: input.wasmRuntimeStarter }),
     });
 }
 
 interface AssemblySeams {
     readonly instanceFactory?: ChatServiceOptions["instanceFactory"];
-    readonly wasmRuntimeStarter?: WasmRuntimeStarter;
 }
 
 async function assembleChatSession(
@@ -129,7 +122,7 @@ async function assembleChatSession(
         target.workspace,
         target.sessionPath,
     );
-    const { agentConfig, agentConfigJson } = resolveChatAgentConfig(
+    const { agentConfig } = resolveChatAgentConfig(
         store,
         target.agent,
         runtimeRoot,
@@ -140,15 +133,13 @@ async function assembleChatSession(
         path: sessionCwd,
     };
     const lifecycle = mergeChatLifecycle(
-        resolveChatLifecycle(runtime.kind, input.chatConfig.lifecycle),
-        runtime.kind,
+        resolveChatLifecycle(input.chatConfig.lifecycle),
         target.lifecycle,
     );
 
     const state: SessionState = { sessionId: target.sessionId, closed: false };
     const ownership = new KvSessionOwnership(input.ownership);
     const sessionIndex = createChatSessionIndex();
-    const wasmRuntimes = createRuntimePool(runtime, seams.wasmRuntimeStarter);
 
     const chat = new ChatService({
         // 句柄身份沿用 Manager 的随机 id；Session 身份只由 ownership/索引表达。
@@ -157,33 +148,12 @@ async function assembleChatSession(
         sessionCwd,
         sessionInit,
         agentConfig,
-        agentConfigJson,
         runtime,
-        ...(runtime.kind === "wasm" && runtime.env !== undefined
-            ? { runtimeEnv: { ...runtime.env } }
-            : {}),
-        ...(runtime.kind === "wasm" && runtime.onDiagnostic !== undefined
-            ? { onRuntimeDiagnostic: runtime.onDiagnostic }
-            : {}),
         database: input.database,
         ownership,
         index: sessionIndex,
         instanceFactory: seams.instanceFactory ?? createChatInstance,
         lifecycle,
-        acquireWasmRuntime: (acquireOptions) => {
-            // 关闭后不再启动运行后端：没有 Manager 承担关闭时的池级收敛。
-            if (state.closed) {
-                throw new Error(
-                    "Chat session is closed; no new WASM runtime can be acquired",
-                );
-            }
-            if (!wasmRuntimes) {
-                throw new Error(
-                    'runtime.kind "transport" does not use a WASM runtime pool',
-                );
-            }
-            return wasmRuntimes.acquire(acquireOptions);
-        },
         onClosed: () => {
             state.closed = true;
         },
@@ -217,11 +187,10 @@ function resolveRuntime(chatConfig: ChatConfig): ChatRuntime {
         !chatConfig ||
         typeof chatConfig !== "object" ||
         !chatConfig.runtime ||
-        (chatConfig.runtime.kind !== "wasm" &&
-            chatConfig.runtime.kind !== "transport")
+        chatConfig.runtime.kind !== "transport"
     ) {
         throw new TypeError(
-            'createChatSession requires chatConfig.runtime of { kind: "wasm" } or { kind: "transport" }',
+            'createChatSession requires chatConfig.runtime of { kind: "transport" }',
         );
     }
     return chatConfig.runtime;
@@ -257,30 +226,4 @@ function snapshotStorage(
             ? {}
             : { httpEndpoint: storage.httpEndpoint }),
     };
-}
-
-/** WASM 池按会话建立；transport runtime 不持有池。 */
-function createRuntimePool(
-    runtime: ChatRuntime,
-    starterOverride?: WasmRuntimeStarter,
-): WasmRuntimePool | undefined {
-    if (runtime.kind !== "wasm") return undefined;
-    const starter: WasmRuntimeStarter =
-        starterOverride ??
-        (({ signal, configJson, env, onDiagnostic }) => {
-            if (configJson === undefined) {
-                throw new Error(
-                    "WASM runtime requires a per-chat agentConfig snapshot",
-                );
-            }
-            return startWasmRuntime({
-                configJson,
-                moduleUrl: runtime.moduleUrl,
-                moduleFactory: runtime.moduleFactory,
-                env: env ?? runtime.env,
-                signal,
-                onDiagnostic: onDiagnostic ?? runtime.onDiagnostic,
-            });
-        });
-    return new WasmRuntimePool(starter);
 }

@@ -1,4 +1,4 @@
-// 主入口与 /wasm 独立打包；同一 realm 内用稳定品牌识别不同副本的错误。
+// 主入口与 /portable 等入口独立打包；同一 realm 内用稳定品牌识别不同副本的错误。
 const RPC_ERROR_BRAND: unique symbol = Symbol.for("@peri-code/sdk/RpcError");
 
 export class RpcError extends Error {

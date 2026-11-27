@@ -22,7 +22,4 @@ tokio.workspace = true
 peri-acp-types = { path = "../../peri-acp-types" }
 rmcp = { workspace = true, features = ["client"] }
 tempfile.workspace = true
-tokio.workspace = true
-
-[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
 tokio = { workspace = true, features = ["net"] }

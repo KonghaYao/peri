@@ -5,9 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::SessionDataHome;
-#[cfg(target_os = "emscripten")]
-use crate::sessions::failure as execution;
-#[cfg(not(target_os = "emscripten"))]
 use crate::sessions::sqlite_store as execution;
 use peri_acp_types::session_resources::{
     MutationOutcome, PersistenceRecovery, SessionResourceError, SessionResourceErrorKind,

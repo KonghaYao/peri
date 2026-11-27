@@ -17,7 +17,6 @@ use crate::mcp::McpInitStatus;
 use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 
-#[cfg(not(target_os = "emscripten"))]
 #[path = "control_lock_order_test.rs"]
 mod lock_order;
 
@@ -42,7 +41,6 @@ fn plain_config() -> super::super::config::McpServerConfig {
     .into_server_config()
 }
 
-#[cfg(not(target_os = "emscripten"))]
 fn wire_registration(name: &str) -> McpControlRequest {
     // Legacy negotiation deliberately exercises the same compatibility path as
     // configured servers. A PID response proves restart replaced the child.
@@ -81,7 +79,6 @@ for line in sys.stdin:
     }
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 async fn wire_register_stop_restart_rejects_old_bridge_and_isolates_pools() {
     let (mut owner, pool, _cwd) = pool_fixture();
@@ -365,7 +362,6 @@ async fn register_oauth_without_credentials_returns_authorization_without_callba
         .is_empty());
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 async fn early_registration_failure_is_queryable_and_can_be_stopped() {
     // Ready configuration with no execution directory fails before a transport

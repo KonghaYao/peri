@@ -3,13 +3,6 @@ use super::{
     McpServerConfig, BUILTIN_MCP_INSTANCES,
 };
 
-#[cfg(target_os = "emscripten")]
-pub(crate) fn default_subscriptions_for(
-    _instance: &str,
-) -> Option<peri_acp_types::plugin::McpSubscriptionsConfig> {
-    None
-}
-
 /// `PERI_MCP_BUILTIN` 环境变量名（紧急闸门，A2：显式运维开关，不是静默降级）。
 pub(crate) const BUILTIN_INJECTION_ENV: &str = peri_config::mcp::MCP_BUILTIN_ENV;
 

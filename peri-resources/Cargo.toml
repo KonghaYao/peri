@@ -14,20 +14,13 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 url.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 uuid.workspace = true
 peri-acp-types = { path = "../peri-acp-types" }
 peri-time = { path = "../peri-time" }
+peri-process = { path = "../peri-process" }
+sqlx = { workspace = true, features = ["postgres", "tls-rustls-ring-webpki"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-[target.'cfg(not(target_os = "emscripten"))'.dependencies]
-peri-process = { path = "../peri-process" }
-sqlx = { workspace = true, features = ["postgres", "tls-rustls-ring-webpki"] }
-tokio = { workspace = true, features = ["full"] }
-
-[target.'cfg(target_os = "emscripten")'.dependencies]
-wasm-bindgen = "=0.2.129"
-wasm-bindgen-futures = "=0.4.79"
-js-sys = "0.3"

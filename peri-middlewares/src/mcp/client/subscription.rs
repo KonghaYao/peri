@@ -32,10 +32,6 @@ mod subscription_events;
 pub(crate) use subscription_events::build_subscription_filter;
 #[cfg(test)]
 pub(crate) use subscription_events::git_watch_reminder_from_resource;
-#[cfg(not(target_os = "emscripten"))]
-#[cfg(test)]
-pub(crate) use subscription_events::is_git_watch_resource;
-#[cfg(target_os = "emscripten")]
 #[cfg(test)]
 pub(crate) use subscription_events::is_git_watch_resource;
 #[cfg(test)]

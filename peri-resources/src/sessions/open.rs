@@ -30,11 +30,6 @@ use super::remote::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LocatorError {
     Empty,
-    /// The local SQLite backend is not part of the WASM build.
-    #[cfg(target_os = "emscripten")]
-    LocalStoreUnsupported,
-    #[cfg(target_os = "emscripten")]
-    ExecutionUnsupported,
     /// `env:` 后面的变量名不合法。
     InvalidEnvReference,
     EnvValueMissing {
@@ -64,14 +59,6 @@ impl fmt::Display for LocatorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("session store locator is empty"),
-            #[cfg(target_os = "emscripten")]
-            Self::LocalStoreUnsupported => {
-                formatter.write_str("local session store is unavailable on WASM")
-            }
-            #[cfg(target_os = "emscripten")]
-            Self::ExecutionUnsupported => {
-                formatter.write_str("WASM session execution host is unavailable")
-            }
             Self::InvalidEnvReference => {
                 formatter.write_str("session store env reference is not a valid variable name")
             }
@@ -152,7 +139,6 @@ impl AccessIntent {
         }
     }
 
-    #[cfg(any(test, not(target_os = "emscripten")))]
     pub(crate) fn is_read_only(self) -> bool {
         matches!(self, Self::ReadOnly)
     }
@@ -321,7 +307,6 @@ impl SessionStoreOpenRequest {
     }
 
     /// 部署参数层的访问意图（只读选择走独立 seam 的依据）。
-    #[cfg(any(test, not(target_os = "emscripten")))]
     pub(crate) fn intent(&self) -> AccessIntent {
         self.intent
     }

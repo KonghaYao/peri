@@ -15,7 +15,6 @@ use peri_acp_types::workspace::WorkspaceId;
 use peri_acp_types::workspace::SESSION_BINDING_VERSION;
 use sha2::{Digest, Sha256};
 
-#[cfg(not(target_os = "emscripten"))]
 use crate::sessions::discovery::{self, Discovery};
 use crate::sessions::local_port::LocalExecutionPort;
 
@@ -184,7 +183,6 @@ impl RemoteExecution {
                 discovery_snapshot: Some(snapshot.to_owned()),
             });
         }
-        #[cfg(not(target_os = "emscripten"))]
         {
             let saved: Discovery =
                 serde_json::from_str(snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
@@ -217,10 +215,6 @@ impl RemoteExecution {
                 discovery_snapshot: Some(snapshot.to_owned()),
             })
         }
-        #[cfg(target_os = "emscripten")]
-        {
-            Err(WorkspaceError::Unavailable.into())
-        }
     }
 }
 
@@ -247,19 +241,10 @@ impl LocalExecutionPort for RemoteExecution {
 
     async fn directory_available(&self, cwd: &Path) -> bool {
         match &self.environment {
-            RemoteWorkspaceEnvironment::Native => {
-                #[cfg(not(target_os = "emscripten"))]
-                {
-                    tokio::fs::metadata(cwd)
-                        .await
-                        .map(|meta| meta.is_dir())
-                        .unwrap_or(false)
-                }
-                #[cfg(target_os = "emscripten")]
-                {
-                    false
-                }
-            }
+            RemoteWorkspaceEnvironment::Native => tokio::fs::metadata(cwd)
+                .await
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false),
             RemoteWorkspaceEnvironment::Virtual { .. } => self.environment.contains(cwd),
         }
     }
@@ -301,7 +286,6 @@ impl LocalExecutionPort for RemoteExecution {
                 );
             return Ok(resolved);
         }
-        #[cfg(not(target_os = "emscripten"))]
         {
             let (cwd, observation) = discovery::observe(cwd).await?;
             let discovery = observation.discovery;
@@ -335,10 +319,6 @@ impl LocalExecutionPort for RemoteExecution {
                     resolved.clone(),
                 );
             Ok(resolved)
-        }
-        #[cfg(target_os = "emscripten")]
-        {
-            Err(WorkspaceError::Unavailable.into())
         }
     }
 

@@ -308,16 +308,6 @@ impl SkillPreloadMiddleware {
         if skill_names.is_empty() {
             return Ok(());
         }
-
-        #[cfg(target_os = "emscripten")]
-        if skill_names.len() > 256 {
-            return Err(peri_agent::error::AgentError::MiddlewareError {
-                middleware: "SkillPreloadMiddleware".to_string(),
-                reason: "WASM skill preload is limited to 256 registry lookups per invocation"
-                    .to_string(),
-            });
-        }
-
         // W4b（F5/J5）：预载只按名查 MCP registry——本地磁盘兜底扫描已删除。
         // 未装配 registry（print/遗留装配）或未命中 → 缺口报告（warn），
         // 不回落磁盘、不静默假装成功；显式名单路径（W6：子代理 / workflow）在此
@@ -395,9 +385,6 @@ impl SkillPreloadMiddleware {
                 })
                 .collect()
         };
-        #[cfg(target_os = "emscripten")]
-        let lookups: Vec<(String, RegistryLookup)> = lookup();
-        #[cfg(not(target_os = "emscripten"))]
         let lookups: Vec<(String, RegistryLookup)> = tokio::task::spawn_blocking(lookup)
             .await
             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {

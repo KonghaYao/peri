@@ -329,10 +329,6 @@ pub struct AcpServerConfig {
     /// Workflow agent 装配端口（peri-middlewares 实现，TUI 部署装配点构造后
     /// 经 [`assemble::HostAssemblyInput`] 注入；p1-wa 收口——ACP 不直接
     /// 引用 middlewares，见 `host/workflow_agent.rs`）。
-    ///
-    /// `not(emscripten)`：工厂实现依赖本地 workflow 运行时（`peri-mcp-workflow`
-    /// 随目标移出构建面），该目标不装配本地 workflow 运行时路径。
-    #[cfg(not(target_os = "emscripten"))]
     pub workflow_middleware_factory: Arc<dyn peri_agent::agent::workflow::WorkflowAgentFactory>,
     /// 会话资源门面：协议面、Agent transcript/subagent 与 middleware 的唯一会话行为
     /// 入口（同一个库句柄、同一份 owner 登记）；协议面与 Controller 都不再持有裸存储。

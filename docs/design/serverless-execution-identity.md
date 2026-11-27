@@ -1,7 +1,8 @@
 # Serverless 执行环境身份
 
-> 状态：已批准目标设计。Emscripten 目标与 Node、Bun、本地 `workerd` 宿主可用；
-> Cloudflare 托管部署与跨实例接管仍未验收。
+> 状态：历史设计（2026-11-24 起 Emscripten/WASM 构建与部署已从仓库移除）。
+> 本文保留移除前的目标设计与验收边界；文中"WASM 宿主可用"等现状描述不再成立。
+> Cloudflare 托管部署与跨实例接管从未验收。
 >
 > Scope：可替换计算实例中运行 Peri 的 Machine、Workspace 与 Session 身份，以及远端
 > Store 与工具环境的执行准入。归属结构以 [存储 v2](storage-v2-machine-workspace-session.md)
@@ -175,7 +176,7 @@ KV 归属记录与执行准入都不改变 Peri 的机器归属、binding/path �
   身份文件和目录检查只描述本地运行实现。
 - [Session 异步任务统一入口](session-async-tasks.md)：SDK 执行协调、关闭接管与恢复
   证据链；不恢复 Peri/Store owner 或 Workspace fencing，这些接管能力未由本设计承诺。
-- 实现入口见当前 `docs/code-index/peri-wasm.md` 与 `docs/code-index/peri-ts-sdk.md`。
+- WASM 部署移除前的实现入口见 Git 历史。
 
 ## 6. 保证边界
 

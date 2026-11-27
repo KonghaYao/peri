@@ -1,10 +1,5 @@
 mod compressor;
-#[cfg(not(target_os = "emscripten"))]
 mod reader;
-#[cfg(target_os = "emscripten")]
-#[path = "reader_wasm.rs"]
-mod reader;
-
 #[cfg(test)]
 mod test_support;
 

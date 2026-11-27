@@ -241,7 +241,6 @@ fn all_registered_instances_have_handler() {
             BuiltinServerHandler::Cron(_) => "cron",
             BuiltinServerHandler::Monitor(_) => "monitor",
             BuiltinServerHandler::Workspace(_) => "workspace",
-            #[cfg(not(target_os = "emscripten"))]
             BuiltinServerHandler::Workflow(_) => "workflow",
         };
         assert_eq!(

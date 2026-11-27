@@ -11,8 +11,6 @@
 //! 轻量验证口径：只覆盖外部可观察行为（就绪位 / 池调用序列 / 任务终态 / run 终态），
 //! 不覆盖重连退避节奏与并发上限细节（由用户验收）。
 
-#![cfg(not(target_os = "emscripten"))]
-
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

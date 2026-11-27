@@ -24,7 +24,6 @@ fn an_unconfirmed_commit_never_reports_a_new_identity() {
     );
 }
 
-#[cfg(not(target_os = "emscripten"))]
 #[tokio::test]
 #[ignore = "requires PERI_TEST_POSTGRES_URL and permission to create temporary schemas"]
 async fn concurrent_initializers_and_read_only_open_validate_the_same_schema() {

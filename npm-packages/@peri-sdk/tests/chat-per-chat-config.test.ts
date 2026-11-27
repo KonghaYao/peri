@@ -11,11 +11,6 @@ import type {
 } from "../src/chat/types";
 import type { AcpMcpServer } from "../src/contracts/acp";
 import type { WorkspaceRef } from "../src/workspace/types";
-import type { WasmAcpTransport } from "../src/wasm/transport";
-import type {
-    WasmRuntimeStarter,
-    WasmRuntimeStarterOptions,
-} from "../src/wasm/runtime-pool";
 import { FakeDatabase, FakePort, directoryEntry } from "./chat-fixtures";
 import { TestTransport } from "./chat-transport-fixture";
 import { OwnershipProbe } from "./ownership-probe";
@@ -120,14 +115,7 @@ function configOf(context: ChatInstanceContext): Record<string, unknown> {
 
 describe("per-chat agent", () => {
     test("one Manager starts two chats with different cwd configs and the shared store", async () => {
-        const starts: WasmRuntimeStarterOptions[] = [];
-        const starter: WasmRuntimeStarter = async (options) => {
-            starts.push(options);
-            return new TestTransport(
-                undefined,
-                `session-${starts.length}`,
-            ) as unknown as WasmAcpTransport;
-        };
+        const configs: Array<Record<string, unknown>> = [];
         const manager = new ChatManager({
             store: {
                 storage: { url: "postgresql://shared" },
@@ -136,10 +124,15 @@ describe("per-chat agent", () => {
             database: new FakeDatabase(),
             kv: new OwnershipProbe(),
             chatConfig: {
-                runtime: { kind: "wasm" },
+                runtime: {
+                    kind: "transport",
+                    factory: (_path, options) => {
+                        configs.push((options?.agentConfig ?? {}) as Record<string, unknown>);
+                        return new TestTransport(undefined, `session-${configs.length}`);
+                    },
+                },
                 session: {},
             },
-            wasmRuntimeStarter: starter,
         });
 
         const first = manager.createChat({
@@ -153,67 +146,20 @@ describe("per-chat agent", () => {
         await bindNew(first, "create-a");
         await bindNew(second, "create-b");
 
-        expect(starts).toHaveLength(2);
-        const firstConfig = JSON.parse(starts[0]!.configJson!);
-        const secondConfig = JSON.parse(starts[1]!.configJson!);
-        expect(firstConfig).toEqual({
+        expect(configs).toHaveLength(2);
+        expect(configs[0]).toEqual({
             cwd: "/workspace-a",
             storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
-        expect(secondConfig).toEqual({
+        expect(configs[1]).toEqual({
             cwd: "/workspace-b",
             storage: { url: "postgresql://shared" },
             machineId: "machine-1",
         });
-        expect(firstConfig.storage).not.toBe(secondConfig.storage);
-        expect(starts[0]!.configJson).not.toBe(starts[1]!.configJson);
+        expect(configs[0]!.storage).not.toBe(configs[1]!.storage);
+        expect(configs[0]).not.toBe(configs[1]);
         await manager.shutdown();
-    });
-
-    test("runtimeSnapshot 按 Chat 归属实例，关闭后立即消失", async () => {
-        class MemoryTransport extends TestTransport {
-            linearMemoryBytes(): number | null { return 65_536; }
-        }
-        let sessions = 0;
-        const manager = new ChatManager({
-            store: {
-                storage: { url: "postgresql://shared" },
-                machineId: "machine-1",
-            },
-            database: new FakeDatabase(),
-            kv: new OwnershipProbe(),
-            chatConfig: {
-                runtime: { kind: "wasm" },
-                session: {},
-            },
-            wasmRuntimeStarter: async () =>
-                new MemoryTransport(undefined, `session-${++sessions}`) as unknown as WasmAcpTransport,
-        });
-
-        const first = manager.createChat({ workspace: workspaceAt("/workspace-a", "ws-a"), agent: {} });
-        const second = manager.createChat({ workspace: workspaceAt("/workspace-b", "ws-b"), agent: {} });
-        await bindNew(first, "create-a");
-        await bindNew(second, "create-b");
-
-        const snapshot = manager.runtimeSnapshot();
-        expect(snapshot.starting).toBe(0);
-        expect(snapshot.unconfirmed).toBe(false);
-        expect(snapshot.instances).toHaveLength(2);
-        expect(snapshot.instances.map((instance) => instance.chatId).sort())
-            .toEqual([first.id, second.id].sort());
-        for (const instance of snapshot.instances) {
-            expect(instance.state).toBe("live");
-            expect(instance.linearMemoryBytes).toBe(65_536);
-            expect(instance.startedAtMs).toBeGreaterThan(0);
-        }
-
-        await first.close();
-        expect(manager.runtimeSnapshot().instances.map((instance) => instance.chatId))
-            .toEqual([second.id]);
-
-        await manager.shutdown();
-        expect(manager.runtimeSnapshot().instances).toEqual([]);
     });
 
     test("each chat gets an independent frozen config with the Manager store injected", async () => {
@@ -255,9 +201,6 @@ describe("per-chat agent", () => {
         expect(Object.isFrozen(contexts[0]!.agentConfig)).toBe(true);
         expect(Object.isFrozen(configOf(contexts[0]!).storage)).toBe(true);
         expect(Object.isFrozen(configOf(contexts[0]!).settings)).toBe(true);
-        expect(JSON.parse(contexts[0]!.agentConfigJson)).toEqual(
-            configOf(contexts[0]!),
-        );
     });
 
     test("per-chat agent cannot declare storage or machineId, even with Manager values", () => {
@@ -443,48 +386,6 @@ describe("per-chat lifecycle and runtime", () => {
             activationCloseTimeoutMs: 250,
             shutdownChatTimeoutMs: 2000,
         });
-    });
-
-    test("per-chat env merges over the Manager env and diagnostics reach the starter", async () => {
-        const starts: WasmRuntimeStarterOptions[] = [];
-        const starter: WasmRuntimeStarter = async (options) => {
-            starts.push(options);
-            return new TestTransport(
-                undefined,
-                `session-${starts.length}`,
-            ) as unknown as WasmAcpTransport;
-        };
-        const managerDiagnostics: string[] = [];
-        const chatDiagnostics: string[] = [];
-        const manager = new ChatManager({
-            store: { storage: {}, machineId: "machine-1" },
-            database: new FakeDatabase(),
-            kv: new OwnershipProbe(),
-            chatConfig: {
-                runtime: {
-                    kind: "wasm",
-                    env: { A: "1", SHARED: "manager" },
-                    onDiagnostic: (kind) => managerDiagnostics.push(kind),
-                },
-                session: {},
-            },
-            wasmRuntimeStarter: starter,
-        });
-        const chat = manager.createChat({
-            workspace: workspaceAt("/workspace", "ws-env"),
-            agent: {},
-            runtime: {
-                env: { SHARED: "chat", C: "3" },
-                onDiagnostic: (kind) => chatDiagnostics.push(kind),
-            },
-        });
-        await bindNew(chat);
-
-        expect(starts[0]!.env).toEqual({ A: "1", SHARED: "chat", C: "3" });
-        starts[0]!.onDiagnostic?.("startup", new Error("boom"));
-        expect(chatDiagnostics).toEqual(["startup"]);
-        expect(managerDiagnostics).toEqual([]);
-        await manager.shutdown();
     });
 });
 

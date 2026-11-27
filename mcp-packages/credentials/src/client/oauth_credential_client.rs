@@ -10,7 +10,6 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) enum Reply {
     Async(tokio::sync::oneshot::Sender<io::Result<OAuthCredentialValue>>),
-    #[cfg(not(target_os = "emscripten"))]
     Blocking(mpsc::Sender<io::Result<OAuthCredentialValue>>),
 }
 
@@ -20,7 +19,6 @@ impl Reply {
             Self::Async(reply) => {
                 let _ = reply.send(value);
             }
-            #[cfg(not(target_os = "emscripten"))]
             Self::Blocking(reply) => {
                 let _ = reply.send(value);
             }
@@ -51,7 +49,6 @@ impl OAuthCredentialClient {
     /// Starts the isolated MCP worker and waits for its startup handshake.
     /// Thread, runtime and handshake failures are returned to the host before
     /// this client can accept credential requests.
-    #[cfg(not(target_os = "emscripten"))]
     pub fn try_new(store: Arc<dyn OAuthCredentialPort>) -> io::Result<Self> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let (ready, startup) = mpsc::channel();
@@ -87,16 +84,6 @@ impl OAuthCredentialClient {
             })??;
         Ok(Self { sender })
     }
-
-    /// Starts the credentials worker on the host event loop.
-    /// Worker setup failures are returned before this client accepts requests.
-    #[cfg(target_os = "emscripten")]
-    pub fn try_new(store: Arc<dyn OAuthCredentialPort>) -> io::Result<Self> {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Job>();
-        spawn_worker(store, receiver)?;
-        Ok(Self { sender })
-    }
-
     pub(super) async fn request(
         &self,
         request: OAuthCredentialRequest,
@@ -193,7 +180,6 @@ impl OAuthCredentialClient {
         }
     }
 
-    #[cfg(not(target_os = "emscripten"))]
     pub fn clear_server_blocking(&self, server_key: &str) -> io::Result<()> {
         let (reply, response) = mpsc::channel();
         self.sender
@@ -224,19 +210,6 @@ impl OAuthCredentialClient {
             _ => Err(invalid_data()),
         }
     }
-
-    #[cfg(target_os = "emscripten")]
-    pub fn clear_server_blocking(&self, server_key: &str) -> io::Result<()> {
-        let client = self.clone();
-        let key = server_key.to_owned();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(error) = client.clear_server(&key).await {
-                tracing::error!(%error, "MCP OAuth credential rollback failed during drop");
-            }
-        });
-        Ok(())
-    }
-
     pub async fn clear_all(&self) -> io::Result<()> {
         match self.request(OAuthCredentialRequest::ClearAll).await? {
             OAuthCredentialValue::Saved => Ok(()),
@@ -252,7 +225,7 @@ impl OAuthCredentialClient {
     }
 }
 
-#[cfg(any(target_os = "emscripten", test))]
+#[cfg(test)]
 pub(super) fn spawn_worker(
     store: Arc<dyn OAuthCredentialPort>,
     receiver: tokio::sync::mpsc::UnboundedReceiver<Job>,

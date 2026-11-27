@@ -37,66 +37,58 @@ fn credential_store(config_path: &std::path::Path, explicit: Option<PathBuf>) ->
 }
 
 pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()> {
-    #[cfg(target_os = "emscripten")]
-    {
-        let _ = (action, config_path);
-        anyhow::bail!("ChatGPT login requires a native credentials MCP capability");
-    }
-    #[cfg(not(target_os = "emscripten"))]
-    {
-        use peri_acp::provider::auth::ChatGptAuthManager;
-        use tokio_util::sync::CancellationToken;
-        let AuthCommand::Chatgpt { action } = action;
-        let options = match &action {
-            ChatGptAction::Login(options)
-            | ChatGptAction::Status(options)
-            | ChatGptAction::Logout(options) => options,
-        };
-        let store = credential_store(&config_path, options.store.clone())?;
-        let manager = ChatGptAuthManager::try_new(store.clone(), options.account.clone())?;
-        match action {
-            ChatGptAction::Login(options) => {
-                let pending = manager.begin_login(CancellationToken::new()).await?;
-                eprintln!(
-                    "Open this URL in your browser and choose your ChatGPT account:\n{}",
-                    pending.authorization_url()
-                );
-                let cancellation = CancellationToken::new();
-                let finish = manager.finish_login(pending, cancellation.clone());
-                tokio::pin!(finish);
-                let status = tokio::select! {
-                    result = &mut finish => result?,
-                    signal = tokio::signal::ctrl_c() => {
-                        signal?;
-                        cancellation.cancel();
-                        finish.await?
-                    }
-                };
-                println!("{}", serde_json::to_string_pretty(&status)?);
-                eprintln!(
-                    "Use this auth reference in an openai_responses provider:\n{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "auth": {"kind": "chatgpt_plan", "store": store, "account": options.account,
-                            "subject": status.subject, "clientId": status.client_id}
-                    }))?
-                );
-            }
-            ChatGptAction::Status(options) => {
-                let status = manager.status(CancellationToken::new()).await?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "account": options.account, "authenticated": status.is_some(), "status": status
-                    }))?
-                );
-            }
-            ChatGptAction::Logout(_) => {
-                let outcome = manager.logout(CancellationToken::new()).await?;
-                println!("{}", serde_json::to_string_pretty(&outcome)?);
-            }
+    use peri_acp::provider::auth::ChatGptAuthManager;
+    use tokio_util::sync::CancellationToken;
+    let AuthCommand::Chatgpt { action } = action;
+    let options = match &action {
+        ChatGptAction::Login(options)
+        | ChatGptAction::Status(options)
+        | ChatGptAction::Logout(options) => options,
+    };
+    let store = credential_store(&config_path, options.store.clone())?;
+    let manager = ChatGptAuthManager::try_new(store.clone(), options.account.clone())?;
+    match action {
+        ChatGptAction::Login(options) => {
+            let pending = manager.begin_login(CancellationToken::new()).await?;
+            eprintln!(
+                "Open this URL in your browser and choose your ChatGPT account:\n{}",
+                pending.authorization_url()
+            );
+            let cancellation = CancellationToken::new();
+            let finish = manager.finish_login(pending, cancellation.clone());
+            tokio::pin!(finish);
+            let status = tokio::select! {
+                result = &mut finish => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancellation.cancel();
+                    finish.await?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            eprintln!(
+                "Use this auth reference in an openai_responses provider:\n{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "auth": {"kind": "chatgpt_plan", "store": store, "account": options.account,
+                        "subject": status.subject, "clientId": status.client_id}
+                }))?
+            );
         }
-        Ok(())
+        ChatGptAction::Status(options) => {
+            let status = manager.status(CancellationToken::new()).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "account": options.account, "authenticated": status.is_some(), "status": status
+                }))?
+            );
+        }
+        ChatGptAction::Logout(_) => {
+            let outcome = manager.logout(CancellationToken::new()).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]

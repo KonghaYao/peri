@@ -90,7 +90,7 @@ Session。读取历史可以有多个 `ChatView`/`ChatReplica` 观察者，但�
 | 使用方的业务服务与部署平台 | User 身份和授权；User 与 SessionDB 的 1:1 配置；Workspace 归属；Volume、microVM/远端环境、挂载、网络与生命周期；部署 Workspace MCP。 |
 | 使用方的路由层 | 同一 Session 单实例绑定：串行化 acquire，换绑前 drain 旧实例或清除旧记录，崩溃后清理 `clearSessionOwnership`；KV 故障 fail closed。SDK 的 acquire 是读后写、非原子，路由层不得依赖 KV 记录提供互斥。 |
 | Peri | SessionDB 的 Workspace / Session 归属、消息和执行数据；Agent 执行核心；Workspace MCP 服务程序、工具与任务语义。 |
-| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 记录与顺序冲突检测（公开面仅 `KvStorage`/`clearSessionOwnership`）、WASM ACP 运行后端装配、`PostgresStorage` 直接实现 `ChatDatabase` 目录读取、载荷与同步契约。 |
+| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 记录与顺序冲突检测（公开面仅 `KvStorage`/`clearSessionOwnership`）、宿主 transport 注入的 ACP 运行装配、`PostgresStorage` 直接实现 `ChatDatabase` 目录读取、载荷与同步契约。 |
 
 因此，审查 SDK 是否符合本图时，microVM、Volume、User 鉴权和专属数据库配置应检查**接入边界是否
 可由使用方提供**，不能把它们列为 SDK 尚未实现的功能。Peri 的 Store 和 Workspace MCP 规则也应在
@@ -130,4 +130,4 @@ Peri 层验证。
    未处理输入、待决交互、未确认清理不可被回收。
 6. **单进程部署**：默认 `createStorage()`（unstorage memory driver），不能宣称多实例接管；
    需要多实例时由部署提供共享 storage，并在路由层完成串行化与崩溃清理。
-7. **WASM 目标不等于 hosted 验收**：WASM 部署是已实现路径；普通浏览器或托管 Workers 的生产部署未验收。
+7. **运行环境边界**：SDK 只消费宿主注入的 transport；Transport 的承载方式（进程、容器或托管运行时）与可用性由宿主部署决定，SDK 不提供跨平台运行后端。
