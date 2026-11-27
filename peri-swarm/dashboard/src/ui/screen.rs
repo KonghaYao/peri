@@ -148,7 +148,7 @@ fn render_jump_control(buf: &mut Buffer, body: Rect, app: &App, hits: &mut HitMa
         return;
     }
     let label = text::action_label(ActionId::JumpToLatest);
-    let width = widgets::button_width(label);
+    let width = widgets::button_width(label, ButtonTone::Primary);
     let right = body.right().saturating_sub(1);
     if width == 0 || width > right.saturating_sub(body.x) {
         return;

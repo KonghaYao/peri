@@ -1,15 +1,21 @@
-//! Session log page: toolbar, status chips, search and the adaptive table.
+//! Session log page: toolbar, status chips, search, the adaptive table and the
+//! page indicator.
 //!
-//! Counts, filters and search all operate on the loaded page; the footer scope
-//! note names the scope so the page never pretends to show gateway-wide totals.
+//! Counts, filters and search all operate on the loaded set; the table shows one
+//! display page of it and the pager row pages through the loaded rows. The
+//! footer scope note names the scope so the page never pretends to show
+//! gateway-wide totals.
 
 use chrono::Utc;
 use peri_tui_components::button::ButtonTone;
+use peri_tui_components::pagination::{
+    pagination_layout, render_pagination, PageAction, PaginationLabels, PaginationState,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Span;
 
-use crate::app::{ActionId, App, Focus, Intent};
+use crate::app::{ActionId, App, Focus, Intent, MAX_SESSIONS};
 use crate::ui::hit::{HitMap, Layer};
 use crate::ui::text;
 use crate::ui::widgets::{self, Rows};
@@ -35,18 +41,18 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
     }
     if !state.ever_loaded() {
         if state.loading() {
-            widgets::render_body(
+            widgets::render_loading(
                 buf,
                 rows.line(),
+                app.spinner_frame(),
                 text::LOADING_SESSIONS,
                 widgets::dim_style(),
             );
         }
-        render_load_more(buf, rows, app, hits);
         return cursor;
     }
 
-    let visible = state.visible_indices();
+    let visible = state.page_indices();
     if state.sessions().is_empty() {
         render_wrapped(
             buf,
@@ -62,7 +68,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
         }
     }
     rows.skip(1);
-    render_load_more(buf, rows, app, hits);
+    render_pager(buf, rows, app, hits);
     cursor
 }
 
@@ -74,13 +80,13 @@ fn render_toolbar(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMa
         (ActionId::RefreshSessions, ButtonTone::Secondary),
     ] {
         let label = text::action_label(action);
-        let rect = widgets::button_rect(row, x, label);
+        let rect = widgets::button_rect(row, x, label, tone);
         if rect.width == 0 {
             break;
         }
         widgets::render_button(buf, rect, label, app.focus() == Focus::Action(action), tone);
         hits.region(Layer::Base, rect, Intent::Activate(action));
-        x = rect.right().saturating_add(1);
+        x = rect.right().saturating_add(2);
     }
 }
 
@@ -90,7 +96,7 @@ fn render_chips(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap)
     let mut row = rows.line();
     let mut x = row.x;
     for bucket in StatusBucket::ALL {
-        let chip = format!("[{}]", text::chip_label(bucket, counts.get(bucket)));
+        let chip = text::chip_label(bucket, counts.get(bucket));
         let width = u16::try_from(Span::raw(chip.as_str()).width()).unwrap_or(u16::MAX);
         if x > row.x && x.saturating_add(width) > row.right() {
             row = rows.line();
@@ -107,7 +113,7 @@ fn render_chips(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap)
         };
         buf.set_string(rect.x, rect.y, widgets::fit(&chip, rect.width), style);
         hits.region(Layer::Base, rect, Intent::SetFilter(bucket));
-        x = rect.right().saturating_add(1);
+        x = rect.right().saturating_add(2);
     }
 }
 
@@ -288,25 +294,42 @@ fn render_cell(
     }
 }
 
-fn render_load_more(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
-    if !app.session_log().can_load_more() {
+/// Draw the page indicator and register one hit region per enabled control.
+fn render_pager(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
+    let state = app.session_log();
+    if !state.ever_loaded() || state.visible_len() == 0 {
         return;
     }
     let row = rows.line();
-    let label = text::action_label(ActionId::LoadMoreSessions);
-    let rect = widgets::button_rect(row, row.x, label);
-    widgets::render_button(
-        buf,
-        rect,
-        label,
-        app.focus() == Focus::Action(ActionId::LoadMoreSessions),
-        ButtonTone::Secondary,
+    if row.is_empty() {
+        return;
+    }
+    let state_view = PaginationState {
+        page: state.page(),
+        page_count: state.page_count(),
+        has_more: state.has_more() && state.limit() < MAX_SESSIONS,
+    };
+    let layout = pagination_layout(
+        row,
+        state_view,
+        PaginationLabels {
+            previous: text::PAGE_PREV,
+            next: text::PAGE_NEXT,
+        },
     );
-    hits.region(
-        Layer::Base,
-        rect,
-        Intent::Activate(ActionId::LoadMoreSessions),
-    );
+    render_pagination(buf, &layout, widgets::theme());
+    for control in &layout.controls {
+        if !control.enabled {
+            continue;
+        }
+        let intent = match control.action {
+            PageAction::Previous => Intent::SessionPagePrev,
+            PageAction::Next => Intent::SessionPageNext,
+            PageAction::Page(page) => Intent::GoToSessionPage(page),
+            PageAction::Gap => continue,
+        };
+        hits.region(Layer::Base, control.rect, intent);
+    }
 }
 
 fn render_wrapped(buf: &mut Buffer, rows: &mut Rows, body: &str, style: ratatui::style::Style) {

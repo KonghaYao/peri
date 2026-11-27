@@ -9,6 +9,10 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
 fn open_form(app: &mut App) {
     app.apply(Intent::NewSession);
     assert_eq!(app.screen(), Screen::SessionCreate);
@@ -205,5 +209,56 @@ fn removing_a_focused_row_moves_focus_to_the_add_button() {
     assert_eq!(
         app.focus(),
         crate::app::Focus::Action(crate::app::ActionId::AddMetadata)
+    );
+}
+
+#[test]
+fn multiline_field_keys_select_words_and_lines() {
+    let (mut app, _dir) = connected_app();
+    open_form(&mut app);
+    let field = FieldId::CreateInstructions;
+    let original = "alpha beta\ngamma delta";
+    assert!(app.set_text_area_value(field, original));
+    app.apply(Intent::FocusTextArea(field));
+    let cursor = |app: &App| app.text_area(field).expect("field").cursor;
+    let selection = |app: &App| app.text_area(field).expect("field").selection_range();
+    assert_eq!(cursor(&app), 22);
+
+    app.handle_key(key(KeyCode::Home));
+    assert_eq!(cursor(&app), 11);
+    app.handle_key(key(KeyCode::End));
+    assert_eq!(cursor(&app), 22);
+    app.handle_key(ctrl(KeyCode::Home));
+    assert_eq!(cursor(&app), 0);
+
+    app.handle_key(ctrl(KeyCode::Right));
+    assert_eq!(cursor(&app), 6);
+    app.handle_key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!((cursor(&app), selection(&app)), (11, Some((6, 11))));
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+    assert_eq!((cursor(&app), selection(&app)), (22, Some((6, 22))));
+
+    app.handle_key(ctrl(KeyCode::Char('a')));
+    assert_eq!(selection(&app), Some((0, 22)));
+    app.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(app.text_area(field).expect("field").text, "x");
+
+    assert!(app.set_text_area_value(field, original));
+    app.apply(Intent::FocusTextArea(field));
+    app.handle_key(ctrl(KeyCode::Backspace));
+    assert_eq!(app.text_area(field).expect("field").text, "alpha beta\n");
+
+    assert!(app.set_text_area_value(field, original));
+    app.apply(Intent::FocusTextArea(field));
+    app.handle_key(key(KeyCode::Char('!')));
+    app.handle_key(ctrl(KeyCode::Char('z')));
+    assert_eq!(app.text_area(field).expect("field").text, original);
+    app.handle_key(ctrl(KeyCode::Char('y')));
+    assert_eq!(
+        app.text_area(field).expect("field").text,
+        "alpha beta\ngamma delta!"
     );
 }

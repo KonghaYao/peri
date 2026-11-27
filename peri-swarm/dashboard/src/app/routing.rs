@@ -6,6 +6,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Span;
 
+use peri_tui_components::list_nav::{next_selection, previous_selection};
+
 use super::types::{
     ActionId, BannerActions, Effect, FieldId, Focus, Intent, Overlay, Page, Screen,
 };
@@ -94,6 +96,9 @@ impl App {
             }
             if let Some(target) = self.field_mut(field) {
                 target.insert_str(text);
+                if field == FieldId::SessionSearch {
+                    self.session_log.reset_page();
+                }
             }
         }
     }
@@ -221,7 +226,9 @@ impl App {
                 Vec::new()
             }
             Intent::RefreshSessions => self.refresh_sessions_now(),
-            Intent::LoadMoreSessions => self.load_more_sessions(),
+            Intent::SessionPagePrev => self.show_page_prev(),
+            Intent::SessionPageNext => self.show_page_next(),
+            Intent::GoToSessionPage(page) => self.goto_session_page(page),
             Intent::SelectDetailTab(tab) => {
                 self.detail_tab = tab;
                 self.content_scroll = 0;
@@ -369,7 +376,7 @@ impl App {
 
     /// Fields that participate in Tab order on the current screen.
     pub(super) fn focus_cycle(&self) -> Vec<Focus> {
-        match self.screen {
+        let mut cycle = match self.screen {
             Screen::Onboarding => vec![
                 Focus::Field(FieldId::OnboardingBaseUrl),
                 Focus::Field(FieldId::OnboardingApiKey),
@@ -393,7 +400,6 @@ impl App {
                 Focus::Field(FieldId::SessionSearch),
                 Focus::Action(ActionId::NewSession),
                 Focus::Action(ActionId::RefreshSessions),
-                Focus::Action(ActionId::LoadMoreSessions),
                 Focus::Content,
             ],
             Screen::Main => vec![Focus::Sidebar, Focus::Content],
@@ -460,7 +466,12 @@ impl App {
                 cycle.push(Focus::Action(ActionId::Back));
                 cycle
             }
-        }
+        };
+        cycle.retain(|focus| match focus {
+            Focus::Action(action) => self.action_enabled(*action),
+            _ => true,
+        });
+        cycle
     }
 
     pub(super) fn cycle_focus(&mut self, backwards: bool) {
@@ -540,6 +551,17 @@ impl App {
     }
 
     fn handle_field_key(&mut self, field: FieldId, key: KeyEvent) -> Vec<Effect> {
+        // Editing the search returns to the first page of the narrower set.
+        let before =
+            (field == FieldId::SessionSearch).then(|| self.session_log.search.value().to_owned());
+        let effects = self.handle_field_input(field, key);
+        if before.is_some_and(|before| before != self.session_log.search.value()) {
+            self.session_log.reset_page();
+        }
+        effects
+    }
+
+    fn handle_field_input(&mut self, field: FieldId, key: KeyEvent) -> Vec<Effect> {
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
             self.cycle_focus(key.code == KeyCode::BackTab);
             return Vec::new();
@@ -579,15 +601,46 @@ impl App {
                 return Vec::new();
             }
         }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let Some(target) = self.field_mut(field) else {
             return Vec::new();
         };
+        if control {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Char('A') if !alt => {
+                    target.select_all();
+                    return Vec::new();
+                }
+                KeyCode::Char('z') | KeyCode::Char('Z') if !shift && !alt => {
+                    target.undo();
+                    return Vec::new();
+                }
+                KeyCode::Char('z' | 'Z' | 'y' | 'Y') if !alt => {
+                    target.redo();
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+        let word = control || alt;
         match key.code {
+            KeyCode::Backspace if word => target.delete_word_left(),
             KeyCode::Backspace => target.backspace(),
+            KeyCode::Delete if word => target.delete_word_right(),
             KeyCode::Delete => target.delete_forward(),
+            KeyCode::Left if word && shift => target.extend_word_left(),
+            KeyCode::Left if word => target.move_word_left(),
+            KeyCode::Left if shift => target.extend_left(),
             KeyCode::Left => target.move_left(),
+            KeyCode::Right if word && shift => target.extend_word_right(),
+            KeyCode::Right if word => target.move_word_right(),
+            KeyCode::Right if shift => target.extend_right(),
             KeyCode::Right => target.move_right(),
+            KeyCode::Home if shift => target.extend_home(),
             KeyCode::Home => target.move_home(),
+            KeyCode::End if shift => target.extend_end(),
             KeyCode::End => target.move_end(),
             _ => {}
         }
@@ -611,23 +664,62 @@ impl App {
             }
             return Vec::new();
         }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let Some(area) = self.text_area_mut(field) else {
             return Vec::new();
         };
+        if control {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Char('A') if !alt => {
+                    area.select_all();
+                    return Vec::new();
+                }
+                KeyCode::Char('z') | KeyCode::Char('Z') if !shift && !alt => {
+                    area.undo();
+                    return Vec::new();
+                }
+                KeyCode::Char('z' | 'Z' | 'y' | 'Y') if !alt => {
+                    area.redo();
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+        let word = control || alt;
         match key.code {
             KeyCode::Enter => area.insert_char('\n'),
+            KeyCode::Backspace if word => area.delete_word_backward(),
             KeyCode::Backspace => area.backspace(),
+            KeyCode::Delete if word => area.delete_word_forward(),
             KeyCode::Delete => area.delete_forward(),
+            KeyCode::Left if word && shift => area.cursor_word_left_extend(),
+            KeyCode::Left if word => area.cursor_word_left(),
+            KeyCode::Left if shift => area.cursor_left_extend(),
             KeyCode::Left => area.cursor_left(),
+            KeyCode::Right if word && shift => area.cursor_word_right_extend(),
+            KeyCode::Right if word => area.cursor_word_right(),
+            KeyCode::Right if shift => area.cursor_right_extend(),
             KeyCode::Right => area.cursor_right(),
+            KeyCode::Up if shift => {
+                area.cursor_line_up_extend();
+            }
             KeyCode::Up => {
                 area.cursor_line_up();
+            }
+            KeyCode::Down if shift => {
+                area.cursor_line_down_extend();
             }
             KeyCode::Down => {
                 area.cursor_line_down();
             }
-            KeyCode::Home => area.cursor_home(),
-            KeyCode::End => area.cursor_end(),
+            KeyCode::Home if control => area.cursor_home(),
+            KeyCode::Home if shift => area.cursor_line_home_extend(),
+            KeyCode::Home => area.cursor_line_home(),
+            KeyCode::End if control => area.cursor_end(),
+            KeyCode::End if shift => area.cursor_line_end_extend(),
+            KeyCode::End => area.cursor_line_end(),
             KeyCode::Char(character)
                 if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
             {
@@ -677,6 +769,14 @@ impl App {
                 KeyCode::Down if self.screen == Screen::Main && self.page == Page::SessionLog => {
                     self.session_log.move_cursor(1);
                     Vec::new()
+                }
+                KeyCode::PageUp if self.screen == Screen::Main && self.page == Page::SessionLog => {
+                    self.show_page_prev()
+                }
+                KeyCode::PageDown
+                    if self.screen == Screen::Main && self.page == Page::SessionLog =>
+                {
+                    self.show_page_next()
                 }
                 KeyCode::Enter if self.screen == Screen::Main && self.page == Page::SessionLog => {
                     match self.session_log.cursor_session_id() {
@@ -744,11 +844,11 @@ impl App {
                     Vec::new()
                 }
                 KeyCode::Up => {
-                    self.overlay_cursor = self.overlay_cursor.saturating_sub(1);
+                    self.overlay_cursor = previous_selection(self.overlay_cursor);
                     Vec::new()
                 }
                 KeyCode::Down => {
-                    self.overlay_cursor = (self.overlay_cursor + 1).min(Page::ALL.len() - 1);
+                    self.overlay_cursor = next_selection(self.overlay_cursor, Page::ALL.len());
                     Vec::new()
                 }
                 KeyCode::Home => {

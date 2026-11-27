@@ -102,10 +102,16 @@ pub fn with_environment(mut session: Session, environment_id: &str) -> Session {
 /// One page of sessions.
 #[must_use]
 pub fn page(data: Vec<Session>) -> SessionPage {
+    page_with(data, false)
+}
+
+/// One page of sessions with an explicit `has_more` flag.
+#[must_use]
+pub fn page_with(data: Vec<Session>, has_more: bool) -> SessionPage {
     SessionPage {
         object: Some("list".to_owned()),
         data,
-        has_more: false,
+        has_more,
         next_cursor: None,
     }
 }
@@ -125,19 +131,36 @@ pub fn list_request(effects: &[Effect]) -> (u64, u64, u32) {
 
 /// Finish the in-flight list request with a page.
 pub fn finish_page(app: &mut App, epoch: u64, generation: u64, limit: u32, data: Vec<Session>) {
+    finish_page_more(app, epoch, generation, limit, data, false);
+}
+
+/// Finish the in-flight list request with a page that may have more rows.
+pub fn finish_page_more(
+    app: &mut App,
+    epoch: u64,
+    generation: u64,
+    limit: u32,
+    data: Vec<Session>,
+    has_more: bool,
+) {
     app.handle_worker(WorkerEvent::SessionsLoaded {
         epoch,
         generation,
         limit,
-        result: Ok(page(data)),
+        result: Ok(page_with(data, has_more)),
     });
 }
 
 /// Trigger the first list fetch, then finish it with `data`.
 pub fn feed_page(app: &mut App, data: Vec<Session>) {
+    feed_page_more(app, data, false);
+}
+
+/// Trigger the first list fetch, then finish it with `data` and `has_more`.
+pub fn feed_page_more(app: &mut App, data: Vec<Session>, has_more: bool) {
     let effects: Vec<Effect> = app.session_list_due(Instant::now()).into_iter().collect();
     let (epoch, generation, limit) = list_request(&effects);
-    finish_page(app, epoch, generation, limit, data);
+    finish_page_more(app, epoch, generation, limit, data, has_more);
 }
 
 /// Trigger a user refresh, then finish it with `data`.

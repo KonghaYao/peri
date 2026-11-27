@@ -1,9 +1,9 @@
 //! Session-log polling, create submission and detail navigation.
 //!
-//! The list keeps exactly one request in flight at a time. A refresh or
-//! `Load more` that arrives while a request is running invalidates its
-//! generation and records [`SessionLogState::reload_wanted`], so the response
-//! that is still on the wire can be discarded without overlapping requests.
+//! The list keeps exactly one request in flight at a time. A refresh or page
+//! fetch that arrives while a request is running invalidates its generation and
+//! records [`SessionLogState::reload_wanted`], so the response that is still on
+//! the wire can be discarded without overlapping requests.
 
 use std::time::Instant;
 
@@ -77,27 +77,66 @@ impl App {
         self.request_session_list(now).into_iter().collect()
     }
 
-    /// Raise the limit by one page and refetch the whole page.
-    pub(super) fn load_more_sessions(&mut self) -> Vec<Effect> {
+    // -----------------------------------------------------------------------
+    // Display pages
+    // -----------------------------------------------------------------------
+
+    /// Show the previous display page.
+    pub(super) fn show_page_prev(&mut self) -> Vec<Effect> {
+        let page = self.session_log.page();
+        if page == 0 {
+            return Vec::new();
+        }
+        self.session_log.goto_page(page - 1);
+        self.focus = Focus::Content;
+        Vec::new()
+    }
+
+    /// Show the next display page, fetching more rows when none are loaded yet.
+    ///
+    /// A page that is already loaded moves immediately. On the last loaded page
+    /// the set is extended by one fetch step and the pager waits for the page to
+    /// arrive; a completed set or a reached cap does nothing.
+    pub(super) fn show_page_next(&mut self) -> Vec<Effect> {
         if self.config.is_none() || self.screen != Screen::Main || self.page != Page::SessionLog {
             return Vec::new();
         }
-        if !self.session_log.can_load_more() {
+        let current = self.session_log.page();
+        if current + 1 < self.session_log.page_count() {
+            self.session_log.goto_page(current + 1);
+            self.focus = Focus::Content;
+            return Vec::new();
+        }
+        if !self.session_log.can_fetch_more() || self.session_log.pending_page().is_some() {
             return Vec::new();
         }
         let raised = self
             .session_log
             .limit
-            .saturating_add(super::session_log::LIST_PAGE_SIZE);
-        self.session_log.limit = raised.min(super::session_log::LIST_MAX);
+            .saturating_add(super::session_log::FETCH_STEP);
+        self.session_log.limit = raised.min(super::session_log::MAX_SESSIONS);
+        self.session_log.pending_page = Some(current + 1);
+        self.focus = Focus::Content;
         self.session_log.poll.reset_backoff();
         self.session_log.poll.invalidate();
         if self.session_log.poll.is_in_flight() {
+            // The in-flight response was requested with the old limit; wait for
+            // it to finish, then refetch with the raised one.
             self.session_log.reload_wanted = true;
             return Vec::new();
         }
         let now = Instant::now();
         self.request_session_list(now).into_iter().collect()
+    }
+
+    /// Show `page` when it is already loaded.
+    pub(super) fn goto_session_page(&mut self, page: usize) -> Vec<Effect> {
+        if page >= self.session_log.page_count() {
+            return Vec::new();
+        }
+        self.session_log.goto_page(page);
+        self.focus = Focus::Content;
+        Vec::new()
     }
 
     fn request_session_list(&mut self, now: Instant) -> Option<Effect> {
@@ -226,7 +265,7 @@ impl App {
         match result {
             Ok(page) => {
                 self.session_log.poll.complete(generation);
-                self.session_log.apply_page(page.data);
+                self.session_log.apply_page(page.data, page.has_more);
                 self.session_log.reload_wanted = false;
                 Vec::new()
             }

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use peri_tui_components::button::ButtonTone;
+use peri_tui_components::button::{ButtonState, ButtonTone};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
@@ -94,9 +94,10 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
     widgets::render_section(buf, rows.line(), text::SECTION_ACTIONS);
 
     if app.validation_purpose() == Some(crate::worker::ValidationPurpose::TestConnection) {
-        widgets::render_body(
+        widgets::render_loading(
             buf,
             rows.line(),
+            app.spinner_frame(),
             text::TESTING_CONNECTION,
             widgets::dim_style(),
         );
@@ -265,7 +266,13 @@ pub fn render_credentials(
     rows.skip(1);
     let busy = app.validation_purpose() == Some(crate::worker::ValidationPurpose::Credentials);
     if busy {
-        widgets::render_body(buf, rows.line(), text::VALIDATING, widgets::dim_style());
+        widgets::render_loading(
+            buf,
+            rows.line(),
+            app.spinner_frame(),
+            text::VALIDATING,
+            widgets::dim_style(),
+        );
     } else {
         action_button(
             buf,
@@ -301,12 +308,12 @@ fn action_button(
 ) {
     let label = text::action_label(action);
     let focused = enabled && app.focus() == Focus::Action(action);
-    let button = widgets::button_rect(row, row.x, label);
+    let button = widgets::button_rect(row, row.x, label, tone);
     if enabled {
         widgets::render_button(buf, button, label, focused, tone);
         hits.region(Layer::Base, button, Intent::Activate(action));
     } else {
-        widgets::render_button(buf, button, label, false, tone);
+        widgets::render_button_state(buf, button, label, ButtonState::Disabled, tone);
     }
 }
 

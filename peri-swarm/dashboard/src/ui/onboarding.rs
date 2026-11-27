@@ -103,12 +103,18 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
     rows.skip(1);
     let busy = app.validation_purpose() == Some(crate::worker::ValidationPurpose::Onboarding);
     if busy {
-        widgets::render_body(buf, rows.line(), text::VALIDATING, widgets::dim_style());
+        widgets::render_loading(
+            buf,
+            rows.line(),
+            app.spinner_frame(),
+            text::VALIDATING,
+            widgets::dim_style(),
+        );
     } else {
         let rect = rows.line();
         let label = text::action_label(ActionId::Submit);
         let focused = app.focus() == Focus::Action(ActionId::Submit);
-        let button = widgets::button_rect(rect, rect.x, label);
+        let button = widgets::button_rect(rect, rect.x, label, ButtonTone::Primary);
         widgets::render_button(buf, button, label, focused, ButtonTone::Primary);
         hits.region(Layer::Base, button, Intent::Activate(ActionId::Submit));
     }

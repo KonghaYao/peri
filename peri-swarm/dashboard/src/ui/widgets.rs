@@ -1,8 +1,9 @@
 //! Shared rendering helpers built on `peri-tui-components` and `ratatui`.
 //!
-//! Buttons, colors and scroll behavior come from the shared components. The
-//! single-line field is rendered locally because the shared text area is
-//! multi-line and cannot mask a secret.
+//! Buttons, colors, the loading spinner and scroll behavior come from the
+//! shared components. The single-line field state lives in the shared input
+//! module; its bordered block is drawn here because the dashboard owns the
+//! terminal cursor.
 //!
 //! Every helper draws into a [`Buffer`] rather than a [`ratatui::Frame`] so a
 //! page can be rendered into an off-screen buffer, measured, and then blitted
@@ -11,9 +12,8 @@
 use std::sync::OnceLock;
 
 use peri_theme::theme::ThemeDefinition;
-use peri_tui_components::button::{
-    button_visual, ButtonChrome, ButtonSpec, ButtonState, ButtonTone, ButtonVisual,
-};
+use peri_tui_components::button::{Button, ButtonChrome, ButtonState, ButtonTone};
+use peri_tui_components::spinner::Spinner;
 use peri_tui_components::text::{truncate_to_width, wrap_by_width};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -243,39 +243,53 @@ impl Rows {
     }
 }
 
-/// Width of a bracketed button label, including the space padding.
+/// Chrome used for each button tone.
+///
+/// Primary actions read as a solid block; secondary and destructive actions
+/// stay plain text so a page has one clear visual accent.
 #[must_use]
-pub fn button_width(label: &str) -> u16 {
-    let text = ButtonChrome::Bracketed { padded: true }.text(label);
-    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+pub fn button_chrome(tone: ButtonTone) -> ButtonChrome {
+    match tone {
+        ButtonTone::Primary => ButtonChrome::Filled,
+        ButtonTone::Secondary | ButtonTone::Danger => ButtonChrome::Plain,
+    }
+}
+
+/// Width of a button label for `tone`, including the filled chrome padding.
+#[must_use]
+pub fn button_width(label: &str, tone: ButtonTone) -> u16 {
+    Button::new(label, button_chrome(tone), tone, ButtonState::Normal).width()
 }
 
 /// A button rectangle clamped to the row it is placed on.
 #[must_use]
-pub fn button_rect(row: Rect, x: u16, label: &str) -> Rect {
-    let width = button_width(label).min(row.right().saturating_sub(x));
+pub fn button_rect(row: Rect, x: u16, label: &str, tone: ButtonTone) -> Rect {
+    let width = button_width(label, tone).min(row.right().saturating_sub(x));
     let height = if row.height == 0 { 0 } else { 1 };
     Rect::new(x, row.y, width, height)
 }
 
-/// Render a bracketed button, using the shared component for text and style.
+/// Render a button using the shared component for text and style.
 pub fn render_button(buf: &mut Buffer, rect: Rect, label: &str, focused: bool, tone: ButtonTone) {
-    if rect.is_empty() {
-        return;
-    }
-    let spec = ButtonSpec {
-        label,
-        chrome: ButtonChrome::Bracketed { padded: true },
-        tone,
-        state: if focused {
-            ButtonState::Focused
-        } else {
-            ButtonState::Normal
-        },
+    let state = if focused {
+        ButtonState::Focused
+    } else {
+        ButtonState::Normal
     };
-    let ButtonVisual { text, style, .. } = button_visual(spec, theme());
-    let text = truncate_to_width(&text, usize::from(rect.width));
-    buf.set_string(rect.x, rect.y, text, style);
+    render_button_state(buf, rect, label, state, tone);
+}
+
+/// Render a button in an explicit state.
+///
+/// Drawing only: the caller still owns the hit region.
+pub fn render_button_state(
+    buf: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    state: ButtonState,
+    tone: ButtonTone,
+) {
+    Button::new(label, button_chrome(tone), tone, state).render(buf, rect, theme());
 }
 
 /// Render a single-line text field with a block, optional masking, and a caret.
@@ -305,6 +319,8 @@ pub fn render_field(
                 .style(dim_style())
                 .render(inner, buf);
         }
+    } else if let Some((start, end)) = display.selection {
+        Paragraph::new(styled_selection(&display.text, start, end)).render(inner, buf);
     } else {
         Paragraph::new(display.text)
             .style(title_style())
@@ -318,6 +334,45 @@ pub fn render_field(
     } else {
         None
     }
+}
+
+/// Split a visible field window into styled runs for an active text selection.
+///
+/// The range is expressed in terminal cells relative to the first visible cell,
+/// matching [`crate::text_field::FieldDisplay::selection`].
+fn styled_selection(text: &str, start: u16, end: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_selected = false;
+    let mut cell = 0u16;
+    for character in text.chars() {
+        let width = u16::try_from(Span::raw(character.to_string()).width()).unwrap_or(u16::MAX);
+        let selected = cell >= start && cell < end;
+        if !run.is_empty() && selected != run_selected {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_selected {
+                    selected_style()
+                } else {
+                    title_style()
+                },
+            ));
+        }
+        run_selected = selected;
+        run.push(character);
+        cell = cell.saturating_add(width);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(
+            run,
+            if run_selected {
+                selected_style()
+            } else {
+                title_style()
+            },
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Label/value row used by Settings and placeholder pages.
@@ -372,6 +427,21 @@ pub fn render_body(buf: &mut Buffer, area: Rect, body: &str, style: Style) {
 pub fn wrapped_height(text: &str, width: u16) -> u16 {
     let lines = wrap_by_width(text, usize::from(width.max(1)));
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
+}
+
+/// Braille frames for loading indicators.
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Render a loading line: spinner glyph, one space, then the unchanged label.
+pub fn render_loading(buf: &mut Buffer, area: Rect, frame: u64, label: &str, style: Style) {
+    if area.is_empty() {
+        return;
+    }
+    let line = Spinner::new(SPINNER_FRAMES, frame)
+        .icon_style(style)
+        .text(Line::from(Span::styled(label.to_owned(), style)))
+        .line();
+    Paragraph::new(line).render(area, buf);
 }
 
 /// Centered line.
@@ -453,3 +523,7 @@ pub fn render_rule(buf: &mut Buffer, area: Rect) {
         dim_style(),
     );
 }
+
+#[cfg(test)]
+#[path = "widgets_test.rs"]
+mod tests;

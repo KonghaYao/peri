@@ -181,6 +181,7 @@ fn run_loop(
         }
         if last_tick.elapsed() >= TICK {
             last_tick = Instant::now();
+            app.advance_spinner();
             dirty = true;
         }
     }

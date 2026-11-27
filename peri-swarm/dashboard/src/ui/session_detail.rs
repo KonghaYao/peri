@@ -10,13 +10,12 @@
 use peri_theme::bridge::ThemeDefinitionExt;
 use peri_tui_components::button::ButtonTone;
 use peri_tui_components::markdown::{parse_markdown, MarkdownSegment};
-use peri_tui_components::textarea::{
-    render_multiline_with_cursor, TextAreaRenderOptions, TextAreaStyles,
-};
+use peri_tui_components::tabs::tab_layout;
+use peri_tui_components::textarea::{render_text_area_with_cursor, TextAreaStyles};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::app::{
     ActionId, App, DetailTab, FieldId, Focus, Intent, RequiredAction, TextAreaClick, TimelineEntry,
@@ -53,7 +52,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
         &text::session_id_label(id),
         widgets::muted_style(),
     );
-    render_summary(buf, rows, detail.session());
+    render_summary(buf, rows, detail.session(), app.spinner_frame());
     if detail.stale() {
         render_wrapped(buf, rows, text::DETAIL_STALE, widgets::warning_style());
     }
@@ -90,9 +89,20 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
     cursor
 }
 
-fn render_summary(buf: &mut Buffer, rows: &mut Rows, session: Option<&crate::api::Session>) {
+fn render_summary(
+    buf: &mut Buffer,
+    rows: &mut Rows,
+    session: Option<&crate::api::Session>,
+    frame: u64,
+) {
     let Some(session) = session else {
-        widgets::render_body(buf, rows.line(), text::DETAIL_LOADING, widgets::dim_style());
+        widgets::render_loading(
+            buf,
+            rows.line(),
+            frame,
+            text::DETAIL_LOADING,
+            widgets::dim_style(),
+        );
         return;
     };
     let row = rows.line();
@@ -149,12 +159,12 @@ fn render_actions(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMa
     let mut x = row.x;
     for (action, tone) in actions {
         let label = text::action_label(action);
-        let width = widgets::button_width(label);
+        let width = widgets::button_width(label, tone);
         if x > row.x && x.saturating_add(width) > row.right() {
             row = rows.line();
             x = row.x;
         }
-        let rect = widgets::button_rect(row, x, label);
+        let rect = widgets::button_rect(row, x, label, tone);
         widgets::render_button(buf, rect, label, app.focus() == Focus::Action(action), tone);
         hits.region(Layer::Base, rect, Intent::Activate(action));
         x = rect.right().saturating_add(2);
@@ -170,7 +180,7 @@ fn render_action_button(
     tone: ButtonTone,
 ) -> Option<Rect> {
     let label = text::action_label(action);
-    let rect = widgets::button_rect(row, row.x, label);
+    let rect = widgets::button_rect(row, row.x, label, tone);
     if rect.is_empty() {
         return None;
     }
@@ -249,11 +259,11 @@ fn render_approval(
             ButtonTone::Danger,
         ),
     ] {
-        let width = widgets::button_width(label);
+        let width = widgets::button_width(label, tone);
         if x.saturating_add(width) > row.right() {
             break;
         }
-        let rect = widgets::button_rect(row, x, label);
+        let rect = widgets::button_rect(row, x, label, tone);
         widgets::render_button(buf, rect, label, focused && !disabled, tone);
         if !disabled {
             hits.region(
@@ -281,26 +291,12 @@ pub fn render_tab_bar(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut H
         .unwrap_or(0);
     let labels: Vec<&str> = DetailTab::ALL.iter().map(|tab| tab.label()).collect();
     widgets::render_tabs(buf, area, &labels, selected);
-    // `ratatui::widgets::Tabs` pads every title with one space on each side and
-    // draws the `|` divider between titles: `" Timeline | Turns | Info "`.
-    // The first label therefore starts one column inside the area, and each
-    // following label starts five columns after the previous label ends
-    // (trailing pad + " | " + leading pad). Hit regions must mirror the drawn
-    // labels; otherwise the last tab is effectively unclickable.
-    const TAB_INSET: u16 = 1;
-    const TAB_GAP: u16 = 5;
-    let mut x = area.x.saturating_add(TAB_INSET);
-    for (index, tab) in DetailTab::ALL.iter().enumerate() {
-        if index > 0 {
-            x = x.saturating_add(TAB_GAP);
-        }
-        let width = u16::try_from(Span::raw(tab.label()).width()).unwrap_or(u16::MAX);
-        let rect = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);
-        if rect.width == 0 {
-            break;
-        }
-        hits.region(Layer::Base, rect, Intent::SelectDetailTab(*tab));
-        x = rect.right();
+    // Hit regions mirror the drawn labels: `ratatui::widgets::Tabs` pads every
+    // title with one space on each side and draws the `|` divider between
+    // titles, so adjacent labels start five columns apart.
+    let layout = tab_layout(area, &labels, selected);
+    for (tab, rect) in DetailTab::ALL.iter().zip(layout.rects.iter()) {
+        hits.region(Layer::Base, *rect, Intent::SelectDetailTab(*tab));
     }
 }
 
@@ -319,11 +315,21 @@ fn render_composer(
         widgets::section_style(),
     );
     let rect = rows.take(COMPOSER_ROWS.saturating_add(2));
-    if let Some(position) = render_text_area(
+    let focused = app.focus() == Focus::Field(FieldId::DetailComposer);
+    let styles = TextAreaStyles {
+        cursor: widgets::selected_style(),
+        selection: widgets::selected_style(),
+        placeholder: widgets::dim_style(),
+        base: widgets::muted_style(),
+    };
+    if let Some(position) = render_text_area_with_cursor(
         buf,
         rect,
         detail.composer(),
-        app.focus() == Focus::Field(FieldId::DetailComposer),
+        focused,
+        widgets::border_style(focused),
+        styles,
+        Some(&detail.composer().placeholder),
     ) {
         *cursor = Some(position);
     }
@@ -345,7 +351,7 @@ fn render_composer(
     }
     let row = rows.line();
     let label = text::action_label(ActionId::SendMessage);
-    let rect = widgets::button_rect(row, row.x, label);
+    let rect = widgets::button_rect(row, row.x, label, ButtonTone::Primary);
     widgets::render_button(
         buf,
         rect,
@@ -362,9 +368,10 @@ fn render_composer(
             widgets::warning_style(),
         );
     } else if detail.send_in_flight() {
-        widgets::render_body(
+        widgets::render_loading(
             buf,
             rows.line(),
+            app.spinner_frame(),
             text::COMPOSER_SENDING,
             widgets::dim_style(),
         );
@@ -382,9 +389,9 @@ fn render_timeline(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitM
     let mut drawn = false;
     if timeline.can_load_earlier() {
         let row = rows.line();
-        let width = widgets::button_width(label);
+        let width = widgets::button_width(label, ButtonTone::Secondary);
         if row.x.saturating_add(width) <= row.right() {
-            let rect = widgets::button_rect(row, row.x, label);
+            let rect = widgets::button_rect(row, row.x, label, ButtonTone::Secondary);
             widgets::render_button(
                 buf,
                 rect,
@@ -403,9 +410,10 @@ fn render_timeline(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitM
         render_wrapped(buf, rows, text::TIMELINE_UNSEEN, widgets::warning_style());
     }
     if timeline.loading_more() {
-        widgets::render_body(
+        widgets::render_loading(
             buf,
             rows.line(),
+            app.spinner_frame(),
             text::TIMELINE_LOADING_OLDER,
             widgets::dim_style(),
         );
@@ -422,9 +430,10 @@ fn render_timeline(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitM
         );
     }
     if !timeline.ever_loaded() {
-        widgets::render_body(
+        widgets::render_loading(
             buf,
             rows.line(),
+            app.spinner_frame(),
             text::TIMELINE_LOADING,
             widgets::dim_style(),
         );
@@ -554,7 +563,13 @@ fn render_markdown(buf: &mut Buffer, rows: &mut Rows, body: &str, max_rows: usiz
         match segment {
             MarkdownSegment::Text(mut text) => lines.append(&mut text),
             MarkdownSegment::Table(table) => {
-                lines.extend(flatten_table(&table));
+                lines.extend(
+                    peri_tui_components::markdown::table_data_to_lines_with_theme(
+                        &table,
+                        width,
+                        widgets::theme(),
+                    ),
+                );
             }
             MarkdownSegment::Image(image) => lines.extend(image.lines),
             MarkdownSegment::GenUi(genui) => {
@@ -579,36 +594,14 @@ fn render_markdown(buf: &mut Buffer, rows: &mut Rows, body: &str, max_rows: usiz
     Paragraph::new(lines).render(area, buf);
 }
 
-/// Flatten a Markdown table into plain rows.
-///
-/// The shared grid renderer needs `ratatui_kit`'s `TableTheme`, which is not a
-/// dependency of this crate and may not be added for a detail-page table.
-fn flatten_table(table: &peri_tui_components::markdown::TableData) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let join = |cells: &[Vec<Span<'static>>]| {
-        let mut spans = Vec::new();
-        for (index, cell) in cells.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled(" | ", widgets::dim_style()));
-            }
-            spans.extend(cell.iter().cloned());
-        }
-        Line::from(spans)
-    };
-    lines.push(join(&table.headers));
-    for row in &table.rows {
-        lines.push(join(row));
-    }
-    lines
-}
-
 fn render_turns(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
     let turns = app.detail().turns();
     rows.skip(1);
     if turns.loading_more() {
-        widgets::render_body(
+        widgets::render_loading(
             buf,
             rows.line(),
+            app.spinner_frame(),
             text::TIMELINE_LOADING_OLDER,
             widgets::dim_style(),
         );
@@ -617,7 +610,13 @@ fn render_turns(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap)
         render_wrapped(buf, rows, error, widgets::error_style());
     }
     if !turns.ever_loaded() {
-        widgets::render_body(buf, rows.line(), text::TURNS_LOADING, widgets::dim_style());
+        widgets::render_loading(
+            buf,
+            rows.line(),
+            app.spinner_frame(),
+            text::TURNS_LOADING,
+            widgets::dim_style(),
+        );
         return;
     }
     if turns.rows().is_empty() {
@@ -805,60 +804,6 @@ fn render_info_block(buf: &mut Buffer, rows: &mut Rows, label: &str, value: &str
     widgets::render_section(buf, rows.line(), label);
     let height = widgets::wrapped_height(value, rows.width());
     widgets::render_body(buf, rows.take(height.max(1)), value, widgets::muted_style());
-}
-
-fn render_text_area(
-    buf: &mut Buffer,
-    rect: Rect,
-    state: &peri_tui_components::textarea::TextAreaState,
-    focused: bool,
-) -> Option<Position> {
-    if rect.height < 3 || rect.width < 2 {
-        return None;
-    }
-    let block = Block::bordered().border_style(widgets::border_style(focused));
-    let inner = block.inner(rect);
-    block.render(rect, buf);
-    if inner.is_empty() {
-        return None;
-    }
-    let styles = TextAreaStyles {
-        cursor: widgets::selected_style(),
-        selection: widgets::selected_style(),
-        placeholder: widgets::dim_style(),
-        base: widgets::muted_style(),
-    };
-    let lines = render_multiline_with_cursor(TextAreaRenderOptions {
-        text: &state.text,
-        cursor: state.cursor,
-        selection_range: None,
-        placeholder: Some(&state.placeholder),
-        styles,
-        max_width: usize::from(inner.width),
-        viewport_height: usize::from(inner.height),
-        show_cursor: focused,
-    });
-    Paragraph::new(lines).render(inner, buf);
-    if !focused {
-        return None;
-    }
-    let wrapped = peri_tui_components::textarea::wrap_text(
-        &state.text,
-        state.cursor,
-        usize::from(inner.width.max(1)),
-    );
-    let (start, _) = peri_tui_components::textarea::viewport_window(
-        wrapped.total_visual_rows,
-        wrapped.cursor_visual_row,
-        usize::from(inner.height.max(1)),
-    );
-    let row = wrapped.cursor_visual_row.saturating_sub(start);
-    Some(Position::new(
-        inner
-            .x
-            .saturating_add(u16::try_from(wrapped.cursor_visual_col).unwrap_or(0)),
-        inner.y.saturating_add(u16::try_from(row).unwrap_or(0)),
-    ))
 }
 
 fn render_wrapped(buf: &mut Buffer, rows: &mut Rows, body: &str, style: ratatui::style::Style) {

@@ -1,8 +1,9 @@
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::api::ApiError;
-use crate::app::{ActionId, App, FieldId, Focus, Intent, Page};
+use crate::app::{ActionId, App, FieldId, Focus, Intent, Page, Screen};
 use crate::test_support::{
     connected_app, feed_page, list_request, session, with_approvals, with_metadata,
 };
@@ -32,6 +33,27 @@ fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         .collect()
 }
 
+fn rect_text(terminal: &Terminal<TestBackend>, rect: Rect) -> String {
+    let buffer = terminal.backend().buffer();
+    (rect.x..rect.right())
+        .map(|column| buffer[(column, rect.y)].symbol())
+        .collect()
+}
+
+/// `count` idle sessions named `sess_000`, `sess_001`, ...
+fn sessions(count: usize) -> Vec<crate::api::Session> {
+    (0..count)
+        .map(|index| session(&format!("sess_{index:03}"), "idle", "idle", None, NOW))
+        .collect()
+}
+
+/// Draw with the content scrolled to its measured bottom.
+fn draw_scrolled(app: &mut App, width: u16, height: u16) -> (Terminal<TestBackend>, HitMap) {
+    draw(app, width, height);
+    app.set_content_scroll(usize::MAX);
+    draw(app, width, height)
+}
+
 #[test]
 fn toolbar_chips_and_rows_are_clickable_at_every_supported_width() {
     for (width, height) in [(80, 24), (100, 30), (140, 40)] {
@@ -45,11 +67,7 @@ fn toolbar_chips_and_rows_are_clickable_at_every_supported_width() {
         );
         let (_terminal, hits) = draw(&mut app, width, height);
 
-        for action in [
-            ActionId::NewSession,
-            ActionId::RefreshSessions,
-            ActionId::LoadMoreSessions,
-        ] {
+        for action in [ActionId::NewSession, ActionId::RefreshSessions] {
             let intent = Intent::Activate(action);
             let rect = hits
                 .region_rect(intent.clone())
@@ -71,7 +89,7 @@ fn toolbar_chips_and_rows_are_clickable_at_every_supported_width() {
         assert_eq!(hits.click(false, row.x, row.y), Some(row_intent));
         app.apply(Intent::OpenSession("sess_a".to_owned()));
         assert_eq!(app.page(), Page::SessionLog);
-        assert_eq!(app.screen(), crate::app::Screen::SessionDetail);
+        assert_eq!(app.screen(), Screen::SessionDetail);
     }
 }
 
@@ -187,47 +205,201 @@ fn filter_chip_click_changes_the_visible_rows() {
 }
 
 #[test]
-fn five_hundred_rows_and_load_more_stay_reachable_by_scrolling() {
+fn pager_regions_cover_the_drawn_labels() {
     let (mut app, _dir) = connected_app();
-    let sessions: Vec<_> = (0..500)
-        .map(|index| {
-            session(
-                &format!("sess_{index:03}"),
-                "idle",
-                "idle",
-                None,
-                NOW - i64::from(index),
-            )
-        })
-        .collect();
-    feed_page(&mut app, sessions);
+    feed_page(&mut app, sessions(25));
+    app.apply(Intent::GoToSessionPage(1));
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 40);
 
-    // At the top only the first rows are visible; the tail is not a hit target.
-    let (terminal, hits) = draw(&mut app, 100, 24);
-    let first = Intent::OpenSession("sess_000".to_owned());
-    assert!(hits.region_rect(first.clone()).is_some());
-    assert!(
-        hits.region_rect(Intent::OpenSession("sess_499".to_owned()))
-            .is_none(),
-        "a row outside the viewport must not be clickable"
+    // Page 2 of 3, so every page number is drawn.
+    for (page, label) in [(0, "1"), (1, "2"), (2, "3")] {
+        let intent = Intent::GoToSessionPage(page);
+        let rect = hits
+            .region_rect(intent.clone())
+            .unwrap_or_else(|| panic!("missing page {page} region"));
+        assert_eq!(rect_text(&terminal, rect), label);
+        assert_eq!(hits.click(false, rect.x, rect.y), Some(intent));
+    }
+    for (intent, label) in [
+        (Intent::SessionPagePrev, text::PAGE_PREV),
+        (Intent::SessionPageNext, text::PAGE_NEXT),
+    ] {
+        let rect = hits
+            .region_rect(intent.clone())
+            .unwrap_or_else(|| panic!("missing {intent:?} region"));
+        assert_eq!(rect_text(&terminal, rect), label);
+        assert_eq!(hits.click(false, rect.x, rect.y), Some(intent));
+    }
+
+    let previous = hits.region_rect(Intent::SessionPagePrev).expect("previous");
+    let first = hits
+        .region_rect(Intent::GoToSessionPage(0))
+        .expect("first page");
+    assert_eq!(
+        first.x,
+        previous.right() + 1,
+        "controls are one space apart"
     );
-    assert!(!buffer_text(&terminal).contains("sess_499"));
+}
 
-    // Scrolling to the measured bottom reaches the last row and the footer.
-    app.set_content_scroll(usize::MAX);
-    let (terminal, hits) = draw(&mut app, 100, 24);
-    assert_eq!(app.content_scroll(), app.content_max());
-    assert!(buffer_text(&terminal).contains("sess_499"));
-    let last = Intent::OpenSession("sess_499".to_owned());
-    let rect = hits.region_rect(last.clone()).expect("last row reachable");
-    assert_eq!(hits.click(false, rect.x, rect.y), Some(last));
-    assert!(rect.y >= 2 && rect.bottom() <= 24, "row is inside the body");
+#[test]
+fn clicking_a_page_number_and_next_moves_the_table() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(25));
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 40);
+    assert!(buffer_text(&terminal).contains("sess_000"));
+    assert!(!buffer_text(&terminal).contains("sess_010"));
 
-    let load = Intent::Activate(ActionId::LoadMoreSessions);
-    let rect = hits.region_rect(load.clone()).expect("load more reachable");
-    assert_eq!(hits.click(false, rect.x, rect.y), Some(load));
+    let intent = Intent::GoToSessionPage(1);
+    let rect = hits.region_rect(intent.clone()).expect("page 2");
+    app.apply(hits.click(false, rect.x, rect.y).expect("page click"));
+    assert_eq!(app.session_log().page(), 1);
+    assert_eq!(app.focus(), Focus::Content);
+
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 40);
+    assert!(buffer_text(&terminal).contains("sess_010"));
+    assert!(!buffer_text(&terminal).contains("sess_000"));
+
+    let next = Intent::SessionPageNext;
+    let rect = hits.region_rect(next.clone()).expect("next");
+    app.apply(hits.click(false, rect.x, rect.y).expect("next click"));
+    assert_eq!(app.session_log().page(), 2);
+
+    let (terminal, _) = draw_scrolled(&mut app, 100, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("sess_020"));
+    assert!(text.contains("sess_024"));
+    assert!(!text.contains("sess_010"));
+}
+
+#[test]
+fn disabled_pager_controls_are_not_clickable() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(25));
+
+    // First page: Previous is drawn but inert.
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 40);
+    assert!(hits.region_rect(Intent::SessionPagePrev).is_none());
+    let current = hits
+        .region_rect(Intent::GoToSessionPage(0))
+        .expect("current page region");
+    assert_eq!(rect_text(&terminal, current), "1");
+    assert_eq!(
+        hits.click(false, current.x.saturating_sub(7), current.y),
+        None
+    );
+
+    // Last page without more data: Next is drawn but inert.
+    app.apply(Intent::GoToSessionPage(2));
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 40);
+    assert!(hits.region_rect(Intent::SessionPageNext).is_none());
+    assert!(hits.region_rect(Intent::SessionPagePrev).is_some());
+    let current = hits
+        .region_rect(Intent::GoToSessionPage(2))
+        .expect("current page region");
+    assert_eq!(rect_text(&terminal, current), "3");
+    assert_eq!(
+        hits.click(false, current.right().saturating_add(1), current.y),
+        None
+    );
+}
+
+#[test]
+fn the_table_renders_only_the_current_page() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(25));
+    let (terminal, _) = draw_scrolled(&mut app, 100, 40);
+    let text = buffer_text(&terminal);
+    for index in 0..10 {
+        assert!(text.contains(&format!("sess_{index:03}")));
+    }
+    for index in 10..25 {
+        assert!(
+            !text.contains(&format!("sess_{index:03}")),
+            "sess_{index:03} belongs to a later page"
+        );
+    }
+}
+
+#[test]
+fn a_single_page_still_shows_the_pager() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(3));
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 24);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::PAGE_PREV));
+    assert!(text.contains(text::PAGE_NEXT));
+    let current = hits
+        .region_rect(Intent::GoToSessionPage(0))
+        .expect("page 1 region");
+    assert_eq!(rect_text(&terminal, current), "1");
+    assert!(hits.region_rect(Intent::SessionPagePrev).is_none());
+    assert!(hits.region_rect(Intent::SessionPageNext).is_none());
+}
+
+#[test]
+fn paging_keys_and_hints_are_documented() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(25));
+    let (terminal, _) = draw(&mut app, 140, 40);
+    let text = buffer_text(&terminal);
+    assert!(text::FOOTER_SESSION_LOG.contains("PgUp/PgDn page"));
+    assert!(text.contains("PgUp/PgDn page"));
+    assert!(text::HELP_SECTIONS
+        .iter()
+        .any(|section| section.lines.iter().any(|line| line.contains("PgUp/PgDn"))));
+    assert!(!text.contains("Load more"));
+
+    app.apply(Intent::OpenHelp);
+    let (terminal, _) = draw(&mut app, 140, 40);
+    assert!(buffer_text(&terminal).contains("PgUp/PgDn"));
+    app.apply(Intent::CloseOverlay);
+    assert_eq!(app.session_log().page(), 0);
+
+    app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::PageDown,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.session_log().page(), 1);
+    app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::PageUp,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.session_log().page(), 0);
+}
+
+#[test]
+fn five_hundred_rows_page_ten_at_a_time_and_the_last_page_is_reachable() {
+    let (mut app, _dir) = connected_app();
+    feed_page(&mut app, sessions(500));
+    assert_eq!(app.session_log().page_count(), 50);
+
+    // At the top only the first page's rows are drawn.
+    let (terminal, _) = draw(&mut app, 100, 24);
+    assert!(buffer_text(&terminal).contains("sess_000"));
+    assert!(!buffer_text(&terminal).contains("sess_010"));
+
+    // The pager stays inside the body once the page is scrolled to its bottom.
+    let (_terminal, hits) = draw_scrolled(&mut app, 100, 24);
+    let next = Intent::SessionPageNext;
+    let rect = hits.region_rect(next.clone()).expect("next reachable");
+    assert_eq!(hits.click(false, rect.x, rect.y), Some(next));
     assert!(
         rect.y >= 2 && rect.bottom() <= 24,
-        "footer is inside the body"
+        "pager is inside the body"
     );
+
+    let last = Intent::GoToSessionPage(49);
+    let rect = hits
+        .region_rect(last.clone())
+        .expect("last page reachable from the pager");
+    assert_eq!(hits.click(false, rect.x, rect.y), Some(last.clone()));
+    app.apply(last);
+    assert_eq!(app.session_log().page(), 49);
+
+    let (terminal, hits) = draw_scrolled(&mut app, 100, 24);
+    assert!(buffer_text(&terminal).contains("sess_499"));
+    let row = Intent::OpenSession("sess_499".to_owned());
+    let rect = hits.region_rect(row.clone()).expect("last row reachable");
+    assert_eq!(hits.click(false, rect.x, rect.y), Some(row));
 }

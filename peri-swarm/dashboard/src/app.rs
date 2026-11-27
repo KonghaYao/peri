@@ -32,7 +32,7 @@ pub use session_detail::{
     TimelineKind, TurnsState,
 };
 pub use session_edit::EditFormState;
-pub use session_log::{SessionLogState, LIST_MAX, LIST_PAGE_SIZE};
+pub use session_log::{SessionLogState, FETCH_STEP, MAX_SESSIONS, PAGE_SIZE};
 pub use types::{
     next_page, page_row_index, previous_page, ActionId, BannerActions, BannerTone, BannerView,
     DetailTab, Effect, FieldClick, FieldId, Focus, HealthState, Intent, NavItem, Overlay, Page,
@@ -74,6 +74,7 @@ pub struct App {
     sidebar_viewport: usize,
     content_scroll: usize,
     content_max: usize,
+    spinner_frame: u64,
     epoch: u64,
     quit: bool,
 }
@@ -120,6 +121,7 @@ impl App {
             sidebar_viewport: 0,
             content_scroll: 0,
             content_max: 0,
+            spinner_frame: 0,
             epoch: 0,
             quit: false,
         };
@@ -167,6 +169,7 @@ impl App {
             sidebar_viewport: 0,
             content_scroll: 0,
             content_max: 0,
+            spinner_frame: 0,
             epoch: 0,
             quit: false,
         }
@@ -210,6 +213,33 @@ impl App {
     #[must_use]
     pub fn validation_purpose(&self) -> Option<ValidationPurpose> {
         self.validation
+    }
+
+    /// Whether an action may be focused or activated right now.
+    ///
+    /// Settings actions are unavailable while a validation runs; the credential
+    /// editor cannot save while its own validation is in flight.
+    #[must_use]
+    pub fn action_enabled(&self, action: ActionId) -> bool {
+        match action {
+            ActionId::TestConnection
+            | ActionId::EditCredentials
+            | ActionId::SignOut
+            | ActionId::Quit => self.validation.is_none(),
+            ActionId::SaveCredentials => self.validation != Some(ValidationPurpose::Credentials),
+            _ => true,
+        }
+    }
+
+    /// Current loading-spinner frame.
+    #[must_use]
+    pub fn spinner_frame(&self) -> u64 {
+        self.spinner_frame
+    }
+
+    /// Advance the loading-spinner frame (called from the runtime tick).
+    pub fn advance_spinner(&mut self) {
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
     /// Onboarding form.

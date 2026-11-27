@@ -120,6 +120,9 @@ impl App {
     }
 
     pub(super) fn activate_action(&mut self, action: ActionId) -> Vec<Effect> {
+        if !self.action_enabled(action) {
+            return Vec::new();
+        }
         match action {
             ActionId::Submit => self.submit_onboarding(),
             ActionId::TestConnection => self.test_connection(),
@@ -166,7 +169,6 @@ impl App {
                 Vec::new()
             }
             ActionId::RefreshSessions => self.refresh_sessions_now(),
-            ActionId::LoadMoreSessions => self.load_more_sessions(),
             ActionId::CreateSubmit => self.submit_create(),
             ActionId::AddMetadata => {
                 self.create.add_row();

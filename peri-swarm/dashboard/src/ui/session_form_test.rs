@@ -28,6 +28,16 @@ fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         .collect()
 }
 
+/// A click on a multiline field registers a row/column-resolved target.
+fn has_text_area_target(hits: &HitMap, field: FieldId) -> bool {
+    hits.regions().iter().any(|region| {
+        matches!(
+            &region.intent,
+            Intent::FocusTextAreaAt { field: hit, .. } if *hit == field
+        )
+    })
+}
+
 #[test]
 fn every_create_control_has_a_hit_target() {
     let (mut app, _dir) = connected_app();
@@ -45,9 +55,7 @@ fn every_create_control_has_a_hit_target() {
             "missing {field:?}"
         );
     }
-    assert!(hits
-        .region_rect(Intent::FocusTextArea(FieldId::CreateInstructions))
-        .is_some());
+    assert!(has_text_area_target(&hits, FieldId::CreateInstructions));
     for action in [
         ActionId::AddMetadata,
         ActionId::ToggleAdvanced,
@@ -66,9 +74,7 @@ fn advanced_json_fields_appear_after_the_toggle() {
     let (mut app, _dir) = connected_app();
     app.apply(Intent::NewSession);
     let (_terminal, hits) = draw(&mut app, 110, 44);
-    assert!(hits
-        .region_rect(Intent::FocusTextArea(FieldId::CreateTools))
-        .is_none());
+    assert!(!has_text_area_target(&hits, FieldId::CreateTools));
 
     let toggle = hits
         .region_rect(Intent::Activate(ActionId::ToggleAdvanced))
@@ -83,10 +89,7 @@ fn advanced_json_fields_appear_after_the_toggle() {
         FieldId::CreateEnvironment,
         FieldId::CreatePromptCache,
     ] {
-        assert!(
-            hits.region_rect(Intent::FocusTextArea(field)).is_some(),
-            "missing {field:?}"
-        );
+        assert!(has_text_area_target(&hits, field), "missing {field:?}");
     }
 }
 
@@ -165,9 +168,7 @@ fn edit_form_renders_its_controls_and_read_only_instructions() {
             click: None,
         })
         .is_some());
-    assert!(hits
-        .region_rect(Intent::FocusTextArea(FieldId::EditPromptCache))
-        .is_some());
+    assert!(has_text_area_target(&hits, FieldId::EditPromptCache));
     assert!(hits
         .region_rect(Intent::FocusField {
             field: FieldId::EditMetadataKey(0),
@@ -189,4 +190,47 @@ fn edit_form_renders_its_controls_and_read_only_instructions() {
         .expect("remove");
     app.apply(hits.click(false, remove.x, remove.y).expect("remove click"));
     assert_eq!(app.edit_form().metadata().len(), before - 1);
+}
+
+#[test]
+fn clicking_a_multiline_field_places_the_caret_on_the_clicked_row() {
+    let (mut app, _dir) = connected_app();
+    app.apply(Intent::NewSession);
+    assert!(app.set_text_area_value(FieldId::CreateInstructions, "abc\ndef\nghi"));
+    let (_terminal, hits) = draw(&mut app, 110, 44);
+    let rect = hits
+        .regions()
+        .iter()
+        .find_map(|region| match &region.intent {
+            Intent::FocusTextAreaAt {
+                field: FieldId::CreateInstructions,
+                ..
+            } => Some(region.rect),
+            _ => None,
+        })
+        .expect("instructions hit region");
+
+    let intent = hits
+        .click(false, rect.x + 2, rect.y + 2)
+        .expect("resolved click");
+    assert!(matches!(
+        intent,
+        Intent::FocusTextAreaAt {
+            field: FieldId::CreateInstructions,
+            click: crate::app::TextAreaClick {
+                row: 1,
+                column: 1,
+                ..
+            },
+        }
+    ));
+    app.apply(intent);
+    let area = app
+        .text_area(FieldId::CreateInstructions)
+        .expect("instructions field");
+    assert_eq!(area.cursor, 5);
+    assert_eq!(
+        app.focus(),
+        crate::app::Focus::Field(FieldId::CreateInstructions)
+    );
 }

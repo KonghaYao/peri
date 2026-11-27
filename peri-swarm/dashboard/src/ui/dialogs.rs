@@ -62,7 +62,7 @@ pub fn render_sign_out(buf: &mut Buffer, area: Rect, app: &App, hits: &mut HitMa
     let row = rows.line();
     let cancel = text::action_label(ActionId::CancelSignOut);
     let confirm = text::action_label(ActionId::ConfirmSignOut);
-    let cancel_rect = widgets::button_rect(row, row.x, cancel);
+    let cancel_rect = widgets::button_rect(row, row.x, cancel, ButtonTone::Secondary);
     widgets::render_button(
         buf,
         cancel_rect,
@@ -76,7 +76,7 @@ pub fn render_sign_out(buf: &mut Buffer, area: Rect, app: &App, hits: &mut HitMa
         Intent::Activate(ActionId::CancelSignOut),
     );
     let confirm_x = cancel_rect.right().saturating_add(2);
-    let confirm_rect = widgets::button_rect(row, confirm_x, confirm);
+    let confirm_rect = widgets::button_rect(row, confirm_x, confirm, ButtonTone::Danger);
     widgets::render_button(
         buf,
         confirm_rect,
@@ -164,7 +164,7 @@ pub fn render_error_actions(buf: &mut Buffer, area: Rect, app: &App, hits: &mut 
     let row = rows.line();
     let retry = text::BANNER_RETRY;
     let settings = text::BANNER_SETTINGS;
-    let retry_rect = widgets::button_rect(row, row.x, retry);
+    let retry_rect = widgets::button_rect(row, row.x, retry, ButtonTone::Primary);
     widgets::render_button(
         buf,
         retry_rect,
@@ -174,7 +174,7 @@ pub fn render_error_actions(buf: &mut Buffer, area: Rect, app: &App, hits: &mut 
     );
     hits.region(Layer::Overlay, retry_rect, Intent::Retry);
     let settings_x = retry_rect.right().saturating_add(2);
-    let settings_rect = widgets::button_rect(row, settings_x, settings);
+    let settings_rect = widgets::button_rect(row, settings_x, settings, ButtonTone::Secondary);
     widgets::render_button(
         buf,
         settings_rect,
@@ -213,7 +213,7 @@ fn render_confirm(buf: &mut Buffer, area: Rect, app: &App, hits: &mut HitMap, sp
     let row = rows.line();
     let cancel_label = text::action_label(spec.cancel);
     let confirm_label = text::action_label(spec.confirm);
-    let cancel_rect = widgets::button_rect(row, row.x, cancel_label);
+    let cancel_rect = widgets::button_rect(row, row.x, cancel_label, ButtonTone::Secondary);
     widgets::render_button(
         buf,
         cancel_rect,
@@ -223,7 +223,7 @@ fn render_confirm(buf: &mut Buffer, area: Rect, app: &App, hits: &mut HitMap, sp
     );
     hits.region(Layer::Overlay, cancel_rect, Intent::Activate(spec.cancel));
     let confirm_x = cancel_rect.right().saturating_add(2);
-    let confirm_rect = widgets::button_rect(row, confirm_x, confirm_label);
+    let confirm_rect = widgets::button_rect(row, confirm_x, confirm_label, ButtonTone::Danger);
     widgets::render_button(
         buf,
         confirm_rect,

@@ -127,7 +127,6 @@ pub fn action_label(action: ActionId) -> &'static str {
         ActionId::CloseHelp => "Close",
         ActionId::NewSession => "New session",
         ActionId::RefreshSessions => "Refresh",
-        ActionId::LoadMoreSessions => "Load more",
         ActionId::CreateSubmit => "Create",
         ActionId::AddMetadata => "Add row",
         ActionId::ToggleAdvanced => "Advanced JSON",
@@ -537,7 +536,7 @@ pub fn loaded_label(loaded: usize) -> String {
 /// Scope note for the session log.
 #[must_use]
 pub fn scope_session_log(loaded: usize, stale: bool) -> String {
-    let mut note = format!("Gateway order (logical id desc) · {}", loaded_label(loaded));
+    let mut note = format!("Newest activity first · {}", loaded_label(loaded));
     if stale {
         note.push_str(" · stale");
     }
@@ -579,6 +578,12 @@ pub const SEARCH_PLACEHOLDER: &str = "Search id, model, metadata, environment";
 
 /// Search scope hint shown next to the field when it fits.
 pub const SEARCH_SCOPE_HINT: &str = "searches the loaded set";
+
+/// Session log pager: previous page.
+pub const PAGE_PREV: &str = "‹ Prev";
+
+/// Session log pager: next page.
+pub const PAGE_NEXT: &str = "Next ›";
 
 /// Loading label shown before the first page arrives.
 pub const LOADING_SESSIONS: &str = "Loading sessions…";
@@ -759,7 +764,7 @@ pub fn detail_placeholder(tab: DetailTab) -> &'static str {
 
 /// Footer hints on the session log.
 pub const FOOTER_SESSION_LOG: &str =
-    "click a row · n new session · / search · r refresh · Tab focus · Ctrl-C quit";
+    "click a row · PgUp/PgDn page · n new session · / search · r refresh · Tab focus · Ctrl-C quit";
 
 /// Footer hints on the create form.
 pub const FOOTER_CREATE: &str = "Tab next control · click to focus · Esc back · Ctrl-C quit";
@@ -841,7 +846,8 @@ pub const HELP_SECTIONS: [HelpSection; 5] = [
     HelpSection {
         title: "Opening a session",
         lines: &[
-            "The Session log lists sessions in gateway order (logical id desc).",
+            "The Session log lists the most recently active sessions first.",
+            "Rows are paged: use the paginator under the table or PgUp/PgDn to change page.",
             "Click a row, or focus the page and press Enter, to open that session.",
         ],
     },

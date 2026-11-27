@@ -160,7 +160,7 @@ impl ShellLayout {
             Some(Rect::new(
                 header.x,
                 header.y,
-                widgets::button_width(text::MENU_BUTTON).min(header.width),
+                widgets::button_width(text::MENU_BUTTON, ButtonTone::Secondary).min(header.width),
                 1,
             ))
         } else {
@@ -375,16 +375,24 @@ pub fn render_banner(
 pub fn banner_buttons(area: Rect, actions: BannerActions) -> Vec<(ActionId, Rect)> {
     let labels = match actions {
         BannerActions::None => return Vec::new(),
-        BannerActions::Settings => vec![(ActionId::OpenSettings, text::BANNER_SETTINGS)],
+        BannerActions::Settings => vec![(
+            ActionId::OpenSettings,
+            text::BANNER_SETTINGS,
+            ButtonTone::Secondary,
+        )],
         BannerActions::RetryAndSettings => vec![
-            (ActionId::OpenSettings, text::BANNER_SETTINGS),
-            (ActionId::Retry, text::BANNER_RETRY),
+            (
+                ActionId::OpenSettings,
+                text::BANNER_SETTINGS,
+                ButtonTone::Secondary,
+            ),
+            (ActionId::Retry, text::BANNER_RETRY, ButtonTone::Primary),
         ],
     };
     let mut x = area.right().saturating_sub(1);
     let mut rects = Vec::with_capacity(labels.len());
-    for (action, label) in labels {
-        let width = widgets::button_width(label);
+    for (action, label, tone) in labels {
+        let width = widgets::button_width(label, tone);
         if width == 0 || x < area.x.saturating_add(2) {
             break;
         }

@@ -527,3 +527,34 @@ fn test_connection_never_writes_or_adopts_credentials() {
         Some(SettingsStatus::Error(_))
     ));
 }
+
+#[test]
+fn single_line_field_keys_select_and_edit_with_undo() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut app, _store) = connected_app(&dir);
+    app.handle_key(key(KeyCode::Char('/')));
+    assert_eq!(app.focus(), Focus::Field(FieldId::SessionSearch));
+    for character in "hello world".chars() {
+        app.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(app.session_log().search().value(), "hello world");
+    app.handle_key(key(KeyCode::Char('!')));
+    app.handle_key(ctrl(KeyCode::Char('z')));
+    assert_eq!(app.session_log().search().value(), "hello world");
+    app.handle_key(ctrl(KeyCode::Char('y')));
+    assert_eq!(app.session_log().search().value(), "hello world!");
+
+    app.handle_key(key(KeyCode::Home));
+    app.handle_key(ctrl(KeyCode::Right));
+    assert_eq!(app.session_log().search().caret(), 6);
+    app.handle_key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.session_log().search().selection_range(), Some((6, 11)));
+
+    app.handle_key(ctrl(KeyCode::Char('a')));
+    assert_eq!(app.session_log().search().selection_range(), Some((0, 12)));
+    app.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(app.session_log().search().value(), "x");
+}

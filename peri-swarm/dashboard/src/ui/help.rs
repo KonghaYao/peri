@@ -58,7 +58,7 @@ pub fn render(buf: &mut Buffer, area: Rect, hits: &mut HitMap) {
     if reserve == 1 {
         let hint_row = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
         let close_label = text::action_label(ActionId::CloseHelp);
-        let close_width = widgets::button_width(close_label);
+        let close_width = widgets::button_width(close_label, ButtonTone::Secondary);
         let hint_width = hint_row.width.saturating_sub(close_width.saturating_add(1));
         buf.set_string(
             hint_row.x,
@@ -71,6 +71,7 @@ pub fn render(buf: &mut Buffer, area: Rect, hits: &mut HitMap) {
                 hint_row,
                 hint_row.right().saturating_sub(close_width),
                 close_label,
+                ButtonTone::Secondary,
             );
             widgets::render_button(buf, close, close_label, false, ButtonTone::Secondary);
             hits.region(Layer::Overlay, close, Intent::Activate(ActionId::CloseHelp));

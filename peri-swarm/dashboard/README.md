@@ -64,8 +64,11 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
 
 已实现功能：
 
-- Session log：加载 50 条，`Load more` 每次 +50，最多 500；状态 chips 与客户端搜索只作用于
-  已加载集合；点击行进入详情。
+- Session log：首屏加载 50 条，表下分页器每页显示 10 条（页码 + `‹ Prev`/`Next ›`，
+  `PgUp`/`PgDn` 同效）；页码控件按最大页码的位数占固定列数，页码带按最宽窗口预留空间，
+  翻页时 `Next ›` 不移动；在末页继续 `Next ›` 时再取 50 条，最多 500 条。列表在本地按
+  最近活跃排序（`last_active_at` 降序，其次 `created_at` 降序；时间完全相同保持网关返回
+  顺序）。状态 chips 与客户端搜索只作用于已加载集合；点击行进入详情。
 - Session detail：Timeline / Turns / Info 三个标签；审批 Approve/Deny；发送消息；取消
   turn；编辑 model/metadata/prompt cache；删除。删除、取消和退出登录都有确认框。
 - New session：Logical ID、Model、CWD、Instructions、Metadata 行与可折叠的
@@ -76,9 +79,10 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
 ## 限制
 
 - **只轮询，没有 SSE**。列表、详情和健康检查按固定间隔拉取；没有流式消费入口。
-- **加载顺序是网关的 `logical_id desc`**，UI 只标注
-  `Gateway order (logical id desc) · N loaded`，不宣称完整历史或时间顺序。搜索和计数都只
-  覆盖已加载集合。
+- **排序在客户端完成**：网关按 `logical_id desc` 返回，但 `logicalId` 是调用方任意字符串，
+  不保证时间顺序。UI 在收到响应后按 `last_active_at` 降序、同值按 `created_at` 降序做稳定
+  排序，时间完全相同时保留网关返回顺序；页脚标注
+  `Newest activity first · N loaded`。搜索和计数仍只覆盖已加载集合。
 - 单网关、单凭据；没有多 profile、Overview、指标聚合或跨节点视图。
 - Request log 无数据来源（网关不提供服务器请求日志）；Agents、Environment templates、
   Skills、Files、Vaults、Projects and keys、Nodes 均未实现。

@@ -5,14 +5,11 @@
 //! owns the worker request and the idempotency key.
 
 use peri_tui_components::button::ButtonTone;
-use peri_tui_components::textarea::{
-    render_multiline_with_cursor, TextAreaRenderOptions, TextAreaStyles,
-};
+use peri_tui_components::textarea::{render_text_area_with_cursor, TextAreaStyles};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::widgets::{Block, Paragraph, Widget};
 
-use crate::app::{ActionId, App, FieldId, Focus, Intent};
+use crate::app::{ActionId, App, FieldId, Focus, Intent, TextAreaClick};
 use crate::ui::hit::{HitMap, Layer};
 use crate::ui::text;
 use crate::ui::widgets::{self, Rows};
@@ -106,7 +103,7 @@ fn render_metadata(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitM
         render_metadata_band(buf, band, app, hits, index, row.key(), row.value());
         let button_row = rows.line();
         let label = text::REMOVE_ROW;
-        let rect = widgets::button_rect(button_row, button_row.x, label);
+        let rect = widgets::button_rect(button_row, button_row.x, label, ButtonTone::Danger);
         widgets::render_button(buf, rect, label, false, ButtonTone::Danger);
         hits.region(Layer::Base, rect, Intent::RemoveMetadataRow(index));
     }
@@ -189,7 +186,7 @@ fn render_advanced(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitM
         text::SHOW_ADVANCED
     };
     let row = rows.line();
-    let rect = widgets::button_rect(row, row.x, label);
+    let rect = widgets::button_rect(row, row.x, label, ButtonTone::Secondary);
     widgets::render_button(
         buf,
         rect,
@@ -294,49 +291,35 @@ fn multiline_field(
         return;
     };
     let rect = rows.take(height.saturating_add(2));
-    render_text_area(
-        buf,
-        rect,
-        state,
-        app.focus() == Focus::Field(field),
-        placeholder,
-    );
-    hits.region(Layer::Base, rect, Intent::FocusTextArea(field));
-}
-
-fn render_text_area(
-    buf: &mut Buffer,
-    rect: Rect,
-    state: &peri_tui_components::textarea::TextAreaState,
-    focused: bool,
-    placeholder: &str,
-) {
-    if rect.height < 3 || rect.width < 2 {
-        return;
-    }
-    let block = Block::bordered().border_style(widgets::border_style(focused));
-    let inner = block.inner(rect);
-    block.render(rect, buf);
-    if inner.is_empty() {
-        return;
-    }
+    let focused = app.focus() == Focus::Field(field);
     let styles = TextAreaStyles {
         cursor: widgets::selected_style(),
         selection: widgets::selected_style(),
         placeholder: widgets::dim_style(),
         base: widgets::muted_style(),
     };
-    let lines = render_multiline_with_cursor(TextAreaRenderOptions {
-        text: &state.text,
-        cursor: state.cursor,
-        selection_range: None,
-        placeholder: Some(placeholder),
+    render_text_area_with_cursor(
+        buf,
+        rect,
+        state,
+        focused,
+        widgets::border_style(focused),
         styles,
-        max_width: usize::from(inner.width),
-        viewport_height: usize::from(inner.height),
-        show_cursor: focused,
-    });
-    Paragraph::new(lines).render(inner, buf);
+        Some(placeholder),
+    );
+    hits.region(
+        Layer::Base,
+        rect,
+        Intent::FocusTextAreaAt {
+            field,
+            click: TextAreaClick {
+                row: 0,
+                column: 0,
+                width: rect.width.saturating_sub(2),
+                height: rect.height.saturating_sub(2),
+            },
+        },
+    );
 }
 
 fn action_button(
@@ -348,7 +331,7 @@ fn action_button(
     tone: ButtonTone,
 ) {
     let label = text::action_label(action);
-    let rect = widgets::button_rect(row, row.x, label);
+    let rect = widgets::button_rect(row, row.x, label, tone);
     widgets::render_button(buf, rect, label, app.focus() == Focus::Action(action), tone);
     hits.region(Layer::Base, rect, Intent::Activate(action));
 }
@@ -398,7 +381,7 @@ pub fn render_edit(
         render_edit_metadata_band(buf, band, app, hits, index, row.key(), row.value());
         let button_row = rows.line();
         let label = text::REMOVE_ROW;
-        let rect = widgets::button_rect(button_row, button_row.x, label);
+        let rect = widgets::button_rect(button_row, button_row.x, label, ButtonTone::Danger);
         widgets::render_button(buf, rect, label, false, ButtonTone::Danger);
         hits.region(Layer::Base, rect, Intent::RemoveMetadataRow(index));
     }
@@ -455,7 +438,7 @@ pub fn render_edit(
         if form.offer_cancel() {
             let row = rows.line();
             let label = text::action_label(ActionId::CancelTurn);
-            let rect = widgets::button_rect(row, row.x, label);
+            let rect = widgets::button_rect(row, row.x, label, ButtonTone::Danger);
             widgets::render_button(buf, rect, label, false, ButtonTone::Danger);
             hits.region(Layer::Base, rect, Intent::OpenCancelTurn);
         }

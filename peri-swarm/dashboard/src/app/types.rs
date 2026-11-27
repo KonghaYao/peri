@@ -216,7 +216,7 @@ pub fn page_row_index(page: Page) -> usize {
 #[must_use]
 pub fn next_page(page: Page) -> Page {
     match Page::ALL.iter().position(|candidate| *candidate == page) {
-        Some(index) => Page::ALL[(index + 1) % Page::ALL.len()],
+        Some(index) => Page::ALL[peri_tui_components::list_nav::cycle_next(index, Page::ALL.len())],
         None => Page::SessionLog,
     }
 }
@@ -225,8 +225,10 @@ pub fn next_page(page: Page) -> Page {
 #[must_use]
 pub fn previous_page(page: Page) -> Page {
     match Page::ALL.iter().position(|candidate| *candidate == page) {
-        Some(0) | None => Page::ALL[Page::ALL.len() - 1],
-        Some(index) => Page::ALL[index - 1],
+        Some(index) => {
+            Page::ALL[peri_tui_components::list_nav::cycle_previous(index, Page::ALL.len())]
+        }
+        None => Page::ALL[Page::ALL.len() - 1],
     }
 }
 
@@ -328,8 +330,6 @@ pub enum ActionId {
     NewSession,
     /// Session log: refetch the current limit.
     RefreshSessions,
-    /// Session log: raise the limit by 50 and refetch.
-    LoadMoreSessions,
     /// Create form: submit through the worker.
     CreateSubmit,
     /// Create form: append an empty metadata row.
@@ -485,8 +485,12 @@ pub enum Intent {
     NewSession,
     /// Session log: refetch the loaded limit.
     RefreshSessions,
-    /// Session log: raise the limit by 50 and refetch.
-    LoadMoreSessions,
+    /// Session log: show the previous display page.
+    SessionPagePrev,
+    /// Session log: show the next display page, fetching more rows if needed.
+    SessionPageNext,
+    /// Session log: jump to a loaded display page (0-based).
+    GoToSessionPage(usize),
     /// Session detail: select a tab.
     SelectDetailTab(DetailTab),
     /// Create form: append a metadata row.

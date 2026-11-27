@@ -1,4 +1,6 @@
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use super::*;
@@ -37,6 +39,23 @@ fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(ratatui::buffer::Cell::symbol)
         .collect()
+}
+
+fn find_label_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+    for y in buffer.area.y..buffer.area.bottom() {
+        let row: String = (buffer.area.x..buffer.area.right())
+            .map(|x| {
+                buffer
+                    .cell((x, y))
+                    .map_or("", ratatui::buffer::Cell::symbol)
+            })
+            .collect();
+        if let Some(offset) = row.find(needle) {
+            let x = buffer.area.x + u16::try_from(offset).expect("column");
+            return Some((x, y));
+        }
+    }
+    None
 }
 
 fn click(hits: &HitMap, intent: Intent) -> Intent {
@@ -136,4 +155,62 @@ fn quit_button_sets_quit() {
     let effects = app.apply(click(&hits, Intent::Activate(ActionId::Quit)));
     assert!(matches!(effects.as_slice(), [crate::app::Effect::Quit]));
     assert!(app.should_quit());
+}
+
+#[test]
+fn busy_settings_disables_buttons_for_mouse_tab_and_enter() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::OpenSettings);
+    let (_terminal, hits) = draw(&mut app, 100, 30);
+    assert!(hits
+        .region_rect(Intent::Activate(ActionId::TestConnection))
+        .is_some());
+    app.apply(click(&hits, Intent::Activate(ActionId::TestConnection)));
+    assert_eq!(
+        app.focus(),
+        crate::app::Focus::Action(ActionId::TestConnection)
+    );
+
+    let (terminal, hits) = draw(&mut app, 100, 30);
+    for action in [
+        ActionId::TestConnection,
+        ActionId::EditCredentials,
+        ActionId::SignOut,
+        ActionId::Quit,
+    ] {
+        assert!(!app.action_enabled(action), "{action:?} stays enabled");
+    }
+    // The sidebar keeps its own sign-out region, so only the three page
+    // buttons are asserted here.
+    for action in [
+        ActionId::TestConnection,
+        ActionId::EditCredentials,
+        ActionId::Quit,
+    ] {
+        assert!(
+            hits.region_rect(Intent::Activate(action)).is_none(),
+            "{action:?} still has a hit region"
+        );
+    }
+    let label = text::action_label(ActionId::TestConnection);
+    let (label_x, label_y) =
+        find_label_row(terminal.backend().buffer(), label).expect("drawn label");
+    let style = terminal
+        .backend()
+        .buffer()
+        .cell((label_x, label_y))
+        .expect("button cell")
+        .style();
+    assert!(style.add_modifier.contains(Modifier::DIM));
+
+    assert!(app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .is_empty());
+    assert_eq!(
+        app.validation_purpose(),
+        Some(crate::worker::ValidationPurpose::TestConnection)
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.focus(), crate::app::Focus::Sidebar);
 }
