@@ -26,7 +26,6 @@ impl ServerLoop<'_> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let mut withdrawn = Vec::new();
         if params
             .get("inputIds")
             .and_then(Value::as_array)
@@ -36,19 +35,20 @@ impl ServerLoop<'_> {
                 .stdio_preview_input(crate::host::stdio::v2::CLOSE, &params)
                 .await
             {
-                Ok(value) => withdrawn = input_ids(&value),
+                Ok(value) => {
+                    let withdrawn = confirmed_withdrawals(&value);
+                    self.transport.settle_withdrawn(&sid, &withdrawn).await;
+                }
                 Err(error) => {
                     // Withdrawals confirmed before the failure are already
                     // committed in the store and can no longer be delivered;
                     // settle them even though the close request fails.
-                    let confirmed = error.data.as_ref().map(input_ids).unwrap_or_default();
-                    self.transport.settle_withdrawn(&sid, &confirmed).await;
+                    settle_failed_close(self.transport.as_ref(), &sid, &error).await;
                     let _ = self.transport.send_response(id, Err(error)).await;
                     return;
                 }
             }
         }
-        self.transport.settle_withdrawn(&sid, &withdrawn).await;
         self.dispatch_request(
             id,
             "session/close".into(),
@@ -114,7 +114,7 @@ impl ServerLoop<'_> {
             crate::host::stdio::v2::CANCEL | crate::host::stdio::v2::CLOSE
         ) {
             let mut withdrawn = Vec::new();
-            let mut close_error = None;
+            let mut first_error = None;
             if let Some(inputs) = params.get("inputIds").and_then(Value::as_array) {
                 for input_id in inputs.iter().filter_map(Value::as_str) {
                     match withdraw(input_id.to_owned()).await {
@@ -124,8 +124,8 @@ impl ServerLoop<'_> {
                             // Keep withdrawing. A confirmed withdrawal can no
                             // longer deliver, and the adapter must learn that
                             // even if this close ultimately fails.
-                            if close_error.is_none() {
-                                close_error = Some(error);
+                            if first_error.is_none() {
+                                first_error = Some(error);
                             }
                         }
                         Err(error) => {
@@ -139,8 +139,8 @@ impl ServerLoop<'_> {
                     .await;
                 return Ok(json!(withdrawn));
             }
-            return match close_error {
-                Some(error) => Err(error.with_data(json!({"withdrawn": withdrawn}))),
+            return match first_error {
+                Some(error) => Err(close_error(error, &withdrawn)),
                 None => Ok(json!(withdrawn)),
             };
         }
@@ -212,9 +212,25 @@ fn invalid() -> AcpError {
     AcpError::new(-32602, "Invalid internal ACP Preview input")
 }
 
-fn input_ids(value: &Value) -> Vec<String> {
-    value
-        .as_array()
+/// Error reply for a close whose withdrawals confirmed inputs before the first
+/// failure: the adapter settles exactly `withdrawn`, and the host reads the
+/// same list back through [`confirmed_withdrawals`].
+fn close_error(error: AcpError, withdrawn: &[String]) -> AcpError {
+    error.with_data(json!({"withdrawn": withdrawn}))
+}
+
+/// Inputs a Preview withdrawal reply confirmed.
+///
+/// A successful close reply is the bare array of input ids; a failed one keeps
+/// the same list under `withdrawn` (see [`close_error`]). Both shapes decode
+/// here, so no caller has to know which reply it holds.
+fn confirmed_withdrawals(value: &Value) -> Vec<String> {
+    let list = match value {
+        Value::Array(_) => Some(value),
+        Value::Object(_) => value.get("withdrawn"),
+        _ => None,
+    };
+    list.and_then(Value::as_array)
         .map(|ids| {
             ids.iter()
                 .filter_map(Value::as_str)
@@ -222,6 +238,22 @@ fn input_ids(value: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A failed close still reports the withdrawals confirmed before its first
+/// error. Those inputs can no longer be delivered, so settle exactly those
+/// before the error reaches the adapter.
+async fn settle_failed_close(
+    transport: &dyn crate::transport::AcpTransport,
+    session_id: &str,
+    error: &AcpError,
+) {
+    let confirmed = error
+        .data
+        .as_ref()
+        .map(confirmed_withdrawals)
+        .unwrap_or_default();
+    transport.settle_withdrawn(session_id, &confirmed).await;
 }
 
 #[cfg(test)]
