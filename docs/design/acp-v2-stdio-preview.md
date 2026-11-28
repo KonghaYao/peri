@@ -262,7 +262,8 @@ turn with `state_update.error.code = -32603` and `stopReason = "error"`.
 always forwarded to the host, which answers an unknown or already deleted session
 with success for `session/close`, the pinned empty payload for a repeated
 `session/delete`, or its own error (for example `-32002`), passed through
-unchanged.
+unchanged, except as the error table maps it (for example, a non-cleanup host
+`-32010` becomes `-32603`).
 
 ## Capabilities and peer requests
 
