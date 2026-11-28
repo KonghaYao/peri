@@ -165,14 +165,16 @@ async fn a_stale_failed_resume_keeps_the_newer_attach() {
     assert!(result.is_ok());
 
     // The earlier attempt fails afterwards. Only the attempt that still owns
-    // the slot may unwind it, so the attach and its updates must survive.
+    // the slot may unwind it, so the attach and its updates must survive. The
+    // host's `-32010` reaches v2 clients as the stable busy code.
     harness
         .respond(
             stale_forwarded.id,
             Err(AcpError::new(-32010, "Session is closing")),
         )
         .await;
-    expect_error(&harness, stale, -32010).await;
+    let error = expect_error(&harness, stale, -32020).await;
+    assert_eq!(error.data.expect("busy data")["reason"], "session_busy");
     harness
         .send_update(
             "A",
@@ -392,7 +394,7 @@ async fn a_failed_owner_ends_the_replay_a_stale_success_left_open() {
             Err(AcpError::new(-32010, "Session is closing")),
         )
         .await;
-    expect_error(&harness, owner, -32010).await;
+    expect_error(&harness, owner, -32020).await;
 
     // No replacement boundary: the replay is over even though no marker was
     // ever sent for the stale success.
@@ -443,7 +445,7 @@ async fn a_failed_takeover_without_a_completed_attach_keeps_the_slot_attaching()
             Err(AcpError::new(-32010, "Session is closing")),
         )
         .await;
-    expect_error(&harness, second, -32010).await;
+    expect_error(&harness, second, -32020).await;
 
     // No attach completed, so the session is not addressable and its updates
     // are not routed.

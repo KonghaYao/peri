@@ -39,7 +39,7 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 3. `PASS v2 session/delete drops the session and its connection slot`
 4. `PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict`
 5. `PASS v2 replay order replay_complete -> state -> reply; deferred live metadata flushed exactly once after the reply`
-6. `KNOWN v2 active-turn replay: shared host prompt lock returns -32010 (adapter hold/order covered by host::stdio::v2::replay tests)`
+6. `PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy (limited rejection, not a successful replay)`
 7. `PASS v2 session/list limit=1 order/no duplicates/termination; exact cwd; invalid cursor -32602`
 8. `PASS v2 session/list cursor remains valid in a new process (durable keyset position)`
 9. `PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close`
@@ -73,11 +73,12 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 - **S4 replay**：unsupported cursor `-32602`；回放后
   `replay_complete`（恰一次）→ state → 响应；host 在 load 响应前推的 config/commands
   被 deferred，响应后各恰好冲刷一次；重启后回放与幂等重试只出现一次；空回放也发
-  `replay_complete`（进程内测试）。
+  `replay_complete`（进程内测试）。活动 turn 内 replay 的 wire 断言是**受限拒绝的形状**：
+  `-32020` + `data.reason == "session_busy"` + `data.sessionId`，不是成功回放。
 - **S4 进程内**：`host::stdio::v2::replay` 覆盖活动 turn 中 resume 的 hold/flush 顺序、
   live chunk 不产生替换边界、1024 条缓冲上限与溢出、回放期间 `session/cancel` 收敛到
   `idle`、stale success 不冲刷 takeover 的 deferred、pending resume 期间的 done 仍结束
-  turn。
+  turn、宿主 `-32010` 在 replay 与无 replay 的 resume 上都映射为 `session_busy`。
 
 ## 复审收口（`7a544cf29` 的 CodeRabbit 复审）
 
@@ -90,18 +91,37 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 - **C（Attaching 时丢弃 done）**：已修复。`peri/agent_event` 与
   `peri/agent_event_done` 的 guard 只在「slot 未 attach、未回放且没有 live turn」时丢弃
   事件；回归 `a_pending_resume_never_drops_the_turn_end` 在 resume pending 时发 done，
-  断言 `idle` 仍发布，随后 host `-32010` 失败不留下 `running`，后续 replay 仍能转发。
+  断言 `idle` 仍发布，随后宿主 `-32010` 失败（v2 客户端收到 `-32020 session_busy`）不留下
+  `running`，后续 replay 仍能转发。
 - **D（设计文档仍称 `set_config_option` 不支持）**：已在设计文档重写中修正；配置面列为
   已实现，不再出现在 `-32601` 表。
 - **E（held 元数据顺序）**：已修正。文档明确 plain resume 成功时 state 快照与 held
   元数据在响应**之前**；只有 `session/new` 的元数据在响应之后。
 
+## 收口复跑：v2 setup 的 busy 错误码
+
+`fix(peri-acp): 活动 turn 内 resume 返回稳定 busy 错误` 之后，v2 setup 回复不再透传宿主
+的 `-32010`：带会话 id 的 setup（`session/resume`、`session/load`）失败于 `-32010` 时，
+客户端收到 `-32020` + `data.reason = "session_busy"` + `data.sessionId`；`session/new`
+没有会话 id 可报，保持 `normalize` 的既有约定；close/delete 的 `-32010` 透传与 v1 语义门
+保持原样。
+
+同一矩阵命令复跑 `EXIT=0`，断言条目不变，只有第 6 条从 `KNOWN` 变为：
+
+```
+PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy (limited rejection, not a successful replay)
+```
+
+这条断言验证的是**受限拒绝的形状**，不是成功回放；宿主放开该 gate 时必须显式改写它。
+
 ## 已知限制
 
-- **活动 turn 内 replay**：适配器不再预拒绝，并具备 hold/flush 与状态机语义（进程内
-  测试覆盖）；但共享宿主在 per-session prompt lock 被持有时对 `session/load` 返回
-  `-32010 Session is executing`。wire 矩阵把该场景记为 `KNOWN` 而非 `PASS`。放开该 gate
-  或增加 preview-only 只读 replay 路由属于宿主策略变更，本次未改共享层。
+- **活动 turn 内 replay（不支持，拒绝形状已确定）**：适配器具备 hold/flush 与状态机
+  语义（进程内测试覆盖），但共享宿主在 per-session prompt lock 被持有时对
+  `session/load` 与 `session/resume` 返回 `-32010 Session is executing`。适配器把它收口为
+  `-32020` + `data.reason = "session_busy"` + `data.sessionId`，客户端应等 `idle`/turn
+  结束后重试；wire 矩阵断言这个受限拒绝的形状，而不是成功回放。放开 gate 或增加
+  preview-only 只读 replay 路由属于宿主策略变更，本次未改共享层。
 - `state_update` 在回放期间被合并：前台状态机继续推进，但逐条 parked `state_update`
   不重放，以 resume 完成时的权威快照为准（pinned 允许重复/幂等快照）。
 - replay 期间 per-session live 缓冲上限 1024 条；溢出丢弃最新条目并记 warn，客户端可用

@@ -256,6 +256,7 @@ async fn a_pending_resume_never_drops_the_turn_end() {
         )
         .await;
     let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/resume");
 
     // The turn ends while the resume is still pending. Ending the foreground
     // state must not depend on the attach phase: otherwise a later host
@@ -272,7 +273,12 @@ async fn a_pending_resume_never_drops_the_turn_end() {
             )),
         )
         .await;
-    expect_error(&harness, resume, -32010).await;
+    // The host's turn lock rejection reaches a v2 client as the stable Peri
+    // busy code, not as the host's overloaded `-32010` (v1 surface only).
+    let error = expect_error(&harness, resume, -32020).await;
+    let data = error.data.expect("busy data");
+    assert_eq!(data["reason"], "session_busy");
+    assert_eq!(data["sessionId"], "A");
 
     // The slot is attached again; a replay request reaches the host instead of
     // being refused from a stale foreground state.
@@ -286,6 +292,43 @@ async fn a_pending_resume_never_drops_the_turn_end() {
         .await;
     let forwarded = harness.expect_forwarded().await;
     assert_eq!(forwarded.method, "session/load");
+}
+
+#[tokio::test]
+async fn a_failed_replay_reports_the_busy_session_with_a_stable_code() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    begin_turn(&harness, "A").await;
+
+    // The adapter accepts the replay and holds live updates, but the host's
+    // per-session prompt lock refuses `session/load` while the turn runs. The
+    // client must see one stable Peri code and reason, not the host's `-32010`.
+    let replay = RequestId::Number(4700);
+    harness
+        .request(
+            replay.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/load");
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    let error = expect_error(&harness, replay, -32020).await;
+    let data = error.data.expect("busy data");
+    assert_eq!(data["reason"], "session_busy");
+    assert_eq!(data["sessionId"], "A");
+    // A refused replay emits no `replay_complete`: the run never started.
+    harness.expect_quiet().await;
 }
 
 #[tokio::test]

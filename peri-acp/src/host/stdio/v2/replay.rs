@@ -262,7 +262,13 @@ pub(super) async fn settle_setup(
     }
     let projected = result
         .map(|value| lifecycle::lifecycle_result(method, value))
-        .map_err(|error| if two { errors::normalize(error) } else { error });
+        .map_err(|error| {
+            if two {
+                errors::setup_failure(error, sid.as_deref())
+            } else {
+                error
+            }
+        });
     // Cache the option list the host reported; `session/new` and
     // `session/load` already carry it in their reply.
     if let Ok(value) = &projected {

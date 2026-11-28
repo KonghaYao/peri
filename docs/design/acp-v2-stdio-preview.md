@@ -124,16 +124,20 @@ later withdrawal or the shared close fails.
   snapshot (`idle`/`running`/`requires_action`) → response → parked live updates.
   A failed or truncated replay sends no marker and fails the request.
 - A resume may arrive while the session's turn is still running. The adapter no
-  longer pre-rejects it: it parks live updates, keeps the foreground state
-  machine current, and reports the then-current state in the reply. The shared
-  host, however, still refuses `session/load` with `-32010` while that session's
-  per-session prompt lock is held, so today the client observes `-32010` for a
-  replay requested mid-turn and the adapter restores the slot and its state.
-  Lifting that gate (or adding a preview-only read-only replay route) is a host
-  policy decision tracked outside this stage; the adapter's hold/order behaviour
-  is covered by `host::stdio::v2::replay` tests. A `session/cancel` received
-  during replay still withdraws and stops the turn; the turn's buffered live
-  updates converge to `idle` in the normal way.
+  longer pre-rejects it and can hold live updates, keep the foreground state
+  machine current, and report the then-current state in a successful reply. The
+  shared host, however, still refuses `session/load` (and a plain
+  `session/resume`) with `-32010` while that session's per-session prompt lock is
+  held by the executing turn; concurrent work against executing state has not
+  been proven safe. The adapter therefore reports a stable `-32020` with
+  `data.reason = "session_busy"` and `data.sessionId`, and the client should wait
+  for `idle` (or the turn end) and retry. Mid-turn replay is **not** supported
+  end to end today: what the adapter exercises in `host::stdio::v2::replay` is
+  the hold/flush path and its 1024-update bound, which are ready for the day the
+  host lifts the gate. That is a host policy decision (or a preview-only
+  read-only replay route), tracked outside this stage. A `session/cancel`
+  received during replay still withdraws and stops the turn; the turn's buffered
+  live updates converge to `idle` in the normal way.
 - `state_update` is a snapshot, not an event: transitions still run while the
   queue holds, but the post-replay snapshot is authoritative and individual
   parked state updates are not replayed.
@@ -152,7 +156,9 @@ later withdrawal or the shared close fails.
 One module owns every v2 error. `-32000` is reserved for *Authentication
 required* by the pinned schema, so the preview never emits it: host
 passthroughs that use it for backpressure are rewritten to `-32020` with the
-original `data.reason` (or `server_error`).
+original `data.reason` (or `server_error`). `-32020` is also the stable answer
+when the host refuses a v2 setup because the session's turn is executing; that
+rejection is `data.reason = "session_busy"` and never the host's `-32010`.
 
 | condition | code | data |
 | --- | --- | --- |
@@ -163,6 +169,7 @@ original `data.reason` (or `server_error`).
 | prompt withdrawn before insertion, close/delete settlement, retry of a key whose submission was withdrawn in this session generation | `-32800` | — |
 | the same key/identity with different content (in flight, or already inserted in the transcript) | `-32602` | — |
 | capacity/backpressure | `-32020` | `{ "reason": "prompt_capacity" \| …, "sessionId": … }` |
+| v2 setup refused because the session's turn is executing (host `-32010`) | `-32020` | `{ "reason": "session_busy", "sessionId": … }` |
 | host-passthrough close/cleanup failure | `-32010` | passthrough |
 
 ## Capabilities and peer requests

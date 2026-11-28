@@ -1,10 +1,11 @@
 //! The single mapping point for ACP v2 error codes.
 //!
 //! The pinned v2 schema reserves `-32000` for **Authentication required**, so the
-//! preview never emits it: capacity and backpressure use Peri's own server error
-//! `-32020` with a stable `data.reason`, and unknown sessions use `-32002` with
-//! `data.sessionId` (`SessionNotFoundErrorData`). Every v2 error is constructed
-//! here so the mapping stays reviewable in one place.
+//! preview never emits it: capacity, backpressure and a busy session use Peri's
+//! own server error `-32020` with a stable `data.reason` (`prompt_capacity`,
+//! `session_busy`), and unknown sessions use `-32002` with `data.sessionId`
+//! (`SessionNotFoundErrorData`). Every v2 error is constructed here so the
+//! mapping stays reviewable in one place.
 
 use serde_json::{json, Value};
 
@@ -22,10 +23,13 @@ pub(super) const INVALID_REQUEST: i64 = -32600;
 pub(super) const SESSION_NOT_FOUND: i64 = -32002;
 /// Request cancelled (prompt withdrawn before insertion, close settlement).
 pub(super) const CANCELLED: i64 = -32800;
-/// Peri-defined server error for capacity/backpressure (pinned allows custom
-/// server errors in `-32000..=-32099`).
+/// Peri-defined server error for capacity/backpressure and for a busy session
+/// (pinned allows custom server errors in `-32000..=-32099`). `data.reason`
+/// distinguishes the two families: `prompt_capacity` vs `session_busy`.
 pub(super) const CAPACITY: i64 = -32020;
-/// The host's one-session-per-connection rejection (v1 surface only).
+/// The host's `-32010` conflict code: the v1 session-switch/setup gates and the
+/// close/cleanup passthrough. A v2 setup never forwards the host's busy
+/// rejection under this code; it answers `session_busy` (`-32020`) instead.
 pub(super) const SESSION_SWITCH: i64 = -32010;
 
 pub(super) fn unknown_method(method: &str) -> AcpError {
@@ -54,14 +58,27 @@ pub(super) fn cancelled() -> AcpError {
 
 /// Prompt queue/receipt capacity reached.
 pub(super) fn prompt_capacity(session_id: &str) -> AcpError {
-    capacity(
+    server_error(
         "prompt_capacity",
         session_id,
         "ACP prompt queue capacity reached",
     )
 }
 
-fn capacity(reason: &'static str, session_id: &str, message: &'static str) -> AcpError {
+/// The session's turn still executes, so the host refuses the setup.
+///
+/// Reported on the same `-32020` server error as capacity so a v2 client sees
+/// one Peri code with an explicit reason, and can retry after the session
+/// publishes `idle`.
+pub(super) fn session_busy(session_id: &str) -> AcpError {
+    server_error(
+        "session_busy",
+        session_id,
+        "Session is busy; retry after the current turn",
+    )
+}
+
+fn server_error(reason: &'static str, session_id: &str, message: &'static str) -> AcpError {
     AcpError::new(CAPACITY, message).with_data(json!({ "reason": reason, "sessionId": session_id }))
 }
 
@@ -129,4 +146,17 @@ pub(super) fn normalize(error: AcpError) -> AcpError {
         _ => json!({ "reason": "server_error" }),
     };
     AcpError::new(CAPACITY, error.message).with_data(data)
+}
+
+/// Map a host error from a v2 `session/new` / `session/resume` setup.
+///
+/// `session/new` has no session id to report, so it keeps the `normalize`
+/// contract. A resume whose session's turn still holds the host's per-session
+/// prompt lock gets the stable busy code instead of the host's overloaded
+/// `-32010`; every other code passes through `normalize` unchanged.
+pub(super) fn setup_failure(error: AcpError, session_id: Option<&str>) -> AcpError {
+    match (error.code, session_id) {
+        (SESSION_SWITCH, Some(session_id)) => session_busy(session_id),
+        _ => normalize(error),
+    }
 }

@@ -334,11 +334,11 @@ def lifecycle(binary, root, schema):
         print("PASS v2 replay order replay_complete -> state -> reply; "
               "deferred live metadata flushed exactly once after the reply")
 
-        # S4 known gap: replay while the turn is running. The adapter accepts the
-        # request and holds live updates, but the shared host's per-session prompt
-        # lock refuses `session/load` with -32010 while a turn is executing.
-        # Keep the probe so a future host policy that lifts the gate exercises
-        # the intended ordering instead.
+        # S4 limitation, asserted deterministically: a replay requested while the
+        # session's turn is executing is refused by the shared host's per-session
+        # prompt lock. The adapter reports one stable Peri code for it, so the
+        # probe asserts the *shape of the limited rejection*, not a successful
+        # replay. If the host policy changes, update this branch explicitly.
         active_sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
         start = len(peer.frames)
         held = peer.request("session/prompt", prompt(active_sid, "[[tool:hold]] active turn replay probe"))
@@ -347,23 +347,15 @@ def lifecycle(binary, root, schema):
                    and f.get("method") == "session/update"
                    and f["params"]["sessionId"] == active_sid
                    and f["params"]["update"].get("sessionUpdate") == "tool_call_update")
-        active_at = len(peer.frames)
         active = peer.response(peer.request("session/resume", {
             "sessionId": active_sid, "cwd": str(root), "replayFrom": {"type": "start"}
         }))
-        if "error" in active:
-            assert active["error"]["code"] == -32010, active
-            print("KNOWN v2 active-turn replay: shared host prompt lock returns -32010 "
-                  "(adapter hold/order covered by host::stdio::v2::replay tests)")
-        else:
-            assert "result" in active, active
-            active_updates = [f["params"]["update"] for f in peer.frames[active_at:peer.frames.index(active)]
-                              if f.get("method") == "session/update"]
-            assert sum(u["sessionUpdate"] == "replay_complete" for u in active_updates) == 1
-            marker = next(i for i, u in enumerate(active_updates)
-                          if u["sessionUpdate"] == "replay_complete")
-            assert active_updates[marker + 1]["state"] == "running", active_updates[marker + 1:]
-            print("PASS v2 active-turn replay: replay_complete -> running state -> reply")
+        assert "error" in active, active
+        assert active["error"]["code"] == -32020, active
+        assert active["error"]["data"]["reason"] == "session_busy", active
+        assert active["error"]["data"]["sessionId"] == active_sid, active
+        print("PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy "
+              "(limited rejection, not a successful replay)")
         peer.send({"method": "session/cancel", "params": {"sessionId": active_sid}})
         peer.until(lambda f: f in peer.frames[start:]
                    and f.get("method") == "session/update"

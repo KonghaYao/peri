@@ -52,9 +52,11 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
         Some(cursor) if cursor.get("type").and_then(Value::as_str) == Some("start") => true,
         _ => return Routed::Answered(Err(errors::invalid_params("Unsupported replay cursor"))),
     };
-    // A replay may start while the session's turn is still running: the adapter
-    // holds live updates until the reply, and the state snapshot reports the
-    // current foreground state.
+    // The adapter can hold live updates until the reply and report the current
+    // foreground state, but the shared host still refuses `session/load` while
+    // this session's turn holds the per-session prompt lock. The v2 client sees
+    // a stable `-32020` with `reason = "session_busy"` and should retry after
+    // `idle`; replay during an active turn is not supported end to end today.
     let mut forwarded = params.clone();
     if let Some(object) = forwarded.as_object_mut() {
         object.remove("replayFrom");

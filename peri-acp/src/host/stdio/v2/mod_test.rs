@@ -256,7 +256,7 @@ async fn a_failed_resume_leaves_no_slot_behind() {
             Err(AcpError::new(-32010, "Session is closing")),
         )
         .await;
-    expect_error(&harness, RequestId::Number(600), -32010).await;
+    expect_error(&harness, RequestId::Number(600), -32020).await;
     // B was already attached, so it keeps receiving updates.
     harness
         .send_update(
