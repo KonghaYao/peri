@@ -20,6 +20,11 @@ pub trait AcpTransport: Send + Sync {
     /// A protocol may project this execution fact into its foreground result.
     async fn observe_execution_failure(&self, _session_id: &str) {}
 
+    /// A partial close may confirm some prompt withdrawals while the shared
+    /// close or a later withdrawal still fails. The protocol adapter settles
+    /// exactly the confirmed inputs; other transports have nothing to settle.
+    async fn settle_withdrawn(&self, _session_id: &str, _input_ids: &[String]) {}
+
     /// Send a request and wait for a response.
     ///
     /// Connected silence has no built-in timeout. Cancelling the caller releases

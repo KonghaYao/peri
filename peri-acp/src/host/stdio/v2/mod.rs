@@ -39,12 +39,27 @@ enum Version {
 #[derive(Default)]
 struct Connection {
     version: Version,
+    /// A non-initialize request has arrived. Repeating `initialize` is only
+    /// allowed before this point.
+    initialized: bool,
+    /// Foreground generation. Bumped whenever the foreground turn changes
+    /// identity (start, end, cancel, close), so a stale `requires_action`
+    /// completion cannot publish `running` for a newer turn.
+    epoch: u64,
     replies: HashMap<RequestId, Reply>,
     prompts: Prompts,
     active: Option<String>,
     foreground: bool,
     execution_failed: bool,
     replay: Option<Replay>,
+}
+
+impl Connection {
+    /// Whether a permission/elicitation completion still belongs to the
+    /// current foreground turn.
+    fn is_current_turn(&self, sid: &str, epoch: u64) -> bool {
+        self.epoch == epoch && self.foreground && self.active.as_deref() == Some(sid)
+    }
 }
 
 enum Reply {
@@ -91,6 +106,9 @@ impl V2Stdio {
                     if wire.active.as_deref() != Some(sid) {
                         return None;
                     }
+                    // The cancelled turn's outstanding peer requests must not
+                    // republish a foreground state afterwards.
+                    wire.epoch += 1;
                     let id = RequestId::String(uuid::Uuid::now_v7().to_string());
                     let inputs = wire.prompts.pending_ids(sid);
                     wire.replies.insert(id.clone(), Reply::Cancel);
@@ -118,7 +136,8 @@ impl V2Stdio {
         };
         if method == "initialize" {
             let requested = params.get("protocolVersion").and_then(Value::as_u64);
-            if matches!(wire.version, Version::Two) {
+            let repeat = matches!(wire.version, Version::Two);
+            if repeat && wire.initialized {
                 let _ = self
                     .inner
                     .send_response(
@@ -128,10 +147,19 @@ impl V2Stdio {
                     .await;
                 return None;
             }
-            if matches!(wire.version, Version::Unset)
-                && requested.is_some_and(|n| n >= 2)
-                && params.get("info").is_some()
-            {
+            // ACP v2 reads protocolVersion before any other parameter and
+            // rejects out-of-range values (0..=65535) with Invalid params.
+            let negotiable = (matches!(wire.version, Version::Unset) || repeat)
+                && requested.is_some_and(|version| version >= 2)
+                && params.get("info").is_some();
+            if negotiable {
+                if requested.is_some_and(|version| version > 65535) {
+                    let _ = self
+                        .inner
+                        .send_response(id, Err(AcpError::new(-32602, "Invalid protocolVersion")))
+                        .await;
+                    return None;
+                }
                 match wire::initialize_params(&params) {
                     Ok(translated) => {
                         params = translated;
@@ -144,7 +172,24 @@ impl V2Stdio {
                 }
                 return Some(IncomingMessage::Request { id, method, params });
             }
+            if repeat {
+                // The pinned protocol allows repeats only before the first
+                // other request; a repeat below v2 cannot renegotiate this
+                // connection and must not disturb the last success.
+                let _ = self
+                    .inner
+                    .send_response(
+                        id,
+                        Err(AcpError::new(
+                            -32602,
+                            "ACP v2 Preview requires protocolVersion 2 and client info",
+                        )),
+                    )
+                    .await;
+                return None;
+            }
         }
+        wire.initialized = true;
 
         if !matches!(wire.version, Version::Two) {
             if matches!(method.as_str(), INPUT | WITHDRAW | CANCEL | CLOSE) {
@@ -167,6 +212,14 @@ impl V2Stdio {
         };
         match method.as_str() {
             "session/new" => {
+                if wire.active.is_some() {
+                    reject(AcpError::new(
+                        -32000,
+                        "ACP v2 Preview supports one active session per connection; close it first",
+                    ))
+                    .await;
+                    return None;
+                }
                 wire.replies.insert(
                     id.clone(),
                     Reply::Setup {
@@ -180,6 +233,14 @@ impl V2Stdio {
                     reject(AcpError::new(-32602, "Missing sessionId")).await;
                     return None;
                 };
+                if wire.active.as_deref().is_some_and(|active| active != sid) {
+                    reject(AcpError::new(
+                        -32000,
+                        "ACP v2 Preview supports one active session per connection; close it first",
+                    ))
+                    .await;
+                    return None;
+                }
                 let replay = match params.get("replayFrom").filter(|cursor| !cursor.is_null()) {
                     None => false,
                     Some(cursor) if cursor.get("type").and_then(Value::as_str) == Some("start") => {
@@ -250,11 +311,7 @@ impl V2Stdio {
                 };
                 let key = match params.get("idempotencyKey").filter(|key| !key.is_null()) {
                     None => None,
-                    Some(key)
-                        if key
-                            .as_str()
-                            .is_some_and(|key| !key.is_empty() && key.len() <= 512) =>
-                    {
+                    Some(key) if key.as_str().is_some_and(prompts::valid_idempotency_key) => {
                         key.as_str()
                     }
                     _ => {
@@ -316,6 +373,25 @@ impl AcpTransport for V2Stdio {
         }
     }
 
+    async fn settle_withdrawn(&self, session_id: &str, input_ids: &[String]) {
+        if input_ids.is_empty() {
+            return;
+        }
+        let waiters = {
+            let mut wire = self.wire.lock().await;
+            if !matches!(wire.version, Version::Two) {
+                return;
+            }
+            input_ids
+                .iter()
+                .flat_map(|input| wire.prompts.reject_in_session(session_id, input))
+                .collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            let _ = self.inner.send_response(waiter, Err(cancelled())).await;
+        }
+    }
+
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         self.send_cancellable_request(method, params, CancellationToken::new())
             .await
@@ -337,6 +413,9 @@ impl AcpTransport for V2Stdio {
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        // Capture the foreground generation together with the `requires_action`
+        // snapshot. A completion that outlived its turn must not overwrite the
+        // state of a newer turn (which may already be `requires_action`).
         let requires_action =
             if v2 && matches!(method, "session/request_permission" | "elicitation/create") {
                 let guard = self.wire.lock().await;
@@ -346,14 +425,14 @@ impl AcpTransport for V2Stdio {
                 {
                     self.update(sid, wire::state("requires_action", None))
                         .await?;
-                    true
+                    Some(guard.epoch)
                 } else {
-                    false
+                    None
                 }
             } else {
-                false
+                None
             };
-        let result = if requires_action {
+        let result = if requires_action.is_some() {
             // The broker can drop its future when the turn stops. An owned
             // cancellable write still has to send the exact peer request ID.
             let inner = Arc::clone(&self.inner);
@@ -372,14 +451,15 @@ impl AcpTransport for V2Stdio {
                 .send_cancellable_request(method, params, token.clone())
                 .await
         };
-        if requires_action
-            && !token.is_cancelled()
-            && !result.as_ref().is_err_and(|e| e.code == -32800)
-        {
+        if let Some(epoch) = requires_action.filter(|_| {
+            // The permission path passes its own token, so the cancellation
+            // check must use that token and be evaluated under `wire`.
+            !token.is_cancelled() && !result.as_ref().is_err_and(|e| e.code == -32800)
+        }) {
             let guard = self.wire.lock().await;
             if let Some(sid) = sid
                 .as_deref()
-                .filter(|sid| guard.foreground && guard.active.as_deref() == Some(*sid))
+                .filter(|sid| guard.is_current_turn(sid, epoch))
             {
                 self.update(sid, wire::state("running", None)).await?;
             }
@@ -445,6 +525,7 @@ impl AcpTransport for V2Stdio {
                         if !wire.foreground =>
                     {
                         wire.foreground = true;
+                        wire.epoch += 1;
                         wire.execution_failed = false;
                         self.update(sid, wire::state("running", None)).await?;
                     }
@@ -452,6 +533,7 @@ impl AcpTransport for V2Stdio {
                         if let Some((message, waiters)) = wire.prompts.accepted(sid, &input_id) {
                             if !wire.foreground {
                                 wire.foreground = true;
+                                wire.epoch += 1;
                                 self.update(sid, wire::state("running", None)).await?;
                             }
                             self.update(sid, message).await?;
@@ -478,10 +560,13 @@ impl AcpTransport for V2Stdio {
                 };
                 if wire.foreground {
                     wire.foreground = false;
+                    wire.epoch += 1;
                     self.update(sid, wire::state("idle", Some(reason))).await?;
                 }
                 // A turn ending is not evidence that a separately queued
                 // prompt was cancelled. Only a committed withdrawal settles it.
+                // The event names the run ticket, not the affected input, so a
+                // failed attempt cannot settle a specific prompt request here.
             }
             _ => {}
         }
@@ -557,6 +642,7 @@ impl AcpTransport for V2Stdio {
                             .await?;
                         }
                         wire.active = Some(sid.to_owned());
+                        wire.epoch += 1;
                     }
                 }
                 result.map(|value| {
@@ -580,6 +666,7 @@ impl AcpTransport for V2Stdio {
                     self.inner.send_response(waiter, Err(cancelled())).await?;
                 }
                 wire.active = None;
+                wire.epoch += 1;
                 Ok(json!({}))
             }
             _ => result,
@@ -591,3 +678,7 @@ impl AcpTransport for V2Stdio {
 fn cancelled() -> AcpError {
     AcpError::new(-32800, "Prompt cancelled before insertion")
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

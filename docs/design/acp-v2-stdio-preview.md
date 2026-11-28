@@ -20,16 +20,28 @@ canonical retained history through the host's existing reader. The v2 adapter
 adds replacement boundaries for replayed chunks, the replay-completion marker,
 and the current foreground-state snapshot. It does not invent a new history or
 cursor store. This preview retains Peri's one-active-session-per-connection
-constraint and does not support starting a replay during an active turn.
+constraint: while a session is active, `session/new` and a resume of a
+different session are rejected until the active session is closed, and a
+resume of the active session itself is allowed. The preview does not support
+starting a replay during an active turn, nor resynchronizing a session whose
+turn is still running; resume is available once the turn ends. A close that
+confirms some prompt withdrawals settles those prompts even when a later
+withdrawal or the shared close fails.
 
 ## Negotiated surface
 
 - Session new, list, resume with no cursor or `{ "type": "start" }`, close, prompt,
   and cancellation. Optional or unknown replay/list cursor types are rejected.
 - Connection-local prompt keys. Repeat the same text/key to get the same
-  acknowledgement without a second insertion. Keys do not survive process
-  exit; an unanswered prompt must not be automatically resent across restarts
-  unless the caller has reconciled whether it was committed.
+  acknowledgement without a second insertion. Keys are not persisted with the
+  inserted message: a new connection or a process restart does not deduplicate
+  a retry, which is outside this preview's scope. An unanswered prompt must not
+  be automatically resent across restarts unless the caller has reconciled
+  whether it was committed.
+- A prompt request is settled by committed delivery, a confirmed withdrawal, or
+  close. If a queued turn fails before insertion, the host's done event names
+  its run ticket rather than the affected input, so the adapter leaves pending
+  prompt requests untouched instead of guessing which one failed.
 - Tool-call updates, permission requests, elicitation, text and image prompts.
   The negotiated v2 connection uses Peri’s default approval policy; v1 keeps
   its existing stdio policy.

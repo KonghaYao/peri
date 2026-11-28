@@ -1,6 +1,18 @@
-use super::{Admission, Prompts};
+use super::{valid_idempotency_key, Admission, Prompts};
 use crate::transport::types::RequestId;
 use serde_json::json;
+
+#[test]
+fn idempotency_key_is_bounded_by_characters_not_utf8_bytes() {
+    assert!(valid_idempotency_key("a"));
+    assert!(valid_idempotency_key(&"a".repeat(255)));
+    assert!(!valid_idempotency_key(&"a".repeat(256)));
+    assert!(!valid_idempotency_key(""));
+    // 128 four-byte characters are 512 bytes but still 128 characters.
+    assert!(valid_idempotency_key(&"🦀".repeat(128)));
+    assert!(valid_idempotency_key(&"🦀".repeat(255)));
+    assert!(!valid_idempotency_key(&"🦀".repeat(256)));
+}
 
 #[test]
 fn keyed_receipt_is_not_acknowledged_before_committed_delivery() {
@@ -59,4 +71,23 @@ fn withdrawal_releases_waiters_and_does_not_create_a_receipt() {
         prompts.admit("session", Some("key"), blocks, rid),
         Ok(Admission::Submit(new)) if new != input
     ));
+}
+
+#[test]
+fn scoped_rejection_never_settles_another_sessions_prompt() {
+    let mut prompts = Prompts::default();
+    let rid = RequestId::Number(9);
+    let Admission::Submit(input) = prompts
+        .admit(
+            "session",
+            None,
+            json!([{"type":"text","text":"x"}]),
+            rid.clone(),
+        )
+        .expect("submit")
+    else {
+        panic!("expected initial submission");
+    };
+    assert!(prompts.reject_in_session("other", &input).is_empty());
+    assert_eq!(prompts.reject_in_session("session", &input), [rid]);
 }

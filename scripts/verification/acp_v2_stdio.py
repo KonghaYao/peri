@@ -6,6 +6,7 @@ Requires Python jsonschema and Node.js. Does not call an external model.
 """
 
 import argparse
+import collections
 import contextlib
 import json
 import os
@@ -30,6 +31,7 @@ class Peer:
         self.sid = None
         self.frames = []
         self.mail = queue.Queue()
+        self.stderr_tail = collections.deque(maxlen=200)
         env = dict(os.environ, HOME=str(root / "home"))
         env.pop("PERI_ACP_V2_PREVIEW", None)
         if preview:
@@ -42,17 +44,35 @@ class Peer:
             text=True, env=env, cwd=root,
         )
         threading.Thread(target=self.read, daemon=True).start()
+        # Drain stderr while the agent runs; a full pipe would otherwise block it.
+        threading.Thread(target=self.read_stderr, daemon=True).start()
         init = {"protocolVersion": version}
         if version == 2:
             init["info"] = {"name": "peri-independent-stdio-probe", "version": "1"}
-        assert self.call("initialize", init, "InitializeResponse")["protocolVersion"] == (
-            2 if preview and version == 2 else 1
-        )
+        try:
+            assert self.call("initialize", init, "InitializeResponse")["protocolVersion"] == (
+                2 if preview and version == 2 else 1
+            )
+        except BaseException:
+            # `lifecycle` only tracks successfully constructed peers; reap the
+            # child here so a silent initialize keeps no orphan.
+            if self.agent.poll() is None:
+                self.agent.kill()
+            self.agent.wait()
+            raise
+
+    @property
+    def stderr_text(self):
+        return "".join(self.stderr_tail)[-2000:]
 
     def read(self):
         for line in self.agent.stdout:
             self.mail.put(line)
         self.mail.put(None)
+
+    def read_stderr(self):
+        for line in self.agent.stderr:
+            self.stderr_tail.append(line)
 
     def check(self, definition, obj):
         if self.version == 2 and definition:
@@ -84,7 +104,7 @@ class Peer:
             except queue.Empty:
                 break
             if line is None:
-                raise AssertionError("Agent EOF: " + self.agent.stderr.read()[-2000:])
+                raise AssertionError("Agent EOF: " + self.stderr_text)
             frame = json.loads(line)
             self.frames.append(frame)
             if frame.get("method") == "session/update":
@@ -123,7 +143,7 @@ class Peer:
                 self.agent.kill()
                 self.agent.wait()
                 raise
-        assert self.agent.returncode == 0, self.agent.stderr.read()[-2000:]
+        assert self.agent.returncode == 0, self.stderr_text
 
 
 def prompt(sid, text, key=None):
@@ -138,8 +158,27 @@ def lifecycle(binary, root, schema):
     try:
         peer = Peer(binary, root, 2, schema)
         peers.append(peer)
+        # Repeating initialize is allowed before the first other request.
+        # A failed repeat leaves the last successful negotiation in effect.
+        client = {"name": "peri-independent-stdio-probe", "version": "1"}
+        assert peer.call("initialize", {"protocolVersion": 2, "info": client},
+                         "InitializeResponse")["protocolVersion"] == 2
+        assert peer.response(peer.request("initialize", {"protocolVersion": 2}))["error"]["code"] == -32602
+        assert peer.response(peer.request("initialize", {"protocolVersion": 65536, "info": client}))["error"]["code"] == -32602
         sid = peer.sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
-        args = prompt(sid, "Please reply to this ACP Preview verification prompt.", "single")
+        assert peer.response(peer.request("initialize", {"protocolVersion": 2, "info": client}))["error"]["code"] == -32600
+        # The adapter enforces the preview's one active session per connection.
+        assert peer.response(peer.request("session/new", {"cwd": str(root)}))["error"]["code"] == -32000
+        assert peer.response(peer.request("session/resume", {
+            "sessionId": "00000000-0000-7000-8000-000000000000", "cwd": str(root)
+        }))["error"]["code"] == -32000
+        # Idempotency keys are 1..255 characters, not bytes.
+        assert peer.response(peer.request("session/prompt", prompt(sid, "Too long", "k" * 256)))["error"]["code"] == -32602
+        print("PASS v2 initialize repeat/version bounds, single active session, prompt key bounds")
+        # A 255-character key is the accepted upper bound; the 256-character
+        # key above was rejected without creating a receipt.
+        key = "k" * 255
+        args = prompt(sid, "Please reply to this ACP Preview verification prompt.", key)
         start = len(peer.frames)
         request = peer.request("session/prompt", args)
         duplicate = peer.request("session/prompt", args)
@@ -153,7 +192,7 @@ def lifecycle(binary, root, schema):
                    frame.get("method") == "session/update"]
         assert sum(update.get("messageId") == message_id for update in emitted) == 1
         assert any(update["sessionUpdate"] == "agent_message_chunk" for update in emitted)
-        assert peer.response(peer.request("session/prompt", prompt(sid, "Changed", "single")))["error"]["code"] == -32602
+        assert peer.response(peer.request("session/prompt", prompt(sid, "Changed", key)))["error"]["code"] == -32602
         assert peer.frames.index(receipt) < next(i for i in range(start, len(peer.frames)) if
                peer.frames[i].get("params", {}).get("update", {}).get("sessionUpdate") == "agent_message_chunk")
         print("PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict")
@@ -203,7 +242,9 @@ def lifecycle(binary, root, schema):
         reopened.close()
         print("PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close")
 
-        approval = Peer(binary, root, 2, schema, permission="default")
+        # Explicit bypass must be overridden by the negotiated v2 connection;
+        # otherwise this probe would see the tool auto-approved and fail.
+        approval = Peer(binary, root, 2, schema, permission="bypass")
         peers.append(approval)
         approval.sid = approval.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
         start = len(approval.frames)

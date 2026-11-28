@@ -24,3 +24,23 @@ streaming, process restart and replay, request and session cancellation,
 denied approval with no file side effect, and close. This does not imply
 complete conformance for optional v2 facilities, real provider load tests,
 cross-platform execution, or support for other transports.
+
+## Review follow-up on `acdd851df`
+
+Re-verified the review fixes with the same command on macOS arm64, isolated
+SQLite database and loopback model. The matrix additionally asserts:
+
+- repeated `initialize` before the first other request succeeds, a failed
+  repeat keeps the last successful negotiation, a later repeat is `-32600`, and
+  `protocolVersion: 65536` is `-32602`;
+- the adapter's one-active-session limit (`session/new` and a resume of a
+  different session are `-32000` while a session is active);
+- idempotency keys on the wire: 256 characters rejected, a 255-character key
+  accepted and deduplicated;
+- the approval probe starts with an explicit `--permission-mode bypass`, so its
+  permission request and absent tool side effect prove the negotiated v2
+  connection overrides bypass with the default approval policy.
+
+The probe drains stderr while the agent runs and reaps the child when
+`initialize` fails. All five original PASS lines and the added protocol-edge
+line passed; the official `v2_one_shot_client` example passed in the same run.

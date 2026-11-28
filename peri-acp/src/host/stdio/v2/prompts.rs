@@ -146,6 +146,14 @@ impl Prompts {
         ids.into_iter().flat_map(|id| self.reject(&id)).collect()
     }
 
+    /// Reject a specific input only if it still belongs to `sid`.
+    pub(super) fn reject_in_session(&mut self, sid: &str, message_id: &str) -> Vec<RequestId> {
+        match self.pending.get(message_id) {
+            Some(pending) if pending.session_id == sid => self.reject(message_id),
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn target(&self, id: &RequestId) -> Option<(String, String)> {
         self.pending.iter().find_map(|(input, p)| {
             p.waiters
@@ -160,6 +168,11 @@ fn conflict() -> AcpError {
         -32602,
         "Prompt idempotency key reused for different content",
     )
+}
+
+/// ACP v2 keys are opaque strings of 1 to 255 **characters**, not bytes.
+pub(super) fn valid_idempotency_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().count() <= 255
 }
 
 fn busy() -> AcpError {
