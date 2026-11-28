@@ -10,16 +10,17 @@
 //! `Debug`: they may contain the API key and must never be printed.
 
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::api::{
-    ApiError, ApprovalDecision, ApprovalReceipt, CreateSessionSpec, CreatedSession, Health,
-    HttpSwarmApi, IdempotencyKey, InputReceipt, ItemsPage, Session, SessionPage, SwarmApi, Turns,
-    UpdateSessionSpec,
+    AgentMetrics, ApiError, ApprovalDecision, ApprovalReceipt, CreateSessionSpec, CreatedSession,
+    Health, HttpSwarmApi, IdempotencyKey, InputReceipt, ItemsPage, Session, SessionPage, SwarmApi,
+    Turns, UpdateSessionSpec,
 };
-use crate::config::Config;
+use crate::config::{Config, ObservabilityConfig};
+use crate::metrics::{self, CoreMetricsSnapshot, RequestLogPage, TimeWindow};
 use crate::observability::{ObservabilityError, OpenObserveClient};
 use crate::ui::text;
 
@@ -106,6 +107,20 @@ pub struct ObservabilityCheck {
     pub streams: Option<usize>,
 }
 
+/// Result of a page request backed by OpenObserve.
+///
+/// A missing `[observability]` section is a normal state, not an error: the
+/// page explains how to configure it and offers a Settings action.
+#[derive(Clone, Debug)]
+pub enum ObservabilityOutcome<T> {
+    /// The query succeeded.
+    Ready(T),
+    /// No OpenObserve connection is configured.
+    NotConfigured,
+    /// The query failed; the error is safe to display.
+    Failed(ObservabilityError),
+}
+
 /// Messages from the worker to the UI.
 #[derive(Clone, Debug)]
 pub enum WorkerEvent {
@@ -115,6 +130,41 @@ pub enum WorkerEvent {
         epoch: u64,
         /// Result of `GET /api/{org}/streams`.
         result: Result<ObservabilityCheck, ObservabilityError>,
+    },
+    /// One Core-metrics query finished.
+    CoreMetricsLoaded {
+        /// UI epoch at request time.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window that was requested.
+        window: TimeWindow,
+        /// OpenObserve result.
+        result: ObservabilityOutcome<CoreMetricsSnapshot>,
+    },
+    /// One Agent-metrics request finished.
+    AgentMetricsLoaded {
+        /// UI epoch at request time.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window that was requested.
+        window: TimeWindow,
+        /// Result of `GET /v1/agents/metrics`.
+        result: Result<AgentMetrics, ApiError>,
+    },
+    /// One request-log page finished.
+    RequestLogLoaded {
+        /// UI epoch at request time.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window that was requested.
+        window: TimeWindow,
+        /// Page that was requested, 0-based.
+        page: usize,
+        /// OpenObserve result.
+        result: ObservabilityOutcome<RequestLogPage>,
     },
     /// One validation finished.
     ValidationFinished {
@@ -219,6 +269,35 @@ pub enum Command {
         /// Candidate password. Never printed.
         password: String,
     },
+    /// Query Core metrics for one window.
+    LoadCoreMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query Agent metrics for one window.
+    LoadAgentMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query one request-log page.
+    LoadRequestLog {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+        /// Page, 0-based.
+        page: usize,
+    },
     /// Validate candidate credentials without adopting them.
     Validate {
         /// UI epoch.
@@ -243,6 +322,17 @@ pub enum Command {
         base_url: String,
         /// Validated key. Never printed.
         api_key: String,
+    },
+    /// Adopt an OpenObserve connection after Settings saved it.
+    AdoptObservability {
+        /// Validated origin.
+        base_url: String,
+        /// Validated organization.
+        org: String,
+        /// Validated user.
+        user: String,
+        /// Validated password. Never printed.
+        password: String,
     },
     /// Run one health poll.
     Health {
@@ -423,6 +513,7 @@ async fn run(
     initial: Option<Config>,
 ) {
     let mut active = initial.clone();
+    let mut observability = initial.as_ref().and_then(Config::observability).cloned();
     let mut client = initial
         .as_ref()
         .and_then(|config| HttpSwarmApi::from_config(config).ok());
@@ -451,6 +542,92 @@ async fn run(
                 };
                 if events
                     .send(WorkerEvent::ObservabilityTested { epoch, result })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadCoreMetrics {
+                epoch,
+                generation,
+                window,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match metrics::load_core_metrics(&client, window, unix_micros_now()).await {
+                            Ok(snapshot) => ObservabilityOutcome::Ready(snapshot),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::CoreMetricsLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadAgentMetrics {
+                epoch,
+                generation,
+                window,
+            } => {
+                let result = match client.as_ref() {
+                    Some(client) => {
+                        let end_us = i64::try_from(unix_micros_now()).unwrap_or(i64::MAX);
+                        let start_us = end_us
+                            .saturating_sub(i64::try_from(window.micros()).unwrap_or(i64::MAX));
+                        client
+                            .agent_metrics(start_us, end_us, metrics::AGENT_METRICS_LIMIT)
+                            .await
+                    }
+                    None => Err(ApiError::local(text::WORKER_CLIENT_UNAVAILABLE)),
+                };
+                if events
+                    .send(WorkerEvent::AgentMetricsLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadRequestLog {
+                epoch,
+                generation,
+                window,
+                page,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match metrics::load_request_log(&client, window, page, unix_micros_now())
+                            .await
+                        {
+                            Ok(loaded) => ObservabilityOutcome::Ready(loaded),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::RequestLogLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        page,
+                        result,
+                    })
                     .is_err()
                 {
                     break;
@@ -500,11 +677,10 @@ async fn run(
                 }
             }
             Command::Adopt { base_url, api_key } => {
-                // `Config::new` starts without observability; keep the section
-                // the active config already carries.
-                let observability = active.as_ref().and_then(Config::observability).cloned();
+                // Keep the OpenObserve section the worker already adopted.
+                let preserved = observability.clone();
                 if let Ok(config) = Config::new(&base_url, &api_key) {
-                    let config = match observability {
+                    let config = match preserved {
                         Some(observability) => config.with_observability(observability),
                         None => config,
                     };
@@ -513,6 +689,19 @@ async fn run(
                 } else {
                     client = None;
                     active = None;
+                }
+            }
+            Command::AdoptObservability {
+                base_url,
+                org,
+                user,
+                password,
+            } => {
+                if let Ok(adopted) = ObservabilityConfig::new(&base_url, &org, &user, &password) {
+                    observability = Some(adopted.clone());
+                    if let Some(config) = active.take() {
+                        active = Some(config.with_observability(adopted));
+                    }
                 }
             }
             Command::Health { epoch } => {
@@ -763,10 +952,32 @@ async fn run(
             Command::SignOut => {
                 active = None;
                 client = None;
+                observability = None;
             }
             Command::Shutdown => break,
         }
     }
+}
+
+/// Current Unix time in microseconds.
+fn unix_micros_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Build an OpenObserve client from the adopted connection.
+///
+/// `Ok(None)` means no connection was configured; a client construction
+/// failure is reported rather than hidden.
+fn observability_client(
+    observability: Option<&ObservabilityConfig>,
+) -> Result<Option<OpenObserveClient>, ObservabilityError> {
+    let Some(observability) = observability else {
+        return Ok(None);
+    };
+    OpenObserveClient::from_config(observability).map(Some)
 }
 
 async fn validate_new(base_url: &str, api_key: &str) -> Result<(), ValidationFailure> {

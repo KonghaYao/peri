@@ -96,8 +96,16 @@ fn navigation_lists_all_thirteen_pages_in_three_groups() {
 
     assert!(Page::SessionLog.is_implemented());
     assert!(Page::Settings.is_implemented());
+    assert!(Page::CoreMetrics.is_implemented());
+    assert!(Page::AgentMetrics.is_implemented());
+    assert!(Page::RequestLog.is_implemented());
     for page in Page::ALL {
-        if page != Page::SessionLog && page != Page::Settings {
+        if page != Page::SessionLog
+            && page != Page::Settings
+            && page != Page::CoreMetrics
+            && page != Page::AgentMetrics
+            && page != Page::RequestLog
+        {
             assert!(!page.is_implemented(), "{page:?}");
         }
     }

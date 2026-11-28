@@ -57,6 +57,16 @@ impl App {
             effects.extend(self.refresh_detail_now());
             return effects;
         }
+        if self.screen == Screen::Main
+            && matches!(
+                self.page,
+                Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog
+            )
+        {
+            let mut effects = self.request_health();
+            effects.extend(self.refresh_metrics_page());
+            return effects;
+        }
         let mut effects = self.request_health();
         effects.extend(self.refresh_sessions_now());
         effects

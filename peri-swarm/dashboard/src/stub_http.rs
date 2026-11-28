@@ -89,6 +89,15 @@ impl Stub {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets inherit O_NONBLOCK on macOS; a
+                        // blocking read keeps request/response pairing
+                        // deterministic and avoids a WouldBlock race.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("stub connection is blocking");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .expect("stub read timeout");
                         let request = read_request(&mut stream);
                         let index = {
                             let mut recorded = recorded.lock().expect("requests lock");

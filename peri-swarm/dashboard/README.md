@@ -70,8 +70,30 @@ user = "peri-swarm-dashboard"
 password = "…"
 ```
 
-本阶段只实现配置、连接测试与客户端；Core metrics、Agent metrics、Sandbox metrics、
-Request log、Query 页面仍在后续阶段实现，当前仍为空页。
+本阶段实现配置、连接测试、Core metrics、Agent metrics 与 Request log 页面；Sandbox
+metrics 保持诚实的空页（网关没有资源级指标），Query 留给后续阶段。
+
+## Metrics 与 Request log 数据源
+
+- **Core metrics**：直连 OpenObserve，只使用 PromQL（该版本对 metrics 流不接受
+  `_search` SQL）。查询 `peri_swarm_http_server_requests` 与
+  `peri_swarm_http_server_duration_bucket`，时间窗 15m/1h/24h；页面可见时每 15 秒轮询。
+  指标为累计计数器，而 v1.2.0 不支持 `rate()`/`increase()`（返回空矩阵），因此客户端读取
+  少量原始样本并将正向增量相加（进程重启不会产生负流量）。错误率只统计 5xx；p95 由
+  `le` 桶增量做直方图插值，落在 `+Inf` 桶时显示 `—`，不虚构有限值。页面展示实际样本
+  覆盖范围；刷新失败保留上一次成功数据并标记 `stale`。
+- **Agent metrics**：来自网关 `GET /v1/agents/metrics`，不依赖 OpenObserve。固定请求
+  窗口内最多 500 个会话（`limit=500`），客户端每页 10 条；总计行使用响应的 `totals`。
+  `truncated=true` 时显示 “Window truncated; totals cover the newest 500 sessions.”。
+  缺失的 token 字段显示 `—`；Cache 列展示 `cache_read_tokens + cache_creation_tokens`。
+- **Request log**：直连 OpenObserve，SQL 查询 `peri_swarm_logs`。SQL 固定以下形状：
+  `WHERE _timestamp >= ? AND _timestamp < ? ORDER BY _timestamp DESC LIMIT 11 OFFSET ?`；
+  返回 11 行是为了判断是否存在下一页，界面每页显示 10 行。时间、method、route、
+  status、duration、session 任一缺失时显示 `—`。OpenObserve 的 `_search.total` 在带
+  OFFSET 时不是全局总数，因此页面只显示 “Page N”，不声称总数。
+- Core metrics 与 Request log 未配置 `[observability]` 时显示
+  “Observability is not configured.” 并提供跳转 Settings 的按钮；Agent metrics 不受影响。
+- 所有请求带 generation；切换窗口、换页或手动刷新会使旧响应失效，不会覆盖新数据。
 
 ## 安全说明
 
@@ -79,9 +101,11 @@ Request log、Query 页面仍在后续阶段实现，当前仍为空页。
   `Debug` 输出。Settings 只显示 `(set)`。
 - OpenObserve 密码使用同一套 `0600`/`0700` 原子存储；`Debug` 与错误消息都会脱敏，
   密码输入遮蔽，保存后不再回显。OpenObserve 客户端同样禁用重定向并设置 10 秒超时，
-  错误只含状态码与经过脱敏的短消息，不含凭据或 `Authorization`。
-- dashboard 直连 OpenObserve 的专用 admin 账号：OSS 没有 viewer 角色，客户端
-  SELECT-only 校验不是安全边界；必须内网部署、专用账号、保护并轮换密码。
+  错误只含状态码与经过脱敏的短消息；响应体里的密码和 `Authorization` 头值都会被替换为
+  `<redacted>`。
+- dashboard 直连 OpenObserve 的专用 admin 账号：OSS 没有 viewer 角色，日志查询只发
+  `SELECT`、指标只发 PromQL 查询，但客户端校验不是安全边界；必须内网部署、专用账号、
+  保护并轮换密码。
 - HTTP 客户端禁用自动重定向，`Authorization` 只发往配置的 origin；`/healthz` 不发
   Bearer。
 - 启用 rustls 证书校验，没有“忽略证书”选项。
@@ -97,7 +121,9 @@ Request log、Query 页面仍在后续阶段实现，当前仍为空页。
 
 | 分组 | 页面 | 状态 |
 | --- | --- | --- |
-| Monitor | Core metrics / Agent metrics / Sandbox metrics / Request log / Query | 空页，说明能力边界或“本构建未实现” |
+| Monitor | Core metrics / Agent metrics / Request log | 已实现（OpenObserve / 网关数据） |
+| Monitor | Sandbox metrics | 空页，说明网关没有资源级指标 |
+| Monitor | Query | 空页，本构建未实现 |
 | Monitor | Session log | 已实现（默认页） |
 | Resources | Agents / Artifacts / Vaults / MCP | 空页，说明能力边界或“本构建未实现” |
 | Platform | Automations / Nodes | 空页，说明能力边界或“本构建未实现” |
@@ -116,6 +142,12 @@ Request log、Query 页面仍在后续阶段实现，当前仍为空页。
   tools/environment/prompt_cache_options JSON。成功后打开新会话详情。
 - Settings：连接信息、`Test connection`、`Edit credentials`、`Configure observability`、
   `Sign out`、`Quit`。
+- Core metrics：窗口 chips、Refresh、requests/min、5xx 错误率、p95、总请求数与实际数据
+  范围；15 秒轮询，窗口 chips 可用鼠标或 `1`/`2`/`3`，`r` 刷新。
+- Agent metrics：窗口 chips、Refresh、总计行、8 列表格、每页 10 条的 Prev/Next；
+  `PgUp`/`PgDn` 同效。
+- Request log：窗口 chips、Refresh、时间/method/route/status/duration/session 表格、
+  每页 10 条的服务端分页；`PgUp`/`PgDn` 同效。
 - 空页会给出“为什么为空”和“网关实际支持什么”，从不编造数据。
 
 ## 限制
@@ -126,9 +158,17 @@ Request log、Query 页面仍在后续阶段实现，当前仍为空页。
   排序，时间完全相同时保留网关返回顺序；页脚标注
   `Newest activity first · N loaded`。搜索和计数仍只覆盖已加载集合。
 - 单网关、单凭据；没有多 profile、Overview、指标聚合或跨节点视图。
-- 网关不提供服务器请求日志；Core metrics、Agent metrics、Sandbox metrics、Request log、
-  Query、Agents、Artifacts、Vaults、MCP、Automations、Nodes 在本构建中均为空页，文案说明
-  为什么为空。
+- OpenObserve 的 PromQL 方言有限：`rate()`、`increase()` 与 `delta()` 返回空矩阵，
+  因此 Core metrics 在客户端按累计计数器的正向增量计算窗口值；采样起点之前的首个增量
+  无法归因，页面以实际样本范围说明覆盖区间。
+- Core metrics 的 p95 依赖 OTel histogram 桶；落在 `+Inf` 桶或没有观测时显示 `—`。
+  OTel SDK 默认的秒级桶较粗，p95 是桶内插值近似值。
+- Request log 不提供总数（OpenObserve 在 OFFSET 下返回的 `total` 只是本页行数），
+  只显示当前页码；访问日志不含 query string、headers 或 body。
+- Agent metrics 只请求窗口内最多 500 个会话；响应 `truncated=true` 时总计覆盖扫描到的
+  最新行，不是整个窗口的完整总计。
+- Sandbox metrics、Query、Agents、Artifacts、Vaults、MCP、Automations、Nodes 在本构建中
+  仍为空页，文案说明为什么为空。
 - 编辑不发送 `instructions`：网关更新端点只接受 `agent.model`、`metadata`、
   `prompt_cache_options`（`deny_unknown_fields`），表单中 instructions 只读。创建表单也不
   发送首条消息。

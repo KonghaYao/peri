@@ -100,6 +100,106 @@ async fn malformed_success_body_is_reported() {
     );
 }
 
+#[tokio::test]
+async fn query_range_uses_the_prometheus_endpoint_and_parses_values() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"peri_swarm_http_server_requests","status":"200"},"values":[[100,"3"],[115,"7"]]}]}}"#,
+    )]);
+    let matrix = client(&stub.base_url())
+        .query_range("sum(peri_swarm_http_server_requests)", 100, 200, 15)
+        .await
+        .expect("matrix");
+    assert_eq!(matrix.series.len(), 1);
+    assert_eq!(
+        matrix.series[0].labels.get("status").map(String::as_str),
+        Some("200")
+    );
+    assert_eq!(matrix.series[0].values.len(), 2);
+    assert_eq!(matrix.series[0].values[1].timestamp, 115);
+    assert!((matrix.series[0].values[1].value - 7.0).abs() < f64::EPSILON);
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path.split('?').next(),
+        Some("/api/myorg/prometheus/api/v1/query_range")
+    );
+    assert_eq!(request.header("authorization"), Some(BASIC_AUTH));
+    assert!(request.path.contains("query=sum"), "{}", request.path);
+    assert!(request.path.contains("start=100"), "{}", request.path);
+    assert!(request.path.contains("end=200"), "{}", request.path);
+    assert!(request.path.contains("step=15"), "{}", request.path);
+}
+
+#[tokio::test]
+async fn query_range_redirects_are_not_followed() {
+    let stub = Stub::start(vec![
+        StubResponse::redirect("http://127.0.0.1:9/elsewhere"),
+        StubResponse::json(
+            200,
+            "OK",
+            r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
+        ),
+    ]);
+    let error = client(&stub.base_url())
+        .query_range("up", 1, 2, 1)
+        .await
+        .expect_err("redirect must be reported");
+    match error {
+        ObservabilityError::Http { status, .. } => assert_eq!(status, 302),
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(stub.requests().len(), 1, "redirect must not be followed");
+}
+
+#[tokio::test]
+async fn query_range_errors_are_scrubbed() {
+    let stub = Stub::start(vec![StubResponse::json(
+        500,
+        "Internal Server Error",
+        r#"{"message":"Authorization: Basic YWxpY2U6czNjcmV0 failed"}"#,
+    )]);
+    let error = client(&stub.base_url())
+        .query_range("up", 1, 2, 1)
+        .await
+        .expect_err("500 must fail");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("500"), "{rendered}");
+    assert!(!rendered.contains("s3cret"), "{rendered}");
+    assert!(!rendered.contains("YWxpY2U6czNjcmV0"), "{rendered}");
+}
+
+#[tokio::test]
+async fn query_range_rejects_a_non_success_envelope() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"status":"error","error":"bad query"}"#,
+    )]);
+    assert_eq!(
+        client(&stub.base_url()).query_range("up", 1, 2, 1).await,
+        Err(ObservabilityError::Malformed)
+    );
+}
+
+#[tokio::test]
+async fn query_range_accepts_an_empty_matrix() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
+    )]);
+    let matrix = client(&stub.base_url())
+        .query_range("up", 1, 2, 1)
+        .await
+        .expect("empty");
+    assert!(matrix.series.is_empty());
+}
+
 #[test]
 fn debug_redacts_the_password() {
     let client = client("http://127.0.0.1:5080");

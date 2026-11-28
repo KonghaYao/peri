@@ -269,6 +269,18 @@ pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
         crate::app::Screen::SessionEdit => text::FOOTER_EDIT,
         crate::app::Screen::Main if app.page() == Page::Settings => text::FOOTER_SETTINGS,
         crate::app::Screen::Main if app.page() == Page::SessionLog => text::FOOTER_SESSION_LOG,
+        crate::app::Screen::Main
+            if matches!(
+                app.page(),
+                Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog
+            ) =>
+        {
+            if narrow {
+                text::FOOTER_METRICS_NARROW
+            } else {
+                text::FOOTER_METRICS
+            }
+        }
         crate::app::Screen::Main => {
             if narrow {
                 text::FOOTER_MAIN_NARROW
@@ -296,6 +308,20 @@ pub fn scope_note(app: &App) -> String {
         crate::app::Screen::Main if app.page() == Page::SessionLog => {
             text::scope_session_log(app.session_log().loaded(), app.session_log().stale())
         }
+        crate::app::Screen::Main if app.page() == Page::CoreMetrics => {
+            text::core_metrics_scope(app.core_metrics().window(), app.core_metrics().stale())
+        }
+        crate::app::Screen::Main if app.page() == Page::AgentMetrics => text::agent_metrics_scope(
+            app.agent_metrics().window(),
+            app.agent_metrics().loaded(),
+            app.agent_metrics().truncated(),
+            app.agent_metrics().stale(),
+        ),
+        crate::app::Screen::Main if app.page() == Page::RequestLog => text::request_log_scope(
+            app.request_log().window(),
+            app.request_log().page(),
+            app.request_log().stale(),
+        ),
         crate::app::Screen::Main => text::SCOPE_EMPTY.to_owned(),
     }
 }

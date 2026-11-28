@@ -6,6 +6,7 @@
 pub mod api;
 pub mod app;
 pub mod config;
+pub mod metrics;
 pub mod observability;
 pub mod poll;
 pub mod text_field;

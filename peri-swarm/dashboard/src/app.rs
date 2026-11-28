@@ -17,6 +17,7 @@ use crate::worker::ValidationPurpose;
 mod actions;
 mod detail;
 mod forms;
+mod metrics;
 mod routing;
 mod session_create;
 mod session_detail;
@@ -26,6 +27,7 @@ mod session_log;
 mod types;
 
 pub use forms::{CredentialsState, ObservabilityState, OnboardingState};
+pub use metrics::{AgentMetricsState, CoreMetricsState, RequestLogState};
 pub use session_create::{CreateFormState, MetadataRow};
 pub use session_detail::{
     pretty_json, ActionError, ApprovalEntry, RequiredAction, SessionDetailState, TimelineEntry,
@@ -70,6 +72,9 @@ pub struct App {
     detail_tab: DetailTab,
     edit: EditFormState,
     session_log: SessionLogState,
+    core_metrics: CoreMetricsState,
+    agent_metrics: AgentMetricsState,
+    request_log: RequestLogState,
     create: CreateFormState,
     viewport_width: u16,
     sidebar_scroll: usize,
@@ -119,6 +124,9 @@ impl App {
             detail_tab: DetailTab::Timeline,
             edit: EditFormState::default(),
             session_log: SessionLogState::new(),
+            core_metrics: CoreMetricsState::new(),
+            agent_metrics: AgentMetricsState::new(),
+            request_log: RequestLogState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -169,6 +177,9 @@ impl App {
             detail_tab: DetailTab::Timeline,
             edit: EditFormState::default(),
             session_log: SessionLogState::new(),
+            core_metrics: CoreMetricsState::new(),
+            agent_metrics: AgentMetricsState::new(),
+            request_log: RequestLogState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -387,6 +398,30 @@ impl App {
     #[must_use]
     pub fn session_log(&self) -> &SessionLogState {
         &self.session_log
+    }
+
+    /// Core-metrics state (window, snapshot, polling).
+    #[must_use]
+    pub fn core_metrics(&self) -> &CoreMetricsState {
+        &self.core_metrics
+    }
+
+    /// Agent-metrics state (window, response, client-side page).
+    #[must_use]
+    pub fn agent_metrics(&self) -> &AgentMetricsState {
+        &self.agent_metrics
+    }
+
+    /// Request-log state (window, page, rows).
+    #[must_use]
+    pub fn request_log(&self) -> &RequestLogState {
+        &self.request_log
+    }
+
+    /// Whether the saved config carries an OpenObserve connection.
+    #[must_use]
+    pub fn observability_configured(&self) -> bool {
+        self.observability_config().is_some()
     }
 
     /// Create-session form state.

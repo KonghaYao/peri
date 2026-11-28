@@ -70,6 +70,16 @@ impl App {
                         self.session_log.poll.resume();
                         self.session_log.poll.reset_backoff();
                         self.session_log.reload_wanted = true;
+                        for poll in [
+                            &mut self.core_metrics.poll,
+                            &mut self.agent_metrics.poll,
+                            &mut self.request_log.poll,
+                        ] {
+                            poll.reset_backoff();
+                        }
+                        self.core_metrics.reload_wanted = true;
+                        self.agent_metrics.reload_wanted = true;
+                        self.request_log.reload_wanted = true;
                         self.settings_status =
                             Some(SettingsStatus::Ok(text::REAUTHENTICATED.to_owned()));
                         self.request_health()
@@ -81,6 +91,25 @@ impl App {
                 }
             }
             WorkerEvent::HealthFinished(report) => self.apply_health(report),
+            WorkerEvent::CoreMetricsLoaded {
+                epoch,
+                generation,
+                window,
+                result,
+            } => self.handle_core_metrics_loaded(epoch, generation, window, result),
+            WorkerEvent::AgentMetricsLoaded {
+                epoch,
+                generation,
+                window,
+                result,
+            } => self.handle_agent_metrics_loaded(epoch, generation, window, result),
+            WorkerEvent::RequestLogLoaded {
+                epoch,
+                generation,
+                window,
+                page,
+                result,
+            } => self.handle_request_log_loaded(epoch, generation, window, page, result),
             WorkerEvent::SessionsLoaded {
                 epoch,
                 generation,
@@ -195,6 +224,9 @@ impl App {
                 Vec::new()
             }
             ActionId::RefreshSessions => self.refresh_sessions_now(),
+            ActionId::RefreshCoreMetrics
+            | ActionId::RefreshAgentMetrics
+            | ActionId::RefreshRequestLog => self.metrics_action(action),
             ActionId::CreateSubmit => self.submit_create(),
             ActionId::AddMetadata => {
                 self.create.add_row();
@@ -482,20 +514,27 @@ impl App {
             self.observability.form_error = Some(text::NO_ACTIVE_CONNECTION.to_owned());
             return Vec::new();
         };
-        let saved = current.clone().with_observability(observability);
+        let saved = current.clone().with_observability(observability.clone());
         if let Err(error) = self.store.save(&saved) {
             self.config = Some(current);
             self.observability.form_error = Some(text::config_error(&error));
             return Vec::new();
         }
         self.config = Some(saved);
+        self.core_metrics = super::CoreMetricsState::new();
+        self.request_log = super::RequestLogState::new();
         self.observability = ObservabilityState::default();
         self.observability_testing = false;
         self.screen = Screen::Main;
         self.page = Page::Settings;
         self.focus = super::types::Focus::Content;
         self.settings_status = Some(SettingsStatus::Ok(text::OBSERVABILITY_SAVED.to_owned()));
-        Vec::new()
+        vec![Effect::AdoptObservability {
+            base_url: observability.base_url().to_owned(),
+            org: observability.org().to_owned(),
+            user: observability.user().to_owned(),
+            password: observability.password().to_owned(),
+        }]
     }
 
     fn finish_onboarding(&mut self) -> Vec<Effect> {
@@ -524,6 +563,7 @@ impl App {
         self.session_log.reset();
         self.create = super::CreateFormState::default();
         self.reset_detail_routes();
+        self.reset_metrics_routes();
         self.banner = None;
         self.paused = false;
         self.config_warning = None;
@@ -575,6 +615,7 @@ impl App {
         self.session_log.reset();
         self.create = super::CreateFormState::default();
         self.reset_detail_routes();
+        self.reset_metrics_routes();
         self.banner = None;
         self.paused = false;
         self.settings_status = Some(SettingsStatus::Ok(text::CREDENTIALS_SAVED.to_owned()));

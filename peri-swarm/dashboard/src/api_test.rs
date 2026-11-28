@@ -262,6 +262,75 @@ fn client(url: &str) -> HttpSwarmApi {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn agent_metrics_uses_the_bounded_window_and_keeps_missing_tokens_none() {
+    let gateway = spawn_gateway(vec![MockResponse::json(
+        200,
+        json!({
+            "start_time": 100,
+            "end_time": 200,
+            "sessions": [{
+                "session_id": "ses_1",
+                "agent_id": "root",
+                "model": "model-a",
+                "input_tokens": 10,
+                "total_tokens": 30,
+                "turns": 2,
+                "calls": 3,
+                "last_active_at": "2026-01-01T00:00:00Z"
+            }],
+            "totals": {
+                "input_tokens": 10,
+                "turns": 2,
+                "calls": 3,
+                "model": "model-a"
+            },
+            "truncated": true
+        }),
+    )]);
+    let api = client(gateway.url());
+
+    let metrics = api
+        .agent_metrics(100, 200, 500)
+        .await
+        .expect("agent metrics");
+    assert_eq!(metrics.start_time, 100);
+    assert_eq!(metrics.end_time, 200);
+    assert_eq!(metrics.sessions.len(), 1);
+    assert_eq!(metrics.sessions[0].session_id, "ses_1");
+    assert_eq!(metrics.sessions[0].input_tokens, Some(10));
+    assert_eq!(metrics.sessions[0].output_tokens, None);
+    assert_eq!(metrics.sessions[0].cache_read_tokens, None);
+    assert_eq!(metrics.sessions[0].cache_creation_tokens, None);
+    assert_eq!(metrics.totals.output_tokens, None);
+    assert!(metrics.truncated);
+
+    let requests = gateway.finish();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        request_line(&requests[0]),
+        "GET /v1/agents/metrics?start_time=100&end_time=200&limit=500 HTTP/1.1"
+    );
+    assert_eq!(
+        header_value(&requests[0], "authorization"),
+        Some(AUTH_HEADER)
+    );
+    assert_eq!(
+        header_value(&requests[0], EXPECT_HEADER),
+        Some(CONTRACT_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn agent_metrics_rejects_a_limit_above_the_contract_max() {
+    let api = HttpSwarmApi::new("http://127.0.0.1:9", KEY).expect("client");
+    let error = api
+        .agent_metrics(100, 200, MAX_PAGE_LIMIT + 1)
+        .await
+        .expect_err("limit is rejected locally");
+    assert!(error.message().contains("limit"));
+}
+
+#[tokio::test]
 async fn list_sessions_sends_contract_headers_and_decodes_the_page() {
     let gateway = spawn_gateway(vec![MockResponse::json(
         200,

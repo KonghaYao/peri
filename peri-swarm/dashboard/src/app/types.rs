@@ -4,6 +4,7 @@
 //! [`Effect`] is deliberately not `Debug`: it may carry an API key.
 
 use crate::api::{ApprovalDecision, CreateSessionSpec, IdempotencyKey, UpdateSessionSpec};
+use crate::metrics::TimeWindow;
 use crate::ui::text;
 use crate::view_model::StatusBucket;
 use crate::worker::ValidationPurpose;
@@ -100,7 +101,14 @@ impl Page {
     /// Whether this build implements the page.
     #[must_use]
     pub fn is_implemented(self) -> bool {
-        matches!(self, Page::SessionLog | Page::Settings)
+        matches!(
+            self,
+            Page::CoreMetrics
+                | Page::AgentMetrics
+                | Page::SessionLog
+                | Page::RequestLog
+                | Page::Settings
+        )
     }
 }
 
@@ -381,6 +389,12 @@ pub enum ActionId {
     CancelCancelTurn,
     /// Edit form: submit through the worker.
     EditSubmit,
+    /// Core metrics: refetch the selected window.
+    RefreshCoreMetrics,
+    /// Agent metrics: refetch the selected window.
+    RefreshAgentMetrics,
+    /// Request log: refetch the current page.
+    RefreshRequestLog,
 }
 
 /// Tabs of the session detail page.
@@ -506,6 +520,12 @@ pub enum Intent {
     SessionPageNext,
     /// Session log: jump to a loaded display page (0-based).
     GoToSessionPage(usize),
+    /// Metrics pages: select a time window.
+    SetMetricsWindow(TimeWindow),
+    /// Metrics pages: show the previous display page.
+    MetricsPagePrev,
+    /// Metrics pages: show the next display page.
+    MetricsPageNext,
     /// Session detail: select a tab.
     SelectDetailTab(DetailTab),
     /// Create form: append a metadata row.
@@ -652,6 +672,17 @@ pub enum Effect {
         /// Validated key.
         api_key: String,
     },
+    /// Adopt a newly saved OpenObserve connection in the API worker.
+    AdoptObservability {
+        /// Validated origin.
+        base_url: String,
+        /// Validated organization.
+        org: String,
+        /// Validated user.
+        user: String,
+        /// Validated password. Never printed.
+        password: String,
+    },
     /// Run a health poll.
     Health {
         /// UI epoch.
@@ -665,6 +696,35 @@ pub enum Effect {
         generation: u64,
         /// Page size.
         limit: u32,
+    },
+    /// Query Core metrics for one window.
+    LoadCoreMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query Agent metrics for one window.
+    LoadAgentMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query one request-log page.
+    LoadRequestLog {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+        /// Page, 0-based.
+        page: usize,
     },
     /// Create a session from the validated create form.
     CreateSession {

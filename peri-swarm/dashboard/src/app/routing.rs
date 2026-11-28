@@ -73,10 +73,34 @@ impl App {
                         self.apply(Intent::ToggleMenu);
                         return Vec::new();
                     }
+                    '1' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::FifteenMinutes,
+                        ));
+                    }
+                    '2' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::OneHour,
+                        ));
+                    }
+                    '3' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::TwentyFourHours,
+                        ));
+                    }
                     'e' if self.active_banner().is_some() => {
                         self.apply(Intent::OpenErrorActions);
                         return Vec::new();
                     }
+                    _ => {}
+                }
+            }
+            if self.screen == Screen::Main
+                && matches!(self.page, Page::AgentMetrics | Page::RequestLog)
+            {
+                match key.code {
+                    KeyCode::PageUp => return self.apply(Intent::MetricsPagePrev),
+                    KeyCode::PageDown => return self.apply(Intent::MetricsPageNext),
                     _ => {}
                 }
             }
@@ -229,6 +253,9 @@ impl App {
             Intent::SessionPagePrev => self.show_page_prev(),
             Intent::SessionPageNext => self.show_page_next(),
             Intent::GoToSessionPage(page) => self.goto_session_page(page),
+            intent @ (Intent::SetMetricsWindow(_)
+            | Intent::MetricsPagePrev
+            | Intent::MetricsPageNext) => self.apply_metrics_intent(intent),
             Intent::SelectDetailTab(tab) => {
                 self.detail_tab = tab;
                 self.content_scroll = 0;
@@ -511,6 +538,14 @@ impl App {
             (index + 1) % cycle.len()
         };
         self.focus = cycle[next];
+    }
+
+    /// Whether the active page has a selectable time window.
+    fn metrics_page_active(&self) -> bool {
+        matches!(
+            self.page,
+            Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog
+        )
     }
 
     pub(super) fn select_page(&mut self, page: Page, focus: Focus) {

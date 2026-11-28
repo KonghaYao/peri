@@ -141,6 +141,11 @@ fn run_loop(
             execute(vec![effect], worker);
             dirty = true;
         }
+        let metrics_effects = app.metrics_due(Instant::now());
+        if !metrics_effects.is_empty() {
+            execute(metrics_effects, worker);
+            dirty = true;
+        }
         let detail_effects = app.detail_due(Instant::now());
         if !detail_effects.is_empty() {
             execute(detail_effects, worker);
@@ -220,6 +225,17 @@ fn execute(effects: Vec<Effect>, worker: &WorkerHandle) {
             Effect::Adopt { base_url, api_key } => {
                 worker.send(Command::Adopt { base_url, api_key });
             }
+            Effect::AdoptObservability {
+                base_url,
+                org,
+                user,
+                password,
+            } => worker.send(Command::AdoptObservability {
+                base_url,
+                org,
+                user,
+                password,
+            }),
             Effect::Health { epoch } => worker.send(Command::Health { epoch }),
             Effect::ListSessions {
                 epoch,
@@ -229,6 +245,35 @@ fn execute(effects: Vec<Effect>, worker: &WorkerHandle) {
                 epoch,
                 generation,
                 limit,
+            }),
+            Effect::LoadCoreMetrics {
+                epoch,
+                generation,
+                window,
+            } => worker.send(Command::LoadCoreMetrics {
+                epoch,
+                generation,
+                window,
+            }),
+            Effect::LoadAgentMetrics {
+                epoch,
+                generation,
+                window,
+            } => worker.send(Command::LoadAgentMetrics {
+                epoch,
+                generation,
+                window,
+            }),
+            Effect::LoadRequestLog {
+                epoch,
+                generation,
+                window,
+                page,
+            } => worker.send(Command::LoadRequestLog {
+                epoch,
+                generation,
+                window,
+                page,
             }),
             Effect::CreateSession { epoch, spec, key } => {
                 worker.send(Command::CreateSession { epoch, spec, key });

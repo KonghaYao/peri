@@ -10,6 +10,7 @@
 //! only a status code, its canonical reason, and a scrubbed short server
 //! message.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use reqwest::redirect::Policy;
@@ -68,6 +69,57 @@ pub struct SearchPage {
     pub hits: Vec<Value>,
     /// Total rows matching the query, as reported by OpenObserve.
     pub total: u64,
+}
+
+/// One PromQL sample. Timestamps are Unix seconds, as returned by OpenObserve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PromSample {
+    /// Evaluation timestamp in Unix seconds.
+    pub timestamp: i64,
+    /// Sample value. Non-finite values are filtered out by consumers.
+    pub value: f64,
+}
+
+/// One PromQL time series.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PromSeries {
+    /// Series labels; `__name__` is included when the server reports it.
+    pub labels: BTreeMap<String, String>,
+    /// Samples in ascending timestamp order.
+    pub values: Vec<PromSample>,
+}
+
+/// Parsed PromQL `query_range` result.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PromMatrix {
+    /// Matching series.
+    pub series: Vec<PromSeries>,
+}
+
+/// PromQL query response envelope.
+#[derive(Deserialize)]
+struct PromEnvelope {
+    status: String,
+    #[serde(default)]
+    data: Option<PromData>,
+}
+
+/// PromQL result payload.
+#[derive(Deserialize)]
+struct PromData {
+    #[serde(rename = "resultType")]
+    result_type: String,
+    #[serde(default)]
+    result: Vec<PromSeriesRaw>,
+}
+
+/// One raw PromQL series.
+#[derive(Deserialize)]
+struct PromSeriesRaw {
+    #[serde(default)]
+    metric: BTreeMap<String, String>,
+    #[serde(default)]
+    values: Vec<(f64, Value)>,
 }
 
 /// OpenObserve search response (the fields the dashboard needs).
@@ -189,6 +241,71 @@ impl OpenObserveClient {
         })
     }
 
+    /// Run one PromQL range query over `[start_s, end_s]` seconds.
+    ///
+    /// OpenObserve stores OTLP metrics in Prometheus-compatible streams and
+    /// rejects SQL search on them, so this is the only metrics query path.
+    /// `step_s` is the evaluation step in seconds.
+    pub async fn query_range(
+        &self,
+        query: &str,
+        start_s: u64,
+        end_s: u64,
+        step_s: u64,
+    ) -> Result<PromMatrix> {
+        let mut url =
+            self.endpoint(&["api", &self.org, "prometheus", "api", "v1", "query_range"])?;
+        {
+            let mut params = url.query_pairs_mut();
+            params.append_pair("query", query);
+            params.append_pair("start", &start_s.to_string());
+            params.append_pair("end", &end_s.to_string());
+            params.append_pair("step", &step_s.to_string());
+        }
+        let response = self
+            .client
+            .get(url)
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|_| ObservabilityError::Malformed)?;
+        if !status.is_success() {
+            return Err(self.http_error(status, &body));
+        }
+        let envelope: PromEnvelope =
+            serde_json::from_str(&body).map_err(|_| ObservabilityError::Malformed)?;
+        if envelope.status != "success" {
+            return Err(ObservabilityError::Malformed);
+        }
+        let data = envelope.data.ok_or(ObservabilityError::Malformed)?;
+        if data.result_type != "matrix" {
+            return Err(ObservabilityError::Malformed);
+        }
+        let series = data
+            .result
+            .into_iter()
+            .map(|raw| PromSeries {
+                labels: raw.metric,
+                values: raw
+                    .values
+                    .into_iter()
+                    .filter_map(|(timestamp, value)| {
+                        parse_prom_value(&value).map(|value| PromSample {
+                            timestamp: timestamp as i64,
+                            value,
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
+        Ok(PromMatrix { series })
+    }
+
     /// Probe the organization with `GET /api/{org}/streams`.
     ///
     /// Returns the stream count when the response exposes it, otherwise
@@ -251,7 +368,8 @@ impl OpenObserveClient {
 
     /// Remove the password from a server message and bound its length.
     fn scrub(&self, message: &str) -> String {
-        let mut scrubbed = message.replace(&self.password, REDACTED);
+        let scrubbed = message.replace(&self.password, REDACTED);
+        let mut scrubbed = redact_authorization_value(&scrubbed);
         scrubbed = scrubbed
             .chars()
             .map(|character| {
@@ -265,6 +383,62 @@ impl OpenObserveClient {
             .collect();
         scrubbed.trim().to_owned()
     }
+}
+
+/// Redact the value after an `Authorization:` header name.
+///
+/// A server error body may echo request headers. The header name is harmless;
+/// its value is not, so replace the scheme and credential tokens that follow
+/// the header name.
+fn redact_authorization_value(message: &str) -> String {
+    const KEY: &str = "authorization";
+    let mut result = String::with_capacity(message.len());
+    let mut rest = message;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(position) = lower.find(KEY) else {
+            result.push_str(rest);
+            break;
+        };
+        let header_end = position + KEY.len();
+        result.push_str(&rest[..header_end]);
+        let after = &rest[header_end..];
+        let Some(colon) = after.find(':') else {
+            rest = after;
+            continue;
+        };
+        let value_start = header_end + colon + 1;
+        result.push_str(&rest[header_end..value_start]);
+        let value = &rest[value_start..];
+        let leading = value.len() - value.trim_start().len();
+        result.push_str(&value[..leading]);
+        let token = &value[leading..];
+        let first_end = token_end(token);
+        if first_end > 0 {
+            // `Authorization: Basic <credential>` and `Bearer <token>` carry
+            // the secret in the second token; redact both.
+            let scheme = token[..first_end].to_ascii_lowercase();
+            let extra = if matches!(scheme.as_str(), "basic" | "bearer" | "digest" | "negotiate") {
+                let after_scheme = &token[first_end..];
+                let spaces = after_scheme.len() - after_scheme.trim_start().len();
+                spaces + token_end(&after_scheme[spaces..])
+            } else {
+                0
+            };
+            result.push_str(REDACTED);
+            rest = &token[(first_end + extra).min(token.len())..];
+        } else {
+            rest = token;
+        }
+    }
+    result
+}
+
+/// Index of the first whitespace/quote/comma delimiter, or the token length.
+fn token_end(token: &str) -> usize {
+    token
+        .find(|character: char| character.is_whitespace() || character == '"' || character == ',')
+        .unwrap_or(token.len())
 }
 
 /// Extract a short, human-readable message from an error body.
@@ -285,6 +459,21 @@ fn short_server_message(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse a PromQL sample value. The Prometheus JSON format encodes it as a
+/// string, but local OpenObserve builds have returned bare numbers too.
+fn parse_prom_value(value: &Value) -> Option<f64> {
+    if let Some(number) = value.as_f64() {
+        return Some(number);
+    }
+    let text = value.as_str()?;
+    match text {
+        "NaN" => Some(f64::NAN),
+        "+Inf" | "Inf" => Some(f64::INFINITY),
+        "-Inf" => Some(f64::NEG_INFINITY),
+        _ => text.parse().ok(),
+    }
 }
 
 /// Map a transport failure to a safe, credential-free variant.

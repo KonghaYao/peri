@@ -13,7 +13,9 @@ use crate::app::{App, Page, Screen};
 use crate::ui::hit::HitMap;
 use crate::ui::widgets::Rows;
 
-use super::{empty, onboarding, session_detail, session_form, session_log, settings};
+use super::{
+    empty, metrics, onboarding, request_log, session_detail, session_form, session_log, settings,
+};
 
 /// Extra scratch rows above the viewport used to draw a block that starts just
 /// above the visible window. Every multi-line block drawn by a page is smaller
@@ -74,12 +76,12 @@ pub fn render(
                 None
             }
             Page::SessionLog => session_log::render(buf, &mut rows, app, hits),
+            Page::CoreMetrics => metrics::render_core(buf, &mut rows, app, hits),
+            Page::AgentMetrics => metrics::render_agent(buf, &mut rows, app, hits),
+            Page::RequestLog => request_log::render(buf, &mut rows, app, hits),
             // Placeholder pages are reachable but have no data source yet; each
             // renders an honest empty state until a later stage implements it.
-            Page::CoreMetrics
-            | Page::AgentMetrics
-            | Page::SandboxMetrics
-            | Page::RequestLog
+            Page::SandboxMetrics
             | Page::Query
             | Page::Agents
             | Page::Artifacts

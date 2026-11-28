@@ -435,6 +435,14 @@ pub trait SwarmApi: Send + Sync {
     /// List sessions in gateway order (`logical_id` desc).
     async fn list_sessions(&self, limit: u32) -> Result<SessionPage, ApiError>;
 
+    /// Per-session token usage over one bounded window.
+    async fn agent_metrics(
+        &self,
+        start_us: i64,
+        end_us: i64,
+        limit: u32,
+    ) -> Result<AgentMetrics, ApiError>;
+
     /// Retrieve one session.
     async fn get_session(&self, session_id: &str) -> Result<Session, ApiError>;
 
@@ -554,6 +562,33 @@ impl HttpSwarmApi {
             for segment in tail {
                 segments.push(segment);
             }
+        }
+        Ok(url)
+    }
+
+    /// `GET /v1/agents/metrics?start_time=…&end_time=…&limit=…`.
+    fn agent_metrics_url(&self, start_us: i64, end_us: i64, limit: u32) -> Result<Url, ApiError> {
+        if limit == 0 || limit > MAX_PAGE_LIMIT {
+            return Err(ApiError::local(format!(
+                "limit must be within 1..={MAX_PAGE_LIMIT}"
+            )));
+        }
+        if start_us > end_us {
+            return Err(ApiError::local("start_time must not be after end_time"));
+        }
+        let mut url = self.base_url.clone();
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| ApiError::local("base URL cannot be used as an API request base"))?;
+            segments.clear();
+            segments.push("v1").push("agents").push("metrics");
+        }
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("start_time", &start_us.to_string());
+            query.append_pair("end_time", &end_us.to_string());
+            query.append_pair("limit", &limit.to_string());
         }
         Ok(url)
     }
@@ -689,6 +724,16 @@ impl SwarmApi for HttpSwarmApi {
 
     async fn list_sessions(&self, limit: u32) -> Result<SessionPage, ApiError> {
         let url = self.page_url(&[], limit, None)?;
+        self.send_json(self.authorized(self.client.get(url))).await
+    }
+
+    async fn agent_metrics(
+        &self,
+        start_us: i64,
+        end_us: i64,
+        limit: u32,
+    ) -> Result<AgentMetrics, ApiError> {
+        let url = self.agent_metrics_url(start_us, end_us, limit)?;
         self.send_json(self.authorized(self.client.get(url))).await
     }
 

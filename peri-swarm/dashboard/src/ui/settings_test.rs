@@ -329,7 +329,10 @@ fn saving_observability_keeps_the_gateway_key_and_never_echoes_the_password() {
     let (_terminal, hits) = draw(&mut app, 120, 50);
 
     let effects = app.apply(click(&hits, Intent::Activate(ActionId::SaveObservability)));
-    assert!(effects.is_empty());
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::app::Effect::AdoptObservability { .. }]
+    ));
     assert_eq!(app.screen(), Screen::Main);
     assert_eq!(app.page(), Page::Settings);
     assert_eq!(app.observability_config().map(|o| o.org()), Some("peri"));
