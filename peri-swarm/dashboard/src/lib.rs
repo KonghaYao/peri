@@ -6,11 +6,14 @@
 pub mod api;
 pub mod app;
 pub mod config;
+pub mod observability;
 pub mod poll;
 pub mod text_field;
 pub mod ui;
 pub mod view_model;
 pub mod worker;
 
+#[cfg(test)]
+pub(crate) mod stub_http;
 #[cfg(test)]
 pub(crate) mod test_support;

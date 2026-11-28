@@ -25,7 +25,7 @@ mod session_flow;
 mod session_log;
 mod types;
 
-pub use forms::{CredentialsState, OnboardingState};
+pub use forms::{CredentialsState, ObservabilityState, OnboardingState};
 pub use session_create::{CreateFormState, MetadataRow};
 pub use session_detail::{
     pretty_json, ActionError, ApprovalEntry, RequiredAction, SessionDetailState, TimelineEntry,
@@ -50,6 +50,8 @@ pub struct App {
     overlay_cursor: usize,
     onboarding: OnboardingState,
     credentials: CredentialsState,
+    observability: ObservabilityState,
+    observability_testing: bool,
     settings_status: Option<SettingsStatus>,
     config: Option<Config>,
     store: ConfigStore,
@@ -97,6 +99,8 @@ impl App {
             overlay_cursor: 0,
             onboarding: OnboardingState::default(),
             credentials: CredentialsState::default(),
+            observability: ObservabilityState::default(),
+            observability_testing: false,
             settings_status: None,
             config: None,
             store,
@@ -145,6 +149,8 @@ impl App {
             overlay_cursor: 0,
             onboarding: OnboardingState::default(),
             credentials: CredentialsState::default(),
+            observability: ObservabilityState::default(),
+            observability_testing: false,
             settings_status: None,
             config: Some(config),
             store,
@@ -226,6 +232,12 @@ impl App {
             | ActionId::EditCredentials
             | ActionId::SignOut
             | ActionId::Quit => self.validation.is_none(),
+            ActionId::ConfigureObservability => {
+                self.validation.is_none() && !self.observability_testing
+            }
+            ActionId::TestObservability | ActionId::SaveObservability => {
+                !self.observability_testing
+            }
             ActionId::SaveCredentials => self.validation != Some(ValidationPurpose::Credentials),
             _ => true,
         }
@@ -252,6 +264,26 @@ impl App {
     #[must_use]
     pub fn credentials(&self) -> &CredentialsState {
         &self.credentials
+    }
+
+    /// Observability connection editor form.
+    #[must_use]
+    pub fn observability(&self) -> &ObservabilityState {
+        &self.observability
+    }
+
+    /// Stored OpenObserve connection, when configured.
+    #[must_use]
+    pub fn observability_config(&self) -> Option<&crate::config::ObservabilityConfig> {
+        self.config
+            .as_ref()
+            .and_then(crate::config::Config::observability)
+    }
+
+    /// Whether an OpenObserve connection test is in flight.
+    #[must_use]
+    pub fn observability_testing(&self) -> bool {
+        self.observability_testing
     }
 
     /// Last settings action result.
@@ -462,6 +494,18 @@ impl App {
             FieldId::CredentialsApiKey if self.screen == Screen::SettingsCredentials => {
                 Some(self.credentials.api_key())
             }
+            FieldId::ObservabilityBaseUrl if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.base_url())
+            }
+            FieldId::ObservabilityOrg if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.org())
+            }
+            FieldId::ObservabilityUser if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.user())
+            }
+            FieldId::ObservabilityPassword if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.password())
+            }
             FieldId::SessionSearch
                 if self.screen == Screen::Main && self.page == Page::SessionLog =>
             {
@@ -543,7 +587,7 @@ impl App {
     pub fn field_is_masked(field: FieldId) -> bool {
         matches!(
             field,
-            FieldId::OnboardingApiKey | FieldId::CredentialsApiKey
+            FieldId::OnboardingApiKey | FieldId::CredentialsApiKey | FieldId::ObservabilityPassword
         )
     }
 
@@ -613,6 +657,7 @@ impl App {
             || self.health_in_flight
             || self.screen == Screen::Onboarding
             || self.screen == Screen::SettingsCredentials
+            || self.screen == Screen::SettingsObservability
             || self.overlay == Some(Overlay::ConfirmSignOut)
         {
             return None;

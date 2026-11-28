@@ -341,6 +341,18 @@ impl App {
             FieldId::CredentialsApiKey if self.screen == Screen::SettingsCredentials => {
                 Some(&mut self.credentials.api_key)
             }
+            FieldId::ObservabilityBaseUrl if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.base_url)
+            }
+            FieldId::ObservabilityOrg if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.org)
+            }
+            FieldId::ObservabilityUser if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.user)
+            }
+            FieldId::ObservabilityPassword if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.password)
+            }
             FieldId::SessionSearch
                 if self.screen == Screen::Main && self.page == Page::SessionLog =>
             {
@@ -388,10 +400,20 @@ impl App {
                 Focus::Action(ActionId::SaveCredentials),
                 Focus::Action(ActionId::Back),
             ],
+            Screen::SettingsObservability => vec![
+                Focus::Field(FieldId::ObservabilityBaseUrl),
+                Focus::Field(FieldId::ObservabilityOrg),
+                Focus::Field(FieldId::ObservabilityUser),
+                Focus::Field(FieldId::ObservabilityPassword),
+                Focus::Action(ActionId::TestObservability),
+                Focus::Action(ActionId::SaveObservability),
+                Focus::Action(ActionId::CancelObservability),
+            ],
             Screen::Main if self.page == Page::Settings => vec![
                 Focus::Sidebar,
                 Focus::Action(ActionId::TestConnection),
                 Focus::Action(ActionId::EditCredentials),
+                Focus::Action(ActionId::ConfigureObservability),
                 Focus::Action(ActionId::SignOut),
                 Focus::Action(ActionId::Quit),
             ],
@@ -501,6 +523,7 @@ impl App {
     pub(super) fn go_back(&mut self) {
         match self.screen {
             Screen::SettingsCredentials => self.back_to_settings(),
+            Screen::SettingsObservability => self.back_to_settings(),
             Screen::SessionEdit => {
                 self.edit = super::EditFormState::default();
                 self.screen = Screen::SessionDetail;
@@ -581,6 +604,7 @@ impl App {
             let action = match self.screen {
                 Screen::Onboarding => Some(ActionId::Submit),
                 Screen::SettingsCredentials => Some(ActionId::SaveCredentials),
+                Screen::SettingsObservability => Some(ActionId::SaveObservability),
                 Screen::SessionEdit => Some(ActionId::EditSubmit),
                 _ => None,
             };

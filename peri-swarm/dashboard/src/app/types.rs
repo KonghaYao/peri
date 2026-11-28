@@ -23,6 +23,8 @@ pub enum Screen {
     SessionEdit,
     /// Settings sub-page for editing credentials.
     SettingsCredentials,
+    /// Settings sub-page for the OpenObserve connection.
+    SettingsObservability,
 }
 
 /// Every sidebar page, in sidebar order.
@@ -240,6 +242,14 @@ pub enum FieldId {
     CredentialsBaseUrl,
     /// Settings credential-edit API key.
     CredentialsApiKey,
+    /// Observability editor base URL.
+    ObservabilityBaseUrl,
+    /// Observability editor organization.
+    ObservabilityOrg,
+    /// Observability editor user.
+    ObservabilityUser,
+    /// Observability editor password.
+    ObservabilityPassword,
     /// Session log search box.
     SessionSearch,
     /// Create form: optional logical id.
@@ -303,6 +313,14 @@ pub enum ActionId {
     TestConnection,
     /// Settings: open the credential editor.
     EditCredentials,
+    /// Settings: open the OpenObserve connection editor.
+    ConfigureObservability,
+    /// Observability editor: probe the entered connection.
+    TestObservability,
+    /// Observability editor: persist the entered connection.
+    SaveObservability,
+    /// Observability editor: leave without saving.
+    CancelObservability,
     /// Open the sign-out confirmation.
     SignOut,
     /// Quit the dashboard.
@@ -596,6 +614,19 @@ pub enum SettingsStatus {
 ///
 /// Deliberately not `Debug`: validation and adoption effects carry the API key.
 pub enum Effect {
+    /// Probe a candidate OpenObserve connection.
+    TestObservability {
+        /// UI epoch.
+        epoch: u64,
+        /// Candidate origin.
+        base_url: String,
+        /// Candidate organization.
+        org: String,
+        /// Candidate user.
+        user: String,
+        /// Candidate password. Never printed.
+        password: String,
+    },
     /// Validate candidate credentials.
     Validate {
         /// UI epoch.

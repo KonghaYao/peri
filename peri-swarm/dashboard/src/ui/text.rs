@@ -115,6 +115,10 @@ pub fn action_label(action: ActionId) -> &'static str {
         ActionId::Submit => "Connect",
         ActionId::TestConnection => "Test connection",
         ActionId::EditCredentials => "Edit credentials",
+        ActionId::ConfigureObservability => "Configure observability",
+        ActionId::TestObservability => "Test",
+        ActionId::SaveObservability => "Save",
+        ActionId::CancelObservability => "Cancel",
         ActionId::SignOut => "Sign out",
         ActionId::Quit => "Quit",
         ActionId::ShowGettingStarted => "Show getting started",
@@ -154,6 +158,10 @@ pub fn field_label(field: FieldId) -> &'static str {
     match field {
         FieldId::OnboardingBaseUrl | FieldId::CredentialsBaseUrl => "Base URL",
         FieldId::OnboardingApiKey | FieldId::CredentialsApiKey => "API key",
+        FieldId::ObservabilityBaseUrl => "Base URL",
+        FieldId::ObservabilityOrg => "Organization",
+        FieldId::ObservabilityUser => "User",
+        FieldId::ObservabilityPassword => "Password",
         FieldId::SessionSearch => "Search",
         FieldId::CreateLogicalId => "Logical ID (optional)",
         FieldId::CreateModel => "Model",
@@ -387,6 +395,91 @@ pub const CREDENTIALS_INTRO: &str = "The new origin is validated before anything
 
 /// Hint under the key field.
 pub const CREDENTIALS_KEY_HINT: &str = "Leave the API key blank to keep the current key.";
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+/// Settings section heading for the OpenObserve connection.
+pub const SECTION_OBSERVABILITY: &str = "Observability";
+
+/// Observability status row label.
+pub const LABEL_OBSERVABILITY_STATUS: &str = "Status";
+
+/// Observability organization row label.
+pub const LABEL_OBSERVABILITY_ORG: &str = "Organization";
+
+/// Observability user row label.
+pub const LABEL_OBSERVABILITY_USER: &str = "User";
+
+/// Observability status when no connection is stored.
+pub const OBSERVABILITY_NOT_CONFIGURED: &str = "not configured";
+
+/// Observability status when a connection is stored.
+pub const OBSERVABILITY_CONFIGURED: &str = "configured";
+
+/// Short warning shown on Settings.
+pub const OBSERVABILITY_NOT_A_BOUNDARY: &str = "Direct admin connection · not a read-only boundary";
+
+/// Configuration sub-page title.
+pub const OBSERVABILITY_TITLE: &str = "Configure observability";
+
+/// Configuration sub-page explanation.
+pub const OBSERVABILITY_INTRO: &str = "The dashboard sends SELECT queries directly to OpenObserve with a dedicated admin account. OpenObserve OSS has no viewer role, so that account can write; the client-side SELECT check is not a security boundary. Keep the connection on a private network, use a dedicated account, and rotate the password.";
+
+/// Base URL placeholder.
+pub const OBSERVABILITY_BASE_URL_PLACEHOLDER: &str = "http://127.0.0.1:5080";
+
+/// Organization placeholder.
+pub const OBSERVABILITY_ORG_PLACEHOLDER: &str = "default";
+
+/// User placeholder.
+pub const OBSERVABILITY_USER_PLACEHOLDER: &str = "dashboard account";
+
+/// Password placeholder.
+pub const OBSERVABILITY_PASSWORD_PLACEHOLDER: &str = "leave blank to keep the stored password";
+
+/// Hint under the password field.
+pub const OBSERVABILITY_PASSWORD_HINT: &str =
+    "The password is stored in the 0600 config file and is never displayed.";
+
+/// In-flight OpenObserve probe.
+pub const TESTING_OBSERVABILITY: &str = "Testing OpenObserve connection…";
+
+/// Observability settings saved by the editor.
+pub const OBSERVABILITY_SAVED: &str = "Observability settings saved.";
+
+/// Successful OpenObserve probe.
+#[must_use]
+pub fn observability_test_ok(elapsed: Duration, streams: Option<usize>) -> String {
+    match streams {
+        Some(1) => format!(
+            "OpenObserve connection OK in {} ms (1 stream).",
+            elapsed.as_millis()
+        ),
+        Some(streams) => format!(
+            "OpenObserve connection OK in {} ms ({streams} streams).",
+            elapsed.as_millis()
+        ),
+        None => format!("OpenObserve connection OK in {} ms.", elapsed.as_millis()),
+    }
+}
+
+/// Human description of an OpenObserve failure, without credentials or headers.
+#[must_use]
+pub fn observability_error(error: &crate::observability::ObservabilityError) -> String {
+    use crate::observability::ObservabilityError;
+    match error {
+        ObservabilityError::InvalidConfig(inner) => observability_config_error(inner),
+        ObservabilityError::Timeout => "OpenObserve request timed out.".to_owned(),
+        ObservabilityError::Unreachable => "Could not reach OpenObserve.".to_owned(),
+        ObservabilityError::Http { status, detail } => {
+            format!("OpenObserve returned HTTP {status}{detail}.")
+        }
+        ObservabilityError::Malformed => "OpenObserve returned an unreadable response.".to_owned(),
+        ObservabilityError::Client => "Could not build the OpenObserve client.".to_owned(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Banner

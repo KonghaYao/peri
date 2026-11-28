@@ -190,6 +190,19 @@ fn run_loop(
 fn execute(effects: Vec<Effect>, worker: &WorkerHandle) {
     for effect in effects {
         match effect {
+            Effect::TestObservability {
+                epoch,
+                base_url,
+                org,
+                user,
+                password,
+            } => worker.send(Command::TestObservability {
+                epoch,
+                base_url,
+                org,
+                user,
+                password,
+            }),
             Effect::Validate {
                 epoch,
                 purpose,

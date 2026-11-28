@@ -2,7 +2,15 @@
 //!
 //! The file lives at `~/.config/peri-swarm-dashboard/config.toml`, the directory
 //! is `0700`, and the file is written atomically with mode `0600`. The API key
-//! is never part of `Debug` output or error messages.
+//! and the OpenObserve password are never part of `Debug` output or error
+//! messages.
+//!
+//! The optional `[observability]` section holds the OpenObserve connection used
+//! by the read-only SQL pages. OpenObserve OSS v1.2.0 has no viewer role, so the
+//! dashboard uses a dedicated admin account and the client only sends `SELECT`
+//! statements. That client-side check is **not** a security boundary: the
+//! account itself can write. Protection depends on the private network, the
+//! dedicated account, and keeping/rotating the `0600` credential file.
 
 use std::fmt;
 use std::fs;
@@ -21,6 +29,10 @@ pub const CONFIG_DIR_NAME: &str = "peri-swarm-dashboard";
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 /// Default gateway origin offered on first run.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8080";
+/// Default OpenObserve origin offered by the observability form.
+pub const DEFAULT_OBSERVABILITY_BASE_URL: &str = "http://127.0.0.1:5080";
+/// Default OpenObserve organization offered by the observability form.
+pub const DEFAULT_OBSERVABILITY_ORG: &str = "default";
 
 const REDACTED_KEY: &str = "<redacted>";
 
@@ -47,6 +59,118 @@ pub enum BaseUrlError {
     UnsupportedPath,
 }
 
+/// Why an OpenObserve connection cannot be used.
+///
+/// Messages never include the entered values, in particular not the password.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ObservabilityConfigError {
+    /// The URL was empty after trimming.
+    #[error("observability base URL must not be empty")]
+    EmptyBaseUrl,
+    /// The value is not an absolute URL with a host.
+    #[error("observability base URL must be an absolute http or https URL with a host")]
+    InvalidBaseUrl,
+    /// A scheme other than `http` or `https` was supplied.
+    #[error("observability base URL must use http or https")]
+    UnsupportedScheme,
+    /// The URL embeds `user:password@`.
+    #[error("observability base URL must not contain credentials")]
+    UserInfo,
+    /// The URL contains a query or fragment.
+    #[error("observability base URL must not contain a query or fragment")]
+    QueryOrFragment,
+    /// The organization was blank.
+    #[error("organization must not be empty")]
+    EmptyOrg,
+    /// The user was blank.
+    #[error("user must not be empty")]
+    EmptyUser,
+    /// The password was blank.
+    #[error("password must not be empty")]
+    EmptyPassword,
+}
+
+/// A validated OpenObserve connection.
+///
+/// Fields are private so every value goes through [`ObservabilityConfig::new`],
+/// which normalizes the base URL. `Debug` never prints the password.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ObservabilityConfig {
+    base_url: String,
+    org: String,
+    user: String,
+    password: String,
+}
+
+impl ObservabilityConfig {
+    /// Validate and normalize an OpenObserve connection.
+    ///
+    /// The base URL is trimmed, restricted to `http`/`https`, stripped of a
+    /// trailing slash, and rejected when it carries userinfo, a query, or a
+    /// fragment. Organization and user are trimmed; the password is kept
+    /// verbatim but must not be blank.
+    pub fn new(
+        base_url: &str,
+        org: &str,
+        user: &str,
+        password: &str,
+    ) -> Result<Self, ObservabilityConfigError> {
+        let base_url = normalize_observability_base_url(base_url)?;
+        let org = org.trim();
+        if org.is_empty() {
+            return Err(ObservabilityConfigError::EmptyOrg);
+        }
+        let user = user.trim();
+        if user.is_empty() {
+            return Err(ObservabilityConfigError::EmptyUser);
+        }
+        if password.trim().is_empty() {
+            return Err(ObservabilityConfigError::EmptyPassword);
+        }
+        Ok(Self {
+            base_url,
+            org: org.to_owned(),
+            user: user.to_owned(),
+            password: password.to_owned(),
+        })
+    }
+
+    /// Normalized origin (plus optional path prefix) without a trailing slash.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// OpenObserve organization.
+    #[must_use]
+    pub fn org(&self) -> &str {
+        &self.org
+    }
+
+    /// OpenObserve user. Callers must not display the password.
+    #[must_use]
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    /// OpenObserve password. Callers must never log or display this value.
+    #[must_use]
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+impl fmt::Debug for ObservabilityConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObservabilityConfig")
+            .field("base_url", &self.base_url)
+            .field("org", &self.org)
+            .field("user", &self.user)
+            .field("password", &REDACTED_KEY)
+            .finish()
+    }
+}
+
 /// A normalized gateway origin plus its deployment key.
 ///
 /// Fields are private so every value goes through [`Config::new`], which
@@ -55,6 +179,7 @@ pub enum BaseUrlError {
 pub struct Config {
     base_url: String,
     api_key: String,
+    observability: Option<ObservabilityConfig>,
 }
 
 impl Config {
@@ -71,7 +196,18 @@ impl Config {
         Ok(Self {
             base_url,
             api_key: api_key.to_owned(),
+            observability: None,
         })
+    }
+
+    /// Attach a validated OpenObserve connection.
+    ///
+    /// Kept separate from [`Config::new`] so every existing call site keeps
+    /// working and a missing `[observability]` section stays representable.
+    #[must_use]
+    pub fn with_observability(mut self, observability: ObservabilityConfig) -> Self {
+        self.observability = Some(observability);
+        self
     }
 
     /// Normalized origin without a trailing slash, e.g. `http://127.0.0.1:8080`.
@@ -85,6 +221,12 @@ impl Config {
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
+
+    /// OpenObserve connection, when configured.
+    #[must_use]
+    pub fn observability(&self) -> Option<&ObservabilityConfig> {
+        self.observability.as_ref()
+    }
 }
 
 impl fmt::Debug for Config {
@@ -92,6 +234,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("base_url", &self.base_url)
             .field("api_key", &REDACTED_KEY)
+            .field("observability", &self.observability)
             .finish()
     }
 }
@@ -175,6 +318,9 @@ pub enum InvalidConfig {
     /// The saved key was blank.
     #[error("API key must not be empty")]
     ApiKey,
+    /// The saved observability section failed validation.
+    #[error("observability section is invalid: {0}")]
+    Observability(#[from] ObservabilityConfigError),
 }
 
 /// A non-fatal observation made while loading the config.
@@ -220,12 +366,26 @@ impl LoadedConfig {
 
 /// The on-disk TOML shape. Kept private so no other type can serialize the key.
 ///
-/// Deliberately not `Debug`: the derived form would print the plaintext key.
+/// Deliberately not `Debug`: the derived form would print the plaintext key and
+/// the OpenObserve password.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     base_url: String,
     api_key: String,
+    /// Optional so configs written before observability existed load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observability: Option<ObservabilityFileConfig>,
+}
+
+/// On-disk shape of the optional `[observability]` table.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservabilityFileConfig {
+    base_url: String,
+    org: String,
+    user: String,
+    password: String,
 }
 
 /// A credential file at a concrete path.
@@ -272,7 +432,7 @@ impl ConfigStore {
         let file: FileConfig = toml::from_str(&text).map_err(|_| ConfigError::Corrupt {
             path: self.path.clone(),
         })?;
-        let config = match Config::new(&file.base_url, &file.api_key) {
+        let mut config = match Config::new(&file.base_url, &file.api_key) {
             Ok(config) => config,
             Err(ConfigError::InvalidBaseUrl(reason)) => {
                 return Err(ConfigError::Invalid {
@@ -288,6 +448,19 @@ impl ConfigStore {
             }
             Err(other) => return Err(other),
         };
+        if let Some(observability) = file.observability {
+            let observability = ObservabilityConfig::new(
+                &observability.base_url,
+                &observability.org,
+                &observability.user,
+                &observability.password,
+            )
+            .map_err(|reason| ConfigError::Invalid {
+                path: self.path.clone(),
+                reason: InvalidConfig::Observability(reason),
+            })?;
+            config = config.with_observability(observability);
+        }
         Ok(Some(LoadedConfig::new(config, self.permission_warnings())))
     }
 
@@ -296,6 +469,14 @@ impl ConfigStore {
         let file = FileConfig {
             base_url: config.base_url.clone(),
             api_key: config.api_key.clone(),
+            observability: config.observability.as_ref().map(|observability| {
+                ObservabilityFileConfig {
+                    base_url: observability.base_url.clone(),
+                    org: observability.org.clone(),
+                    user: observability.user.clone(),
+                    password: observability.password.clone(),
+                }
+            }),
         };
         let text = toml::to_string_pretty(&file).map_err(|error| ConfigError::Write {
             path: self.path.clone(),
@@ -381,6 +562,32 @@ pub fn config_path_in(home: &Path) -> PathBuf {
     home.join(".config")
         .join(CONFIG_DIR_NAME)
         .join(CONFIG_FILE_NAME)
+}
+
+/// Normalize an operator-entered OpenObserve base URL.
+///
+/// Unlike the gateway origin, a path prefix is allowed (OpenObserve may sit
+/// behind a reverse-proxy prefix). Any trailing slash is removed.
+pub fn normalize_observability_base_url(input: &str) -> Result<String, ObservabilityConfigError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(ObservabilityConfigError::EmptyBaseUrl);
+    }
+    let url = Url::parse(trimmed).map_err(|_| ObservabilityConfigError::InvalidBaseUrl)?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err(ObservabilityConfigError::UnsupportedScheme),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ObservabilityConfigError::UserInfo);
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ObservabilityConfigError::QueryOrFragment);
+    }
+    if url.host_str().is_none() {
+        return Err(ObservabilityConfigError::InvalidBaseUrl);
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// Normalize an operator-entered base URL to a bare origin.

@@ -261,9 +261,9 @@ pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
         return text::FOOTER_OVERLAY;
     }
     match app.screen() {
-        crate::app::Screen::Onboarding | crate::app::Screen::SettingsCredentials => {
-            text::FOOTER_FIELD
-        }
+        crate::app::Screen::Onboarding
+        | crate::app::Screen::SettingsCredentials
+        | crate::app::Screen::SettingsObservability => text::FOOTER_FIELD,
         crate::app::Screen::SessionCreate => text::FOOTER_CREATE,
         crate::app::Screen::SessionDetail => text::FOOTER_DETAIL,
         crate::app::Screen::SessionEdit => text::FOOTER_EDIT,
@@ -284,7 +284,9 @@ pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
 pub fn scope_note(app: &App) -> String {
     match app.screen() {
         crate::app::Screen::Onboarding => text::SCOPE_ONBOARDING.to_owned(),
-        crate::app::Screen::SettingsCredentials => text::SCOPE_SETTINGS.to_owned(),
+        crate::app::Screen::SettingsCredentials | crate::app::Screen::SettingsObservability => {
+            text::SCOPE_SETTINGS.to_owned()
+        }
         crate::app::Screen::SessionDetail => {
             text::scope_detail(app.detail().timeline().loaded(), app.detail().stale())
         }

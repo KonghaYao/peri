@@ -26,7 +26,8 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
 
 - 配置路径：`~/.config/peri-swarm-dashboard/config.toml`（由 `dirs::home_dir()` 推导）。
 - 目录权限 `0700`，文件权限 `0600`；写入使用同目录临时文件 + 原子 rename。
-- 文件内容只有 `base_url` 与 `api_key` 两个 TOML 键。
+- 顶层 TOML 键为 `base_url` 与 `api_key`；可选的 `[observability]` 表保存 OpenObserve
+  连接（`base_url`、`org`、`user`、`password`）。旧配置文件没有该表时照常加载。
 - 首次运行在 Onboarding 输入 Base URL（默认 `http://127.0.0.1:8080`）和 API Key。
   `Connect` 先请求 `GET /healthz`，再用 Bearer 请求 `GET /v1/agents/sessions?limit=1`；
   两步都成功才保存。失败停留在 Onboarding 显示具体错误，不写文件。
@@ -37,10 +38,50 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
   不会自动覆盖。加载时若发现文件权限比 `0600` 宽，只警告，不静默 chmod。
 - 401 会暂停认证轮询并显示持久错误横幅；不会自动删除配置。可在 Settings 重新认证。
 
+## Observability 配置
+
+Settings 的 **Observability** 区域显示 OpenObserve 连接状态（`not configured` /
+`configured`、Base URL、Organization、User），`Configure observability` 打开配置子页：
+
+- 字段：Base URL、Organization、User、Password；`Test` 请求 `GET /api/{org}/streams`
+  验证连接，`Save` 通过同一份原子配置存储写盘，`Cancel` 返回 Settings。
+- Base URL 接受 `http`/`https` 和可选路径前缀，但拒绝 userinfo、query、fragment；
+  尾斜杠会被去掉。Organization/User 必须非空；Password 必须非空。
+- Password 输入始终遮蔽。已保存的密码不会回显；编辑时留空表示沿用已保存的密码。
+- 保存后 Settings 只显示状态、URL、org 与 user，从不显示密码。
+- 旧配置文件没有 `[observability]` 时行为不变；带未知字段的文件仍按损坏配置处理。
+
+**直连风险（重要）**：dashboard 用**专用 admin 账号**直接连接 OpenObserve。
+OpenObserve OSS v1.2.0 没有 viewer/editor 角色，只有 admin/service account 可用，因此
+该账号本身可以写入。客户端只发送 `SELECT`，但这是防误操作，**不是安全边界**。
+安全性依赖：OpenObserve 只在内网/loopback 可达、使用专用账号（不要用 root）、
+`config.toml` 的 `0600` 权限，以及凭据轮换。
+
+配置示例（密码不要提交到仓库）：
+
+```toml
+base_url = "http://127.0.0.1:8080"
+api_key = "…"
+
+[observability]
+base_url = "http://127.0.0.1:5080"
+org = "default"
+user = "peri-swarm-dashboard"
+password = "…"
+```
+
+本阶段只实现配置、连接测试与客户端；Core metrics、Agent metrics、Sandbox metrics、
+Request log、Query 页面仍在后续阶段实现，当前仍为空页。
+
 ## 安全说明
 
 - API Key 只在内存与 `0600` 配置文件中存在；不打印、不回显、不进入错误消息或
   `Debug` 输出。Settings 只显示 `(set)`。
+- OpenObserve 密码使用同一套 `0600`/`0700` 原子存储；`Debug` 与错误消息都会脱敏，
+  密码输入遮蔽，保存后不再回显。OpenObserve 客户端同样禁用重定向并设置 10 秒超时，
+  错误只含状态码与经过脱敏的短消息，不含凭据或 `Authorization`。
+- dashboard 直连 OpenObserve 的专用 admin 账号：OSS 没有 viewer 角色，客户端
+  SELECT-only 校验不是安全边界；必须内网部署、专用账号、保护并轮换密码。
 - HTTP 客户端禁用自动重定向，`Authorization` 只发往配置的 origin；`/healthz` 不发
   Bearer。
 - 启用 rustls 证书校验，没有“忽略证书”选项。
@@ -73,7 +114,8 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
   turn；编辑 model/metadata/prompt cache；删除。删除、取消和退出登录都有确认框。
 - New session：Logical ID、Model、CWD、Instructions、Metadata 行与可折叠的
   tools/environment/prompt_cache_options JSON。成功后打开新会话详情。
-- Settings：连接信息、`Test connection`、`Edit credentials`、`Sign out`、`Quit`。
+- Settings：连接信息、`Test connection`、`Edit credentials`、`Configure observability`、
+  `Sign out`、`Quit`。
 - 空页会给出“为什么为空”和“网关实际支持什么”，从不编造数据。
 
 ## 限制

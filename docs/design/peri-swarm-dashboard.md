@@ -96,7 +96,7 @@ flowchart LR
 | 路径 | `~/.config/peri-swarm-dashboard/config.toml`（`dirs::home_dir()`） |
 | 目录模式 | `0700` |
 | 文件模式 | `0600`，同目录临时文件 + 原子 rename |
-| TOML 键 | `base_url`、`api_key` |
+| TOML 键 | `base_url`、`api_key`；可选 `[observability]`（`base_url`、`org`、`user`、`password`） |
 | 权限漂移 | 加载时只产生警告横幅，不自动 chmod |
 | 损坏配置 | 进入 Onboarding 并显示读取错误，不自动覆盖 |
 
@@ -123,6 +123,19 @@ flowchart LR
 401 的处理独立于配置：暂停认证轮询，显示持久横幅
 （`401` + 网关 message + `Retry` / `Settings`），从不自动清除配置；重新认证成功后恢复
 轮询。`/healthz` 不携带 Bearer，因此 health 成功不能覆盖 401 横幅。
+
+### 4.4 Observability 配置
+
+- `[observability]` 是可选表；缺失时旧配置照常加载，`deny_unknown_fields` 仍然生效。
+- `Config::new`（网关凭据）签名不变；OpenObserve 连接用 `with_observability()` 附加，
+  `observability()` 读取。旧的 `base_url`/`api_key` 编辑路径会保留已保存的该表。
+- 校验：只接受 `http`/`https`，拒绝 userinfo、query、fragment；允许路径前缀并去掉尾
+  斜杠；`org`、`user`、`password` 非空。密码不 trim；错误消息不回显任何字段值。
+- `Debug` 对 API key 和 OpenObserve 密码都脱敏；保存沿用 `0600`/`0700` 与原子 rename。
+- Settings 只读展示 `not configured`/`configured`、URL、org、user；配置子页提供
+  `Test`/`Save`/`Cancel`。密码输入遮蔽，保存后不回显；留空表示沿用已保存密码。
+- `Test` 走 worker 的 `TestObservability` 命令与事件，调用
+  `GET /api/{org}/streams`；`Save` 只做本地校验并写配置，不依赖网络。
 
 ## 5. 网关契约
 
@@ -285,6 +298,11 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 
 - API key 不打印、不回显、不写入日志、错误消息或 `Debug` 输出；`Config` 与 HTTP 客户端
   都有自定义 redaction。
+- OpenObserve 是第二套凭据，同样存于 `0600` 配置、`Debug`/错误脱敏、输入遮蔽、保存后
+  不回显；客户端禁用重定向、10 秒超时，错误只含状态与脱敏后的短消息。
+- **OpenObserve OSS v1.2.0 没有 viewer/editor 角色**。dashboard 只能使用专用 admin
+  账号（不要用 root）直连；该账号可写。客户端只发 `SELECT` 是防误操作，**不是安全
+  边界**。必须让 OpenObserve 仅在内网/loopback 可达，并保护、轮换该密码。
 - 配置文件 `0600`、目录 `0700`、原子写入；权限过宽只警告。
 - 禁用重定向，Authorization 只发往配置的 origin；`/healthz` 不带 Bearer。
 - TLS 使用 rustls 证书校验，没有 insecure 选项。

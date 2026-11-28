@@ -67,6 +67,7 @@ pub fn render(
     let cursor = match app.screen() {
         Screen::Onboarding => onboarding::render(buf, &mut rows, app, hits),
         Screen::SettingsCredentials => settings::render_credentials(buf, &mut rows, app, hits),
+        Screen::SettingsObservability => settings::render_observability(buf, &mut rows, app, hits),
         Screen::Main => match app.page() {
             Page::Settings => {
                 settings::render(buf, &mut rows, app, hits);

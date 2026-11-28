@@ -20,6 +20,7 @@ use crate::api::{
     UpdateSessionSpec,
 };
 use crate::config::Config;
+use crate::observability::{ObservabilityError, OpenObserveClient};
 use crate::ui::text;
 
 /// Why credentials are being validated.
@@ -96,9 +97,25 @@ pub enum MutationData {
     Approval(Box<ApprovalReceipt>),
 }
 
+/// A successful OpenObserve connection probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservabilityCheck {
+    /// Round-trip time of the probe.
+    pub elapsed: Duration,
+    /// Stream count when OpenObserve reported it.
+    pub streams: Option<usize>,
+}
+
 /// Messages from the worker to the UI.
 #[derive(Clone, Debug)]
 pub enum WorkerEvent {
+    /// One OpenObserve connection test finished.
+    ObservabilityTested {
+        /// UI epoch at request time.
+        epoch: u64,
+        /// Result of `GET /api/{org}/streams`.
+        result: Result<ObservabilityCheck, ObservabilityError>,
+    },
     /// One validation finished.
     ValidationFinished {
         /// UI epoch at request time.
@@ -189,6 +206,19 @@ pub enum WorkerEvent {
 
 /// Commands from the UI to the worker. Deliberately not `Debug`.
 pub enum Command {
+    /// Probe candidate OpenObserve settings without saving them.
+    TestObservability {
+        /// UI epoch.
+        epoch: u64,
+        /// Candidate origin.
+        base_url: String,
+        /// Candidate organization.
+        org: String,
+        /// Candidate user. Never printed.
+        user: String,
+        /// Candidate password. Never printed.
+        password: String,
+    },
     /// Validate candidate credentials without adopting them.
     Validate {
         /// UI epoch.
@@ -399,6 +429,33 @@ async fn run(
 
     while let Some(command) = commands.recv().await {
         match command {
+            Command::TestObservability {
+                epoch,
+                base_url,
+                org,
+                user,
+                password,
+            } => {
+                let started = Instant::now();
+                let result = match OpenObserveClient::new(&base_url, &org, &user, &password) {
+                    Ok(client) => {
+                        client
+                            .test_connection()
+                            .await
+                            .map(|streams| ObservabilityCheck {
+                                elapsed: started.elapsed(),
+                                streams,
+                            })
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(WorkerEvent::ObservabilityTested { epoch, result })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Command::Validate {
                 epoch,
                 purpose,
@@ -443,7 +500,14 @@ async fn run(
                 }
             }
             Command::Adopt { base_url, api_key } => {
+                // `Config::new` starts without observability; keep the section
+                // the active config already carries.
+                let observability = active.as_ref().and_then(Config::observability).cloned();
                 if let Ok(config) = Config::new(&base_url, &api_key) {
+                    let config = match observability {
+                        Some(observability) => config.with_observability(observability),
+                        None => config,
+                    };
                     client = HttpSwarmApi::from_config(&config).ok();
                     active = Some(config);
                 } else {
@@ -727,3 +791,7 @@ async fn validate_client(client: &HttpSwarmApi) -> Result<(), ValidationFailure>
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "worker_test.rs"]
+mod tests;
