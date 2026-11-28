@@ -754,9 +754,14 @@ impl AcpTransport for V2Stdio {
                             .map(str::to_owned);
                         if let Some(sid) = sid.as_deref() {
                             let slot = wire.insert_slot(sid, Attach::Attached);
+                            // A `session/new` id is not routable before its
+                            // reply, so it has no takeover to defer to; a
+                            // resume completion must still own the slot.
+                            let owned = session.is_none() || slot.setup == owner;
                             slot.attach = Attach::Attached;
+                            slot.attached = true;
                             let foreground = slot.foreground;
-                            if replay {
+                            if owned && replay {
                                 slot.replay = None;
                                 self.update(sid, json!({"sessionUpdate":"replay_complete"}))
                                     .await?;
@@ -768,15 +773,18 @@ impl AcpTransport for V2Stdio {
                                 // the host pushes the command table and options
                                 // ahead of its own reply.
                                 self.update(sid, updates::state(foreground, None)).await?;
-                                let held = slot.flush_held();
-                                let projected = held
-                                    .into_iter()
-                                    .flat_map(|update| {
-                                        updates::project_update(update, false).unwrap_or_default()
-                                    })
-                                    .collect();
-                                self.emit(slot, sid, projected).await?;
-                            } else {
+                                if owned {
+                                    let held = slot.flush_held();
+                                    let projected = held
+                                        .into_iter()
+                                        .flat_map(|update| {
+                                            updates::project_update(update, false)
+                                                .unwrap_or_default()
+                                        })
+                                        .collect();
+                                    self.emit(slot, sid, projected).await?;
+                                }
+                            } else if owned {
                                 // A new session's id only becomes routable with
                                 // the reply, so its metadata waits for it.
                                 flush = slot
@@ -792,15 +800,52 @@ impl AcpTransport for V2Stdio {
                             // A newer attach may already own the slot; only the
                             // attempt that still owns it may unwind it, and a
                             // takeover keeps its own held updates and waiter.
-                            let owned = wire.slots.get(sid).is_some_and(|slot| slot.setup == owner);
-                            if owned {
+                            if wire.slots.get(sid).is_some_and(|slot| slot.setup == owner) {
                                 if created {
                                     wire.slots.remove(sid);
-                                } else if let Some(slot) = wire.slots.get_mut(sid) {
-                                    // The previous attach is still live.
-                                    slot.attach = Attach::Attached;
-                                    slot.replay = None;
-                                    slot.flush_held();
+                                } else {
+                                    // Hand the slot back to the newest setup
+                                    // still in flight: its completion owns the
+                                    // replay marker and the parked metadata.
+                                    let previous = wire.newest_pending_setup(sid);
+                                    let attached =
+                                        wire.slots.get(sid).is_some_and(|slot| slot.attached);
+                                    if let Some(slot) = wire.slots.get_mut(sid) {
+                                        match previous {
+                                            Some((previous_owner, previous_replay)) => {
+                                                slot.setup = previous_owner;
+                                                if !previous_replay {
+                                                    // No successor will emit its
+                                                    // `replay_complete`.
+                                                    slot.replay = None;
+                                                }
+                                            }
+                                            None => {
+                                                // This attempt's replay ends
+                                                // here: an earlier load whose
+                                                // success was stale skipped its
+                                                // `replay_complete`, so leaving
+                                                // the replay marker set would
+                                                // keep resetting live chunks for
+                                                // a replay that never completes.
+                                                slot.replay = None;
+                                                slot.flush_held();
+                                            }
+                                        }
+                                        // The previous attach is live only if
+                                        // one completed; while an earlier setup
+                                        // is still pending the slot stays
+                                        // `Attaching`.
+                                        if attached {
+                                            slot.attach = Attach::Attached;
+                                        }
+                                    }
+                                    // No attach ever completed and no setup is
+                                    // left to complete one: the failed attempts
+                                    // created this slot, so drop it.
+                                    if !attached && previous.is_none() {
+                                        wire.slots.remove(sid);
+                                    }
                                 }
                             }
                         }

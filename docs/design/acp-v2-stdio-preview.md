@@ -50,6 +50,14 @@ prompts even when a later withdrawal or the shared close fails.
   reply instead of being dropped. Live activity is not parked, and a failed
   setup drops the slot it created. `session/new` cannot park anything: the
   client does not know the new id until the reply.
+- Concurrent setups on one session are owned by the newest bound attempt. An
+  older success still answers its client but neither ends that owner's replay
+  (`replay_complete`) nor drains the metadata parked for it. A failed owner
+  hands the slot to the newest attempt still in flight, restoring `Attached`
+  only when an attach already completed; if no attach ever completed and none
+  is left in flight, the slot is dropped. The failed owner still ends the
+  replay state, so a stale success cannot leave live chunks carrying replay
+  replacement boundaries.
 - Replay still streams before the reply and a session whose turn is running
   cannot start one; resynchronizing a session with a live turn stays out of
   scope until replay work lands.

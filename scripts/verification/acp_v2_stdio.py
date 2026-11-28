@@ -93,9 +93,10 @@ class Peer:
         self.send({"id": self.seq, "method": method, "params": params})
         return self.seq
 
-    def until(self, predicate, timeout=25):
+    def until(self, predicate, timeout=25, after=0):
         due = time.monotonic() + timeout
-        for frame in self.frames:
+        for index in range(after, len(self.frames)):
+            frame = self.frames[index]
             if predicate(frame):
                 return frame
         while time.monotonic() < due:
@@ -211,38 +212,64 @@ def lifecycle(binary, root, schema):
                    and f["params"]["update"].get("state") == "idle")
         # Turns of two sessions must genuinely overlap: the host serializes per
         # session, not per connection. Both prompts are written before either is
-        # awaited, and each session has to report `running` before the first
-        # `idle` of either arrives — a serialized implementation cannot pass.
+        # awaited, and A's tool directive holds its turn open (the stub's `hold`
+        # command), so B has to report `running` while A is still active. The
+        # held tool needs the bypass policy; the default policy would park the
+        # turn on an approval the probe never answers. Frames are located from
+        # `start` by position: a value search would find the earlier `running`
+        # frame of the previous turn and could accept a serialized
+        # implementation.
+        peer.call("session/set_config_option", {
+            "sessionId": sid, "configId": "mode", "type": "id", "value": "bypass"
+        }, "SetSessionConfigOptionResponse")
         start = len(peer.frames)
-        first = peer.request("session/prompt", prompt(sid, "Concurrent turn A"))
+        first = peer.request("session/prompt", prompt(sid, "Concurrent turn A [[tool:hold]]"))
         second = peer.request("session/prompt", prompt(other, "Concurrent turn B"))
 
         def running(target):
-            return peer.until(lambda f: f in peer.frames[start:]
-                              and f.get("method") == "session/update"
-                              and f["params"]["sessionId"] == target
-                              and f["params"]["update"].get("sessionUpdate") == "state_update"
-                              and f["params"]["update"].get("state") == "running")
+            return peer.until(
+                lambda f: f.get("method") == "session/update"
+                          and f["params"]["sessionId"] == target
+                          and f["params"]["update"].get("sessionUpdate") == "state_update"
+                          and f["params"]["update"].get("state") == "running",
+                after=start)
+
+        def idle(target):
+            return peer.until(
+                lambda f: f.get("method") == "session/update"
+                          and f["params"]["sessionId"] == target
+                          and f["params"]["update"].get("sessionUpdate") == "state_update"
+                          and f["params"]["update"].get("state") == "idle",
+                after=start)
+
+        def position(frame):
+            for index in range(start, len(peer.frames)):
+                if peer.frames[index] is frame:
+                    return index
+            raise AssertionError(f"frame not observed after `start`: {frame}")
 
         running_a = running(sid)
         running_b = running(other)
-        peer.response(first, "PromptResponse")
+        first_reply = peer.response(first, "PromptResponse")
         peer.response(second, "PromptResponse")
         for target in (sid, other):
-            peer.until(lambda f: f in peer.frames[start:]
-                       and f.get("method") == "session/update"
-                       and f["params"]["sessionId"] == target
-                       and f["params"]["update"].get("sessionUpdate") == "state_update"
-                       and f["params"]["update"].get("state") == "idle")
+            idle(target)
+        first_reply_at = position(first_reply)
         first_idle = min(index for index in range(start, len(peer.frames))
                          if peer.frames[index].get("method") == "session/update"
                          and peer.frames[index]["params"]["sessionId"] in (sid, other)
                          and peer.frames[index]["params"]["update"].get("sessionUpdate") == "state_update"
                          and peer.frames[index]["params"]["update"].get("state") == "idle")
         for target, frame in ((sid, running_a), (other, running_b)):
-            assert peer.frames.index(frame) < first_idle, (
+            assert position(frame) < first_idle, (
                 f"turn {target!r} was still missing `running` when the first session went idle; "
                 "the turns did not overlap")
+            # The held turn is still running when B has to start. `idle` can be
+            # written slightly after the turn's reply, so the reply is the
+            # order that a serialized host cannot fake.
+            assert position(frame) < first_reply_at, (
+                f"turn {target!r} only reported `running` after the held turn's reply; "
+                "the host serialized the turns")
         peer.call("session/close", {"sessionId": other}, "CloseSessionResponse")
         assert peer.response(peer.request("session/prompt", prompt(other, "Closed")))["error"]["code"] == -32002
         print("PASS v2 two sessions on one connection; concurrent turns; per-session close isolation")
@@ -514,7 +541,10 @@ def main():
         stub = subprocess.Popen(
             ["node", str(Path(__file__).resolve().parents[2] / "peri-swarm/scripts/local_model_stub.mjs")],
             env={**os.environ, "PERI_STUB_PORT": str(port), "PERI_STUB_CHUNK_DELAY_MS": "135",
-                 "PERI_STUB_COMMANDS": json.dumps({"verify": "printf probe > approval-probe.txt"})},
+                 "PERI_STUB_COMMANDS": json.dumps({
+                     "verify": "printf probe > approval-probe.txt",
+                     "hold": "sleep 4",
+                 })},
             stdout=subprocess.DEVNULL,
         )
         stack.callback(stub.wait)

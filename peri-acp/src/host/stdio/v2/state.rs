@@ -63,6 +63,10 @@ pub(super) struct Replay {
 
 pub(super) struct Slot {
     pub attach: Attach,
+    /// Whether a setup on this slot ever completed. Only a completed attach may
+    /// restore `Attached` after a failed takeover; while every setup is still
+    /// pending the slot stays `Attaching`.
+    pub attached: bool,
     /// Identity of this slot object within the connection. A slot dropped by
     /// close/delete and re-created by a later attach gets a new value, so a
     /// completion captured before the close cannot act on its replacement.
@@ -91,6 +95,7 @@ impl Slot {
     pub(super) fn new(attach: Attach) -> Self {
         Self {
             attach,
+            attached: false,
             incarnation: 0,
             setup: 0,
             epoch: 0,
@@ -299,6 +304,27 @@ impl Connection {
                 entry.insert(slot)
             }
         }
+    }
+
+    /// The newest setup still in flight for one session, if any.
+    ///
+    /// A failed setup hands the slot back to this attempt, so its completion
+    /// performs the flush and the `replay_complete` the failed one no longer
+    /// can. The current reply is removed from `replies` before its result is
+    /// applied, so only older attempts for the same session are returned.
+    pub(super) fn newest_pending_setup(&self, session_id: &str) -> Option<(u64, bool)> {
+        self.replies
+            .values()
+            .filter_map(|reply| match reply {
+                Reply::Setup {
+                    session: Some(session),
+                    owner,
+                    replay,
+                    ..
+                } if session == session_id => Some((*owner, *replay)),
+                _ => None,
+            })
+            .max_by_key(|(owner, _)| *owner)
     }
 
     /// Reproduce the host's one-session-per-connection rule for a v1 client.

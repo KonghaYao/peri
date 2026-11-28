@@ -183,6 +183,289 @@ async fn a_stale_failed_resume_keeps_the_newer_attach() {
     assert_eq!(live["sessionUpdate"], "tool_call_update");
 }
 
+/// Two loads race for one slot. The earlier success must not end the replay the
+/// later setup owns: the chunk boundaries and the `replay_complete` marker both
+/// belong to the takeover.
+#[tokio::test]
+async fn a_stale_success_keeps_the_newer_replay() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let stale = RequestId::Number(620);
+    harness
+        .request(
+            stale.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
+        )
+        .await;
+    let stale_forwarded = harness.expect_forwarded().await;
+    assert_eq!(stale_forwarded.method, "session/load");
+
+    // The second load takes the slot over while the first is still in flight.
+    let newer = RequestId::Number(621);
+    harness
+        .request(
+            newer.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
+        )
+        .await;
+    let newer_forwarded = harness.expect_forwarded().await;
+    assert_eq!(newer_forwarded.method, "session/load");
+
+    // The newer attempt owns the replay: its chunk gets the replacement
+    // boundary that replay streaming installs.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
+                   "content": {"type": "text", "text": "newer replay"}}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message"
+    );
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message_chunk"
+    );
+
+    // The first attempt succeeds afterwards. It no longer owns the slot, so it
+    // must not clear the replay or emit its own `replay_complete`; its response
+    // is still delivered.
+    harness
+        .respond(stale_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, stale);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+
+    // The takeover is still replaying: the next chunk also gets a boundary.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m2",
+                   "content": {"type": "text", "text": "still replaying"}}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message"
+    );
+    assert_eq!(harness.expect_out().await.update()["messageId"], "m2");
+
+    // The owner completes its own load: marker, state snapshot, reply.
+    harness
+        .respond(newer_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "replay_complete"
+    );
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, newer);
+    assert!(result.is_ok());
+}
+
+/// The metadata a resumed session parks during setup belongs to the newest
+/// attempt: an earlier success must not drain it into the wire.
+#[tokio::test]
+async fn a_stale_success_keeps_the_metadata_parked_for_the_takeover() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let stale = RequestId::Number(625);
+    harness
+        .request(
+            stale.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let stale_forwarded = harness.expect_forwarded().await;
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "takeover"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+
+    let newer = RequestId::Number(626);
+    harness
+        .request(
+            newer.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let newer_forwarded = harness.expect_forwarded().await;
+
+    // The earlier attempt completes while the takeover still owns the slot: it
+    // neither drains the held metadata nor ends the newer attach.
+    harness
+        .respond(stale_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, stale);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+
+    // The owner flushes the parked metadata before its own reply.
+    harness
+        .respond(newer_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let held = harness.expect_out().await.update();
+    assert_eq!(held["sessionUpdate"], "session_info_update");
+    assert_eq!(held["title"], "takeover");
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, newer);
+    assert!(result.is_ok());
+}
+
+/// A stale success skips its `replay_complete`; when the owning setup then
+/// fails, that failure must still end the replay state. Otherwise live chunks
+/// keep getting replacement boundaries for a replay that will never complete.
+#[tokio::test]
+async fn a_failed_owner_ends_the_replay_a_stale_success_left_open() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let stale = RequestId::Number(630);
+    harness
+        .request(
+            stale.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
+        )
+        .await;
+    let stale_forwarded = harness.expect_forwarded().await;
+    let owner = RequestId::Number(631);
+    harness
+        .request(
+            owner.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
+        )
+        .await;
+    let owner_forwarded = harness.expect_forwarded().await;
+
+    harness
+        .respond(stale_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let (answered, _) = harness.expect_out().await.response();
+    assert_eq!(answered, stale);
+    harness.expect_quiet().await;
+
+    harness
+        .respond(
+            owner_forwarded.id,
+            Err(AcpError::new(-32010, "Session is closing")),
+        )
+        .await;
+    expect_error(&harness, owner, -32010).await;
+
+    // No replacement boundary: the replay is over even though no marker was
+    // ever sent for the stale success.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "live",
+                   "content": {"type": "text", "text": "live"}}),
+        )
+        .await;
+    let live = harness.expect_out().await.update();
+    assert_eq!(live["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(live["messageId"], "live");
+}
+
+/// A takeover that fails before any attach completed must leave the slot
+/// `Attaching`: an earlier setup may still complete it, but the session is not
+/// addressable yet.
+#[tokio::test]
+async fn a_failed_takeover_without_a_completed_attach_keeps_the_slot_attaching() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+
+    // Two resumes of a session this connection never attached: the first
+    // creates the slot in `Attaching`, the second takes it over.
+    let first = RequestId::Number(640);
+    harness
+        .request(
+            first.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let first_forwarded = harness.expect_forwarded().await;
+    let second = RequestId::Number(641);
+    harness
+        .request(
+            second.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let second_forwarded = harness.expect_forwarded().await;
+
+    harness
+        .respond(
+            second_forwarded.id,
+            Err(AcpError::new(-32010, "Session is closing")),
+        )
+        .await;
+    expect_error(&harness, second, -32010).await;
+
+    // No attach completed, so the session is not addressable and its updates
+    // are not routed.
+    let prompt_id = RequestId::Number(642);
+    harness
+        .request(
+            prompt_id.clone(),
+            "session/prompt",
+            json!({"sessionId": "A", "prompt": [{"type": "text", "text": "early"}]}),
+        )
+        .await;
+    let error = expect_error(&harness, prompt_id, -32002).await;
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
+    // The slot is still `Attaching`: session metadata is parked, not routed.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "early"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+
+    // The earlier attempt still completes the attach normally, and the slot it
+    // took back flushes the metadata parked for it.
+    harness
+        .respond(first_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let held = harness.expect_out().await.update();
+    assert_eq!(held["sessionUpdate"], "session_info_update");
+    assert_eq!(held["title"], "early");
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, first);
+    assert!(result.is_ok());
+    harness.enqueue_prompt("A", "attached now").await;
+}
+
 #[tokio::test]
 async fn a_completion_from_a_replaced_slot_cannot_publish_running() {
     let mut harness = Harness::start();
