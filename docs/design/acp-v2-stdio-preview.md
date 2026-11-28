@@ -214,7 +214,10 @@ rewritten to `-32020` with the original `data.reason` (or `server_error`).
 
 `-32010` is the host's overloaded conflict code. The **only** v2 outbound path
 that forwards it is the close-incomplete settlement of `session/close` (and the
-shared close/delete gate behind it); any other close/delete failure is `-32603`. Every other host `-32010` is mapped in
+shared close/delete gate behind it). Other close/delete failures keep the host's
+own code and data (for example a host `-32002` passes through unchanged); a host
+`-32010` that is not the close-incomplete settlement becomes `-32603` with the
+host message. Every other host `-32010` is mapped in
 `errors.rs::host_failure`: a transient setup refusal (`Session is executing`,
 `Session is closing`) becomes `-32020` + `data.reason = "session_busy"` when the
 session id is known; a setup refused because the session's close has not
@@ -243,7 +246,7 @@ turn with `state_update.error.code = -32603` and `stopReason = "error"`.
 | --- | --- | --- |
 | method not advertised or unknown (`auth/*`, `session/fork`, `providers/*`, `mcp/message`, unknown names) | `-32601` | — |
 | invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, malformed list cursor, non-integer list limit, repeated `initialize` below v2, v2 `initialize` without `info`, a present `protocolVersion` that is not a JSON integer in `0..=65535` | `-32602` | — |
-| session-scoped request naming a session this connection has not attached, or a preview-only handler whose session is no longer active on the host | `-32002` | `{ "sessionId": … }` |
+| session-scoped request that requires an attached slot and names a session this connection has not attached, or a preview-only handler whose session is no longer active on the host | `-32002` | `{ "sessionId": … }` |
 | `terminal/cancel`, `tool_call/cancel` (per-object cancel is never advertised) | `-32602` | — |
 | prompt withdrawn before insertion, close/delete settlement, retry of a key whose submission was withdrawn in this session generation | `-32800` | — |
 | the same key/identity with different content (in flight, or already inserted in the transcript) | `-32602` | — |
@@ -253,7 +256,13 @@ turn with `state_update.error.code = -32603` and `stopReason = "error"`.
 | v2 setup whose client-supplied cwd/location cannot be used (host `-32010`) | `-32602` | host message kept |
 | `session/list` storage failure, prompt workspace/resource failure (host `-32010`) | `-32603` | host message kept |
 | execution failure reported in the state snapshot | `-32603` | `state_update.error = { code: -32603, message: … }`, `stopReason = "error"` |
-| close/delete gate timeout (`Session close incomplete`) | `-32010` | passthrough; every other close/delete failure is `-32603` with the host message |
+| close/delete gate timeout (`Session close incomplete`) | `-32010` | passthrough; other host errors keep their own code/data (e.g. `-32002`), and a non-cleanup host `-32010` becomes `-32603` with the host message |
+
+`session/close` and `session/delete` are not gated by the local slot: both are
+always forwarded to the host, which answers an unknown or already deleted session
+with success for `session/close`, the pinned empty payload for a repeated
+`session/delete`, or its own error (for example `-32002`), passed through
+unchanged.
 
 ## Capabilities and peer requests
 
