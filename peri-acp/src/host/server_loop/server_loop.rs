@@ -73,6 +73,12 @@ impl ServerLoop<'_> {
                     {
                         self.handle_stdio_preview_config(id, params).await;
                     }
+                    crate::host::stdio::v2::SESSION_LIST
+                        if self.transport.owns_stdio_preview_requests() =>
+                    {
+                        let result = crate::host::stdio::v2::list::handle(self.cfg, &params).await;
+                        let _ = self.transport.send_response(id, result).await;
+                    }
                     "session/prompt" => self.spawn_prompt(id, params).await,
                     "peri/mcp/control" => self.spawn_mcp_control(id, params).await,
                     "session/input/snapshot" => {

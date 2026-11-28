@@ -221,7 +221,8 @@ async fn a_stale_success_keeps_the_newer_replay() {
         .send_update(
             "A",
             json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
-                   "content": {"type": "text", "text": "newer replay"}}),
+                   "content": {"type": "text", "text": "newer replay"},
+                   "_meta": {"periReplay": true}}),
         )
         .await;
     assert_eq!(
@@ -250,7 +251,8 @@ async fn a_stale_success_keeps_the_newer_replay() {
         .send_update(
             "A",
             json!({"sessionUpdate": "agent_message_chunk", "messageId": "m2",
-                   "content": {"type": "text", "text": "still replaying"}}),
+                   "content": {"type": "text", "text": "still replaying"},
+                   "_meta": {"periReplay": true}}),
         )
         .await;
     assert_eq!(

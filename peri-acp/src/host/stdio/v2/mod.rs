@@ -9,8 +9,10 @@ mod capabilities;
 mod config;
 mod errors;
 mod lifecycle;
+pub(in crate::host) mod list;
 mod params;
 mod prompts;
+mod replay;
 mod state;
 mod updates;
 
@@ -39,6 +41,7 @@ pub(in crate::host) const WITHDRAW: &str = "_peri/stdio-v2/withdraw";
 pub(in crate::host) const CANCEL: &str = "_peri/stdio-v2/cancel";
 pub(in crate::host) const CLOSE: &str = "_peri/stdio-v2/close";
 pub(in crate::host) const CONFIG: &str = "_peri/stdio-v2/config";
+pub(in crate::host) const SESSION_LIST: &str = "_peri/stdio-v2/session-list";
 
 /// Methods v2 never advertises per-object cancellation for.
 const OBJECT_CANCELS: [&str; 2] = ["terminal/cancel", "tool_call/cancel"];
@@ -92,11 +95,10 @@ impl V2Stdio {
             .await
     }
 
-    /// Send projected updates for one session.
+    /// Send projected live updates for one session.
     ///
-    /// A `config_option_update` also refreshes the option cache that
-    /// `session/set_config_option` validates against, so the adapter's view of
-    /// what is settable always matches what the client was last told.
+    /// While a replay holds the session they are parked instead (bounded) and
+    /// flushed after the resume reply; see [`replay`].
     async fn emit(
         &self,
         slot: &mut state::Slot,
@@ -104,14 +106,70 @@ impl V2Stdio {
         updates: Vec<Value>,
     ) -> Result<(), AcpError> {
         for update in updates {
-            if update.get("sessionUpdate").and_then(Value::as_str) == Some("config_option_update") {
-                if let Some(options) = update.get("configOptions").and_then(Value::as_array) {
-                    slot.config = options.clone();
-                }
+            if let Some(update) = replay::route_live(slot, update) {
+                self.write(slot, sid, update).await?;
             }
-            self.update(sid, update).await?;
         }
         Ok(())
+    }
+
+    /// Send projected updates without the replay hold: replay payloads and the
+    /// resume completion sequence (marker, state snapshot, flushed buffer).
+    async fn emit_now(
+        &self,
+        slot: &mut state::Slot,
+        sid: &str,
+        updates: Vec<Value>,
+    ) -> Result<(), AcpError> {
+        for update in updates {
+            self.write(slot, sid, update).await?;
+        }
+        Ok(())
+    }
+
+    /// Write one already-projected update.
+    ///
+    /// A `config_option_update` also refreshes the option cache that
+    /// `session/set_config_option` validates against, so the adapter's view of
+    /// what is settable always matches what the client was last told.
+    async fn write(
+        &self,
+        slot: &mut state::Slot,
+        sid: &str,
+        update: Value,
+    ) -> Result<(), AcpError> {
+        if update.get("sessionUpdate").and_then(Value::as_str) == Some("config_option_update") {
+            if let Some(options) = update.get("configOptions").and_then(Value::as_array) {
+                slot.config = options.clone();
+            }
+        }
+        self.update(sid, update).await
+    }
+
+    /// Publish one foreground snapshot, honouring the replay hold.
+    async fn publish_state(
+        &self,
+        slot: &mut state::Slot,
+        sid: &str,
+        foreground: Foreground,
+        stop_reason: Option<&str>,
+    ) -> Result<(), AcpError> {
+        self.emit(slot, sid, vec![updates::state(foreground, stop_reason)])
+            .await
+    }
+
+    /// Project and write live updates taken from the slot's replay buffer.
+    async fn flush_deferred(
+        &self,
+        slot: &mut state::Slot,
+        sid: &str,
+        deferred: Vec<Value>,
+    ) -> Result<(), AcpError> {
+        let projected = deferred
+            .into_iter()
+            .flat_map(|update| updates::project_update(update, false).unwrap_or_default())
+            .collect();
+        self.emit_now(slot, sid, projected).await
     }
 
     /// Route one inbound message, translating or answering it as needed.
@@ -260,7 +318,7 @@ impl V2Stdio {
         let routed = match method.as_str() {
             "session/new" => lifecycle::new_session(wire, id.clone(), &params),
             "session/resume" => lifecycle::resume_session(wire, id.clone(), &params),
-            "session/list" => lifecycle::list_sessions(id.clone(), &params),
+            "session/list" => list::request(wire, id.clone(), &params),
             "session/close" => lifecycle::close_session(wire, id.clone(), &params),
             "session/delete" => lifecycle::delete_session(wire, id.clone(), &params),
             "session/prompt" => lifecycle::prompt(wire, id.clone(), &params),
@@ -333,7 +391,9 @@ impl V2Stdio {
                     let slot = wire
                         .slots
                         .get_mut(&sid)
-                        .filter(|slot| slot.attach == Attach::Attached)?;
+                        // A cancel is still valid while the session replays: the
+                        // turn is live even though the slot is re-attaching.
+                        .filter(|slot| slot.attach == Attach::Attached || slot.replay.is_some())?;
                     // The cancelled turn's outstanding peer requests must not
                     // republish a foreground state afterwards.
                     slot.cancel_turn();
@@ -370,7 +430,7 @@ impl V2Stdio {
             | crate::event::AcpEvent::ExecutionStarted { .. } => {
                 if slot.begin_turn() {
                     let _ = self
-                        .update(sid, updates::state(Foreground::Running, None))
+                        .publish_state(slot, sid, Foreground::Running, None)
                         .await;
                 }
             }
@@ -378,11 +438,11 @@ impl V2Stdio {
                 let delivered = slot.prompts.accepted(sid, input_id);
                 if slot.begin_turn() {
                     let _ = self
-                        .update(sid, updates::state(Foreground::Running, None))
+                        .publish_state(slot, sid, Foreground::Running, None)
                         .await;
                 }
                 if let Some((message, waiters)) = delivered {
-                    let _ = self.update(sid, message).await;
+                    let _ = self.emit(slot, sid, vec![message]).await;
                     for waiter in waiters {
                         let _ = self
                             .inner
@@ -488,8 +548,10 @@ impl AcpTransport for V2Stdio {
                 });
                 if let Some((incarnation, epoch, publish)) = step {
                     if publish {
-                        self.update(sid, updates::state(Foreground::RequiresAction, None))
-                            .await?;
+                        if let Some(slot) = wire.slots.get_mut(sid) {
+                            self.publish_state(slot, sid, Foreground::RequiresAction, None)
+                                .await?;
+                        }
                     }
                     blocked = Some((incarnation, epoch));
                 }
@@ -521,8 +583,10 @@ impl AcpTransport for V2Stdio {
                 .get_mut(sid)
                 .is_some_and(|slot| slot.unblock(incarnation, epoch));
             if published {
-                self.update(sid, updates::state(Foreground::Running, None))
-                    .await?;
+                if let Some(slot) = wire.slots.get_mut(sid) {
+                    self.publish_state(slot, sid, Foreground::Running, None)
+                        .await?;
+                }
             }
         }
         result
@@ -552,6 +616,13 @@ impl AcpTransport for V2Stdio {
                     return Ok(());
                 };
                 let replaying = slot.replay.is_some();
+                let replayed = replay::marked(&params, &update);
+                // Live activity of an already attached session is held during a
+                // replay and flushed after the resume reply.
+                if replaying && !replayed {
+                    slot.deferred.hold(update);
+                    return Ok(());
+                }
                 if slot.attach == Attach::Attaching
                     && !replaying
                     && updates::is_attach_held(&update)
@@ -561,20 +632,14 @@ impl AcpTransport for V2Stdio {
                 }
                 // During replay the first chunk of each message gets a
                 // replacement boundary, so a message already streamed live is
-                // not appended twice.
-                let reset = slot.replay.as_mut().is_some_and(|replay| {
-                    match (
-                        update.get("sessionUpdate").and_then(Value::as_str),
-                        update.get("messageId").and_then(Value::as_str),
-                    ) {
-                        (Some(kind), Some(id)) if kind.ends_with("_chunk") => {
-                            replay.messages.insert((kind.into(), id.into()))
-                        }
-                        _ => false,
-                    }
-                });
+                // not appended twice. Live chunks never reset a message.
+                let reset = replayed && replay::reset_replayed_chunk(slot, &update);
                 if let Some(updates) = updates::project_update(update, reset) {
-                    self.emit(slot, &sid, updates).await?;
+                    if replayed {
+                        self.emit_now(slot, &sid, updates).await?;
+                    } else {
+                        self.emit(slot, &sid, updates).await?;
+                    }
                 }
             }
             "peri/agent_event" => {
@@ -607,7 +672,7 @@ impl AcpTransport for V2Stdio {
                 // A turn ending is not evidence that a separately queued prompt
                 // was cancelled. Only a committed withdrawal settles it.
                 if slot.end_turn() {
-                    self.update(&sid, updates::state(Foreground::Idle, Some(reason)))
+                    self.publish_state(slot, &sid, Foreground::Idle, Some(reason))
                         .await?;
                 }
             }
@@ -644,7 +709,6 @@ impl AcpTransport for V2Stdio {
     ) -> Result<(), AcpError> {
         let mut wire = self.wire.lock().await;
         let two = wire.is_two();
-        let mut flush: Vec<(String, Value)> = Vec::new();
         let result = match wire.replies.remove(&id) {
             Some(Reply::Initialize(client)) => result.map(|_| {
                 wire.version = state::Version::Two;
@@ -704,10 +768,16 @@ impl AcpTransport for V2Stdio {
                 }
                 value
             }),
+            Some(Reply::SessionList { client }) => {
+                let result =
+                    result.map_err(|error| if two { errors::normalize(error) } else { error });
+                return self.inner.send_response(client, result).await;
+            }
             Some(Reply::ConfigFetch {
                 client,
                 session,
                 result: mut parked,
+                deferred,
             }) => {
                 let fetch = result;
                 match (parked.as_mut(), fetch) {
@@ -732,7 +802,13 @@ impl AcpTransport for V2Stdio {
                 }
                 let parked =
                     parked.map_err(|error| if two { errors::normalize(error) } else { error });
-                return self.inner.send_response(client, parked).await;
+                self.inner.send_response(client, parked).await?;
+                if !deferred.is_empty() {
+                    if let Some(slot) = wire.slots.get_mut(&session) {
+                        self.flush_deferred(slot, &session, deferred).await?;
+                    }
+                }
+                return Ok(());
             }
             Some(Reply::Setup {
                 session,
@@ -740,170 +816,10 @@ impl AcpTransport for V2Stdio {
                 created,
                 owner,
             }) => {
-                let method = if session.is_some() {
-                    "session/resume"
-                } else {
-                    "session/new"
-                };
-                let mut sid: Option<String> = None;
-                match &result {
-                    Ok(value) => {
-                        sid = session
-                            .as_deref()
-                            .or_else(|| value.get("sessionId").and_then(Value::as_str))
-                            .map(str::to_owned);
-                        if let Some(sid) = sid.as_deref() {
-                            let slot = wire.insert_slot(sid, Attach::Attached);
-                            // A `session/new` id is not routable before its
-                            // reply, so it has no takeover to defer to; a
-                            // resume completion must still own the slot.
-                            let owned = session.is_none() || slot.setup == owner;
-                            slot.attach = Attach::Attached;
-                            slot.attached = true;
-                            let foreground = slot.foreground;
-                            if owned && replay {
-                                slot.replay = None;
-                                self.update(sid, json!({"sessionUpdate":"replay_complete"}))
-                                    .await?;
-                            }
-                            if session.is_some() {
-                                // v2 reports the state snapshot and the session
-                                // metadata before the resume reply: the snapshot
-                                // is required after any replay and before it, and
-                                // the host pushes the command table and options
-                                // ahead of its own reply.
-                                self.update(sid, updates::state(foreground, None)).await?;
-                                if owned {
-                                    let held = slot.flush_held();
-                                    let projected = held
-                                        .into_iter()
-                                        .flat_map(|update| {
-                                            updates::project_update(update, false)
-                                                .unwrap_or_default()
-                                        })
-                                        .collect();
-                                    self.emit(slot, sid, projected).await?;
-                                }
-                            } else if owned {
-                                // A new session's id only becomes routable with
-                                // the reply, so its metadata waits for it.
-                                flush = slot
-                                    .flush_held()
-                                    .into_iter()
-                                    .map(|update| (sid.to_owned(), update))
-                                    .collect();
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        if let Some(sid) = session.as_deref() {
-                            // A newer attach may already own the slot; only the
-                            // attempt that still owns it may unwind it, and a
-                            // takeover keeps its own held updates and waiter.
-                            if wire.slots.get(sid).is_some_and(|slot| slot.setup == owner) {
-                                if created {
-                                    wire.slots.remove(sid);
-                                } else {
-                                    // Hand the slot back to the newest setup
-                                    // still in flight: its completion owns the
-                                    // replay marker and the parked metadata.
-                                    let previous = wire.newest_pending_setup(sid);
-                                    let attached =
-                                        wire.slots.get(sid).is_some_and(|slot| slot.attached);
-                                    if let Some(slot) = wire.slots.get_mut(sid) {
-                                        match previous {
-                                            Some((previous_owner, previous_replay)) => {
-                                                slot.setup = previous_owner;
-                                                if !previous_replay {
-                                                    // No successor will emit its
-                                                    // `replay_complete`.
-                                                    slot.replay = None;
-                                                }
-                                            }
-                                            None => {
-                                                // This attempt's replay ends
-                                                // here: an earlier load whose
-                                                // success was stale skipped its
-                                                // `replay_complete`, so leaving
-                                                // the replay marker set would
-                                                // keep resetting live chunks for
-                                                // a replay that never completes.
-                                                slot.replay = None;
-                                                slot.flush_held();
-                                            }
-                                        }
-                                        // The previous attach is live only if
-                                        // one completed; while an earlier setup
-                                        // is still pending the slot stays
-                                        // `Attaching`.
-                                        if attached {
-                                            slot.attach = Attach::Attached;
-                                        }
-                                    }
-                                    // No attach ever completed and no setup is
-                                    // left to complete one: the failed attempts
-                                    // created this slot, so drop it.
-                                    if !attached && previous.is_none() {
-                                        wire.slots.remove(sid);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let projected = result
-                    .map(|value| lifecycle::lifecycle_result(method, value))
-                    .map_err(|error| if two { errors::normalize(error) } else { error });
-                // Cache the option list the host reported; `session/new` and
-                // `session/load` already carry it in their reply.
-                if let Ok(value) = &projected {
-                    if let Some(options) = value.get("configOptions").and_then(Value::as_array) {
-                        if let Some(slot) = sid
-                            .as_deref()
-                            .and_then(|session_id| wire.slots.get_mut(session_id))
-                        {
-                            slot.config = options.clone();
-                        }
-                    }
-                }
-                // A resume reply has no v1 `configOptions`; ask the host for the
-                // list `session/new` returns and answer the client once it is
-                // known, so both entry points expose the same configuration
-                // surface. `session/load` already replayed it.
-                if projected.is_ok() && session.is_some() && !replay {
-                    if let Some(session_id) = sid.as_deref() {
-                        let config_id = RequestId::String(uuid::Uuid::now_v7().to_string());
-                        wire.replies.insert(
-                            config_id.clone(),
-                            Reply::ConfigFetch {
-                                client: id,
-                                session: session_id.to_owned(),
-                                result: projected,
-                            },
-                        );
-                        self.park(IncomingMessage::Request {
-                            id: config_id,
-                            method: CONFIG.into(),
-                            params: config::fetch_params(session_id),
-                        })
-                        .await;
-                        return Ok(());
-                    }
-                }
-                self.inner.send_response(id, projected).await?;
-                for (sid, update) in flush {
-                    let slot = wire.slots.get_mut(&sid);
-                    let projected = updates::project_update(update, false).unwrap_or_default();
-                    match slot {
-                        Some(slot) => self.emit(slot, &sid, projected).await?,
-                        None => {
-                            for update in projected {
-                                self.update(&sid, update).await?;
-                            }
-                        }
-                    }
-                }
-                return Ok(());
+                return replay::settle_setup(
+                    self, &mut wire, id, result, session, replay, created, owner, two,
+                )
+                .await;
             }
             Some(Reply::V1Setup { session }) => {
                 match &result {

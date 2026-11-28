@@ -15,6 +15,7 @@ use crate::transport::types::{AcpError, RequestId};
 use super::capabilities::ClientCapabilities;
 use super::errors;
 use super::prompts::Prompts;
+use super::replay::Deferred;
 
 /// Upper bound on notifications parked while a setup request is in flight. The
 /// hold exists to avoid losing a handful of metadata updates, not to buffer a
@@ -83,6 +84,9 @@ pub(super) struct Slot {
     pub execution_failed: bool,
     pub prompts: Prompts,
     pub replay: Option<Replay>,
+    /// Live updates parked while this slot replays and until the owning resume
+    /// reply flushes them. Presence and bounds are owned by [`Deferred`].
+    pub deferred: Deferred,
     /// The session's configuration options as last reported by the host, in
     /// their v2 shape. `session/set_config_option` validates against this list so
     /// an unknown id or an out-of-range value is refused instead of being
@@ -104,6 +108,7 @@ impl Slot {
             execution_failed: false,
             prompts: Prompts::default(),
             replay: None,
+            deferred: Deferred::default(),
             config: Vec::new(),
             held: Vec::new(),
         }
@@ -242,6 +247,14 @@ pub(super) enum Reply {
         session: String,
         /// The already-projected reply that is waiting for `configOptions`.
         result: Result<Value, AcpError>,
+        /// Live updates taken from the slot when the setup reply was ready; they
+        /// are written after the client's reply, per the replay contract.
+        deferred: Vec<Value>,
+    },
+    /// `session/list`: the preview-only internal query; the client's reply is
+    /// written once the host has paged storage.
+    SessionList {
+        client: RequestId,
     },
     /// A v1 setup whose success binds the connection's single session.
     V1Setup {

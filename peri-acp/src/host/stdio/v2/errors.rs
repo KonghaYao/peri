@@ -61,15 +61,6 @@ pub(super) fn prompt_capacity(session_id: &str) -> AcpError {
     )
 }
 
-/// The preview cannot replay a session whose turn is still running (S4 lifts it).
-pub(super) fn session_busy(session_id: &str) -> AcpError {
-    capacity(
-        "session_busy",
-        session_id,
-        "Replay is unavailable while this session is running a turn",
-    )
-}
-
 fn capacity(reason: &'static str, session_id: &str, message: &'static str) -> AcpError {
     AcpError::new(CAPACITY, message).with_data(json!({ "reason": reason, "sessionId": session_id }))
 }

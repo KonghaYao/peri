@@ -1,131 +1,97 @@
 # ACP v2 stdio Preview verification
 
-Base: `4b0da81f7c82d4ee12e4a5cc4ba99b849f8d9e3e`. Repository toolchain Rust
-1.99.0, Linux x86_64. All runs use an isolated SQLite database and a
-loopback-only deterministic OpenAI-compatible SSE model fixture.
+状态：现行。S1–S4 的 wire 矩阵与进程内适配器测试可在同一 worktree 复跑；本页记录
+如何运行、断言覆盖项与已知限制。历史段落只保留仍然有效的结论。
+
+## 如何运行
+
+前置：Python 3（`jsonschema`）、Node.js、已构建的 `peri` 二进制。矩阵使用独立的
+SQLite 数据库和仅回环的确定性 OpenAI-compatible SSE 模型，不导入 Peri 服务端或 mock
+JSON-RPC。
 
 ```bash
-./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri
+./scripts/cargo-rmcp-patched.sh build -p peri-tui --bin peri
 python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
-  /path/to/verified-acp-checkout/schema/v2/schema.json \
-  --official-client /path/to/v2_one_shot_client
+  --official-client /tmp/acp-sdk-target/debug/examples/v2_one_shot_client
 ```
 
-Use ACP schema commit `927e31867b31b1e3c961c7edee7e3680b90be718`. The client
-needs Python with `jsonschema` and Node.js. It launches the shipped Peri CLI
-entry point via stdio. It does not import Peri's server or mocks for JSON-RPC.
-The independently installed ACP Rust SDK example is an additional client
-check, not a substitute for the matrix.
+- 第二个位置参数（schema）可省略；默认读取仓库 fixture
+  `scripts/verification/fixtures/acp-v2-schema.json`（git blob
+  `301e906d8566c71f378e563905c3437d9edfac4c`，对应 pinned upstream schema commit
+  `927e31867b31b1e3c961c7edee7e3680b90be718`）。也可以显式传入同一路径。
+- `--official-client` 是 unmodified `agent-client-protocol` 3.5.0
+  `v2_one_shot_client` 示例；它作为独立客户端 smoke，不替代 wire 矩阵。
+- 矩阵只通过 stdio 驱动 `peri acp --cwd <root>`，不 import Peri 的实现。
 
-Release gate: the build, Rust protocol-unit checks, SDK example, and raw wire
-matrix must all pass on the same patch. The matrix covers paired v1/v2
-negotiation, acceptance and stable IDs, retry without duplicate insertion,
-streaming, process restart and replay, request and session cancellation,
-denied approval with no file side effect, and close. This does not imply
-complete conformance for optional v2 facilities, real provider load tests,
-cross-platform execution, or support for other transports.
+进程内回归：
 
-## Review follow-up on `acdd851df`
+```bash
+./scripts/cargo-rmcp-patched.sh test -p peri-acp --lib -- host::stdio::v2
+```
 
-Re-verified the review fixes with the same command on macOS arm64, isolated
-SQLite database and loopback model. The matrix additionally asserts:
+## S4 运行记录（2026-11-24，macOS arm64，Rust 1.99.0）
 
-- repeated `initialize` before the first other request succeeds, a failed
-  repeat keeps the last successful negotiation, a later repeat is `-32600`, and
-  `protocolVersion: 65536` is `-32602`;
-- the adapter's one-active-session limit (`session/new` and a resume of a
-  different session are `-32000` while a session is active);
-- idempotency keys on the wire: 256 characters rejected, a 255-character key
-  accepted and deduplicated;
-- the approval probe starts with an explicit `--permission-mode bypass`, so its
-  permission request and absent tool side effect prove the negotiated v2
-  connection overrides bypass with the default approval policy.
+工作树基于 `7a544cf29` 的 S4 实现；`peri` 由当前工作树重建。同一次运行
+`EXIT=0`，官方 `v2_one_shot_client` 也通过：
 
-The probe drains stderr while the agent runs and reaps the child when
-`initialize` fails. All five original PASS lines and the added protocol-edge
-line passed; the official `v2_one_shot_client` example passed in the same run.
+1. `PASS v2 initialize repeat/version bounds, multi-session admission, setup/error-code shapes, prompt key bounds`
+2. `PASS v2 two sessions on one connection; concurrent turns; per-session close isolation`
+3. `PASS v2 session/delete drops the session and its connection slot`
+4. `PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict`
+5. `PASS v2 replay order replay_complete -> state -> reply; deferred live metadata flushed exactly once after the reply`
+6. `KNOWN v2 active-turn replay: shared host prompt lock returns -32010 (adapter hold/order covered by host::stdio::v2::replay tests)`
+7. `PASS v2 session/list limit=1 order/no duplicates/termination; exact cwd; invalid cursor -32602`
+8. `PASS v2 session/list cursor remains valid in a new process (durable keyset position)`
+9. `PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close`
+10. `PASS v2 idempotency key survives a restart; same key retried once, different content -32602, keys scoped to the session`
+11. `PASS v2 real permission request, requires_action, rejection, peer cancellation, idle, no tool side effect`
+12. `PASS v2 session/new ConfigOptions + AvailableCommands v2 shapes`
+13. `PASS v2 set_config_option projects configOptions and refuses unknown input`
+14. `PASS v2 mode change governs the next turn; UsageUpdate carries used/size only`
+15. `PASS v1 client with Preview enabled and disabled`
+16. `PASS upstream Rust ACP 3.5.0 v2_one_shot_client: accepted, streamed, idle, closed`
 
-## S1 multi-session and explicit negotiation
+### 断言覆盖项
 
-Base: `0b6ca2f74`. Same command, isolated SQLite database, loopback model,
-macOS arm64; `--official-client` used the unmodified 3.5.0 `v2_one_shot_client`.
-The matrix and the official client both exited 0.
+- **S1 方法面/错误码**：重复 `initialize`、`protocolVersion` 边界、多会话、setup 参数、
+  `-32002` 的 `data.sessionId`、`terminal/cancel`/`tool_call/cancel` 的 `-32602`、`auth/*`
+  的 `-32601`、prompt key 1..=255。
+- **S1 并发**：两个会话的两个 turn 必须都报告 `running` 后才出现任一 `idle`；串行执行的
+  实现无法通过该断言。
+- **S2 幂等**：跨三个进程的 key 重试返回同一 `messageId`、不重复插入、同 key 不同内容
+  `-32602`、key 按会话隔离、重放只出现一次。
+- **S3 配置面**：`session/new` 的 `configOptions`（`configId`、无 `id`）、
+  `available_commands_update`（`type:"command"`/`input.type:"text"`）、
+  `set_config_option(mode)` 往返、非法值/未知选项/未知会话拒绝、`bypass` 对下一 turn
+  生效、`usage_update` 只有 `used`/`size`。
+- **S4 分页**：三个有历史的会话；`limit=1` 逐页遍历的顺序与默认页一致、无重复、
+  `nextCursor` 终止；`cwd` 只匹配相同目录；非法 cursor `-32602`；旧进程取得的 cursor
+  在新进程中继续同一 keyset 遍历。
+- **S4 replay**：unsupported cursor `-32602`；回放后
+  `replay_complete`（恰一次）→ state → 响应；host 在 load 响应前推的 config/commands
+  被 deferred，响应后各恰好冲刷一次；重启后回放与幂等重试只出现一次；空回放也发
+  `replay_complete`（进程内测试）。
+- **S4 进程内**：`host::stdio::v2::replay` 覆盖活动 turn 中 resume 的 hold/flush 顺序、
+  live chunk 不产生替换边界、1024 条缓冲上限与溢出、回放期间 `session/cancel` 收敛到
+  `idle`、stale success 不冲刷 takeover 的 deferred。
 
-This run **supersedes** the earlier one-active-session assertion above: a v2
-connection now holds several sessions, so `session/new` while another session is
-attached succeeds. A resume of a **non-existent** session id fails with the
-host's code (never `-32000`); a session this *process* had not attached yet is
-resumable, which the restart probes below rely on. The matrix now asserts:
+## 已知限制
 
-- two sessions on one connection, a turn on the second one, then **two turns in
-  flight at the same time** on the two sessions — each session must report
-  `running` before either reports `idle`, so a serialized implementation cannot
-  pass — then both turns end and one `session/close`; the closed session's
-  prompt is `-32002` while the other session stays attached;
-- `session/delete` removes the session from `session/list` and from the
-  connection (`session/prompt` and a second `session/delete` are `-32002`);
-- error-code shapes: unknown session `-32002` with `data.sessionId`, missing and
-  relative `cwd` `-32602`, unadvertised `additionalDirectories` `-32602`,
-  `terminal/cancel` and `tool_call/cancel` `-32602`, `auth/login` `-32601`;
-- the previous checks (repeat `initialize`, key bounds and dedup, replay
-  ordering, both cancellation scopes, durable withdrawal, approval probe, v1
-  client with the preview on and off) are unchanged.
-
-A v1 client on the same preview wrapper keeps the host's one-session gate: the
-wrapper reports multi-session support before the negotiated version is known, so
-the shared host skips its gate for every connection through it and the adapter
-enforces it for v1 connections (`-32010` with `data.reason`
-`session_switch_requires_close`, or `session_setup_in_progress` while another
-setup is in flight). v2 connections are unaffected.
-
-Metadata updates parked while a session is attaching (`available_commands_update`,
-`config_option_update`, `current_mode_update`) are flushed after the attach
-reply, in the pinned v2 shapes (`type: "command"` on commands, `configId` on
-config options). The live S1 subset still drops them; S3 extends it.
-
-Adapter-level behaviour that has no wire probe is covered by
-`cargo test -p peri-acp --lib -- host::stdio::v2`: per-session routing and close
-isolation (including close while another session's turn is in flight), stale
-epoch and stale slot completions, concurrent permission aggregation, `Attaching`
-hold/flush ordering, a stale failed resume not detaching a newer attach, the v1
-one-session gate, elicitation capability gating, `$/cancel_request` scope, and
-delete settlement.
-
-## S2 durable idempotency keys
-
-Base: `e355ae1dc`. Same command, isolated SQLite database, loopback model,
-macOS arm64; `--official-client` used the unmodified 3.5.0 `v2_one_shot_client`.
-The matrix and the official client both exited 0.
-
-A keyed prompt now derives its message id from `(sessionId, key)`
-(`UUIDv5` with a frozen namespace), so the durable store answers a retry and no
-connection-local receipt survives a restart. The matrix adds one PASS line that
-spans three processes on the same database and `cwd`:
-
-- process A prompts with a 203-character key and exits; process B resumes,
-  repeats the identical submission, and gets the **same** `messageId` with no
-  `user_message` update for it (the retry is acknowledged from the store);
-- the same key with edited content is `-32602`, and the same key in a second
-  session yields a different message id;
-- a third process replays from the start of history: the retried submission
-  appears exactly once as a `user_message` boundary.
-
-Adapter and mailbox behaviour behind that line is covered by unit tests:
-`cargo test -p peri-acp --lib -- host::stdio::v2` (derived-id stability and
-version, an in-flight retry joining the first submission, a retry after the
-acknowledgement reusing the identity, `delivered` acknowledgement releasing the
-waiters, keys scoped per session, `-32602` for different content while in
-flight), `cargo test -p peri-agent --lib -- user_input_mailbox` (a restarted
-mailbox over the same store reports `Delivered` for an already-handed-off id,
-`Inserted`/`Existing` stay `Queued`, and different content under that id is a
-conflict), and `cargo test -p peri-resources --lib -- session_mq` (SQLite and,
-with `PERI_TEST_POSTGRES_URL`, the remote adapter return `AlreadyHandedOff` for
-the same payload and a conflict error for a different one).
-
-Known limits of this stage: the second connection of a *live* process that
-attaches the same session does not receive the first connection's delivery
-event, so its same-key retry waits for `close`/`cancel` instead of being
-acknowledged (no duplicate message is inserted); a key retired by a confirmed
-withdrawal is answered with `-32800` until the session generation restarts;
-`session/list` pagination, replay cursors and the config surface remain out of
-scope (S3/S4).
+- **活动 turn 内 replay**：适配器不再预拒绝，并具备 hold/flush 与状态机语义（进程内
+  测试覆盖）；但共享宿主在 per-session prompt lock 被持有时对 `session/load` 返回
+  `-32010 Session is executing`。wire 矩阵把该场景记为 `KNOWN` 而非 `PASS`。放开该 gate
+  或增加 preview-only 只读 replay 路由属于宿主策略变更，本次未改共享层。
+- `state_update` 在回放期间被合并：前台状态机继续推进，但逐条 parked `state_update`
+  不重放，以 resume 完成时的权威快照为准（pinned 允许重复/幂等快照）。
+- replay 期间 per-session live 缓冲上限 1024 条；溢出丢弃最新条目并记 warn，客户端可用
+  另一次 `session/resume` 重新同步。
+- `session/list` 的 `limit` 是 preview-only 顶层扩展：pinned `ListSessionsRequest` 没有
+  页大小字段，标准客户端拿到默认 100 条；`1..=500` clamp。
+- 同一进程的第二个连接 attach 同一 live 会话时，不会收到第一个连接的 committed-delivery
+  事件；其同 key 重试会等待 `close`/`cancel` 而不是立即确认（不会重复插入）。这是 S2
+  留下的边界。
+- 未实现的可选面（`auth/*`、`session/fork`、`providers/*`、`mcp/message`、per-object
+  cancel、自定义 replay cursor）见[设计文档](../design/acp-v2-stdio-preview.md)的
+  「Deliberately not implemented」表；它们不是待补的回归缺口。
+- 本轮矩阵在 macOS arm64 运行；Linux CI 未在本阶段重跑。官方 SDK smoke 使用 3.5.0
+  未修改示例；不覆盖真实 provider 负载、跨平台终端与其它传输。

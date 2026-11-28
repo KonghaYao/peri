@@ -286,7 +286,8 @@ async fn replayed_chunks_get_a_replacement_boundary() {
         .send_update(
             "A",
             json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
-                   "content": {"type": "text", "text": "replayed"}}),
+                   "content": {"type": "text", "text": "replayed"},
+                   "_meta": {"periReplay": true}}),
         )
         .await;
     let reset = harness.expect_out().await.update();

@@ -302,13 +302,145 @@ def lifecycle(binary, root, schema):
         assert peer.frames.index(receipt) < next(i for i in range(start, len(peer.frames)) if
                peer.frames[i].get("params", {}).get("update", {}).get("sessionUpdate") == "agent_message_chunk")
         print("PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict")
+
+        # S4: replay ordering and the deferred queue. The host pushes the
+        # configuration snapshot and command table before its load reply; those
+        # live updates must be parked and flushed after the reply, never lost or
+        # interleaved with the replay sequence.
+        replay_at = len(peer.frames)
+        resume = peer.request("session/resume", {
+            "sessionId": sid, "cwd": str(root), "replayFrom": {"type": "start"}
+        })
+        response = peer.response(resume, "ResumeSessionResponse")
+        assert "result" in response, response
+        updates = [f["params"]["update"] for f in peer.frames[replay_at:peer.frames.index(response)]
+                   if f.get("method") == "session/update"]
+        assert sum(u["sessionUpdate"] == "replay_complete" for u in updates) == 1, updates[-5:]
+        boundary = next(i for i, u in enumerate(updates) if u["sessionUpdate"] == "replay_complete")
+        assert updates[boundary + 1]["state"] == "idle", updates[boundary + 1:]
+        assert not any(u["sessionUpdate"] in ("available_commands_update", "config_option_update")
+                       for u in updates[boundary + 1:]), updates[boundary + 1:]
+        after_at = peer.frames.index(response) + 1
+
+        def flushed(name):
+            peer.until(lambda f: f in peer.frames[after_at:]
+                       and f.get("method") == "session/update"
+                       and f["params"]["sessionId"] == sid
+                       and f["params"]["update"].get("sessionUpdate") == name,
+                       after=after_at)
+            return [f for f in peer.frames[after_at:]
+                    if f.get("method") == "session/update"
+                    and f["params"]["sessionId"] == sid
+                    and f["params"]["update"].get("sessionUpdate") == name]
+
+        assert len(flushed("available_commands_update")) == 1, "deferred commands were lost or duplicated"
+        assert len(flushed("config_option_update")) == 1, "deferred options were lost or duplicated"
+        print("PASS v2 replay order replay_complete -> state -> reply; "
+              "deferred live metadata flushed exactly once after the reply")
+
+        # S4 known gap: replay while the turn is running. The adapter accepts the
+        # request and holds live updates, but the shared host's per-session prompt
+        # lock refuses `session/load` with -32010 while a turn is executing.
+        # Keep the probe so a future host policy that lifts the gate exercises
+        # the intended ordering instead.
+        active_sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        start = len(peer.frames)
+        held = peer.request("session/prompt", prompt(active_sid, "[[tool:hold]] active turn replay probe"))
+        peer.response(held, "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == active_sid
+                   and f["params"]["update"].get("sessionUpdate") == "tool_call_update")
+        active_at = len(peer.frames)
+        active = peer.response(peer.request("session/resume", {
+            "sessionId": active_sid, "cwd": str(root), "replayFrom": {"type": "start"}
+        }))
+        if "error" in active:
+            assert active["error"]["code"] == -32010, active
+            print("KNOWN v2 active-turn replay: shared host prompt lock returns -32010 "
+                  "(adapter hold/order covered by host::stdio::v2::replay tests)")
+        else:
+            assert "result" in active, active
+            active_updates = [f["params"]["update"] for f in peer.frames[active_at:peer.frames.index(active)]
+                              if f.get("method") == "session/update"]
+            assert sum(u["sessionUpdate"] == "replay_complete" for u in active_updates) == 1
+            marker = next(i for i, u in enumerate(active_updates)
+                          if u["sessionUpdate"] == "replay_complete")
+            assert active_updates[marker + 1]["state"] == "running", active_updates[marker + 1:]
+            print("PASS v2 active-turn replay: replay_complete -> running state -> reply")
+        peer.send({"method": "session/cancel", "params": {"sessionId": active_sid}})
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == active_sid
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle"
+                   and f["params"]["update"].get("stopReason") == "cancelled")
+        peer.call("session/delete", {"sessionId": active_sid}, "DeleteSessionResponse")
+
         peer.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
         assert peer.response(peer.request("session/prompt", prompt(sid, "Closed")))["error"]["code"] == -32002
+
+        # S4: session/list pages over the durable keyset. Three sessions with
+        # history make a page size of one meaningful; `limit` is a preview-only
+        # extension (the pinned request has no page-size field).
+        third = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        start = len(peer.frames)
+        peer.call("session/prompt", prompt(third, "Third paged session."), "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == third
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle")
+        full = peer.call("session/list", {"cwd": str(root)}, "ListSessionsResponse")
+        full_ids = [entry["sessionId"] for entry in full["sessions"]]
+        assert len(full_ids) >= 3, full_ids
+        assert len(set(full_ids)) == len(full_ids), full_ids
+        paged = []
+        cursor = None
+        while True:
+            params = {"cwd": str(root), "limit": 1}
+            if cursor:
+                params["cursor"] = cursor
+            page = peer.call("session/list", params, "ListSessionsResponse")
+            assert len(page["sessions"]) <= 1, page
+            paged += [entry["sessionId"] for entry in page["sessions"]]
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        assert paged == full_ids, (paged, full_ids)
+        assert len(paged) == len(set(paged)), paged
+        assert {sid, other, third} <= set(paged), (sid, other, third, paged)
+        assert peer.response(peer.request("session/list", {"cursor": "not-a-cursor"}))["error"]["code"] == -32602
+        assert peer.call("session/list", {"cwd": str(root / "no-such-directory")},
+                         "ListSessionsResponse")["sessions"] == []
+        first_page = peer.call("session/list", {"cwd": str(root), "limit": 2}, "ListSessionsResponse")
+        restart_cursor = first_page.get("nextCursor")
+        assert restart_cursor, first_page
+        expected_tail = []
+        cursor = restart_cursor
+        while cursor:
+            page = peer.call("session/list", {"cwd": str(root), "limit": 2, "cursor": cursor},
+                             "ListSessionsResponse")
+            expected_tail += [entry["sessionId"] for entry in page["sessions"]]
+            cursor = page.get("nextCursor")
+        assert expected_tail, expected_tail
+        print("PASS v2 session/list limit=1 order/no duplicates/termination; exact cwd; invalid cursor -32602")
         peer.close()
 
         restored = Peer(binary, root, 2, schema)
         peers.append(restored)
         restored.sid = sid
+        # The cursor captured in the previous process keeps the same durable
+        # keyset position in the new one.
+        tail = []
+        cursor = restart_cursor
+        while cursor:
+            page = restored.call("session/list", {"cwd": str(root), "limit": 2, "cursor": cursor},
+                                 "ListSessionsResponse")
+            tail += [entry["sessionId"] for entry in page["sessions"]]
+            cursor = page.get("nextCursor")
+        assert tail == expected_tail, (tail, expected_tail)
+        print("PASS v2 session/list cursor remains valid in a new process (durable keyset position)")
         assert restored.response(restored.request("session/resume", {
             "sessionId": sid, "cwd": str(root), "replayFrom": {"type": "unsupported"}
         }))["error"]["code"] == -32602
@@ -527,7 +659,9 @@ def lifecycle(binary, root, schema):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
-    parser.add_argument("schema", type=Path)
+    parser.add_argument("schema", type=Path, nargs="?",
+                        default=Path(__file__).resolve().parent / "fixtures" / "acp-v2-schema.json",
+                        help="Pinned ACP v2 schema (defaults to the repository fixture)")
     parser.add_argument("--official-client", type=Path,
                         help="Built, unmodified upstream v2_one_shot_client")
     args = parser.parse_args()

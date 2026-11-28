@@ -52,14 +52,9 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
         Some(cursor) if cursor.get("type").and_then(Value::as_str) == Some("start") => true,
         _ => return Routed::Answered(Err(errors::invalid_params("Unsupported replay cursor"))),
     };
-    if replay
-        && connection
-            .slots
-            .get(&session_id)
-            .is_some_and(|slot| !slot.foreground.is_idle())
-    {
-        return Routed::Answered(Err(errors::session_busy(&session_id)));
-    }
+    // A replay may start while the session's turn is still running: the adapter
+    // holds live updates until the reply, and the state snapshot reports the
+    // current foreground state.
     let mut forwarded = params.clone();
     if let Some(object) = forwarded.as_object_mut() {
         object.remove("replayFrom");
@@ -68,12 +63,18 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
         Some(slot) => {
             slot.attach = Attach::Attaching;
             slot.replay = replay.then(Replay::default);
+            if replay {
+                slot.deferred.begin();
+            }
             slot.setup += 1;
             (false, slot.setup)
         }
         None => {
             let slot = connection.insert_slot(&session_id, Attach::Attaching);
             slot.replay = replay.then(Replay::default);
+            if replay {
+                slot.deferred.begin();
+            }
             slot.setup = 1;
             (true, 1)
         }
@@ -195,20 +196,6 @@ pub(super) fn prompt(connection: &mut Connection, id: RequestId, params: &Value)
         }
         Ok(super::prompts::Admission::Pending) => Routed::Parked,
         Err(error) => Routed::Answered(Err(error)),
-    }
-}
-
-/// `session/list`: the preview does not paginate yet (S4).
-pub(super) fn list_sessions(id: RequestId, params: &Value) -> Routed {
-    if params.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
-        return Routed::Answered(Err(errors::invalid_params(
-            "Unsupported session list cursor",
-        )));
-    }
-    Routed::Forward {
-        id,
-        method: "session/list".into(),
-        params: params.clone(),
     }
 }
 
