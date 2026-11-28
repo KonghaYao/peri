@@ -56,6 +56,18 @@ impl ServerLoop<'_> {
         while let Some(msg) = self.transport.recv().await {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
+                    crate::host::stdio::v2::INPUT
+                    | crate::host::stdio::v2::WITHDRAW
+                    | crate::host::stdio::v2::CANCEL
+                        if self.transport.owns_stdio_preview_requests() =>
+                    {
+                        self.handle_stdio_preview_input(id, &method, params).await;
+                    }
+                    crate::host::stdio::v2::CLOSE
+                        if self.transport.owns_stdio_preview_requests() =>
+                    {
+                        self.handle_stdio_preview_close(id, params).await;
+                    }
                     "session/prompt" => self.spawn_prompt(id, params).await,
                     "peri/mcp/control" => self.spawn_mcp_control(id, params).await,
                     "session/input/snapshot" => {

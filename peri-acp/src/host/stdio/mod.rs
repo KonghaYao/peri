@@ -122,10 +122,15 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     // 先完成装配再启动 stdin pump：`from_reader_writer` 会立即 spawn 阻塞式
     // stdin 读取，装配失败时 runtime 关闭可能要等这次读取结束。
     let assembly = assemble_stdio_config(input, injected_settings.as_deref()).await?;
-    let transport: Arc<dyn AcpTransport> = Arc::new(StdioTransport::from_reader_writer(
-        stdin,
-        tokio::io::stdout(),
-    ));
+    let stdio = StdioTransport::from_reader_writer(stdin, tokio::io::stdout());
+    let transport: Arc<dyn AcpTransport> = match &assembly {
+        StdioAssembly::Configured(cfg)
+            if std::env::var("PERI_ACP_V2_PREVIEW").as_deref() == Ok("1") =>
+        {
+            Arc::new(v2::V2Stdio::new(stdio, Arc::clone(&cfg.permission_mode)))
+        }
+        _ => Arc::new(stdio),
+    };
     match assembly {
         StdioAssembly::Configured(cfg) => {
             let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -291,6 +296,7 @@ async fn assemble_stdio_config(
 }
 
 mod auth_required_gate;
+pub(super) mod v2;
 
 #[cfg(test)]
 #[path = "auth_required_gate_test.rs"]

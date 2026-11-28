@@ -210,6 +210,7 @@
 | F-CLI-005 | L3 | Workflow CLI；运行与分发共用工作流语义 | [契约](../design/workflow.md) |
 | F-CLI-006 | L3 | 启动配置；显式参数进入统一配置路径 | [契约](../design/configuration-authority.md) |
 | F-CLI-007 | L3 | 首次配置入口；ACP 终端认证与向导复用 | [契约](../design/peri-acp-protocol.md) |
+| F-CLI-008 | L3 | ACP v2 Preview；外部 stdio 可选协商，与 v1 共用执行和存储 | [契约](../design/acp-v2-stdio-preview.md) |
 | F-SWARM-001 | L1 | 会话 HTTP 面；sessions/events/items/turns 路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
 | F-SWARM-003 | L1 | 事件续读；无游标只送实时（不读行）、显式回放；lookback 播种与末尾终态；官方 `agent.session.*` 帧；items 分页默认 `desc`、行预算 | [契约](../design/peri-swarm.md) |

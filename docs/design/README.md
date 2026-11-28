@@ -26,6 +26,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 总体分层 | [architecture.md](architecture.md) | crate 职责、依赖方向与跨层数据流 |
 | 配置权威面 | [configuration-authority.md](configuration-authority.md) | Peri source adapters、纯 typed 规则、scoped snapshot/revision、解释与 CAS 更新；专属领域仍按能力边界扩展 |
 | ACP wire | [peri-acp-protocol.md](peri-acp-protocol.md) | 方法、事件、transport 与兼容语义 |
+| ACP v2 stdio Preview | [acp-v2-stdio-preview.md](acp-v2-stdio-preview.md) | 外部 stdio 协商、兼容边界与验证入口 |
 | Model adapter | [model-adapters.md](model-adapters.md) | provider 无关协议、stream、retry 与观测 |
 | System Prompt | [system-prompt.md](system-prompt.md) | 冻结 base、request-time contribution 与 cache seam |
 | MetaHarness | [meta-harness.md](meta-harness.md) | 段落覆盖、middleware 关闭与冻结语义 |
