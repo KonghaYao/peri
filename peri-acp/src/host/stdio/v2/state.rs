@@ -75,6 +75,10 @@ pub(super) struct Slot {
     /// Identity of the newest setup that bound this slot. A failed setup only
     /// undoes the slot when it still owns it.
     pub setup: u64,
+    /// Setup that last completed an attach. A failed takeover cannot hand the
+    /// slot back to a pending attempt older than this one: a newer attach
+    /// already superseded it.
+    pub attached_setup: u64,
     /// Turn identity. Bumped on start, end, cancel and teardown so a stale
     /// blocking-request completion cannot publish a state for a newer turn.
     pub epoch: u64,
@@ -83,7 +87,18 @@ pub(super) struct Slot {
     pub blocking: usize,
     pub execution_failed: bool,
     pub prompts: Prompts,
-    pub replay: Option<Replay>,
+    /// Replay state of each setup attempt that asked for a cursor replay,
+    /// keyed by its setup id. Keeping it per attempt lets a failed takeover
+    /// hand the replay (and each message's replacement boundary) back intact.
+    pub replays: HashMap<u64, Replay>,
+    /// The setup attempt whose replay currently streams, if any. A cursorless
+    /// attempt stops the stream but leaves earlier attempts' state in `replays`.
+    pub replay_owner: Option<u64>,
+    /// The newest `state_update` suppressed while live updates were held for a
+    /// replay. A successful replay reports it through its authoritative
+    /// snapshot; a failed one publishes it, so the client still learns that the
+    /// turn ended and why.
+    pub pending_state: Option<Value>,
     /// Live updates parked while this slot replays and until the owning resume
     /// reply flushes them. Presence and bounds are owned by [`Deferred`].
     pub deferred: Deferred,
@@ -102,16 +117,77 @@ impl Slot {
             attached: false,
             incarnation: 0,
             setup: 0,
+            attached_setup: 0,
             epoch: 0,
             foreground: Foreground::Idle,
             blocking: 0,
             execution_failed: false,
             prompts: Prompts::default(),
-            replay: None,
+            replays: HashMap::new(),
+            replay_owner: None,
+            pending_state: None,
             deferred: Deferred::default(),
             config: Vec::new(),
             held: Vec::new(),
         }
+    }
+
+    /// Bind this setup attempt's replay mode.
+    ///
+    /// A cursor replay starts a fresh stream owned by the attempt. A cursorless
+    /// attempt stops the active stream without discarding earlier attempts'
+    /// chunk identities, so a handback can resume exactly where it was.
+    pub(super) fn start_setup_replay(&mut self, owner: u64, replay: bool) {
+        self.replays.remove(&owner);
+        if replay {
+            self.replays.insert(owner, Replay::default());
+            self.replay_owner = Some(owner);
+            self.deferred.begin();
+        } else {
+            self.replay_owner = None;
+        }
+    }
+
+    /// Drop one attempt's replay state; returns whether it was streaming.
+    pub(super) fn end_setup_replay(&mut self, owner: u64) -> bool {
+        self.replays.remove(&owner);
+        if self.replay_owner == Some(owner) {
+            self.replay_owner = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether a replay stream is active on this slot.
+    pub(super) fn is_replaying(&self) -> bool {
+        self.replay_owner
+            .is_some_and(|owner| self.replays.contains_key(&owner))
+    }
+
+    /// The active attempt's replay state.
+    pub(super) fn active_replay_mut(&mut self) -> Option<&mut Replay> {
+        let owner = self.replay_owner?;
+        self.replays.get_mut(&owner)
+    }
+
+    /// Take the suppressed state snapshot and keep its stop reason only when it
+    /// describes the foreground state about to be published.
+    pub(super) fn take_suppressed_stop_reason(&mut self, foreground: Foreground) -> Option<String> {
+        let state = self.pending_state.take()?;
+        let published = state.get("state").and_then(Value::as_str);
+        let matches = match foreground {
+            Foreground::Idle => published == Some("idle"),
+            Foreground::Running => published == Some("running"),
+            Foreground::RequiresAction => published == Some("requires_action"),
+        };
+        if !matches {
+            return None;
+        }
+        state
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     }
 
     /// Foreground work started. Returns whether `running` must be published.
@@ -227,8 +303,6 @@ pub(super) enum Reply {
         /// `Some` for resume (the id is known up front), `None` for new.
         session: Option<String>,
         replay: bool,
-        /// The slot was created by this setup and must be dropped on failure.
-        created: bool,
         /// The setup that bound the slot. A failure only unwinds this attempt.
         owner: u64,
     },

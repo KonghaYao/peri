@@ -154,6 +154,32 @@ def prompt(sid, text, key=None):
     return result
 
 
+def page_through(peer, limit, cwd, cursor=None, max_pages=1000):
+    """Walk `session/list` until it terminates.
+
+    The server controls `nextCursor`; a repeated cursor or an unbounded page
+    count would otherwise make this loop run forever (each response resets the
+    per-call timeout). Both are treated as protocol failures here.
+    """
+    ids = []
+    seen = set()
+    pages = 0
+    while True:
+        params = {"cwd": cwd, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        page = peer.call("session/list", params, "ListSessionsResponse")
+        assert len(page["sessions"]) <= limit, page
+        ids += [entry["sessionId"] for entry in page["sessions"]]
+        cursor = page.get("nextCursor")
+        if not cursor:
+            return ids
+        assert cursor not in seen, f"session/list repeated a cursor: {cursor}"
+        seen.add(cursor)
+        pages += 1
+        assert pages <= max_pages, f"session/list did not terminate after {pages} pages"
+
+
 def lifecycle(binary, root, schema):
     peers = []
     try:
@@ -185,6 +211,16 @@ def lifecycle(binary, root, schema):
         assert peer.response(peer.request("session/new", {
             "cwd": str(root), "additionalDirectories": [str(root)]
         }))["error"]["code"] == -32602
+        # A v2 setup must not forward the host's overloaded `-32010`: an
+        # absolute but unusable cwd is Invalid params with the host's
+        # diagnostic message. If the host message changes, update this branch
+        # explicitly (it asserts the shape, not only the code).
+        unavailable_cwd = peer.response(peer.request("session/new", {
+            "cwd": str(root / "no-such-directory")
+        }))["error"]
+        assert unavailable_cwd["code"] == -32602, unavailable_cwd
+        assert unavailable_cwd["code"] != -32010, unavailable_cwd
+        assert "workspace location is unavailable" in unavailable_cwd["message"], unavailable_cwd
         # Per-object cancellation is never advertised.
         assert peer.response(peer.request("terminal/cancel", {
             "sessionId": sid, "terminalId": "t"
@@ -317,20 +353,20 @@ def lifecycle(binary, root, schema):
         assert not any(u["sessionUpdate"] in ("available_commands_update", "config_option_update")
                        for u in updates[boundary + 1:]), updates[boundary + 1:]
         after_at = peer.frames.index(response) + 1
-
-        def flushed(name):
-            peer.until(lambda f: f in peer.frames[after_at:]
-                       and f.get("method") == "session/update"
-                       and f["params"]["sessionId"] == sid
-                       and f["params"]["update"].get("sessionUpdate") == name,
-                       after=after_at)
-            return [f for f in peer.frames[after_at:]
-                    if f.get("method") == "session/update"
-                    and f["params"]["sessionId"] == sid
-                    and f["params"]["update"].get("sessionUpdate") == name]
-
-        assert len(flushed("available_commands_update")) == 1, "deferred commands were lost or duplicated"
-        assert len(flushed("config_option_update")) == 1, "deferred options were lost or duplicated"
+        # Completion fence: the adapter writes the deferred updates immediately
+        # after the reply, before it reads the next request. Waiting for a later
+        # response therefore closes the flush window; counting before that would
+        # miss a duplicate that arrives after the first matching frame.
+        fence = peer.response(peer.request("session/list", {"cwd": str(root), "limit": 1}),
+                              "ListSessionsResponse")
+        fence_at = peer.frames.index(fence)
+        flushed = [f["params"]["update"] for f in peer.frames[after_at:fence_at]
+                   if f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == sid]
+        assert sum(u.get("sessionUpdate") == "available_commands_update"
+                   for u in flushed) == 1, "deferred commands were lost or duplicated"
+        assert sum(u.get("sessionUpdate") == "config_option_update"
+                   for u in flushed) == 1, "deferred options were lost or duplicated"
         print("PASS v2 replay order replay_complete -> state -> reply; "
               "deferred live metadata flushed exactly once after the reply")
 
@@ -383,18 +419,7 @@ def lifecycle(binary, root, schema):
         full_ids = [entry["sessionId"] for entry in full["sessions"]]
         assert len(full_ids) >= 3, full_ids
         assert len(set(full_ids)) == len(full_ids), full_ids
-        paged = []
-        cursor = None
-        while True:
-            params = {"cwd": str(root), "limit": 1}
-            if cursor:
-                params["cursor"] = cursor
-            page = peer.call("session/list", params, "ListSessionsResponse")
-            assert len(page["sessions"]) <= 1, page
-            paged += [entry["sessionId"] for entry in page["sessions"]]
-            cursor = page.get("nextCursor")
-            if not cursor:
-                break
+        paged = page_through(peer, 1, str(root))
         assert paged == full_ids, (paged, full_ids)
         assert len(paged) == len(set(paged)), paged
         assert {sid, other, third} <= set(paged), (sid, other, third, paged)
@@ -402,17 +427,15 @@ def lifecycle(binary, root, schema):
         assert peer.call("session/list", {"cwd": str(root / "no-such-directory")},
                          "ListSessionsResponse")["sessions"] == []
         first_page = peer.call("session/list", {"cwd": str(root), "limit": 2}, "ListSessionsResponse")
+        assert len(first_page["sessions"]) <= 2, first_page
+        first_ids = [entry["sessionId"] for entry in first_page["sessions"]]
         restart_cursor = first_page.get("nextCursor")
-        assert restart_cursor, first_page
-        expected_tail = []
-        cursor = restart_cursor
-        while cursor:
-            page = peer.call("session/list", {"cwd": str(root), "limit": 2, "cursor": cursor},
-                             "ListSessionsResponse")
-            expected_tail += [entry["sessionId"] for entry in page["sessions"]]
-            cursor = page.get("nextCursor")
-        assert expected_tail, expected_tail
-        print("PASS v2 session/list limit=1 order/no duplicates/termination; exact cwd; invalid cursor -32602")
+        assert restart_cursor and len(first_ids) == 2, first_page
+        tail_ids = page_through(peer, 2, str(root), cursor=restart_cursor)
+        assert first_ids + tail_ids == full_ids, (first_ids, tail_ids, full_ids)
+        assert len(tail_ids) == len(set(tail_ids)), tail_ids
+        print("PASS v2 session/list limit=1 order/no duplicates/termination; limit=2 capped and "
+              "resumed without gaps; exact cwd; invalid cursor -32602")
         peer.close()
 
         restored = Peer(binary, root, 2, schema)
@@ -420,14 +443,8 @@ def lifecycle(binary, root, schema):
         restored.sid = sid
         # The cursor captured in the previous process keeps the same durable
         # keyset position in the new one.
-        tail = []
-        cursor = restart_cursor
-        while cursor:
-            page = restored.call("session/list", {"cwd": str(root), "limit": 2, "cursor": cursor},
-                                 "ListSessionsResponse")
-            tail += [entry["sessionId"] for entry in page["sessions"]]
-            cursor = page.get("nextCursor")
-        assert tail == expected_tail, (tail, expected_tail)
+        tail = page_through(restored, 2, str(root), cursor=restart_cursor)
+        assert tail == tail_ids, (tail, tail_ids)
         print("PASS v2 session/list cursor remains valid in a new process (durable keyset position)")
         assert restored.response(restored.request("session/resume", {
             "sessionId": sid, "cwd": str(root), "replayFrom": {"type": "unsupported"}
@@ -634,6 +651,12 @@ def lifecycle(binary, root, schema):
             legacy.sid = legacy.call("session/new", {"cwd": str(root), "mcpServers": []})["sessionId"]
             result = legacy.call("session/prompt", prompt(legacy.sid, "Legacy client still works"))
             assert result["stopReason"] == "end_turn", result
+            # Preview-only internal methods do not exist on a v1 connection,
+            # even when the preview transport is enabled.
+            for internal in ("_peri/stdio-v2/session-list", "_peri/stdio-v2/input",
+                             "_peri/stdio-v2/config"):
+                denied = legacy.response(legacy.request(internal, {}))["error"]
+                assert denied["code"] == -32601, (internal, denied)
             legacy.call("session/close", {"sessionId": legacy.sid})
             legacy.close()
         print("PASS v1 client with Preview enabled and disabled")

@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 
 use super::config;
+use super::errors;
 use super::state::Foreground;
 
 /// Stable plan identity: one session has one todo list, and every `plan` update
@@ -135,7 +136,7 @@ pub(super) fn state(foreground: Foreground, stop_reason: Option<&str>) -> Value 
     match stop_reason {
         Some("error") => {
             update["stopReason"] = json!("error");
-            update["error"] = json!({"code": -32603, "message": "Peri execution failed"});
+            update["error"] = json!({"code": errors::INTERNAL, "message": "Peri execution failed"});
         }
         Some(stop_reason) => update["stopReason"] = json!(stop_reason),
         None => {}

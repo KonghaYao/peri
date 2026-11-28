@@ -177,10 +177,7 @@ pub(super) fn derive_message_id(session_id: &str, key: &str) -> String {
 }
 
 fn conflict() -> AcpError {
-    AcpError::new(
-        -32602,
-        "Prompt idempotency key reused for different content",
-    )
+    errors::invalid_params("Prompt idempotency key reused for different content")
 }
 
 /// ACP v2 keys are opaque strings of 1 to 255 **characters**, not bytes.

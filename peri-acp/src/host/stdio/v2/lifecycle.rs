@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::transport::types::RequestId;
 
 use super::params as wire;
-use super::state::{Attach, Connection, Replay, Reply, Routed};
+use super::state::{Attach, Connection, Reply, Routed};
 use super::{errors, CLOSE, INPUT};
 
 /// `session/new`: one more session on the same connection.
@@ -24,7 +24,6 @@ pub(super) fn new_session(connection: &mut Connection, id: RequestId, params: &V
         Reply::Setup {
             session: None,
             replay: false,
-            created: true,
             owner: 0,
         },
     );
@@ -55,38 +54,35 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
     // The adapter can hold live updates until the reply and report the current
     // foreground state, but the shared host still refuses `session/load` while
     // this session's turn holds the per-session prompt lock. The v2 client sees
-    // a stable `-32020` with `reason = "session_busy"` and should retry after
+    // a stable busy server error with `reason = "session_busy"` and should retry after
     // `idle`; replay during an active turn is not supported end to end today.
     let mut forwarded = params.clone();
     if let Some(object) = forwarded.as_object_mut() {
         object.remove("replayFrom");
     }
-    let (created, owner) = match connection.slots.get_mut(&session_id) {
+    let owner = match connection.slots.get_mut(&session_id) {
         Some(slot) => {
-            slot.attach = Attach::Attaching;
-            slot.replay = replay.then(Replay::default);
-            if replay {
-                slot.deferred.begin();
-            }
             slot.setup += 1;
-            (false, slot.setup)
+            slot.attach = Attach::Attaching;
+            slot.setup
         }
         None => {
             let slot = connection.insert_slot(&session_id, Attach::Attaching);
-            slot.replay = replay.then(Replay::default);
-            if replay {
-                slot.deferred.begin();
-            }
             slot.setup = 1;
-            (true, 1)
+            1
         }
     };
+    if let Some(slot) = connection.slots.get_mut(&session_id) {
+        // Bind this attempt's replay state before the host sees the request:
+        // a cursorless attempt stops the active stream, a replay attempt owns
+        // a fresh one, and earlier attempts keep theirs for a handback.
+        slot.start_setup_replay(owner, replay);
+    }
     connection.replies.insert(
         id.clone(),
         Reply::Setup {
             session: Some(session_id),
             replay,
-            created,
             owner,
         },
     );

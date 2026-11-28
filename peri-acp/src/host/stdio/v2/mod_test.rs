@@ -306,6 +306,181 @@ async fn replayed_chunks_get_a_replacement_boundary() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn host_failures_map_only_the_documented_codes() {
+    use super::errors::{host_failure, HostContext};
+
+    let busy = || AcpError::new(-32010, "Session is executing; retry after the current turn");
+    let mapped = host_failure(
+        busy(),
+        HostContext::Setup {
+            session_id: Some("A"),
+        },
+    );
+    assert_eq!(mapped.code, -32020);
+    assert_eq!(mapped.data.expect("reason")["reason"], "session_busy");
+
+    // A setup cwd the host cannot use is the request's Invalid params, with
+    // the host's diagnostic message intact.
+    let mapped = host_failure(
+        AcpError::new(-32010, "workspace location is unavailable"),
+        HostContext::Setup {
+            session_id: Some("A"),
+        },
+    );
+    assert_eq!(mapped.code, -32602);
+    assert_eq!(mapped.message, "workspace location is unavailable");
+
+    // `session/new` has no session id, so the busy shape cannot be used.
+    let mapped = host_failure(busy(), HostContext::Setup { session_id: None });
+    assert_eq!(mapped.code, -32603);
+
+    // Storage and prompt workspace failures are host-side, not client input.
+    let mapped = host_failure(
+        AcpError::new(-32010, "store offline"),
+        HostContext::SessionList,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "store offline");
+    let mapped = host_failure(
+        AcpError::new(-32010, "workspace location is unavailable"),
+        HostContext::Prompt,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "workspace location is unavailable");
+
+    // The overloaded `-32000` keeps its documented remap; other codes pass.
+    assert_eq!(
+        host_failure(AcpError::new(-32000, "busy"), HostContext::Prompt).code,
+        -32020
+    );
+    assert_eq!(
+        host_failure(
+            AcpError::new(-32603, "x"),
+            HostContext::Setup { session_id: None }
+        )
+        .code,
+        -32603
+    );
+}
+
+#[tokio::test]
+async fn a_setup_with_an_unusable_cwd_is_invalid_params_not_the_host_code() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(2100);
+    harness
+        .request(
+            id.clone(),
+            "session/new",
+            json!({"cwd": "/no/such/project"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/new");
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "workspace location is unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32602).await;
+    assert_eq!(error.message, "workspace location is unavailable");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_list_storage_failure_is_an_internal_error() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(2101);
+    harness
+        .request(id.clone(), "session/list", json!({"cwd": CWD}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::SESSION_LIST);
+    harness
+        .respond(forwarded.id, Err(AcpError::new(-32010, "store offline")))
+        .await;
+    let error = expect_error(&harness, id, -32603).await;
+    assert_eq!(error.message, "store offline");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_prompt_workspace_failure_is_an_internal_error() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    let id = harness.request_prompt("A", "hello", None).await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::INPUT);
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "workspace location is unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32603).await;
+    assert_eq!(error.message, "workspace location is unavailable");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn preview_only_internal_methods_are_rejected_on_v1_connections() {
+    let mut harness = Harness::start();
+    harness.negotiate_v1().await;
+    for (offset, method) in [
+        super::SESSION_LIST,
+        super::INPUT,
+        super::WITHDRAW,
+        super::CANCEL,
+        super::CLOSE,
+        super::CONFIG,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(2200 + offset as i64);
+        harness.request(id.clone(), method, json!({})).await;
+        expect_error(&harness, id, -32601).await;
+    }
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_v2_initialize_without_client_info_is_invalid_params() {
+    let mut harness = Harness::start();
+    let id = RequestId::Number(2300);
+    harness
+        .request(id.clone(), "initialize", json!({"protocolVersion": 2}))
+        .await;
+    let error = expect_error(&harness, id, -32602).await;
+    assert!(error.message.contains("info"), "{error}");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_version_zero_initialize_keeps_the_v1_negotiation() {
+    let mut harness = Harness::start();
+    let id = RequestId::Number(2301);
+    harness
+        .request(
+            id.clone(),
+            "initialize",
+            json!({"protocolVersion": 0, "clientCapabilities": {}}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "initialize");
+    harness
+        .respond(forwarded.id, Ok(json!({"protocolVersion": 1})))
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert_eq!(result.expect("v1 reply")["protocolVersion"], 1);
+}
+
 #[tokio::test]
 async fn unsupported_methods_and_object_cancels_use_the_documented_codes() {
     let mut harness = Harness::start();

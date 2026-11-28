@@ -27,7 +27,7 @@ const WAIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(80);
 
 /// Absolute `cwd` for setup requests. A non-absolute path is rejected with
-/// `-32602` before the adapter forwards anything, so this must be a platform
+/// Invalid params before the adapter forwards anything, so this must be a platform
 /// absolute path, not a POSIX-only literal.
 #[cfg(windows)]
 pub(super) const CWD: &str = r"C:\workspace";
@@ -164,7 +164,7 @@ impl AcpTransport for Fake {
         self.peer_wake.notify_one();
         response
             .await
-            .unwrap_or_else(|_| Err(AcpError::new(-32603, "test peer dropped")))
+            .unwrap_or_else(|_| Err(AcpError::new(super::errors::INTERNAL, "test peer dropped")))
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {

@@ -1,26 +1,33 @@
-//! The single mapping point for ACP v2 error codes.
+//! Central construction and mapping for ACP v2 error codes.
 //!
-//! The pinned v2 schema reserves `-32000` for **Authentication required**, so the
-//! preview never emits it: capacity, backpressure and a busy session use Peri's
-//! own server error `-32020` with a stable `data.reason` (`prompt_capacity`,
-//! `session_busy`), and unknown sessions use `-32002` with `data.sessionId`
-//! (`SessionNotFoundErrorData`). Every v2 error is constructed here so the
-//! mapping stays reviewable in one place.
+//! The v2 adapter and the preview-only host handlers build their errors from the
+//! constructors and constants here, so no bare code literal lives in a request
+//! path. The pinned v2 schema reserves `-32000` for **Authentication required**,
+//! so the preview never emits it: capacity, backpressure and a busy session use
+//! Peri's own server error `-32020` with a stable `data.reason`
+//! (`prompt_capacity`, `session_busy`), unknown sessions use `-32002` with
+//! `data.sessionId` (`SessionNotFoundErrorData`), and `state_update.error`
+//! reports execution failure as `-32603`.
+//!
+//! `-32010` is the host's overloaded conflict code. The only v2 outbound path
+//! allowed to keep it is the close-incomplete settlement of `session/close`
+//! (and the shared close/delete gate behind it); every other host `-32010` is
+//! normalized by [`host_failure`].
 
 use serde_json::{json, Value};
 
 use crate::transport::types::AcpError;
 
 /// Method not found or not advertised on this connection.
-pub(super) const METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 /// Invalid params: bad content block, missing/relative cwd, bad cursor, bad key.
-pub(super) const INVALID_PARAMS: i64 = -32602;
+pub(crate) const INVALID_PARAMS: i64 = -32602;
 /// Internal error.
-pub(super) const INTERNAL: i64 = -32603;
+pub(crate) const INTERNAL: i64 = -32603;
 /// Invalid request (repeated `initialize` after the connection started).
 pub(super) const INVALID_REQUEST: i64 = -32600;
 /// Resource not found: a session-scoped request named an unknown session.
-pub(super) const SESSION_NOT_FOUND: i64 = -32002;
+pub(crate) const SESSION_NOT_FOUND: i64 = -32002;
 /// Request cancelled (prompt withdrawn before insertion, close settlement).
 pub(super) const CANCELLED: i64 = -32800;
 /// Peri-defined server error for capacity/backpressure and for a busy session
@@ -32,6 +39,11 @@ pub(super) const CAPACITY: i64 = -32020;
 /// rejection under this code; it answers `session_busy` (`-32020`) instead.
 pub(super) const SESSION_SWITCH: i64 = -32010;
 
+/// The host's transient per-session refusals: the prompt lock is held by the
+/// running turn, or the session is being closed. The message, not the code,
+/// decides whether a host `-32010` is such a retryable conflict.
+const HOST_TRANSIENT_REFUSALS: [&str; 2] = ["Session is executing", "Session is closing"];
+
 pub(super) fn unknown_method(method: &str) -> AcpError {
     AcpError::new(
         METHOD_NOT_FOUND,
@@ -39,8 +51,20 @@ pub(super) fn unknown_method(method: &str) -> AcpError {
     )
 }
 
-pub(super) fn invalid_params(message: impl Into<String>) -> AcpError {
+pub(crate) fn invalid_params(message: impl Into<String>) -> AcpError {
     AcpError::new(INVALID_PARAMS, message)
+}
+
+/// A host-side failure the client cannot fix by changing its request.
+pub(crate) fn internal(message: impl Into<String>) -> AcpError {
+    AcpError::new(INTERNAL, message)
+}
+
+/// A preview-only handler answered for a session that is no longer active on the
+/// host. Unlike [`session_not_found`] this carries no `sessionId`: the adapter
+/// already checked its own slot, so the id is not the client's mistake.
+pub(crate) fn session_unavailable(message: impl Into<String>) -> AcpError {
+    AcpError::new(SESSION_NOT_FOUND, message)
 }
 
 /// `-32002` carries the offending session id so clients can drop local state.
@@ -126,12 +150,59 @@ pub(super) fn unsupported_object_cancel(method: &str) -> AcpError {
     )
 }
 
-/// Rewrite a host-passthrough error that a v2 client would misread.
+/// Where a host-passthrough error is about to be written to a v2 client.
+///
+/// The same host code means different things per request surface; naming the
+/// context here keeps every mapping in this module instead of at the call sites.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HostContext<'a> {
+    /// A `session/new` / `session/resume` reply; the id is `None` for `new`.
+    Setup { session_id: Option<&'a str> },
+    /// The preview-only `session/list` storage query.
+    SessionList,
+    /// A prompt's admission/workspace path.
+    Prompt,
+}
+
+/// Map a host-passthrough error that a v2 client would misread.
 ///
 /// `-32000` means Authentication required in the pinned schema; Peri's v1 paths
-/// use it for backpressure, MCP control and history domain failures. Only that
-/// code is remapped (to `-32020` with the original `reason` preserved when there
-/// is one), everything else passes through unchanged.
+/// use it for backpressure, MCP control and history domain failures. That code
+/// is remapped to `-32020` with the original `reason` preserved when there is
+/// one.
+///
+/// The host's `-32010` is only forwarded by the close-incomplete settlement,
+/// which does not call this function. Every other context is translated:
+///
+/// - the host's transient per-session refusals ("Session is executing",
+///   "Session is closing") become `session_busy` (`-32020` + `reason`) when the
+///   caller can name the session;
+/// - a setup whose client-supplied location cannot be used is Invalid params
+///   (`-32602`) with the host's message intact;
+/// - host resource/internal failures (list storage, prompt workspace checks)
+///   are `-32603`, again keeping the message.
+pub(super) fn host_failure(error: AcpError, context: HostContext<'_>) -> AcpError {
+    if error.code == SESSION_SWITCH {
+        if HOST_TRANSIENT_REFUSALS
+            .iter()
+            .any(|prefix| error.message.starts_with(prefix))
+        {
+            return match context {
+                HostContext::Setup {
+                    session_id: Some(session_id),
+                } => session_busy(session_id),
+                _ => internal(error.message),
+            };
+        }
+        return match context {
+            HostContext::Setup { .. } => invalid_params(error.message),
+            HostContext::SessionList | HostContext::Prompt => internal(error.message),
+        };
+    }
+    normalize(error)
+}
+
+/// Rewrite the overloaded host `-32000`; other codes pass through unchanged.
 pub(super) fn normalize(error: AcpError) -> AcpError {
     if error.code != -32000 {
         return error;
@@ -150,13 +221,10 @@ pub(super) fn normalize(error: AcpError) -> AcpError {
 
 /// Map a host error from a v2 `session/new` / `session/resume` setup.
 ///
-/// `session/new` has no session id to report, so it keeps the `normalize`
-/// contract. A resume whose session's turn still holds the host's per-session
-/// prompt lock gets the stable busy code instead of the host's overloaded
-/// `-32010`; every other code passes through `normalize` unchanged.
+/// A setup whose session's turn still holds the host's per-session prompt lock
+/// gets the stable busy code instead of the host's overloaded `-32010`; any
+/// other host `-32010` (unavailable cwd, relink/binding failures) is the
+/// client's Invalid params. See [`host_failure`].
 pub(super) fn setup_failure(error: AcpError, session_id: Option<&str>) -> AcpError {
-    match (error.code, session_id) {
-        (SESSION_SWITCH, Some(session_id)) => session_busy(session_id),
-        _ => normalize(error),
-    }
+    host_failure(error, HostContext::Setup { session_id })
 }

@@ -42,19 +42,31 @@ impl Deferred {
     }
 
     /// Park one live update, dropping redundant state snapshots and (past the
-    /// bound) the newest arrivals.
-    pub(super) fn hold(&mut self, update: Value) {
+    /// bound) the newest arrivals. A state snapshot is returned to the caller
+    /// instead of parked: it is a snapshot, not an event, and the caller keeps
+    /// only the newest one for a later authoritative publication.
+    ///
+    /// Session metadata is also a replace-whole snapshot. The host may
+    /// broadcast the same table more than once while a load is in flight (one
+    /// per attach phase); parking each broadcast would flush the same table
+    /// twice, so only the newest per kind is kept.
+    pub(super) fn hold(&mut self, update: Value) -> Option<Value> {
         if is_state_update(&update) {
-            return;
+            return Some(update);
+        }
+        if let Some(kind) = metadata_snapshot(&update) {
+            self.updates
+                .retain(|parked| metadata_snapshot(parked) != Some(kind));
         }
         if self.updates.len() >= MAX_DEFERRED_UPDATES {
             tracing::warn!(
                 held = self.updates.len(),
                 "ACP v2 replay buffer is full; dropping a live session update"
             );
-            return;
+            return None;
         }
         self.updates.push_back(update);
+        None
     }
 
     /// Stop holding and return what was parked, in arrival order.
@@ -66,6 +78,19 @@ impl Deferred {
 
 fn is_state_update(update: &Value) -> bool {
     update.get("sessionUpdate").and_then(Value::as_str) == Some("state_update")
+}
+
+/// The kind of a replace-whole session metadata snapshot, if the update is one.
+fn metadata_snapshot(update: &Value) -> Option<&str> {
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        kind @ Some(
+            "available_commands_update"
+            | "config_option_update"
+            | "current_mode_update"
+            | "session_info_update",
+        ) => kind,
+        _ => None,
+    }
 }
 
 /// Whether a `session/update` notification belongs to the host's history replay.
@@ -87,7 +112,7 @@ pub(super) fn marked(params: &Value, update: &Value) -> bool {
 /// message the client already streamed live is not appended twice. Only
 /// replay-marked chunks are tracked; a live chunk must never reset the message.
 pub(super) fn reset_replayed_chunk(slot: &mut Slot, update: &Value) -> bool {
-    let Some(replay) = slot.replay.as_mut() else {
+    let Some(replay) = slot.active_replay_mut() else {
         return false;
     };
     match (
@@ -104,10 +129,22 @@ pub(super) fn reset_replayed_chunk(slot: &mut Slot, update: &Value) -> bool {
 /// Route one live update: write it now, or park it while a replay holds.
 pub(super) fn route_live(slot: &mut Slot, update: Value) -> Option<Value> {
     if slot.deferred.is_holding() {
-        slot.deferred.hold(update);
+        hold_live(slot, update);
         None
     } else {
         Some(update)
+    }
+}
+
+/// Park one live update for the active replay hold.
+///
+/// A foreground state snapshot is not parked (the post-replay snapshot is
+/// authoritative), but it is remembered on the slot: a failed replay ends the
+/// hold without a snapshot of its own, and the client still needs the final
+/// state and its stop reason.
+pub(super) fn hold_live(slot: &mut Slot, update: Value) {
+    if let Some(state) = slot.deferred.hold(update) {
+        slot.pending_state = Some(state);
     }
 }
 
@@ -126,7 +163,6 @@ pub(super) async fn settle_setup(
     result: Result<Value, AcpError>,
     session: Option<String>,
     replay: bool,
-    created: bool,
     owner: u64,
     two: bool,
 ) -> Result<(), AcpError> {
@@ -140,6 +176,9 @@ pub(super) async fn settle_setup(
     // Live updates taken from the slot when this attempt finishes
     // replay; written after the reply, per the pinned order.
     let mut deferred: Vec<Value> = Vec::new();
+    // A state transition the replay hold swallowed, published after the error
+    // reply when no successor owns the hold (see `hold_live`).
+    let mut suppressed: Option<Value> = None;
     match &result {
         Ok(value) => {
             sid = session
@@ -152,20 +191,32 @@ pub(super) async fn settle_setup(
                 // reply, so it has no takeover to defer to; a
                 // resume completion must still own the slot.
                 let owned = session.is_none() || slot.setup == owner;
+                // This attempt's replay ends with its reply whether or not it
+                // still owns the slot; a stale success must not leave its
+                // chunk identities behind.
+                if replay {
+                    slot.end_setup_replay(owner);
+                }
                 // Only the owning attempt publishes the attach phase. A stale
                 // success records that an attach completed, but must not lift
                 // the takeover's `Attaching`: live metadata for the still
                 // pending owner would otherwise bypass the hold.
                 if owned {
                     slot.attach = Attach::Attached;
+                    slot.attached_setup = owner;
                 }
                 slot.attached = true;
                 let foreground = slot.foreground;
-                if owned && session.is_some() {
-                    deferred = slot.deferred.finish();
+                let mut stop_reason = None;
+                if owned {
+                    if session.is_some() {
+                        deferred = slot.deferred.finish();
+                    }
+                    // A turn that ended while the replay held its snapshot is
+                    // reported through the authoritative snapshot below.
+                    stop_reason = slot.take_suppressed_stop_reason(foreground);
                 }
                 if owned && replay {
-                    slot.replay = None;
                     stdio
                         .update(sid, json!({"sessionUpdate":"replay_complete"}))
                         .await?;
@@ -176,7 +227,9 @@ pub(super) async fn settle_setup(
                     // is required after any replay and before it, and
                     // the host pushes the command table and options
                     // ahead of its own reply.
-                    stdio.update(sid, updates::state(foreground, None)).await?;
+                    stdio
+                        .update(sid, updates::state(foreground, stop_reason.as_deref()))
+                        .await?;
                     if owned {
                         let held = slot.flush_held();
                         let projected = held
@@ -204,56 +257,63 @@ pub(super) async fn settle_setup(
                 // attempt that still owns it may unwind it, and a
                 // takeover keeps its own held updates and waiter.
                 if wire.slots.get(sid).is_some_and(|slot| slot.setup == owner) {
-                    if created {
-                        wire.slots.remove(sid);
-                    } else {
-                        // Hand the slot back to the newest setup
-                        // still in flight: its completion owns the
-                        // replay marker and the parked metadata.
-                        let previous = wire.newest_pending_setup(sid);
-                        let attached = wire.slots.get(sid).is_some_and(|slot| slot.attached);
-                        if let Some(slot) = wire.slots.get_mut(sid) {
-                            match previous {
-                                Some((previous_owner, previous_replay)) => {
-                                    slot.setup = previous_owner;
-                                    if !previous_replay {
-                                        // No successor will emit its
-                                        // `replay_complete`.
-                                        slot.replay = None;
-                                    }
-                                }
-                                None => {
-                                    // This attempt's replay ends
-                                    // here: an earlier load whose
-                                    // success was stale skipped its
-                                    // `replay_complete`, so leaving
-                                    // the replay marker set would
-                                    // keep resetting live chunks for
-                                    // a replay that never completes.
-                                    slot.replay = None;
-                                    slot.flush_held();
-                                    // No successor owns the parked
-                                    // live updates: hand them back to
-                                    // the still-attached client after
-                                    // the error reply.
-                                    if attached {
-                                        deferred = slot.deferred.finish();
-                                    }
-                                }
-                            }
-                            // The previous attach is live only if
-                            // one completed; while an earlier setup
-                            // is still pending the slot stays
-                            // `Attaching`.
-                            if attached {
-                                slot.attach = Attach::Attached;
+                    let previous = wire.newest_pending_setup(sid);
+                    let (attached, attached_setup) = wire
+                        .slots
+                        .get(sid)
+                        .map_or((false, 0), |slot| (slot.attached, slot.attached_setup));
+                    // A pending attempt older than the newest completed attach
+                    // was superseded by it. Handing the slot back would
+                    // resurrect that attempt as the owner, let its late
+                    // failure delete a live slot, and drop updates the attach
+                    // already owns.
+                    let successor = previous.filter(|(previous_owner, _)| {
+                        !attached || attached_setup < *previous_owner
+                    });
+                    match successor {
+                        Some((previous_owner, previous_replay)) => {
+                            if let Some(slot) = wire.slots.get_mut(sid) {
+                                // Its completion owns the replay marker and
+                                // the parked metadata. Restore its replay
+                                // state so already-started messages keep their
+                                // replacement boundary and new ones get one.
+                                slot.setup = previous_owner;
+                                slot.end_setup_replay(owner);
+                                slot.replay_owner = previous_replay.then_some(previous_owner);
+                                // While a setup is still pending the slot
+                                // stays `Attaching`; held metadata must not
+                                // bypass the takeover.
+                                slot.attach = Attach::Attaching;
                             }
                         }
-                        // No attach ever completed and no setup is
-                        // left to complete one: the failed attempts
-                        // created this slot, so drop it.
-                        if !attached && previous.is_none() {
-                            wire.slots.remove(sid);
+                        None => {
+                            if let Some(slot) = wire.slots.get_mut(sid) {
+                                // This attempt's replay ends here: an earlier
+                                // load whose success was stale skipped its
+                                // `replay_complete`, so leaving the replay
+                                // marker set would keep resetting live chunks
+                                // for a replay that never completes.
+                                slot.end_setup_replay(owner);
+                                slot.flush_held();
+                                if attached {
+                                    // No successor owns the parked live
+                                    // updates: hand them back to the
+                                    // still-attached client after the error
+                                    // reply, together with the state
+                                    // transition the hold swallowed. Otherwise
+                                    // the client that received `session_busy`
+                                    // would never see the turn end.
+                                    deferred = slot.deferred.finish();
+                                    suppressed = slot.pending_state.take();
+                                    slot.attach = Attach::Attached;
+                                }
+                            }
+                            // No attach ever completed and no setup is
+                            // left to complete one: the failed attempts
+                            // created this slot, so drop it.
+                            if !attached {
+                                wire.slots.remove(sid);
+                            }
                         }
                     }
                 }
@@ -313,6 +373,11 @@ pub(super) async fn settle_setup(
             if let Some(slot) = wire.slots.get_mut(sid) {
                 stdio.flush_deferred(slot, sid, deferred).await?;
             }
+        }
+    }
+    if let Some(state) = suppressed {
+        if let Some(sid) = sid.as_deref() {
+            stdio.update(sid, state).await?;
         }
     }
     for (sid, update) in flush {

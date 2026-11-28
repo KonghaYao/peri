@@ -9,6 +9,7 @@
 use serde_json::{json, Value};
 
 use super::ServerLoop;
+use crate::host::stdio::v2::errors;
 use crate::transport::types::{AcpError, RequestId};
 
 impl ServerLoop<'_> {
@@ -21,7 +22,7 @@ impl ServerLoop<'_> {
         let session_id = params
             .get("sessionId")
             .and_then(Value::as_str)
-            .ok_or_else(|| AcpError::new(-32602, "Missing sessionId"))?;
+            .ok_or_else(|| errors::invalid_params("Missing sessionId"))?;
         // A session assembled from its own environment configuration owns its
         // option list; anything else answers from the connection's view.
         let environment = {
@@ -29,7 +30,7 @@ impl ServerLoop<'_> {
             let state = sessions
                 .get(session_id)
                 .filter(|state| !state.closing && state.close_in_flight == 0)
-                .ok_or_else(|| AcpError::new(-32002, "Session not active"))?;
+                .ok_or_else(|| errors::session_unavailable("Session not active"))?;
             state.environment.clone()
         };
         let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(self.cfg);
@@ -43,6 +44,6 @@ impl ServerLoop<'_> {
             )
         };
         serde_json::to_value(json!({ "configOptions": options }))
-            .map_err(|error| AcpError::new(-32603, error.to_string()))
+            .map_err(|error| errors::internal(error.to_string()))
     }
 }

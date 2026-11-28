@@ -3,6 +3,7 @@
 use serde_json::json;
 
 use crate::transport::types::{AcpError, RequestId};
+use crate::transport::AcpTransport;
 
 use super::super::harness::{begin_turn, expect_error, expect_state, Harness, CWD};
 use super::MAX_DEFERRED_UPDATES;
@@ -391,4 +392,395 @@ async fn a_stale_success_never_flushes_the_takeovers_deferred_updates() {
         "t1",
         "the takeover owns the deferred updates"
     );
+}
+
+#[tokio::test]
+async fn a_failed_replay_publishes_the_state_transition_the_hold_swallowed() {
+    for error_case in [false, true] {
+        let mut harness = Harness::start();
+        harness.negotiate().await;
+        harness.open("A").await;
+        begin_turn(&harness, "A").await;
+
+        let replay = RequestId::Number(4800);
+        harness
+            .request(
+                replay.clone(),
+                "session/resume",
+                json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+            )
+            .await;
+        let forwarded = harness.expect_forwarded().await;
+        assert_eq!(forwarded.method, "session/load");
+
+        // The turn ends while the replay holds the slot: the state transition is
+        // suppressed (stale snapshots are not parked) and must not be lost when
+        // the host then refuses the replay.
+        if error_case {
+            harness.v2().observe_execution_failure("A").await;
+        }
+        let reason = if error_case { "error" } else { "cancelled" };
+        harness.send_done("A", reason).await;
+        harness.expect_quiet().await;
+
+        harness
+            .respond(
+                forwarded.id,
+                Err(AcpError::new(
+                    -32010,
+                    "Session is executing; retry after the current turn",
+                )),
+            )
+            .await;
+        let error = expect_error(&harness, replay, -32020).await;
+        assert_eq!(error.data.expect("busy data")["reason"], "session_busy");
+
+        // The client that received `session_busy` still learns the turn ended,
+        // with the stop reason (and the execution error) it had.
+        let state = expect_state(&harness, "A", "idle").await;
+        assert_eq!(state["stopReason"], reason);
+        if error_case {
+            assert_eq!(state["error"]["code"], -32603);
+        }
+        harness.expect_quiet().await;
+    }
+}
+
+#[tokio::test]
+async fn a_superseded_late_failure_never_deletes_the_attached_slot() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+
+    // A's replay creates the slot and stays pending, so its late failure would
+    // meet the "this attempt created the slot" rule.
+    let a = RequestId::Number(4900);
+    harness
+        .request(
+            a.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let a_forwarded = harness.expect_forwarded().await;
+
+    // B takes over and completes, so the slot is genuinely attached.
+    let b = RequestId::Number(4901);
+    harness
+        .request(
+            b.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let b_forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(b_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "replay_complete"
+    );
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, b);
+    assert!(result.is_ok());
+
+    // C fails. A is older than the completed attach, so handing the slot back
+    // to A would resurrect a superseded attempt.
+    let c = RequestId::Number(4902);
+    harness
+        .request(
+            c.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let c_forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            c_forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, c, -32020).await;
+
+    // A's late failure must answer A but leave the live slot alone.
+    harness
+        .respond(
+            a_forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, a, -32020).await;
+
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1"}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["toolCallId"],
+        "t1",
+        "a superseded late failure must not drop the attached slot"
+    );
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_failed_takeover_keeps_the_pending_owner_attaching() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    // A is a cursorless resume: it owns the slot and parks metadata.
+    let a = RequestId::Number(5000);
+    harness
+        .request(
+            a.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let a_forwarded = harness.expect_forwarded().await;
+    assert_eq!(a_forwarded.method, "session/resume");
+
+    let b = RequestId::Number(5001);
+    harness
+        .request(
+            b.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let b_forwarded = harness.expect_forwarded().await;
+    assert_eq!(b_forwarded.method, "session/load");
+
+    harness
+        .respond(
+            b_forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, b, -32020).await;
+
+    // A still owns the setup: its metadata must stay parked instead of being
+    // published ahead of its own snapshot.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "Y"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+
+    harness
+        .respond(a_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let info = harness.expect_out().await.update();
+    assert_eq!(info["sessionUpdate"], "session_info_update");
+    assert_eq!(info["title"], "Y");
+    harness.fetch_config("A", json!([])).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, a);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_failed_cursorless_takeover_restores_the_owners_replay_state() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let a = RequestId::Number(5100);
+    harness
+        .request(
+            a.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let a_forwarded = harness.expect_forwarded().await;
+
+    // A starts streaming message m1; its first chunk gets one replacement
+    // boundary.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
+                   "content": {"type": "text", "text": "one"},
+                   "_meta": {"periReplay": true}}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message"
+    );
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message_chunk"
+    );
+
+    // A cursorless takeover clears the active replay; when it fails, A's replay
+    // state (including m1's identity) must come back.
+    let b = RequestId::Number(5101);
+    harness
+        .request(
+            b.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let b_forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            b_forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, b, -32020).await;
+
+    // The already-started message keeps no second boundary; a new message gets
+    // exactly one.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
+                   "content": {"type": "text", "text": "two"},
+                   "_meta": {"periReplay": true}}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message_chunk"
+    );
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m2",
+                   "content": {"type": "text", "text": "three"},
+                   "_meta": {"periReplay": true}}),
+        )
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message"
+    );
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "agent_message_chunk"
+    );
+
+    harness
+        .respond(a_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    assert_eq!(
+        harness.expect_out().await.update()["sessionUpdate"],
+        "replay_complete"
+    );
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, a);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_cancel_while_a_cursorless_resume_is_pending_still_reaches_the_turn() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    begin_turn(&harness, "A").await;
+
+    let resume = RequestId::Number(5200);
+    harness
+        .request(
+            resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/resume");
+
+    // The slot is `Attaching` with no replay, but the turn is live: the cancel
+    // must reach the host instead of being dropped by the attach filter.
+    harness
+        .notification("session/cancel", json!({"sessionId": "A"}))
+        .await;
+    let cancel = harness.expect_forwarded().await;
+    assert_eq!(cancel.method, super::super::CANCEL);
+    harness.respond(cancel.id, Ok(json!([]))).await;
+
+    harness.send_done("A", "cancelled").await;
+    expect_state(&harness, "A", "idle").await;
+    harness
+        .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    harness.fetch_config("A", json!([])).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, resume);
+    assert!(result.is_ok());
+
+    // An idle session whose only setup is still attaching has nothing running:
+    // the same cancel is dropped (no host request).
+    let idle_resume = RequestId::Number(5201);
+    harness
+        .request(
+            idle_resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let idle_forwarded = harness.expect_forwarded().await;
+    harness
+        .notification("session/cancel", json!({"sessionId": "A"}))
+        .await;
+    harness.expect_quiet().await;
+    harness
+        .respond(idle_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    harness.fetch_config("A", json!([])).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, idle_resume);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn a_replayed_broadcast_keeps_only_the_newest_metadata_snapshot_per_kind() {
+    let mut deferred = super::Deferred::default();
+    deferred.begin();
+    deferred.hold(json!({"sessionUpdate": "available_commands_update",
+                         "availableCommands": [{"name": "stale"}]}));
+    deferred.hold(json!({"sessionUpdate": "config_option_update", "configOptions": []}));
+    deferred.hold(json!({"sessionUpdate": "available_commands_update",
+                         "availableCommands": [{"name": "fresh"}]}));
+    let flushed = deferred.finish();
+    assert_eq!(
+        flushed
+            .iter()
+            .map(|update| update["sessionUpdate"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!("config_option_update"),
+            json!("available_commands_update")
+        ]
+    );
+    assert_eq!(flushed[1]["availableCommands"][0]["name"], "fresh");
 }

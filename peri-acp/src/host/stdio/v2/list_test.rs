@@ -6,7 +6,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use peri_acp_types::session_resources::SessionResourceError;
 use peri_acp_types::thread::ThreadListEntry;
-use peri_acp_types::workspace::{ScopedThreadEntry, ScopedThreadPage};
+use peri_acp_types::workspace::{ScopedThreadEntry, ScopedThreadPage, ScopedThreadQuery};
 use serde_json::json;
 
 use crate::transport::types::RequestId;
@@ -189,6 +189,92 @@ async fn a_filtered_page_reports_the_last_raw_cursor_and_never_skips_entries() {
     .expect("page through");
     assert_eq!(session_ids(&rest), vec!["c"]);
     assert!(rest.next_cursor.is_none());
+}
+
+/// A store that honours the requested page size and keyset cursor, like the
+/// real backend: entries in `updated_at` order, each fetch starts after the
+/// cursor position and returns at most `limit` entries.
+struct KeysetStore {
+    entries: Vec<ScopedThreadEntry>,
+}
+
+impl KeysetStore {
+    fn page(&self, query: &ScopedThreadQuery) -> ScopedThreadPage {
+        let start = query
+            .cursor
+            .as_ref()
+            .and_then(|cursor| {
+                self.entries
+                    .iter()
+                    .position(|entry| entry.thread.id == cursor.thread_id)
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(0);
+        let end = (start + query.limit as usize).min(self.entries.len());
+        let entries = self.entries[start..end].to_vec();
+        let next_cursor = (end < self.entries.len()).then(|| {
+            let last = &self.entries[end - 1];
+            ThreadListCursor {
+                updated_at: last.thread.updated_at,
+                thread_id: last.thread.id.clone(),
+            }
+        });
+        ScopedThreadPage {
+            entries,
+            next_cursor,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_limit_two_mixed_cwd_page_is_capped_and_the_cursor_still_covers_every_match() {
+    // Three sessions match the filter, but they are interleaved with others
+    // across raw pages: a naive implementation returns all three for limit 2.
+    let store = KeysetStore {
+        entries: vec![
+            entry("a", "/wanted", "2026-11-24T10:00:00Z"),
+            entry("b", "/other", "2026-11-24T09:00:00Z"),
+            entry("c", "/wanted", "2026-11-24T08:00:00Z"),
+            entry("d", "/wanted", "2026-11-24T07:00:00Z"),
+        ],
+    };
+    let mut queries = Vec::new();
+    let mut collected = Vec::new();
+    let mut next = None;
+    loop {
+        let page = page_through(Some("/wanted"), next.clone(), 2, |query| {
+            queries.push(query.clone());
+            let page = store.page(&query);
+            async move { Ok::<_, SessionResourceError>(page) }
+        })
+        .await
+        .expect("page through");
+        assert!(
+            page.sessions.len() <= 2,
+            "one response exceeded the requested limit: {:?}",
+            session_ids(&page)
+        );
+        collected.extend(session_ids(&page));
+        next = page
+            .next_cursor
+            .as_deref()
+            .map(|text| decode_cursor(text).expect("decodable cursor"));
+        if next.is_none() {
+            break;
+        }
+    }
+    assert_eq!(collected, vec!["a", "c", "d"]);
+    assert_eq!(
+        collected.len(),
+        collected
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+    // Each fetch asks only for the entries still missing from the response, so
+    // the page a cursor resumes after was consumed whole (no skipped entry).
+    assert_eq!(queries[0].limit, 2);
+    assert_eq!(queries[1].limit, 1);
 }
 
 #[tokio::test]

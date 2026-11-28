@@ -5,9 +5,11 @@
 //! store's keyset position. Storage supports `(updated_at, thread_id)` keyset
 //! paging but not a `cwd` predicate inside it, so a `cwd` filter is applied
 //! after each raw page and pages are fetched until the requested number of
-//! matching sessions is reached or the store is exhausted. `nextCursor` is the
-//! cursor of the last raw page consumed, never of the last match, so an entry
-//! filtered out of one response is never skipped.
+//! matching sessions is reached or the store is exhausted. The requested
+//! `limit` caps the **response**: each fetch asks only for the entries still
+//! missing, so no response can exceed it. `nextCursor` is the cursor of the
+//! last raw page consumed, never of the last match, so an entry filtered out of
+//! one response is never skipped.
 //!
 //! The query is a preview-only internal request (`_peri/stdio-v2/session-list`):
 //! the v1 `session/list` handler keeps its existing shape and pagination
@@ -185,6 +187,14 @@ fn internal_cursor(value: Option<&Value>) -> Result<Option<ThreadListCursor>, Ac
 }
 
 /// Page storage until `limit` matching sessions are collected or it runs out.
+///
+/// The requested `limit` is the upper bound on the **response**, not on one raw
+/// store page: storage has no `cwd` predicate, so each fetch is asked for only
+/// the entries still missing from this response. A conforming store therefore
+/// returns at most `remaining` entries, that page is consumed whole, and its
+/// `nextCursor` stays a faithful resume position. The final `truncate` is a
+/// defensive guard for a store that ignores the requested size: the response
+/// never exceeds the client's limit.
 async fn page_through<F, Fut>(
     cwd: Option<&str>,
     mut cursor: Option<ThreadListCursor>,
@@ -197,10 +207,11 @@ where
 {
     let mut sessions = Vec::new();
     loop {
+        let remaining = (limit as usize).saturating_sub(sessions.len()).max(1);
         let page = fetch(ScopedThreadQuery {
             scope: ThreadScope::All,
             cursor: cursor.clone(),
-            limit,
+            limit: remaining as u32,
         })
         .await
         .map_err(crate::host::workspace::resource_error)?;
@@ -209,8 +220,10 @@ where
             page.entries
                 .iter()
                 .filter(|entry| cwd.is_none_or(|dir| entry.thread.cwd == dir))
-                .map(session_info),
+                .map(session_info)
+                .take(remaining),
         );
+        sessions.truncate(limit as usize);
         match next {
             Some(next) if sessions.len() < limit as usize => cursor = Some(next),
             Some(next) => {

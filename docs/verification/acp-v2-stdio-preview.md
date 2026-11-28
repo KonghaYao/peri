@@ -31,16 +31,18 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 
 ## S4 运行记录（2026-11-24，macOS arm64，Rust 1.99.0）
 
-工作树基于 `7a544cf29` 的 S4 实现；`peri` 由当前工作树重建。同一次运行
-`EXIT=0`，官方 `v2_one_shot_client` 也通过：
+工作树基线 `6866f4a9d`，外加本次整合修复提交
+`fix(peri-acp): 收紧 v2 分页上限与错误码边界`（含页大小上限、宿主 `-32010`
+归一化、preview-only 方法对 v1 拒绝、replay 状态机收口）；`peri` 由该工作树重建。
+同一次运行 `EXIT=0`，官方 `v2_one_shot_client` 也通过：
 
-1. `PASS v2 initialize repeat/version bounds, multi-session admission, setup/error-code shapes, prompt key bounds`
+1. `PASS v2 initialize repeat/version bounds, multi-session admission, setup/error-code shapes, prompt key bounds`（含不可用 cwd：`session/new` → `-32602`，message 保留 `workspace location is unavailable`）
 2. `PASS v2 two sessions on one connection; concurrent turns; per-session close isolation`
 3. `PASS v2 session/delete drops the session and its connection slot`
 4. `PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict`
 5. `PASS v2 replay order replay_complete -> state -> reply; deferred live metadata flushed exactly once after the reply`
 6. `PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy (limited rejection, not a successful replay)`
-7. `PASS v2 session/list limit=1 order/no duplicates/termination; exact cwd; invalid cursor -32602`
+7. `PASS v2 session/list limit=1 order/no duplicates/termination; limit=2 capped and resumed without gaps; exact cwd; invalid cursor -32602`
 8. `PASS v2 session/list cursor remains valid in a new process (durable keyset position)`
 9. `PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close`
 10. `PASS v2 idempotency key survives a restart; same key retried once, different content -32602, keys scoped to the session`
@@ -48,13 +50,15 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 12. `PASS v2 session/new ConfigOptions + AvailableCommands v2 shapes`
 13. `PASS v2 set_config_option projects configOptions and refuses unknown input`
 14. `PASS v2 mode change governs the next turn; UsageUpdate carries used/size only`
-15. `PASS v1 client with Preview enabled and disabled`
+15. `PASS v1 client with Preview enabled and disabled`（含 preview-only 内部方法在 v1 上 `-32601`）
 16. `PASS upstream Rust ACP 3.5.0 v2_one_shot_client: accepted, streamed, idle, closed`
 
 ### 断言覆盖项
 
-- **S1 方法面/错误码**：重复 `initialize`、`protocolVersion` 边界、多会话、setup 参数、
-  `-32002` 的 `data.sessionId`、`terminal/cancel`/`tool_call/cancel` 的 `-32602`、`auth/*`
+- **S1 方法面/错误码**：重复 `initialize`、`protocolVersion` 边界、首次 v2
+  `initialize` 缺 `info` 的 `-32602`、多会话、setup 参数、不可用 cwd 的
+  `session/new` → `-32602`（保留宿主 message，且不是 `-32010`）、`-32002` 的
+  `data.sessionId`、`terminal/cancel`/`tool_call/cancel` 的 `-32602`、`auth/*`
   的 `-32601`、prompt key 1..=255。
 - **S1 并发**：两个会话的两个 turn 必须都报告 `running` 后才出现任一 `idle`。探针以
   **首个 `idle`** 作为 turn 结束边界，不再把 prompt ACK 顺序当作 turn 结束证据（ACK 是
@@ -68,17 +72,23 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
   `set_config_option(mode)` 往返、非法值/未知选项/未知会话拒绝、`bypass` 对下一 turn
   生效、`usage_update` 只有 `used`/`size`。
 - **S4 分页**：三个有历史的会话；`limit=1` 逐页遍历的顺序与默认页一致、无重复、
-  `nextCursor` 终止；`cwd` 只匹配相同目录；非法 cursor `-32602`；旧进程取得的 cursor
-  在新进程中继续同一 keyset 遍历。
+  `nextCursor` 终止；`limit=2` 的响应也 `<= 2`，从它的 `nextCursor` 继续能覆盖
+  余下全部条目且无重复/缺口；`cwd` 只匹配相同目录；非法 cursor `-32602`；旧进程
+  取得的 cursor 在新进程中继续同一 keyset 遍历。遍历循环有页数上限并拒绝重复
+  cursor，服务端若不推进 cursor 会失败而不是挂死。
 - **S4 replay**：unsupported cursor `-32602`；回放后
   `replay_complete`（恰一次）→ state → 响应；host 在 load 响应前推的 config/commands
-  被 deferred，响应后各恰好冲刷一次；重启后回放与幂等重试只出现一次；空回放也发
+  被 deferred，响应后各恰好冲刷一次（以「响应后的后继请求」作为完成栅栏，再统计整个
+  冲刷窗口，重复不会被漏数）；重启后回放与幂等重试只出现一次；空回放也发
   `replay_complete`（进程内测试）。活动 turn 内 replay 的 wire 断言是**受限拒绝的形状**：
   `-32020` + `data.reason == "session_busy"` + `data.sessionId`，不是成功回放。
 - **S4 进程内**：`host::stdio::v2::replay` 覆盖活动 turn 中 resume 的 hold/flush 顺序、
   live chunk 不产生替换边界、1024 条缓冲上限与溢出、回放期间 `session/cancel` 收敛到
   `idle`、stale success 不冲刷 takeover 的 deferred、pending resume 期间的 done 仍结束
-  turn、宿主 `-32010` 在 replay 与无 replay 的 resume 上都映射为 `session_busy`。
+  turn、宿主 `-32010` 在 replay 与无 replay 的 resume 上都映射为 `session_busy`；
+  失败 replay 在结束后补发被 hold 压掉的最终状态（含 `cancelled`/`error` stop reason）、
+  被已提交 attach 取代的迟到失败不删除 slot、失败 takeover 保持 `Attaching` 并恢复
+  owner 的 replay 状态、cursorless 等待中的 `session/cancel` 仍到达宿主。
 
 ## 复审收口（`7a544cf29` 的 CodeRabbit 复审）
 
@@ -98,21 +108,24 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 - **E（held 元数据顺序）**：已修正。文档明确 plain resume 成功时 state 快照与 held
   元数据在响应**之前**；只有 `session/new` 的元数据在响应之后。
 
-## 收口复跑：v2 setup 的 busy 错误码
+## 收口复跑：v2 setup 的 busy 错误码与宿主 `-32010`
 
-`fix(peri-acp): 活动 turn 内 resume 返回稳定 busy 错误` 之后，v2 setup 回复不再透传宿主
-的 `-32010`：带会话 id 的 setup（`session/resume`、`session/load`）失败于 `-32010` 时，
-客户端收到 `-32020` + `data.reason = "session_busy"` + `data.sessionId`；`session/new`
-没有会话 id 可报，保持 `normalize` 的既有约定；close/delete 的 `-32010` 透传与 v1 语义门
-保持原样。
+活动 turn 内 resume 的 busy 收口之后，v2 setup 回复不再透传宿主的 `-32010`：
+`session/resume` 失败于宿主的执行中/关闭中拒绝时，客户端收到 `-32020` +
+`data.reason = "session_busy"` + `data.sessionId`。
 
-同一矩阵命令复跑 `EXIT=0`，断言条目不变，只有第 6 条从 `KNOWN` 变为：
+本次整合修复进一步收口其余 `-32010` 路径（映射集中在
+`host/stdio/v2/errors.rs::host_failure`）：
 
-```
-PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy (limited rejection, not a successful replay)
-```
+- `session/new` 的 cwd 绝对但不可用 → `-32602`，message 保留宿主原文
+  `workspace location is unavailable`；
+- `session/list` 存储错误、`session/prompt` 的 workspace 资源错误 → `-32603`，
+  message 保留；
+- 只有 `session/close`（及其共享 close/delete 闸门）的 close-incomplete 仍透传
+  `-32010`；v1 连接上的错误形状不变。
 
-这条断言验证的是**受限拒绝的形状**，不是成功回放；宿主放开该 gate 时必须显式改写它。
+同一矩阵命令复跑 `EXIT=0`，断言条目见上（第 1 条新增不可用 cwd 断言，第 7 条新增
+`limit=2` 续页断言，第 15 条新增 v1 对 preview-only 方法的 `-32601` 断言）。
 
 ## 已知限制
 
@@ -127,7 +140,13 @@ PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy
 - replay 期间 per-session live 缓冲上限 1024 条；溢出丢弃最新条目并记 warn，客户端可用
   另一次 `session/resume` 重新同步。
 - `session/list` 的 `limit` 是 preview-only 顶层扩展：pinned `ListSessionsRequest` 没有
-  页大小字段，标准客户端拿到默认 100 条；`1..=500` clamp。
+  页大小字段，标准客户端拿到默认 100 条；`1..=500` clamp。`limit` 是**响应条目上限**：
+  `cwd` 后过滤会连续取页（每次只取仍缺的条数），`nextCursor` 指向最后消费的原始页，
+  一次响应不会超过 `limit`。
+- preview-only 内部方法（`_peri/stdio-v2/*`）对 v1 连接一律 `-32601`，即使
+  `PERI_ACP_V2_PREVIEW=1` 已开启。
+- 首次 v2 `initialize` 缺 `info` 是 `-32602`（pinned v2 `InitializeRequest` 的
+  required 字段）；版本号低于 2（含 0）仍走 v1 协商，行为未改。
 - 同一进程的第二个连接 attach 同一 live 会话时，不会收到第一个连接的 committed-delivery
   事件；其同 key 重试会等待 `close`/`cancel` 而不是立即确认（不会重复插入）。这是 S2
   留下的边界。

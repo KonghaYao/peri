@@ -52,17 +52,28 @@ later withdrawal or the shared close fails.
   routable before then. Live activity outside a replay is not parked, and a
   failed setup drops the slot it created.
 - A stale success records that an attach completed but leaves the takeover's
-  `Attaching` phase untouched; only the owning attempt publishes `Attached`, and
-  a failure restores it only when an attach had completed. Metadata arriving
-  after a stale success therefore still hits the hold.
+  `Attaching` phase untouched; only the owning attempt publishes `Attached`.
+  A failed attempt hands the slot back only to a still-pending attempt newer
+  than the last completed attach; a pending attempt superseded by a committed
+  attach is never resurrected, and its late failure can no longer delete the
+  live slot. The handback restores that attempt's replay state (including the
+  chunk identities already streamed) and keeps the slot `Attaching`, so live
+  metadata cannot bypass the pending owner. Only when no pending owner remains
+  and an attach had completed is `Attached` restored.
 - Concurrent setups on one session are owned by the newest bound attempt. An
   older success still answers its client but neither ends that owner's replay
   (`replay_complete`) nor drains the metadata or deferred updates parked for it.
-  A failed owner hands the slot to the newest attempt still in flight,
-  restoring `Attached` only when an attach already completed; if no attach ever
-  completed and none is left in flight, the slot is dropped. The failed owner
-  still ends the replay state, so a stale success cannot leave live chunks
-  carrying replay replacement boundaries.
+  If no attach ever completed and no setup is left in flight, the slot is
+  dropped. A failed owner still ends its own replay state, so a stale success
+  cannot leave live chunks carrying replay replacement boundaries.
+- A failed replay that ends the hold with no successor publishes the state
+  transition the hold swallowed (exactly the snapshot the successful path reports
+  before its reply), including the stop reason (`cancelled`, `error`, …). A
+  client that receives the `session_busy` refusal therefore still learns that the
+  turn ended.
+- `session/cancel` is accepted while a turn is running through a pending
+  cursorless resume (`Attaching`, no replay); only an idle slot whose only
+  activity is an attaching setup drops it.
 - `session/delete` is advertised and implemented: it settles this connection's
   parked prompts, deletes the session, and drops the slot.
 
@@ -76,8 +87,8 @@ later withdrawal or the shared close fails.
 | `session/list` | Keyset pagination (below). `auth/*`, `session/fork`, `providers/*`, `mcp/message`, unknown methods are never forwarded. |
 | `session/close` | Closes this connection's slot; closing an unknown session is a success. |
 | `session/delete` | Advertised via `session.delete`; settles and removes this connection's slot. |
-| `session/prompt` | Admission, durable idempotency key, committed-delivery settlement, cancellation. |
-| `session/set_config_option` | Validated against the option list last reported for the session; unknown id/value is `-32602` and leaves the configuration untouched. |
+| `session/prompt` | Admission, durable idempotency key, committed-delivery settlement, cancellation. `resource_link` content is passed as a text reference and is **deliberately never fetched**; `audio`/`resource` are `-32602`. |
+| `session/set_config_option` | Validated against the option list last reported for the session (today `mode`, `model`, `thinking_effort`, built by `peri-acp/src/session/state_builders.rs`); the adapter defines no stable config-id list of its own. Unknown id/value is `-32602` and leaves the configuration untouched. |
 | `session/cancel` | Turn-level cancel: withdraws queued prompts, stops the host turn, publishes `idle cancelled`. |
 | `$/cancel_request` | Settles a `session/prompt` request the adapter can still withdraw with `-32800`; other request ids are ignored as pinned. |
 | `session/request_permission` | Baseline peer request; drives `requires_action`. |
@@ -95,17 +106,22 @@ later withdrawal or the shared close fails.
   `ListSessionsRequest` has no page-size field; the preview accepts a top-level
   `limit` as a documented extension so conformance probes can exercise every
   page boundary. Standard clients simply receive the default page.
-- `cwd` is an exact-directory filter (an absolute path; subdirectories and
+- The requested `limit` is the **cap on the response**, not on one raw store
+  page. `cwd` is an exact-directory filter (an absolute path; subdirectories and
   additional roots do not match). Storage does not accept a `cwd` predicate
   inside its keyset query, so matching is applied after each raw page and pages
   are fetched until the requested number of matches is collected or the store is
-  exhausted. `nextCursor` is the cursor of the **last raw page consumed** — not
-  of the last match — so an entry filtered out of one response is returned by
-  the next request instead of being skipped.
+  exhausted. Each fetch asks only for the entries still missing from the
+  response, so a response never contains more than `limit` sessions and a raw
+  page is never partially consumed. `nextCursor` is the cursor of the **last raw
+  page consumed** — not of the last match — so an entry filtered out of one
+  response is returned by the next request instead of being skipped.
 - The query travels as the preview-only internal request
   `_peri/stdio-v2/session-list`; the v1 `session/list` handler and its response
   shape are unchanged. The cursor stays valid across processes because it names
-  a durable store position, not connection state.
+  a durable store position, not connection state. Preview-only internal methods
+  (`_peri/stdio-v2/*`) are **not available on a v1 connection**: they answer
+  `-32601` even when the preview transport is enabled.
 
 ## Replay semantics
 
@@ -140,7 +156,10 @@ later withdrawal or the shared close fails.
   live updates converge to `idle` in the normal way.
 - `state_update` is a snapshot, not an event: transitions still run while the
   queue holds, but the post-replay snapshot is authoritative and individual
-  parked state updates are not replayed.
+  parked state updates are not replayed. The adapter remembers the newest
+  suppressed snapshot: a successful replay reports its stop reason through the
+  authoritative snapshot, and a failed replay publishes it after the error
+  reply, so a hold can never hide that the turn ended.
 - The per-session live buffer is bounded at 1024 updates. Past the bound the
   adapter drops the newest update and logs a warning; the client can
   resynchronize with another `session/resume` (with or without a cursor). This
@@ -153,24 +172,42 @@ later withdrawal or the shared close fails.
 
 ## Error mapping
 
-One module owns every v2 error. `-32000` is reserved for *Authentication
-required* by the pinned schema, so the preview never emits it: host
-passthroughs that use it for backpressure are rewritten to `-32020` with the
-original `data.reason` (or `server_error`). `-32020` is also the stable answer
-when the host refuses a v2 setup because the session's turn is executing; that
-rejection is `data.reason = "session_busy"` and never the host's `-32010`.
+The v2 adapter and the preview-only host handlers construct their errors from
+the constructors and constants in `host/stdio/v2/errors.rs`, so request paths do
+not carry bare code literals. That module is the review point, not a claim that
+every error in the process is born there.
+
+`-32000` is reserved for *Authentication required* by the pinned schema, so the
+preview never emits it: host passthroughs that use it for backpressure are
+rewritten to `-32020` with the original `data.reason` (or `server_error`).
+
+`-32010` is the host's overloaded conflict code. The **only** v2 outbound path
+that forwards it is the close-incomplete settlement of `session/close` (and the
+shared close/delete gate behind it). Every other host `-32010` is mapped in
+`errors.rs::host_failure`: a transient setup refusal (`Session is executing`,
+`Session is closing`) becomes `-32020` + `data.reason = "session_busy"` when the
+session id is known; a setup whose client-supplied cwd/location cannot be used is
+`-32602` (Invalid params, host message kept); list storage failures and prompt
+workspace errors are `-32603` (Internal error, host message kept).
+
+`-32020` is **not** an execution-failure report: a failed execution ends the
+turn with `state_update.error.code = -32603` and `stopReason = "error"`.
+`-32020` is used only for capacity/backpressure and for a busy session.
 
 | condition | code | data |
 | --- | --- | --- |
 | method not advertised or unknown (`auth/*`, `session/fork`, `providers/*`, `mcp/message`, unknown names) | `-32601` | — |
-| invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, malformed list cursor, non-integer list limit, repeated `initialize` below v2 | `-32602` | — |
+| invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, malformed list cursor, non-integer list limit, repeated `initialize` below v2, v2 `initialize` without `info` | `-32602` | — |
 | session-scoped request naming a session this connection has not attached | `-32002` | `{ "sessionId": … }` |
 | `terminal/cancel`, `tool_call/cancel` (per-object cancel is never advertised) | `-32602` | — |
 | prompt withdrawn before insertion, close/delete settlement, retry of a key whose submission was withdrawn in this session generation | `-32800` | — |
 | the same key/identity with different content (in flight, or already inserted in the transcript) | `-32602` | — |
 | capacity/backpressure | `-32020` | `{ "reason": "prompt_capacity" \| …, "sessionId": … }` |
-| v2 setup refused because the session's turn is executing (host `-32010`) | `-32020` | `{ "reason": "session_busy", "sessionId": … }` |
-| host-passthrough close/cleanup failure | `-32010` | passthrough |
+| v2 setup refused because the session's turn is executing or the session is closing (host `-32010`) | `-32020` | `{ "reason": "session_busy", "sessionId": … }` |
+| v2 setup whose client-supplied cwd/location cannot be used (host `-32010`) | `-32602` | host message kept |
+| `session/list` storage failure, prompt workspace/resource failure (host `-32010`) | `-32603` | host message kept |
+| execution failure reported in the state snapshot | `-32603` | `state_update.error = { code: -32603, message: … }`, `stopReason = "error"` |
+| host-passthrough close/delete close-incomplete failure | `-32010` | passthrough |
 
 ## Capabilities and peer requests
 
@@ -227,6 +264,7 @@ rejection is `data.reason = "session_busy"` and never the host's `-32010`.
 | `providers/list`, `providers/set`, `providers/disable` | `-32601` | Not in the pinned method set; Peri has no runtime provider mutation surface (configuration file + `ConfigSource` only) and the SDK marks them unstable |
 | `mcp/message` (both directions) | outbound `-32601`; inbound notification dropped | The pinned `session.mcp` transports are stdio/http only — there is no `McpServerAcp` and no ACP transport to declare |
 | `terminal/cancel`, `tool_call/cancel` | `-32602` | Peri never advertises per-object cancel; the pinned schema forbids calling them unless the object advertised `capabilities.cancel` |
+| `elicitation/complete` (agent → client notification) | never sent | Peri only issues form elicitations; it never sends a `url` elicitation, so there is no URL-mode completion to report |
 | custom replay cursors (`_peri/*`) | `-32602` | This preview defines no implementation-specific replay position; the pinned rule requires rejection rather than substituting `start` |
 | display terminals, optional config controls, other `_meta` extensions | unadvertised | Peri produces no agent-owned terminal and negotiates no extension beyond the two client routing facts above |
 

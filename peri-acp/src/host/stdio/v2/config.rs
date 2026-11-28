@@ -60,7 +60,7 @@ pub(super) fn options_from(reply: &Value) -> Vec<Value> {
 /// `session/set_config_option`.
 ///
 /// The pinned contract is `{configId, type:"id", value}` → v1 `{configId, value}`
-/// plus a `-32602` for an unknown option or value that leaves the session
+/// plus Invalid params for an unknown option or value that leaves the session
 /// configuration untouched. Peri advertises no boolean option, so a `boolean`
 /// value type is rejected rather than silently coerced.
 pub(super) fn set_config_option(

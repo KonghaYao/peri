@@ -8,6 +8,7 @@ use peri_acp_types::session::{
 };
 
 use super::ServerLoop;
+use crate::host::stdio::v2::errors;
 use crate::transport::types::{AcpError, RequestId};
 
 impl ServerLoop<'_> {
@@ -68,13 +69,12 @@ impl ServerLoop<'_> {
             let state = sessions
                 .get(sid)
                 .filter(|state| !state.closing && state.close_in_flight == 0)
-                .ok_or_else(|| AcpError::new(-32002, "Session not active"))?;
+                .ok_or_else(|| errors::session_unavailable("Session not active"))?;
             state.environment.clone()
         };
         let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(self.cfg);
         if !cfg.session_manager.get_caps(sid).user_input_queue {
-            return Err(AcpError::new(
-                -32002,
+            return Err(errors::session_unavailable(
                 "Session has no ACP Preview input endpoint",
             ));
         }
@@ -154,7 +154,7 @@ impl ServerLoop<'_> {
             if withdraw(input_id.to_owned()).await? {
                 return Ok(json!({}));
             }
-            return Err(AcpError::new(-32602, "Prompt is no longer withdrawable"));
+            return Err(errors::invalid_params("Prompt is no longer withdrawable"));
         }
 
         let (_, content, _) = crate::dispatch::extract_prompt_params(params)?;
@@ -283,7 +283,7 @@ fn withdrawn() -> AcpError {
 }
 
 fn invalid() -> AcpError {
-    AcpError::new(-32602, "Invalid internal ACP Preview input")
+    errors::invalid_params("Invalid internal ACP Preview input")
 }
 
 /// How a failed dispatch whose handoff could not be confirmed must reply.
@@ -374,16 +374,15 @@ async fn settle_failed_close(
 mod tests;
 
 fn mailbox_error(error: impl std::fmt::Display) -> AcpError {
-    AcpError::new(-32602, error.to_string())
+    errors::invalid_params(error.to_string())
 }
 
 /// A confirmed withdrawal means the dispatch failure did not insert anything.
 /// A storage failure is then a retryable internal error, not invalid params.
 fn dispatch_error(error: peri_agent::session::user_input_mailbox::UserInputQueueError) -> AcpError {
     use peri_agent::session::user_input_mailbox::UserInputQueueError;
-    let code = match &error {
-        UserInputQueueError::Store(_) => -32603,
-        _ => -32602,
-    };
-    AcpError::new(code, error.to_string())
+    match &error {
+        UserInputQueueError::Store(_) => errors::internal(error.to_string()),
+        _ => errors::invalid_params(error.to_string()),
+    }
 }

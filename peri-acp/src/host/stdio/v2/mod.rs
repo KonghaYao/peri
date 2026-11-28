@@ -7,7 +7,7 @@
 
 mod capabilities;
 mod config;
-mod errors;
+pub(in crate::host) mod errors;
 mod lifecycle;
 pub(in crate::host) mod list;
 mod params;
@@ -204,7 +204,13 @@ impl V2Stdio {
         method: String,
         params: Value,
     ) -> Option<IncomingMessage> {
-        if matches!(method.as_str(), INPUT | WITHDRAW | CANCEL | CLOSE | CONFIG) {
+        // Preview-only internal methods do not exist for a v1 connection, not
+        // even when the preview transport is enabled: a v1 client must never be
+        // able to drive the v2 adapter's internal surface.
+        if matches!(
+            method.as_str(),
+            INPUT | WITHDRAW | CANCEL | CLOSE | CONFIG | SESSION_LIST
+        ) {
             let _ = self
                 .inner
                 .send_response(id, Err(errors::unknown_method(&method)))
@@ -253,7 +259,24 @@ impl V2Stdio {
             return None;
         }
         // ACP v2 reads protocolVersion before any other parameter and rejects
-        // out-of-range values (0..=65535) with Invalid params.
+        // out-of-range values (0..=65535) with Invalid params. The pinned v2
+        // `InitializeRequest` also requires `info`: a client that declares a v2
+        // version without it sent an invalid v2 request, so it is refused
+        // instead of silently falling back to the v1 surface. A version below 2
+        // (including 0) is still a v1 negotiation and keeps that path.
+        if !repeat && requested.is_some_and(|version| version >= 2) && params.get("info").is_none()
+        {
+            let _ = self
+                .inner
+                .send_response(
+                    id,
+                    Err(errors::invalid_params(
+                        "ACP v2 initialize requires the client info document",
+                    )),
+                )
+                .await;
+            return None;
+        }
         let negotiable = (matches!(wire.version, state::Version::Unset) || repeat)
             && requested.is_some_and(|version| version >= 2)
             && params.get("info").is_some();
@@ -391,9 +414,16 @@ impl V2Stdio {
                     let slot = wire
                         .slots
                         .get_mut(&sid)
-                        // A cancel is still valid while the session replays: the
-                        // turn is live even though the slot is re-attaching.
-                        .filter(|slot| slot.attach == Attach::Attached || slot.replay.is_some())?;
+                        // A cancel is still valid while the session replays or
+                        // while a turn is already running through a pending
+                        // cursorless resume: the turn is live even though the
+                        // slot is re-attaching. Only an idle session with
+                        // nothing to replay drops it (nothing is running).
+                        .filter(|slot| {
+                            slot.attach == Attach::Attached
+                                || slot.is_replaying()
+                                || !slot.foreground.is_idle()
+                        })?;
                     // The cancelled turn's outstanding peer requests must not
                     // republish a foreground state afterwards.
                     slot.cancel_turn();
@@ -423,7 +453,7 @@ impl V2Stdio {
         // that is already running (or while it replays), which is the one case
         // where the host streams activity before the setup reply. Dropping a
         // done event for such a turn would leave the foreground state running.
-        if slot.attach != Attach::Attached && slot.replay.is_none() && slot.foreground.is_idle() {
+        if slot.attach != Attach::Attached && !slot.is_replaying() && slot.foreground.is_idle() {
             return;
         }
         match event {
@@ -525,7 +555,7 @@ impl AcpTransport for V2Stdio {
                 .await;
         }
         // This adapter only ever emits form elicitations. A client that did not
-        // advertise `elicitation.form` would answer -32601 anyway; failing here
+        // advertise `elicitation.form` would answer Method not found; failing here
         // lets the broker take its MethodUnsupported degradation without a
         // round-trip or a dangling request.
         if method == "elicitation/create" && !client.supports_form_elicitation() {
@@ -616,12 +646,12 @@ impl AcpTransport for V2Stdio {
                 let Some(slot) = wire.slots.get_mut(&sid) else {
                     return Ok(());
                 };
-                let replaying = slot.replay.is_some();
+                let replaying = slot.is_replaying();
                 let replayed = replay::marked(&params, &update);
                 // Live activity of an already attached session is held during a
                 // replay and flushed after the resume reply.
                 if replaying && !replayed {
-                    slot.deferred.hold(update);
+                    replay::hold_live(slot, update);
                     return Ok(());
                 }
                 if slot.attach == Attach::Attaching
@@ -658,7 +688,7 @@ impl AcpTransport for V2Stdio {
                     return Ok(());
                 };
                 if slot.attach != Attach::Attached
-                    && slot.replay.is_none()
+                    && !slot.is_replaying()
                     && slot.foreground.is_idle()
                 {
                     return Ok(());
@@ -725,6 +755,14 @@ impl AcpTransport for V2Stdio {
             Some(Reply::Input(input)) => {
                 match result {
                     Err(error) => {
+                        // A prompt's workspace/resource failure reaches the
+                        // waiting client through this path; map it like every
+                        // other v2 outbound host failure.
+                        let error = if two {
+                            errors::host_failure(error, errors::HostContext::Prompt)
+                        } else {
+                            error
+                        };
                         for waiter in wire.reject_prompt(&input) {
                             self.inner.send_response(waiter, Err(error.clone())).await?;
                         }
@@ -773,8 +811,13 @@ impl AcpTransport for V2Stdio {
                 value
             }),
             Some(Reply::SessionList { client }) => {
-                let result =
-                    result.map_err(|error| if two { errors::normalize(error) } else { error });
+                let result = result.map_err(|error| {
+                    if two {
+                        errors::host_failure(error, errors::HostContext::SessionList)
+                    } else {
+                        error
+                    }
+                });
                 return self.inner.send_response(client, result).await;
             }
             Some(Reply::ConfigFetch {
@@ -817,11 +860,10 @@ impl AcpTransport for V2Stdio {
             Some(Reply::Setup {
                 session,
                 replay,
-                created,
                 owner,
             }) => {
                 return replay::settle_setup(
-                    self, &mut wire, id, result, session, replay, created, owner, two,
+                    self, &mut wire, id, result, session, replay, owner, two,
                 )
                 .await;
             }

@@ -2,7 +2,7 @@
 //!
 //! The agent advertises only what this preview can honour; the client's
 //! declaration is captured so peer requests can be gated instead of being sent
-//! to a client that will answer `-32601`.
+//! to a client that would answer Method not found.
 
 use serde_json::{json, Value};
 
