@@ -118,6 +118,7 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | 官方 `sessions.turns.retrieve`；turn 不属于该会话时 `404 unknown_agent` |
 | `GET` | `/v1/agents/sessions/{logicalId}/subagents` | 官方 `sessions.subagents.list`：按 `(opened_at, id)` 的 keyset 分页（`order` 默认 `desc`，`limit` 默认 20、上限 500）；数据来自 Peri 会话树的全部子线程（含 nested 与 closed，不含 root），`session_id` 是 `logicalId` |
 | `GET` | `/v1/agents/sessions/{logicalId}/subagents/{subagentId}` | 官方 `sessions.subagents.retrieve`；subagent 不属于该会话时 `404 unknown_agent`；`instructions` 恒 `null` |
+| `GET` | `/v1/agents/metrics` | 网关扩展：按会话聚合窗口内 turn 的 token 用量。`start_time`/`end_time` 是 Unix 微秒（默认最近 24 小时；窗口上限 31 天，`start_time > end_time` → `400 invalid_query`），`limit` 1..=500（默认 50）。只返回至少一个带 usage 事实的 turn 的会话，按 `total_tokens` 倒序；`totals` 覆盖整个窗口，扫描上限 5 万行，超出时 `truncated:true` |
 | `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
 
 约定：
@@ -169,8 +170,8 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   空 items 与空 turns。删除失败不返回成功，行仍可重试。
 - 官方 `sessions.turns.list` 按 `(created_at, turn_id)` 稳定全序分页；`after` 是
   turn id 且排他，未知 turn id 返回 `400 invalid_query`。`turns.retrieve` 的
-  `usage` 与 `subagent_id` 恒为 `null`（网关不做 token 记账，也没有 subagent
-  turn），`agent_id` 恒为 `root`。
+  `usage` 是持久 turn 行的累计用量（§4.2），`subagent_id` 恒为 `null`（没有
+  subagent turn），`agent_id` 恒为 `root`。
 
 
 ### 4.2 SSE 与 items
@@ -207,6 +208,18 @@ actor）→ 进程内 Peri ACP Host。Hosted 工具经远程 workspace MCP 使�
   `agent.session.*` 与 `gap` 不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发
   `started`，终止帧是 `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn`
   帧保持不变。
+- turn 用量写入 `swarm_turns.usage_json`（稳定 snake_case）：
+  `{input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_tokens,`
+  `context_used,context_size,model,request_id,calls}`。每个非 replay 的
+  `usage_update` 是一次 LLM 调用：`input_tokens = inputTokens - cacheReadTokens -
+  cacheCreationTokens`（饱和减，provider 的 `inputTokens` 已含两个 cache 桶），
+  `total_tokens` 为四项之和；`context_used`/`context_size`、`model`、`request_id`
+  取最新值，`calls` 累加。观测到达即 upsert 当前累计值，turn 终止写同一对象，所以
+  中断的 turn 也保留已观测用量；任何不带 usage 的后续写入（`begin_turn` 重写、恢复
+  关闭、终态补写）保留已存值，不清空。宿主未协商 `token_stats`（`_meta` 缺失）时只写
+  `context_used`/`context_size`，不伪造 token 计数；`_meta.periReplay` 的更新在投影层
+  丢弃，重连回放不会重复计数。实时 `turn.completed`/`turn.failed` 的 `usage` 与
+  `turns.retrieve` 读同一对象。
 - 订阅游标接受 `Last-Event-ID` 头、`?afterSeq=` 或 `?after=`（三者等价，同时给出
   必须一致，否则 `400 conflicting_cursor`）。查询还接受官方
   `include_obfuscation`（`true`/`false`）：网关不生成混淆填充，值被接受并忽略，
@@ -498,7 +511,8 @@ turn；steer 沿用 opener 的 `turn_id`。可识别的边界（payload 未被�
 - `agent.session.in_progress`/`idle`/`failed` 的 `metadata` 来自会话行；官方
   `AgentSession.prompt_cache_options` 是可选项，网关只在有持久值时发送它（没有值
   时字段不出现，而不是伪造 `null`）。实时与回放使用同一会话行投影，字段不静默分叉。
-- `usage` 恒为 `null`；`requires_action` 只对声明了 MCP 审批的 MCP 绑定发送
+- `usage` 按 turn 累计（§4.2）：缺少 `_meta` 时只有 `context_used`/`context_size`，
+  从未观测到任何用量事实时为 `null`；`requires_action` 只对声明了 MCP 审批的 MCP 绑定发送
   （见 §4.5 与 `spec/issues/2026-11-21-peri-swarm-requires-action-design.md`）；
   `turn.cancelled` 不存在：取消折叠为 `turn.completed(status="cancelled")`；
   budget、subagent 与官方 `function_call` item 不在本层。
@@ -665,8 +679,12 @@ SRT 启停，表里也没有该列，所以不伪造 `reserved`/`running`。实�
 失败（502）处理，不单独伪造一个持久结算原因。
 
 会话投影同时携带官方默认字段：`required_actions`（当前待办，通常为 `[]`）、
-`vault_ids=[]`、`usage=null`、`error=null`。vault、token 记账与会话级错误没有本地
-事实，不伪造非空值。`OfficialSession.environment` 使用与 REST 相同的
+`vault_ids=[]`、`error=null`。`usage` 在 `sessions.retrieve`（以及 create/update 的
+回读）上聚合该会话的持久 turn：token 计数相加，`context_*`/`model` 取最新观测，
+`calls` 为观测到的 LLM 调用数；没有任何带观测的 turn 时为 `null`，只有 context 的
+turn 不产生 token 键。`sessions.list` 不逐会话扫描 turn，保持 `usage:null`，避免列表
+成本随会话数乘上 turn 数增长。vault 与会话级错误仍没有本地事实，不伪造非空值。
+`OfficialSession.environment` 使用与 REST 相同的
 `{type,id}` 投影：hosted 带 logicalEnvId，`none` 省略 id，未记录时为
 `{"type":"none"}`。反序列化对四个字段使用 serde 默认值，
 旧的持久/测试 JSON 不因缺字段失败。

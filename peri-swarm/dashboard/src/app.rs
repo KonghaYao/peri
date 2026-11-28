@@ -17,6 +17,8 @@ use crate::worker::ValidationPurpose;
 mod actions;
 mod detail;
 mod forms;
+mod metrics;
+mod query;
 mod routing;
 mod session_create;
 mod session_detail;
@@ -25,7 +27,9 @@ mod session_flow;
 mod session_log;
 mod types;
 
-pub use forms::{CredentialsState, OnboardingState};
+pub use forms::{CredentialsState, ObservabilityState, OnboardingState};
+pub use metrics::{AgentMetricsState, CoreMetricsState, RequestLogState};
+pub use query::QueryState;
 pub use session_create::{CreateFormState, MetadataRow};
 pub use session_detail::{
     pretty_json, ActionError, ApprovalEntry, RequiredAction, SessionDetailState, TimelineEntry,
@@ -50,6 +54,8 @@ pub struct App {
     overlay_cursor: usize,
     onboarding: OnboardingState,
     credentials: CredentialsState,
+    observability: ObservabilityState,
+    observability_testing: bool,
     settings_status: Option<SettingsStatus>,
     config: Option<Config>,
     store: ConfigStore,
@@ -68,6 +74,10 @@ pub struct App {
     detail_tab: DetailTab,
     edit: EditFormState,
     session_log: SessionLogState,
+    core_metrics: CoreMetricsState,
+    agent_metrics: AgentMetricsState,
+    request_log: RequestLogState,
+    query: QueryState,
     create: CreateFormState,
     viewport_width: u16,
     sidebar_scroll: usize,
@@ -97,6 +107,8 @@ impl App {
             overlay_cursor: 0,
             onboarding: OnboardingState::default(),
             credentials: CredentialsState::default(),
+            observability: ObservabilityState::default(),
+            observability_testing: false,
             settings_status: None,
             config: None,
             store,
@@ -115,6 +127,10 @@ impl App {
             detail_tab: DetailTab::Timeline,
             edit: EditFormState::default(),
             session_log: SessionLogState::new(),
+            core_metrics: CoreMetricsState::new(),
+            agent_metrics: AgentMetricsState::new(),
+            request_log: RequestLogState::new(),
+            query: QueryState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -145,6 +161,8 @@ impl App {
             overlay_cursor: 0,
             onboarding: OnboardingState::default(),
             credentials: CredentialsState::default(),
+            observability: ObservabilityState::default(),
+            observability_testing: false,
             settings_status: None,
             config: Some(config),
             store,
@@ -163,6 +181,10 @@ impl App {
             detail_tab: DetailTab::Timeline,
             edit: EditFormState::default(),
             session_log: SessionLogState::new(),
+            core_metrics: CoreMetricsState::new(),
+            agent_metrics: AgentMetricsState::new(),
+            request_log: RequestLogState::new(),
+            query: QueryState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -226,7 +248,14 @@ impl App {
             | ActionId::EditCredentials
             | ActionId::SignOut
             | ActionId::Quit => self.validation.is_none(),
+            ActionId::ConfigureObservability => {
+                self.validation.is_none() && !self.observability_testing
+            }
+            ActionId::TestObservability | ActionId::SaveObservability => {
+                !self.observability_testing
+            }
             ActionId::SaveCredentials => self.validation != Some(ValidationPurpose::Credentials),
+            ActionId::RunQuery => !self.query.in_flight,
             _ => true,
         }
     }
@@ -252,6 +281,26 @@ impl App {
     #[must_use]
     pub fn credentials(&self) -> &CredentialsState {
         &self.credentials
+    }
+
+    /// Observability connection editor form.
+    #[must_use]
+    pub fn observability(&self) -> &ObservabilityState {
+        &self.observability
+    }
+
+    /// Stored OpenObserve connection, when configured.
+    #[must_use]
+    pub fn observability_config(&self) -> Option<&crate::config::ObservabilityConfig> {
+        self.config
+            .as_ref()
+            .and_then(crate::config::Config::observability)
+    }
+
+    /// Whether an OpenObserve connection test is in flight.
+    #[must_use]
+    pub fn observability_testing(&self) -> bool {
+        self.observability_testing
     }
 
     /// Last settings action result.
@@ -355,6 +404,36 @@ impl App {
     #[must_use]
     pub fn session_log(&self) -> &SessionLogState {
         &self.session_log
+    }
+
+    /// Core-metrics state (window, snapshot, polling).
+    #[must_use]
+    pub fn core_metrics(&self) -> &CoreMetricsState {
+        &self.core_metrics
+    }
+
+    /// Agent-metrics state (window, response, client-side page).
+    #[must_use]
+    pub fn agent_metrics(&self) -> &AgentMetricsState {
+        &self.agent_metrics
+    }
+
+    /// Request-log state (window, page, rows).
+    #[must_use]
+    pub fn request_log(&self) -> &RequestLogState {
+        &self.request_log
+    }
+
+    /// Query-page state (SQL editor, window, result pages).
+    #[must_use]
+    pub fn query(&self) -> &QueryState {
+        &self.query
+    }
+
+    /// Whether the saved config carries an OpenObserve connection.
+    #[must_use]
+    pub fn observability_configured(&self) -> bool {
+        self.observability_config().is_some()
     }
 
     /// Create-session form state.
@@ -462,6 +541,18 @@ impl App {
             FieldId::CredentialsApiKey if self.screen == Screen::SettingsCredentials => {
                 Some(self.credentials.api_key())
             }
+            FieldId::ObservabilityBaseUrl if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.base_url())
+            }
+            FieldId::ObservabilityOrg if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.org())
+            }
+            FieldId::ObservabilityUser if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.user())
+            }
+            FieldId::ObservabilityPassword if self.screen == Screen::SettingsObservability => {
+                Some(self.observability.password())
+            }
             FieldId::SessionSearch
                 if self.screen == Screen::Main && self.page == Page::SessionLog =>
             {
@@ -510,6 +601,7 @@ impl App {
             (Screen::SessionEdit, FieldId::EditPromptCache) => {
                 Some(self.edit.prompt_cache_options())
             }
+            (Screen::Main, FieldId::QuerySql) if self.page == Page::Query => Some(&self.query.sql),
             _ => None,
         }
     }
@@ -534,6 +626,9 @@ impl App {
             (Screen::SessionEdit, FieldId::EditPromptCache) => {
                 Some(&mut self.edit.prompt_cache_options)
             }
+            (Screen::Main, FieldId::QuerySql) if self.page == Page::Query => {
+                Some(&mut self.query.sql)
+            }
             _ => None,
         }
     }
@@ -543,7 +638,7 @@ impl App {
     pub fn field_is_masked(field: FieldId) -> bool {
         matches!(
             field,
-            FieldId::OnboardingApiKey | FieldId::CredentialsApiKey
+            FieldId::OnboardingApiKey | FieldId::CredentialsApiKey | FieldId::ObservabilityPassword
         )
     }
 
@@ -613,6 +708,7 @@ impl App {
             || self.health_in_flight
             || self.screen == Screen::Onboarding
             || self.screen == Screen::SettingsCredentials
+            || self.screen == Screen::SettingsObservability
             || self.overlay == Some(Overlay::ConfirmSignOut)
         {
             return None;

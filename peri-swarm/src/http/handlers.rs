@@ -7,7 +7,7 @@ use axum::Json;
 
 use super::error::{from_bytes_rejection, from_json_rejection, from_query_rejection};
 use super::request::{
-    self, CreateSessionBody, EventsQuery, ItemsQuery, SessionsQuery, SubagentsQuery,
+    self, CreateSessionBody, EventsQuery, ItemsQuery, MetricsQuery, SessionsQuery, SubagentsQuery,
     SubmitEventBody, TurnsQuery,
 };
 use super::{sse, AppState};
@@ -136,6 +136,19 @@ pub async fn list_sessions(
     let window = request::resolve_sessions_window(&query)?;
     let page = state.service().list_sessions(window).await?;
     Ok(Json(page).into_response())
+}
+
+/// `GET /v1/agents/metrics`: per-session token usage over one bounded window.
+pub async fn get_agent_metrics(
+    State(state): State<AppState>,
+    query: Result<Query<MetricsQuery>, QueryRejection>,
+) -> Result<Response, SwarmError> {
+    let Query(query) = query.map_err(from_query_rejection)?;
+    // The resolver owns the window rule; the default window ends now.
+    let now_us = crate::domain::official::unix_now().saturating_mul(1_000_000);
+    let window = request::resolve_metrics_window(&query, now_us)?;
+    let metrics = state.service().agent_metrics(window).await?;
+    Ok(Json(metrics).into_response())
 }
 
 pub async fn update_session(

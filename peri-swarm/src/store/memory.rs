@@ -9,6 +9,7 @@ use crate::domain::{EnvironmentKind, ItemOrder, SessionsWindow, TurnStatus, Turn
 use super::{
     grouped_item_page, InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
     SwarmItemRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
+    SwarmTurnUsageRow,
 };
 
 /// In-memory fake for the S3 ports. Semantics mirror the future remote store:
@@ -499,14 +500,59 @@ impl SwarmStore for MemorySwarmStore {
         let turns = state.turns.entry(row.logical_id.clone()).or_default();
         // Keep the opening `created_at`: a terminal write carries the same
         // value, but the store must not re-key the row if a caller omits it.
-        let created_at = turns
+        let existing = turns
             .iter()
             .find(|((_, turn_id), _)| turn_id == &row.turn_id)
-            .map_or(row.created_at, |((created_at, _), _)| *created_at);
+            .map(|((created_at, _), existing)| (*created_at, existing.usage.clone()));
+        let (created_at, stored_usage) = match existing {
+            Some((created_at, usage)) => (created_at, usage),
+            None => (row.created_at, None),
+        };
         turns.retain(|(_, turn_id), _| turn_id != &row.turn_id);
         let mut row = row;
         row.created_at = created_at;
+        // Same rule as the PostgreSQL `COALESCE`: an absent usage keeps the
+        // stored value instead of erasing an earlier observation.
+        if row.usage.is_none() {
+            row.usage = stored_usage;
+        }
         turns.insert((created_at, row.turn_id.clone()), row);
+        Ok(())
+    }
+
+    async fn swarm_record_turn_usage(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+        created_at: i64,
+        started_at: Option<i64>,
+        usage: &Value,
+    ) -> Result<(), StoreError> {
+        let mut state = self.lock();
+        let turns = state.turns.entry(logical_id.to_owned()).or_default();
+        if let Some(((_, _), row)) = turns.iter_mut().find(|((_, stored), _)| stored == turn_id) {
+            // Same rule as the PostgreSQL statement: a late observation
+            // refreshes only the running total of an open turn; a terminal row
+            // keeps its status, times and final usage.
+            if row.status.is_open() {
+                row.usage = Some(usage.clone());
+            }
+            return Ok(());
+        }
+        turns.insert(
+            (created_at, turn_id.to_owned()),
+            SwarmTurnRow {
+                logical_id: logical_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                status: TurnStatus::InProgress,
+                created_at,
+                started_at,
+                completed_at: None,
+                error: None,
+                usage: Some(usage.clone()),
+                subagent_id: None,
+            },
+        );
         Ok(())
     }
 
@@ -579,12 +625,79 @@ impl SwarmStore for MemorySwarmStore {
         Ok(updated)
     }
 
+    async fn swarm_turn_usage_window(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        let state = self.lock();
+        let mut rows = Vec::new();
+        for (logical_id, turns) in &state.turns {
+            let Some(session) = state.sessions.get(logical_id) else {
+                // A turn whose session is gone is not reportable.
+                continue;
+            };
+            for ((created_at, _), row) in turns {
+                if *created_at < start_at || *created_at > end_at {
+                    continue;
+                }
+                rows.push(usage_row(row, session));
+            }
+        }
+        rows.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.turn_id.cmp(&left.turn_id))
+        });
+        rows.truncate(limit as usize);
+        Ok(rows)
+    }
+
+    async fn swarm_session_usage_turns(
+        &self,
+        logical_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        let state = self.lock();
+        let Some(session) = state.sessions.get(logical_id) else {
+            return Ok(Vec::new());
+        };
+        let mut rows: Vec<SwarmTurnUsageRow> = state
+            .turns
+            .get(logical_id)
+            .map(|turns| turns.values().map(|row| usage_row(row, session)).collect())
+            .unwrap_or_default();
+        rows.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.turn_id.cmp(&left.turn_id))
+        });
+        rows.truncate(limit as usize);
+        Ok(rows)
+    }
+
     async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
         let state = self.lock();
         Ok(state
             .turns
             .get(logical_id)
             .is_some_and(|turns| turns.values().any(|row| row.status.is_open())))
+    }
+}
+
+/// Project one stored turn into the usage-aggregate shape, mirroring the
+/// PostgreSQL session join.
+fn usage_row(row: &SwarmTurnRow, session: &SwarmSessionRow) -> SwarmTurnUsageRow {
+    SwarmTurnUsageRow {
+        logical_id: row.logical_id.clone(),
+        turn_id: row.turn_id.clone(),
+        created_at: row.created_at,
+        usage: row.usage.clone(),
+        model: session.model.clone(),
+        last_active_at: session.last_activity_at.clone(),
     }
 }
 

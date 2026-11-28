@@ -10,8 +10,8 @@ use crate::domain::input::OFFICIAL_CANCEL_EVENT;
 use crate::domain::input_id::input_id_for_key;
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
-    InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
-    PromptCacheTtl, SessionsWindow, SubagentsWindow, SwarmError, TurnsWindow,
+    InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, MetricsWindow,
+    PromptCacheOptions, PromptCacheTtl, SessionsWindow, SubagentsWindow, SwarmError, TurnsWindow,
     MAX_METADATA_KEY_CHARS, MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
 };
 use crate::service::{SessionUpdateCommand, UpdateField};
@@ -289,6 +289,19 @@ pub struct SubagentsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub order: Option<String>,
+}
+
+/// `GET /v1/agents/metrics` query. Both times are Unix microseconds; the
+/// bounded window keeps one report from scanning the whole history.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsQuery {
+    #[serde(default)]
+    pub start_time: Option<i64>,
+    #[serde(default)]
+    pub end_time: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Raw `sessions.list` query. `metadata[key]=value` has dynamic keys, so the
@@ -1505,6 +1518,56 @@ pub fn resolve_subagents_window(query: &SubagentsQuery) -> Result<SubagentsWindo
     Ok(SubagentsWindow {
         order,
         after: query.after.clone(),
+        limit,
+    })
+}
+
+/// `GET /v1/agents/metrics` query.
+///
+/// `now_us` supplies the default window end so the rule is testable without a
+/// clock. Defaults: the last 24 hours, at most 50 sessions.
+pub fn resolve_metrics_window(
+    query: &MetricsQuery,
+    now_us: i64,
+) -> Result<MetricsWindow, SwarmError> {
+    let end_time = query.end_time.unwrap_or(now_us);
+    let start_time = query
+        .start_time
+        .unwrap_or_else(|| end_time.saturating_sub(MetricsWindow::DEFAULT_WINDOW_US));
+    if start_time > end_time {
+        return Err(
+            SwarmError::invalid_query("start_time must not be after end_time").with_details(
+                json!({
+                    "field": "start_time",
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }),
+            ),
+        );
+    }
+    let span = end_time.saturating_sub(start_time);
+    if span > MetricsWindow::MAX_WINDOW_US {
+        return Err(SwarmError::invalid_query(format!(
+            "window must be at most {} days",
+            MetricsWindow::MAX_WINDOW_US / 86_400_000_000
+        ))
+        .with_details(json!({
+            "field": "start_time",
+            "max_window_us": MetricsWindow::MAX_WINDOW_US,
+            "received_us": span,
+        })));
+    }
+    let limit = query.limit.unwrap_or(MetricsWindow::DEFAULT_LIMIT);
+    if limit == 0 || limit > MetricsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            MetricsWindow::MAX_LIMIT
+        ))
+        .with_details(json!({ "field": "limit", "received": limit })));
+    }
+    Ok(MetricsWindow {
+        start_time,
+        end_time,
         limit,
     })
 }

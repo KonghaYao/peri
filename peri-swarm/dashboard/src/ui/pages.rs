@@ -13,7 +13,10 @@ use crate::app::{App, Page, Screen};
 use crate::ui::hit::HitMap;
 use crate::ui::widgets::Rows;
 
-use super::{empty, onboarding, session_detail, session_form, session_log, settings};
+use super::{
+    empty, metrics, onboarding, query, request_log, session_detail, session_form, session_log,
+    settings,
+};
 
 /// Extra scratch rows above the viewport used to draw a block that starts just
 /// above the visible window. Every multi-line block drawn by a page is smaller
@@ -67,14 +70,27 @@ pub fn render(
     let cursor = match app.screen() {
         Screen::Onboarding => onboarding::render(buf, &mut rows, app, hits),
         Screen::SettingsCredentials => settings::render_credentials(buf, &mut rows, app, hits),
+        Screen::SettingsObservability => settings::render_observability(buf, &mut rows, app, hits),
         Screen::Main => match app.page() {
             Page::Settings => {
                 settings::render(buf, &mut rows, app, hits);
                 None
             }
             Page::SessionLog => session_log::render(buf, &mut rows, app, hits),
-            page => {
-                empty::render(page, buf, &mut rows);
+            Page::CoreMetrics => metrics::render_core(buf, &mut rows, app, hits),
+            Page::AgentMetrics => metrics::render_agent(buf, &mut rows, app, hits),
+            Page::RequestLog => request_log::render(buf, &mut rows, app, hits),
+            Page::Query => query::render(buf, &mut rows, app, hits),
+            // Placeholder pages are reachable but have no data source yet; each
+            // renders an honest empty state until a later stage implements it.
+            Page::SandboxMetrics
+            | Page::Agents
+            | Page::Artifacts
+            | Page::Vaults
+            | Page::Mcp
+            | Page::Automations
+            | Page::Nodes => {
+                empty::render(app.page(), buf, &mut rows);
                 None
             }
         },

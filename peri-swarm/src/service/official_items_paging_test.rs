@@ -240,6 +240,19 @@ impl crate::store::SwarmStore for CountingStore {
         self.inner.swarm_upsert_turn(row).await
     }
 
+    async fn swarm_record_turn_usage(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+        created_at: i64,
+        started_at: Option<i64>,
+        usage: &Value,
+    ) -> Result<(), crate::store::StoreError> {
+        self.inner
+            .swarm_record_turn_usage(logical_id, turn_id, created_at, started_at, usage)
+            .await
+    }
+
     async fn swarm_get_turn(
         &self,
         logical_id: &str,
@@ -254,6 +267,27 @@ impl crate::store::SwarmStore for CountingStore {
         window: &crate::domain::TurnsWindow,
     ) -> Result<Vec<SwarmTurnRow>, crate::store::StoreError> {
         self.inner.swarm_turn_page(logical_id, window).await
+    }
+
+    async fn swarm_session_usage_turns(
+        &self,
+        logical_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::store::SwarmTurnUsageRow>, crate::store::StoreError> {
+        self.inner
+            .swarm_session_usage_turns(logical_id, limit)
+            .await
+    }
+
+    async fn swarm_turn_usage_window(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        limit: u32,
+    ) -> Result<Vec<crate::store::SwarmTurnUsageRow>, crate::store::StoreError> {
+        self.inner
+            .swarm_turn_usage_window(start_at, end_at, limit)
+            .await
     }
 
     async fn swarm_close_open_turns(

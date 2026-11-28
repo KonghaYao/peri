@@ -4,6 +4,7 @@
 //! [`Effect`] is deliberately not `Debug`: it may carry an API key.
 
 use crate::api::{ApprovalDecision, CreateSessionSpec, IdempotencyKey, UpdateSessionSpec};
+use crate::metrics::TimeWindow;
 use crate::ui::text;
 use crate::view_model::StatusBucket;
 use crate::worker::ValidationPurpose;
@@ -23,6 +24,8 @@ pub enum Screen {
     SessionEdit,
     /// Settings sub-page for editing credentials.
     SettingsCredentials,
+    /// Settings sub-page for the OpenObserve connection.
+    SettingsObservability,
 }
 
 /// Every sidebar page, in sidebar order.
@@ -38,18 +41,18 @@ pub enum Page {
     SessionLog,
     /// Request log.
     RequestLog,
+    /// Ad-hoc read-only query.
+    Query,
     /// Agents.
     Agents,
-    /// Environment templates.
-    EnvironmentTemplates,
-    /// Skills.
-    Skills,
-    /// Files.
-    Files,
+    /// Artifacts.
+    Artifacts,
     /// Vaults.
     Vaults,
-    /// Projects and keys.
-    ProjectsAndKeys,
+    /// MCP servers.
+    Mcp,
+    /// Automations.
+    Automations,
     /// Nodes.
     Nodes,
     /// Settings.
@@ -64,12 +67,12 @@ impl Page {
         Page::SandboxMetrics,
         Page::SessionLog,
         Page::RequestLog,
+        Page::Query,
         Page::Agents,
-        Page::EnvironmentTemplates,
-        Page::Skills,
-        Page::Files,
+        Page::Artifacts,
         Page::Vaults,
-        Page::ProjectsAndKeys,
+        Page::Mcp,
+        Page::Automations,
         Page::Nodes,
         Page::Settings,
     ];
@@ -82,13 +85,10 @@ impl Page {
             | Page::AgentMetrics
             | Page::SandboxMetrics
             | Page::SessionLog
-            | Page::RequestLog => SidebarGroup::Monitor,
-            Page::Agents
-            | Page::EnvironmentTemplates
-            | Page::Skills
-            | Page::Files
-            | Page::Vaults => SidebarGroup::Resources,
-            Page::ProjectsAndKeys | Page::Nodes | Page::Settings => SidebarGroup::Platform,
+            | Page::RequestLog
+            | Page::Query => SidebarGroup::Monitor,
+            Page::Agents | Page::Artifacts | Page::Vaults | Page::Mcp => SidebarGroup::Resources,
+            Page::Automations | Page::Nodes | Page::Settings => SidebarGroup::Platform,
         }
     }
 
@@ -101,7 +101,15 @@ impl Page {
     /// Whether this build implements the page.
     #[must_use]
     pub fn is_implemented(self) -> bool {
-        matches!(self, Page::SessionLog | Page::Settings)
+        matches!(
+            self,
+            Page::CoreMetrics
+                | Page::AgentMetrics
+                | Page::SessionLog
+                | Page::RequestLog
+                | Page::Query
+                | Page::Settings
+        )
     }
 }
 
@@ -158,28 +166,28 @@ pub const NAV_ENTRIES: [NavItem; 13] = [
         page: Page::RequestLog,
     },
     NavItem {
+        group: SidebarGroup::Monitor,
+        page: Page::Query,
+    },
+    NavItem {
         group: SidebarGroup::Resources,
         page: Page::Agents,
     },
     NavItem {
         group: SidebarGroup::Resources,
-        page: Page::EnvironmentTemplates,
-    },
-    NavItem {
-        group: SidebarGroup::Resources,
-        page: Page::Skills,
-    },
-    NavItem {
-        group: SidebarGroup::Resources,
-        page: Page::Files,
+        page: Page::Artifacts,
     },
     NavItem {
         group: SidebarGroup::Resources,
         page: Page::Vaults,
     },
     NavItem {
+        group: SidebarGroup::Resources,
+        page: Page::Mcp,
+    },
+    NavItem {
         group: SidebarGroup::Platform,
-        page: Page::ProjectsAndKeys,
+        page: Page::Automations,
     },
     NavItem {
         group: SidebarGroup::Platform,
@@ -243,8 +251,18 @@ pub enum FieldId {
     CredentialsBaseUrl,
     /// Settings credential-edit API key.
     CredentialsApiKey,
+    /// Observability editor base URL.
+    ObservabilityBaseUrl,
+    /// Observability editor organization.
+    ObservabilityOrg,
+    /// Observability editor user.
+    ObservabilityUser,
+    /// Observability editor password.
+    ObservabilityPassword,
     /// Session log search box.
     SessionSearch,
+    /// Query page: read-only SQL editor (multiline).
+    QuerySql,
     /// Create form: optional logical id.
     CreateLogicalId,
     /// Create form: model.
@@ -306,6 +324,14 @@ pub enum ActionId {
     TestConnection,
     /// Settings: open the credential editor.
     EditCredentials,
+    /// Settings: open the OpenObserve connection editor.
+    ConfigureObservability,
+    /// Observability editor: probe the entered connection.
+    TestObservability,
+    /// Observability editor: persist the entered connection.
+    SaveObservability,
+    /// Observability editor: leave without saving.
+    CancelObservability,
     /// Open the sign-out confirmation.
     SignOut,
     /// Quit the dashboard.
@@ -366,6 +392,14 @@ pub enum ActionId {
     CancelCancelTurn,
     /// Edit form: submit through the worker.
     EditSubmit,
+    /// Core metrics: refetch the selected window.
+    RefreshCoreMetrics,
+    /// Agent metrics: refetch the selected window.
+    RefreshAgentMetrics,
+    /// Request log: refetch the current page.
+    RefreshRequestLog,
+    /// Query page: run the statement in the editor.
+    RunQuery,
 }
 
 /// Tabs of the session detail page.
@@ -491,6 +525,18 @@ pub enum Intent {
     SessionPageNext,
     /// Session log: jump to a loaded display page (0-based).
     GoToSessionPage(usize),
+    /// Metrics pages: select a time window.
+    SetMetricsWindow(TimeWindow),
+    /// Metrics pages: show the previous display page.
+    MetricsPagePrev,
+    /// Metrics pages: show the next display page.
+    MetricsPageNext,
+    /// Query page: run the statement in the editor.
+    RunQuery,
+    /// Query page: show the previous result page.
+    QueryPagePrev,
+    /// Query page: show the next result page.
+    QueryPageNext,
     /// Session detail: select a tab.
     SelectDetailTab(DetailTab),
     /// Create form: append a metadata row.
@@ -599,6 +645,19 @@ pub enum SettingsStatus {
 ///
 /// Deliberately not `Debug`: validation and adoption effects carry the API key.
 pub enum Effect {
+    /// Probe a candidate OpenObserve connection.
+    TestObservability {
+        /// UI epoch.
+        epoch: u64,
+        /// Candidate origin.
+        base_url: String,
+        /// Candidate organization.
+        org: String,
+        /// Candidate user.
+        user: String,
+        /// Candidate password. Never printed.
+        password: String,
+    },
     /// Validate candidate credentials.
     Validate {
         /// UI epoch.
@@ -624,6 +683,17 @@ pub enum Effect {
         /// Validated key.
         api_key: String,
     },
+    /// Adopt a newly saved OpenObserve connection in the API worker.
+    AdoptObservability {
+        /// Validated origin.
+        base_url: String,
+        /// Validated organization.
+        org: String,
+        /// Validated user.
+        user: String,
+        /// Validated password. Never printed.
+        password: String,
+    },
     /// Run a health poll.
     Health {
         /// UI epoch.
@@ -637,6 +707,52 @@ pub enum Effect {
         generation: u64,
         /// Page size.
         limit: u32,
+    },
+    /// Query Core metrics for one window.
+    LoadCoreMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query Agent metrics for one window.
+    LoadAgentMetrics {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+    },
+    /// Query one request-log page.
+    LoadRequestLog {
+        /// UI epoch.
+        epoch: u64,
+        /// Page poll generation.
+        generation: u64,
+        /// Window to query.
+        window: TimeWindow,
+        /// Page, 0-based.
+        page: usize,
+    },
+    /// Run one validated read-only SQL statement.
+    RunQuery {
+        /// UI epoch.
+        epoch: u64,
+        /// Query generation; responses from older generations are discarded.
+        generation: u64,
+        /// Single `SELECT` statement.
+        sql: String,
+        /// Window start, Unix microseconds.
+        start_us: u64,
+        /// Window end, Unix microseconds.
+        end_us: u64,
+        /// Row offset.
+        from: u64,
+        /// Row count.
+        size: u64,
     },
     /// Create a session from the validated create form.
     CreateSession {

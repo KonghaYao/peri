@@ -5,7 +5,7 @@
 //! produced here so a future locale layer has one place to translate.
 
 use crate::api::{ApiError, ApiErrorCause};
-use crate::config::{BaseUrlError, ConfigError, InvalidConfig};
+use crate::config::{BaseUrlError, ConfigError, InvalidConfig, ObservabilityConfigError};
 
 use super::{api_error_detail, config_save_failed};
 
@@ -68,11 +68,37 @@ pub fn base_url_error(error: &BaseUrlError) -> String {
     }
 }
 
+/// Observability validation message shown next to a field or the form.
+#[must_use]
+pub fn observability_config_error(error: &ObservabilityConfigError) -> String {
+    match error {
+        ObservabilityConfigError::EmptyBaseUrl => {
+            "Observability base URL must not be empty.".to_owned()
+        }
+        ObservabilityConfigError::InvalidBaseUrl => {
+            "Observability base URL must be an absolute http or https URL with a host.".to_owned()
+        }
+        ObservabilityConfigError::UnsupportedScheme => {
+            "Observability base URL must use http or https.".to_owned()
+        }
+        ObservabilityConfigError::UserInfo => {
+            "Observability base URL must not contain credentials.".to_owned()
+        }
+        ObservabilityConfigError::QueryOrFragment => {
+            "Observability base URL must not contain a query or fragment.".to_owned()
+        }
+        ObservabilityConfigError::EmptyOrg => "Organization must not be empty.".to_owned(),
+        ObservabilityConfigError::EmptyUser => "User must not be empty.".to_owned(),
+        ObservabilityConfigError::EmptyPassword => "Password must not be empty.".to_owned(),
+    }
+}
+
 /// Reason a saved config file was rejected, in user-facing wording.
 fn invalid_config(reason: &InvalidConfig) -> String {
     match reason {
         InvalidConfig::BaseUrl(inner) => base_url_error(inner),
         InvalidConfig::ApiKey => "API key must not be empty".to_owned(),
+        InvalidConfig::Observability(inner) => observability_config_error(inner),
     }
 }
 

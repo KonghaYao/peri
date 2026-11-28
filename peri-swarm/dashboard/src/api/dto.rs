@@ -324,6 +324,96 @@ pub struct Health {
     pub status: String,
 }
 
+/// `GET /v1/agents/metrics` response.
+///
+/// Only sessions with at least one usage-carrying turn appear; token fields the
+/// gateway did not report stay `None` so the UI can render an em dash instead
+/// of a fabricated zero.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentMetrics {
+    /// Window start, Unix microseconds.
+    #[serde(default)]
+    pub start_time: i64,
+    /// Window end, Unix microseconds.
+    #[serde(default)]
+    pub end_time: i64,
+    /// Sessions newest-first; at most the requested limit.
+    #[serde(default)]
+    pub sessions: Vec<AgentMetricsSession>,
+    /// Totals over the scanned window.
+    pub totals: AgentMetricsTotals,
+    /// The window held more rows than one scan reads; totals cover the newest
+    /// rows only.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// One session in the Agent-metrics response.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentMetricsSession {
+    /// Public session id.
+    pub session_id: String,
+    /// Agent id (`root` in the current gateway).
+    #[serde(default)]
+    pub agent_id: String,
+    /// Model name, when a turn reported one.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Prompt input tokens.
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    /// Prompt-cache read tokens.
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt-cache creation tokens.
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    /// Gateway-computed total tokens.
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    /// Turns that reported usage.
+    #[serde(default)]
+    pub turns: u64,
+    /// LLM calls.
+    #[serde(default)]
+    pub calls: u64,
+    /// Last activity, RFC3339.
+    #[serde(default)]
+    pub last_active_at: String,
+}
+
+/// Totals section of the Agent-metrics response.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AgentMetricsTotals {
+    /// Prompt input tokens.
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    /// Prompt-cache read tokens.
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt-cache creation tokens.
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    /// Gateway-computed total tokens.
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    /// Turns that reported usage.
+    #[serde(default)]
+    pub turns: u64,
+    /// LLM calls.
+    #[serde(default)]
+    pub calls: u64,
+    /// Model of the latest usage fact, when reported.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 /// `POST /events` acceptance receipt.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]

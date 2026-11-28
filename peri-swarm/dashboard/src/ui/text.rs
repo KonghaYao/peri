@@ -12,6 +12,10 @@ mod detail;
 pub use detail::*;
 mod errors;
 pub use errors::*;
+mod help;
+pub use help::*;
+mod observability;
+pub use observability::*;
 
 // ---------------------------------------------------------------------------
 // Shell
@@ -97,12 +101,12 @@ pub fn page_label(page: Page) -> &'static str {
         Page::SandboxMetrics => "Sandbox metrics",
         Page::SessionLog => "Session log",
         Page::RequestLog => "Request log",
+        Page::Query => "Query",
         Page::Agents => "Agents",
-        Page::EnvironmentTemplates => "Environment templates",
-        Page::Skills => "Skills",
-        Page::Files => "Files",
+        Page::Artifacts => "Artifacts",
         Page::Vaults => "Vaults",
-        Page::ProjectsAndKeys => "Projects and keys",
+        Page::Mcp => "MCP",
+        Page::Automations => "Automations",
         Page::Nodes => "Nodes",
         Page::Settings => "Settings",
     }
@@ -115,6 +119,10 @@ pub fn action_label(action: ActionId) -> &'static str {
         ActionId::Submit => "Connect",
         ActionId::TestConnection => "Test connection",
         ActionId::EditCredentials => "Edit credentials",
+        ActionId::ConfigureObservability => "Configure observability",
+        ActionId::TestObservability => "Test",
+        ActionId::SaveObservability => "Save",
+        ActionId::CancelObservability => "Cancel",
         ActionId::SignOut => "Sign out",
         ActionId::Quit => "Quit",
         ActionId::ShowGettingStarted => "Show getting started",
@@ -145,6 +153,10 @@ pub fn action_label(action: ActionId) -> &'static str {
         ActionId::ConfirmCancelTurn => "Cancel turn",
         ActionId::CancelCancelTurn => "Keep running",
         ActionId::EditSubmit => "Save changes",
+        ActionId::RefreshCoreMetrics
+        | ActionId::RefreshAgentMetrics
+        | ActionId::RefreshRequestLog => "Refresh",
+        ActionId::RunQuery => "Run",
     }
 }
 
@@ -154,7 +166,12 @@ pub fn field_label(field: FieldId) -> &'static str {
     match field {
         FieldId::OnboardingBaseUrl | FieldId::CredentialsBaseUrl => "Base URL",
         FieldId::OnboardingApiKey | FieldId::CredentialsApiKey => "API key",
+        FieldId::ObservabilityBaseUrl => "Base URL",
+        FieldId::ObservabilityOrg => "Organization",
+        FieldId::ObservabilityUser => "User",
+        FieldId::ObservabilityPassword => "Password",
         FieldId::SessionSearch => "Search",
+        FieldId::QuerySql => "SQL",
         FieldId::CreateLogicalId => "Logical ID (optional)",
         FieldId::CreateModel => "Model",
         FieldId::CreateCwd => "Working directory (cwd)",
@@ -389,6 +406,91 @@ pub const CREDENTIALS_INTRO: &str = "The new origin is validated before anything
 pub const CREDENTIALS_KEY_HINT: &str = "Leave the API key blank to keep the current key.";
 
 // ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+/// Settings section heading for the OpenObserve connection.
+pub const SECTION_OBSERVABILITY: &str = "Observability";
+
+/// Observability status row label.
+pub const LABEL_OBSERVABILITY_STATUS: &str = "Status";
+
+/// Observability organization row label.
+pub const LABEL_OBSERVABILITY_ORG: &str = "Organization";
+
+/// Observability user row label.
+pub const LABEL_OBSERVABILITY_USER: &str = "User";
+
+/// Observability status when no connection is stored.
+pub const OBSERVABILITY_NOT_CONFIGURED: &str = "not configured";
+
+/// Observability status when a connection is stored.
+pub const OBSERVABILITY_CONFIGURED: &str = "configured";
+
+/// Short warning shown on Settings.
+pub const OBSERVABILITY_NOT_A_BOUNDARY: &str = "Direct admin connection · not a read-only boundary";
+
+/// Configuration sub-page title.
+pub const OBSERVABILITY_TITLE: &str = "Configure observability";
+
+/// Configuration sub-page explanation.
+pub const OBSERVABILITY_INTRO: &str = "The dashboard sends SELECT queries directly to OpenObserve with a dedicated admin account. OpenObserve OSS has no viewer role, so that account can write; the client-side SELECT check is not a security boundary. Keep the connection on a private network, use a dedicated account, and rotate the password.";
+
+/// Base URL placeholder.
+pub const OBSERVABILITY_BASE_URL_PLACEHOLDER: &str = "http://127.0.0.1:5080";
+
+/// Organization placeholder.
+pub const OBSERVABILITY_ORG_PLACEHOLDER: &str = "default";
+
+/// User placeholder.
+pub const OBSERVABILITY_USER_PLACEHOLDER: &str = "dashboard account";
+
+/// Password placeholder.
+pub const OBSERVABILITY_PASSWORD_PLACEHOLDER: &str = "leave blank to keep the stored password";
+
+/// Hint under the password field.
+pub const OBSERVABILITY_PASSWORD_HINT: &str =
+    "The password is stored in the 0600 config file and is never displayed.";
+
+/// In-flight OpenObserve probe.
+pub const TESTING_OBSERVABILITY: &str = "Testing OpenObserve connection…";
+
+/// Observability settings saved by the editor.
+pub const OBSERVABILITY_SAVED: &str = "Observability settings saved.";
+
+/// Successful OpenObserve probe.
+#[must_use]
+pub fn observability_test_ok(elapsed: Duration, streams: Option<usize>) -> String {
+    match streams {
+        Some(1) => format!(
+            "OpenObserve connection OK in {} ms (1 stream).",
+            elapsed.as_millis()
+        ),
+        Some(streams) => format!(
+            "OpenObserve connection OK in {} ms ({streams} streams).",
+            elapsed.as_millis()
+        ),
+        None => format!("OpenObserve connection OK in {} ms.", elapsed.as_millis()),
+    }
+}
+
+/// Human description of an OpenObserve failure, without credentials or headers.
+#[must_use]
+pub fn observability_error(error: &crate::observability::ObservabilityError) -> String {
+    use crate::observability::ObservabilityError;
+    match error {
+        ObservabilityError::InvalidConfig(inner) => observability_config_error(inner),
+        ObservabilityError::Timeout => "OpenObserve request timed out.".to_owned(),
+        ObservabilityError::Unreachable => "Could not reach OpenObserve.".to_owned(),
+        ObservabilityError::Http { status, detail } => {
+            format!("OpenObserve returned HTTP {status}{detail}.")
+        }
+        ObservabilityError::Malformed => "OpenObserve returned an unreadable response.".to_owned(),
+        ObservabilityError::Client => "Could not build the OpenObserve client.".to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Banner
 // ---------------------------------------------------------------------------
 
@@ -469,51 +571,43 @@ pub struct EmptyPageText {
 #[must_use]
 pub fn empty_page(page: Page) -> EmptyPageText {
     match page {
-        Page::CoreMetrics => EmptyPageText {
-            reason: "This build does not aggregate gateway metrics.",
-            supported: "The gateway reports session status, turns, item history, and usage per session. Open Session log to inspect them.",
-        },
-        Page::AgentMetrics => EmptyPageText {
-            reason: "Per-agent metrics are not collected by this build.",
-            supported: "Agent model, instructions, and per-turn usage are available per session.",
-        },
         Page::SandboxMetrics => EmptyPageText {
-            reason: "Sandbox resource metrics are not collected by this build.",
-            supported: "The gateway reports the sandbox type and id attached to a session.",
+            reason: "This build collects no resource-level sandbox metrics.",
+            supported: "The gateway reports only the sandbox type and id attached to a session; it exposes no CPU, memory, or sandbox resource usage.",
         },
-        Page::RequestLog => EmptyPageText {
-            reason: "The gateway does not expose a server request log.",
-            supported: "Session item history is available per session. Use Session log to find a session.",
+        Page::Query => EmptyPageText {
+            reason: "The query page is not implemented in this build.",
+            supported: "This dashboard calls no ad-hoc query API. Session data remains available in Session log.",
         },
         Page::Agents => EmptyPageText {
             reason: "This build does not manage agents as a standalone resource.",
             supported: "Agent model and instructions are configured per session and shown in session detail.",
         },
-        Page::EnvironmentTemplates => EmptyPageText {
-            reason: "This build does not manage environment templates.",
-            supported: "Sessions can request an environment (none or openai_hosted) when created; the allocated environment is reported per session.",
-        },
-        Page::Skills => EmptyPageText {
-            reason: "Skills are not exposed by the gateway API used here.",
-            supported: "Session instructions and metadata remain available in session detail.",
-        },
-        Page::Files => EmptyPageText {
-            reason: "File browsing is not exposed by the gateway API used here.",
-            supported: "A session's working directory (cwd) is reported in session detail.",
+        Page::Artifacts => EmptyPageText {
+            reason: "Artifacts are not implemented in this build.",
+            supported: "The gateway exposes no artifact store or artifact endpoints.",
         },
         Page::Vaults => EmptyPageText {
             reason: "The gateway used here exposes no vault endpoints.",
             supported: "Vault ids reported on a session are shown in session detail when present.",
         },
-        Page::ProjectsAndKeys => EmptyPageText {
-            reason: "Project and key management is not exposed by the gateway API used here.",
-            supported: "Credentials for this dashboard are edited in Settings.",
+        Page::Mcp => EmptyPageText {
+            reason: "MCP server management is not implemented in this build.",
+            supported: "The gateway exposes no MCP server inventory or configuration endpoints.",
+        },
+        Page::Automations => EmptyPageText {
+            reason: "Automations are not implemented in this build.",
+            supported: "The gateway exposes no automation or schedule endpoints.",
         },
         Page::Nodes => EmptyPageText {
             reason: "Multi-node aggregation is not available in this build.",
             supported: "The dashboard connects to one gateway origin; its health and contract status are shown in the header and Settings.",
         },
-        Page::SessionLog | Page::Settings => EmptyPageText {
+        Page::CoreMetrics
+        | Page::AgentMetrics
+        | Page::SessionLog
+        | Page::RequestLog
+        | Page::Settings => EmptyPageText {
             reason: "This page is implemented.",
             supported: "No empty state is shown.",
         },
@@ -766,6 +860,22 @@ pub fn detail_placeholder(tab: DetailTab) -> &'static str {
 pub const FOOTER_SESSION_LOG: &str =
     "click a row · PgUp/PgDn page · n new session · / search · r refresh · Tab focus · Ctrl-C quit";
 
+/// Footer hints on the metrics pages.
+pub const FOOTER_METRICS: &str =
+    "1/2/3 window · PgUp/PgDn page · r refresh · Tab focus · h help · q quit · Ctrl-C quit";
+
+/// Footer hints on the metrics pages when the sidebar is behind the menu.
+pub const FOOTER_METRICS_NARROW: &str =
+    "menu/Tab focus · 1/2/3 window · PgUp/PgDn page · r refresh · h help · q quit · Ctrl-C quit";
+
+/// Footer hints on the Query page.
+pub const FOOTER_QUERY: &str =
+    "1/2/3 window · Ctrl-Enter run · PgUp/PgDn page · Tab focus · h help · q quit · Ctrl-C quit";
+
+/// Footer hints on the Query page when the sidebar is behind the menu.
+pub const FOOTER_QUERY_NARROW: &str =
+    "menu/Tab focus · 1/2/3 window · Ctrl-Enter run · PgUp/PgDn page · q quit · Ctrl-C quit";
+
 /// Footer hints on the create form.
 pub const FOOTER_CREATE: &str = "Tab next control · click to focus · Esc back · Ctrl-C quit";
 
@@ -813,64 +923,3 @@ pub const TERMINAL_TOO_SMALL_HINT: &str = "Resize to at least 50x12 to continue.
 
 /// Prefix for a fatal startup error printed after the terminal is restored.
 pub const STARTUP_ERROR: &str = "peri-swarm dashboard failed to start";
-
-// ---------------------------------------------------------------------------
-// Help overlay
-// ---------------------------------------------------------------------------
-
-/// Help overlay title.
-pub const HELP_TITLE: &str = "Getting started";
-
-/// Help overlay footer.
-pub const HELP_HINT: &str = "Esc closes this overlay · click outside to dismiss";
-
-/// One help section.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HelpSection {
-    /// Section heading.
-    pub title: &'static str,
-    /// Body lines.
-    pub lines: &'static [&'static str],
-}
-
-/// Help content.
-pub const HELP_SECTIONS: [HelpSection; 5] = [
-    HelpSection {
-        title: "Credentials",
-        lines: &[
-            "On first run, enter the gateway base URL and an API key.",
-            "Connect runs GET /healthz and an authenticated session list before saving anything.",
-            "The key is stored in ~/.config/peri-swarm-dashboard/config.toml with mode 0600 and is never displayed.",
-        ],
-    },
-    HelpSection {
-        title: "Opening a session",
-        lines: &[
-            "The Session log lists the most recently active sessions first.",
-            "Rows are paged: use the paginator under the table or PgUp/PgDn to change page.",
-            "Click a row, or focus the page and press Enter, to open that session.",
-        ],
-    },
-    HelpSection {
-        title: "Sending input and approving",
-        lines: &[
-            "Open a session and type in the composer at the bottom of the page.",
-            "Ctrl-Enter sends the message. When a turn requests approval, approve or deny it from the session header.",
-        ],
-    },
-    HelpSection {
-        title: "Sign out",
-        lines: &[
-            "Settings → Sign out deletes the saved credentials and returns to onboarding.",
-            "Signing out does not cancel a running turn on the gateway.",
-        ],
-    },
-    HelpSection {
-        title: "Mouse and keyboard",
-        lines: &[
-            "Click sidebar items, buttons, and fields. The wheel scrolls the sidebar or the page under the pointer.",
-            "Tab and Shift-Tab move focus; arrows navigate; Enter activates; Esc goes back.",
-            "Ctrl-C quits from anywhere. q quits only when no text field owns focus.",
-        ],
-    },
-];

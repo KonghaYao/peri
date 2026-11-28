@@ -9,6 +9,7 @@
 //! - [`actor::swarm`] + [`gateway`]：S5 的 Rivet actor 与网关适配器；actor 持有
 //!   会话，网关只做 `logicalId → rootSessionId` 路由与 SSE 转发。
 //! - [`bootstrap`]：S6b 的进程入口（两个 PostgreSQL 库、部署注入、registry + axum）。
+//! - [`telemetry`]：OTLP/HTTP 的 traces、metrics、logs；未配置 endpoint 时为 no-op。
 //!
 //! 证据边界：内存 fake 只证明协议与顺序契约，不代表真实 Peri 执行、PostgreSQL 持久化或
 //! Rivet 路由行为。真实接线以设计文档 `.peri/plans/peri-swarm-impl.md` 的 S5-S9 为准。
@@ -23,6 +24,7 @@ pub mod http;
 pub mod sandbox;
 pub mod service;
 pub mod store;
+pub mod telemetry;
 
 pub use config::{ConfigError, SwarmConfig};
 pub use domain::{ErrorCode, ItemPage, ItemView, LogicalId, SessionView, StreamEvent, SwarmError};

@@ -19,6 +19,7 @@ use peri_swarm::service::{InMemorySwarmService, ServiceConfig, TurnPolicy};
 use peri_swarm::store::{
     InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
     SwarmItemRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
+    SwarmTurnUsageRow,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -1512,6 +1513,18 @@ async fn a_failed_turn_persists_its_customer_safe_error() {
         async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), StoreError> {
             self.inner.swarm_upsert_turn(row).await
         }
+        async fn swarm_record_turn_usage(
+            &self,
+            logical_id: &str,
+            turn_id: &str,
+            created_at: i64,
+            started_at: Option<i64>,
+            usage: &Value,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .swarm_record_turn_usage(logical_id, turn_id, created_at, started_at, usage)
+                .await
+        }
         async fn swarm_get_turn(
             &self,
             logical_id: &str,
@@ -1525,6 +1538,25 @@ async fn a_failed_turn_persists_its_customer_safe_error() {
             window: &TurnsWindow,
         ) -> Result<Vec<SwarmTurnRow>, StoreError> {
             self.inner.swarm_turn_page(logical_id, window).await
+        }
+        async fn swarm_session_usage_turns(
+            &self,
+            logical_id: &str,
+            limit: u32,
+        ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+            self.inner
+                .swarm_session_usage_turns(logical_id, limit)
+                .await
+        }
+        async fn swarm_turn_usage_window(
+            &self,
+            start_at: i64,
+            end_at: i64,
+            limit: u32,
+        ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+            self.inner
+                .swarm_turn_usage_window(start_at, end_at, limit)
+                .await
         }
         async fn swarm_close_open_turns(
             &self,
@@ -1699,4 +1731,275 @@ async fn unmappable_official_resources_return_gateway_json_404() {
             "the Bearer gate must run before the explicit 404: {path}"
         );
     }
+}
+
+// ── turn usage and the Agent-metrics window ────────────────────────────────
+
+/// The gateway's persisted usage shape (`domain::TurnUsage`), cumulative for
+/// one turn.
+fn usage_json(input: u64, output: u64, cache_read: u64, cache_creation: u64) -> Value {
+    let total = input + output + cache_read + cache_creation;
+    json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+        "total_tokens": total,
+        "context_used": 100,
+        "context_size": 200_000,
+        "model": "claude-test",
+        "request_id": format!("req-{total}"),
+        "calls": 1,
+    })
+}
+
+async fn seed_turn_with_usage(
+    harness: &Harness,
+    logical_id: &str,
+    turn: &str,
+    created_at: i64,
+    usage: Option<Value>,
+) {
+    harness
+        .store
+        .swarm_upsert_turn(SwarmTurnRow {
+            logical_id: logical_id.to_owned(),
+            turn_id: turn.to_owned(),
+            status: TurnStatus::Completed,
+            created_at,
+            started_at: Some(created_at),
+            completed_at: Some(created_at + 1),
+            error: None,
+            usage,
+            subagent_id: None,
+        })
+        .await
+        .expect("turn row");
+}
+
+#[tokio::test]
+async fn retrieve_aggregates_turn_usage_and_metrics_cover_the_window() {
+    let harness = harness();
+    for id in ["agent-usage-a", "agent-usage-b"] {
+        let (status, created) = create(&harness, json!({ "logicalId": id })).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+    }
+    seed_turn_with_usage(
+        &harness,
+        "agent-usage-a",
+        "turn-a-1",
+        100,
+        Some(usage_json(10, 2, 3, 1)),
+    )
+    .await;
+    seed_turn_with_usage(
+        &harness,
+        "agent-usage-a",
+        "turn-a-2",
+        300,
+        Some(usage_json(20, 4, 0, 0)),
+    )
+    .await;
+    seed_turn_with_usage(
+        &harness,
+        "agent-usage-b",
+        "turn-b-1",
+        200,
+        Some(usage_json(5, 1, 0, 0)),
+    )
+    .await;
+    // A turn without a usage observation is real, but it is not a token fact.
+    seed_turn_with_usage(&harness, "agent-usage-b", "turn-b-2", 350, None).await;
+
+    let (status, session) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-usage-a",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let usage = &session["usage"];
+    assert_eq!(usage["input_tokens"], json!(30), "{session}");
+    assert_eq!(usage["output_tokens"], json!(6));
+    assert_eq!(usage["cache_read_tokens"], json!(3));
+    assert_eq!(usage["cache_creation_tokens"], json!(1));
+    assert_eq!(usage["total_tokens"], json!(40));
+    assert_eq!(usage["turns"], json!(2));
+    assert_eq!(usage["calls"], json!(2));
+    assert_eq!(usage["model"], json!("claude-test"));
+
+    let (status, first_turn) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-usage-a/turns/turn-a-1",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first_turn}");
+    assert_eq!(first_turn["usage"]["total_tokens"], json!(16));
+
+    let (status, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    for item in page["data"].as_array().expect("data") {
+        assert_eq!(
+            item["usage"],
+            Value::Null,
+            "list does not scan turns per row: {item}"
+        );
+    }
+
+    // [100s, 250s] covers turn-a-1 and turn-b-1. Turn-b-2 has no token fact,
+    // so agent-b still reports its one measured turn.
+    let (status, metrics) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics?start_time=100000000&end_time=250000000",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{metrics}");
+    assert_eq!(metrics["start_time"], json!(100_000_000));
+    assert_eq!(metrics["end_time"], json!(250_000_000));
+    let sessions = metrics["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 2, "{metrics}");
+    assert_eq!(
+        sessions[0]["session_id"],
+        json!("agent-usage-a"),
+        "sorted by total tokens desc: {metrics}"
+    );
+    assert_eq!(sessions[0]["input_tokens"], json!(10));
+    assert_eq!(sessions[0]["total_tokens"], json!(16));
+    assert_eq!(sessions[0]["agent_id"], json!("root"));
+    assert_eq!(sessions[0]["model"], json!("claude-test"));
+    let stored = stored_session(&harness, "agent-usage-a").await;
+    assert_eq!(
+        sessions[0]["last_active_at"],
+        json!(stored.last_activity_at)
+    );
+    assert_eq!(sessions[1]["session_id"], json!("agent-usage-b"));
+    assert_eq!(sessions[1]["total_tokens"], json!(6));
+    assert_eq!(sessions[1]["turns"], json!(1));
+    assert_eq!(metrics["totals"]["turns"], json!(2));
+    assert_eq!(metrics["totals"]["total_tokens"], json!(22));
+    assert_eq!(metrics["totals"]["calls"], json!(2));
+    assert_eq!(metrics["truncated"], json!(false));
+
+    // [300s, 400s] holds only agent-a's later turn.
+    let (status, later) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics?start_time=300000000&end_time=400000000",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{later}");
+    let sessions = later["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 1, "{later}");
+    assert_eq!(sessions[0]["total_tokens"], json!(24));
+    assert_eq!(later["totals"]["turns"], json!(1));
+}
+
+#[tokio::test]
+async fn usage_aggregates_are_absent_when_nothing_was_observed() {
+    let harness = harness();
+    create(&harness, json!({ "logicalId": "agent-quiet" })).await;
+    seed_turn_with_usage(&harness, "agent-quiet", "turn-quiet", 100, None).await;
+
+    let (status, session) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-quiet",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(
+        session["usage"],
+        Value::Null,
+        "no observation must not read as zero tokens: {session}"
+    );
+
+    let (status, metrics) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics?start_time=0&end_time=100000000",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{metrics}");
+    assert!(
+        metrics["sessions"].as_array().expect("sessions").is_empty(),
+        "a usage-less session is not reported: {metrics}"
+    );
+    assert_eq!(metrics["totals"]["turns"], json!(0));
+    assert!(metrics["totals"].get("total_tokens").is_none());
+}
+
+#[tokio::test]
+async fn agent_metrics_rejects_an_unbounded_or_inverted_window() {
+    let harness = harness();
+    let (status, _) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the report is behind the Bearer gate"
+    );
+
+    let (status, error) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics?start_time=200000000&end_time=100000000",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["error"]["code"], json!("invalid_query"));
+    assert_eq!(error["error"]["details"]["field"], json!("start_time"));
+
+    // 31 days is the maximum window; one microsecond more is refused.
+    let span = 31i64 * 24 * 60 * 60 * 1_000_000;
+    let (status, error) = send(
+        &harness.router,
+        Method::GET,
+        &format!("/v1/agents/metrics?start_time=0&end_time={}", span + 1),
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["error"]["code"], json!("invalid_query"));
+    assert_eq!(error["error"]["details"]["field"], json!("start_time"));
+
+    let (status, error) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/metrics?limit=0",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["error"]["details"]["field"], json!("limit"));
 }

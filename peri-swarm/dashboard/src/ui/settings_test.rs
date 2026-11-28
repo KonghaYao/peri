@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Modifier;
@@ -5,15 +7,42 @@ use ratatui::Terminal;
 
 use super::*;
 use crate::app::{App, FieldId, Intent, Page, Screen};
-use crate::config::{self, Config, ConfigStore};
+use crate::config::{self, Config, ConfigStore, ObservabilityConfig};
+use crate::observability::ObservabilityError;
 use crate::ui::hit::HitMap;
+use crate::worker::{ObservabilityCheck, WorkerEvent};
 
 const SECRET: &str = "settings-test-key-never-displayed";
+const OBS_SECRET: &str = "oo-settings-password-never-displayed";
 
 fn connected_app() -> (App, ConfigStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = ConfigStore::at(dir.path().join("config.toml"));
     let config = Config::new(config::DEFAULT_BASE_URL, SECRET).expect("config");
+    store.save(&config).expect("save");
+    (
+        App::connected(config, Vec::new(), store.clone()),
+        store,
+        dir,
+    )
+}
+
+fn observability() -> ObservabilityConfig {
+    ObservabilityConfig::new(
+        "http://127.0.0.1:5080",
+        "obs-org",
+        "logs-reader",
+        OBS_SECRET,
+    )
+    .expect("observability")
+}
+
+fn connected_app_with_observability() -> (App, ConfigStore, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = ConfigStore::at(dir.path().join("config.toml"));
+    let config = Config::new(config::DEFAULT_BASE_URL, SECRET)
+        .expect("config")
+        .with_observability(observability());
     store.save(&config).expect("save");
     (
         App::connected(config, Vec::new(), store.clone()),
@@ -213,4 +242,226 @@ fn busy_settings_disables_buttons_for_mouse_tab_and_enter() {
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.focus(), crate::app::Focus::Sidebar);
+}
+
+fn open_observability(app: &mut App) {
+    app.apply(Intent::OpenSettings);
+    let (_terminal, hits) = draw(app, 120, 40);
+    app.apply(click(
+        &hits,
+        Intent::Activate(ActionId::ConfigureObservability),
+    ));
+    assert_eq!(app.screen(), Screen::SettingsObservability);
+}
+
+fn fill_observability(app: &mut App, password: &str) {
+    assert!(app.set_field_value(FieldId::ObservabilityBaseUrl, "http://127.0.0.1:5080"));
+    assert!(app.set_field_value(FieldId::ObservabilityOrg, "peri"));
+    assert!(app.set_field_value(FieldId::ObservabilityUser, "dashboard"));
+    assert!(app.set_field_value(FieldId::ObservabilityPassword, password));
+}
+
+#[test]
+fn settings_reports_observability_as_not_configured() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::OpenSettings);
+    let (terminal, hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::SECTION_OBSERVABILITY));
+    assert!(text.contains(text::OBSERVABILITY_NOT_CONFIGURED));
+    assert!(text.contains(text::OBSERVABILITY_NOT_A_BOUNDARY));
+    assert!(hits
+        .region_rect(Intent::Activate(ActionId::ConfigureObservability))
+        .is_some());
+}
+
+#[test]
+fn settings_reports_configured_observability_without_the_password() {
+    let (mut app, _store, _dir) = connected_app_with_observability();
+    app.apply(Intent::OpenSettings);
+    let (terminal, hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::OBSERVABILITY_CONFIGURED));
+    assert!(text.contains("http://127.0.0.1:5080"));
+    assert!(text.contains("obs-org"));
+    assert!(text.contains("logs-reader"));
+    assert!(!text.contains(OBS_SECRET));
+    assert!(hits
+        .region_rect(Intent::Activate(ActionId::ConfigureObservability))
+        .is_some());
+}
+
+#[test]
+fn observability_editor_masks_the_password() {
+    let (mut app, _store, _dir) = connected_app();
+    open_observability(&mut app);
+    let (terminal, hits) = draw(&mut app, 120, 50);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::OBSERVABILITY_TITLE));
+    for field in [
+        FieldId::ObservabilityBaseUrl,
+        FieldId::ObservabilityOrg,
+        FieldId::ObservabilityUser,
+        FieldId::ObservabilityPassword,
+    ] {
+        assert!(
+            hits.region_rect(Intent::FocusField { field, click: None })
+                .is_some(),
+            "missing {field:?}"
+        );
+    }
+
+    assert!(app.set_field_value(FieldId::ObservabilityPassword, OBS_SECRET));
+    let (terminal, _hits) = draw(&mut app, 120, 50);
+    let text = buffer_text(&terminal);
+    assert!(
+        !text.contains(OBS_SECRET),
+        "password rendered in clear text"
+    );
+    assert!(text.contains('\u{2022}'), "masked cell missing");
+}
+
+#[test]
+fn saving_observability_keeps_the_gateway_key_and_never_echoes_the_password() {
+    let (mut app, store, _dir) = connected_app();
+    open_observability(&mut app);
+    fill_observability(&mut app, OBS_SECRET);
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+
+    let effects = app.apply(click(&hits, Intent::Activate(ActionId::SaveObservability)));
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::app::Effect::AdoptObservability { .. }]
+    ));
+    assert_eq!(app.screen(), Screen::Main);
+    assert_eq!(app.page(), Page::Settings);
+    assert_eq!(app.observability_config().map(|o| o.org()), Some("peri"));
+
+    let loaded = store.load().expect("load").expect("saved");
+    assert_eq!(loaded.config().api_key(), SECRET);
+    let stored = loaded.config().observability().expect("observability");
+    assert_eq!(stored.base_url(), "http://127.0.0.1:5080");
+    assert_eq!(stored.org(), "peri");
+    assert_eq!(stored.user(), "dashboard");
+    assert_eq!(stored.password(), OBS_SECRET);
+
+    let (terminal, _hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::OBSERVABILITY_CONFIGURED));
+    assert!(text.contains(text::OBSERVABILITY_SAVED));
+    assert!(!text.contains(OBS_SECRET));
+}
+
+#[test]
+fn observability_test_uses_the_typed_values_and_reports_success() {
+    let (mut app, _store, _dir) = connected_app();
+    open_observability(&mut app);
+    fill_observability(&mut app, OBS_SECRET);
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+
+    let effects = app.apply(click(&hits, Intent::Activate(ActionId::TestObservability)));
+    let epoch = match effects.as_slice() {
+        [crate::app::Effect::TestObservability {
+            epoch,
+            base_url,
+            org,
+            user,
+            password,
+        }] => {
+            assert_eq!(base_url, "http://127.0.0.1:5080");
+            assert_eq!(org, "peri");
+            assert_eq!(user, "dashboard");
+            assert_eq!(password, OBS_SECRET);
+            *epoch
+        }
+        other => panic!("unexpected effects: {} effects", other.len()),
+    };
+    assert!(app.observability_testing());
+
+    app.handle_worker(WorkerEvent::ObservabilityTested {
+        epoch,
+        result: Ok(ObservabilityCheck {
+            elapsed: Duration::from_millis(12),
+            streams: Some(3),
+        }),
+    });
+    assert!(!app.observability_testing());
+    let (terminal, _hits) = draw(&mut app, 120, 50);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("OpenObserve connection OK in 12 ms (3 streams)."));
+}
+
+#[test]
+fn blank_password_reuses_the_stored_observability_secret() {
+    let (mut app, store, _dir) = connected_app_with_observability();
+    open_observability(&mut app);
+    assert_eq!(app.observability().password().value(), "");
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+    let effects = app.apply(click(&hits, Intent::Activate(ActionId::TestObservability)));
+    let epoch = match effects.as_slice() {
+        [crate::app::Effect::TestObservability {
+            epoch, password, ..
+        }] => {
+            assert_eq!(password, OBS_SECRET);
+            *epoch
+        }
+        other => panic!("unexpected effects: {} effects", other.len()),
+    };
+    app.handle_worker(WorkerEvent::ObservabilityTested {
+        epoch,
+        result: Ok(ObservabilityCheck {
+            elapsed: Duration::from_millis(5),
+            streams: None,
+        }),
+    });
+    assert!(!app.observability_testing());
+
+    assert!(app.set_field_value(FieldId::ObservabilityOrg, "other"));
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+    app.apply(click(&hits, Intent::Activate(ActionId::SaveObservability)));
+    let loaded = store.load().expect("load").expect("saved");
+    let stored = loaded.config().observability().expect("observability");
+    assert_eq!(stored.org(), "other");
+    assert_eq!(stored.password(), OBS_SECRET);
+}
+
+#[test]
+fn invalid_observability_url_is_rejected_without_an_effect() {
+    let (mut app, _store, _dir) = connected_app();
+    open_observability(&mut app);
+    fill_observability(&mut app, OBS_SECRET);
+    assert!(app.set_field_value(FieldId::ObservabilityBaseUrl, "ftp://127.0.0.1:5080"));
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+
+    let effects = app.apply(click(&hits, Intent::Activate(ActionId::TestObservability)));
+    assert!(effects.is_empty());
+    assert!(!app.observability_testing());
+    let error = app
+        .observability()
+        .base_url_error()
+        .expect("base URL error");
+    assert!(error.contains("http or https"), "{error}");
+}
+
+#[test]
+fn observability_errors_render_without_secrets() {
+    let (mut app, _store, _dir) = connected_app();
+    open_observability(&mut app);
+    fill_observability(&mut app, OBS_SECRET);
+    let (_terminal, hits) = draw(&mut app, 120, 50);
+    let _ = app.apply(click(&hits, Intent::Activate(ActionId::TestObservability)));
+    let epoch = app.epoch();
+    app.handle_worker(WorkerEvent::ObservabilityTested {
+        epoch,
+        result: Err(ObservabilityError::Http {
+            status: 401,
+            detail: " Unauthorized".to_owned(),
+        }),
+    });
+
+    let (terminal, _hits) = draw(&mut app, 120, 50);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("HTTP 401 Unauthorized"), "{text}");
+    assert!(!text.contains(OBS_SECRET));
+    assert!(!text.contains("Authorization"));
 }

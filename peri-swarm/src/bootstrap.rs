@@ -602,6 +602,19 @@ where
 /// Run the process until shutdown. Errors are startup/runtime failures of this
 /// process; none of them is repaired by opening a local store.
 pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
+    run_with_telemetry(config, None).await
+}
+
+/// Run the process and, when configured, observe its HTTP gateway.
+///
+/// The telemetry handle is the one `telemetry::init` produced; `None` keeps the
+/// disabled path (no middleware, no exporters). The guard itself is owned by
+/// `main`, not here: its flush must happen after this function returns and the
+/// stores are closed.
+pub async fn run_with_telemetry(
+    config: BootstrapConfig,
+    telemetry: Option<crate::telemetry::HttpTelemetry>,
+) -> Result<(), BootstrapError> {
     // The bind opt-in is a deployment decision, not a per-request one: say it
     // once at startup, with the two facts that constrain it.
     if !config.bind_addr.ip().is_loopback() {
@@ -705,7 +718,9 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         store,
         RivetServiceConfig::default(),
     ));
-    let router = build_router(AppState::new(service, Arc::new(config.swarm_config())));
+    let router = build_router(
+        AppState::new(service, Arc::new(config.swarm_config())).with_optional_telemetry(telemetry),
+    );
 
     // Bind before the registry starts so an address conflict fails fast and
     // does not leave an engine-backed registry behind.

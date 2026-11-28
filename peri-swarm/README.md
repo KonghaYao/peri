@@ -336,7 +336,7 @@ SELECT logical_id, MIN(seq), MAX(seq), COUNT(*) FROM swarm_items GROUP BY logica
 | P1 | items 形状 | `AgentSessionItem` 联合包含消息、推理、多种工具与 subagent 调用 | `data` 投影 `message`、`reasoning`、`function_call`、`function_call_output`；`items` 保留原始行（新数据每条目一行，历史数据可能包含逐帧 delta）。原始页无投影时继续扫描，`items` 与原始游标一起前进到首个有投影的页或末尾 | 不伪造审批、子 agent 等条目；MCP 调用与结果以 `call_id` 关联，不发 `mcp_call`。完整的原始行遍历应使用 `nextCursor`，不要用 SDK 的 `data` 游标 |
 | P1 | 官方事件覆盖 | `AgentSessionEvent` 共 33 种；`turn.item.done` 是官方 SDK 读取最终文本的来源 | 发 16 种：`turn.created` / `turn.in_progress` / `turn.item.added` / `turn.item.done` / `turn.completed` / `turn.failed` / `content_part.added` / `content_part.done` / `output_text.delta` / `output_text.done` / `session.created`（仅 create 流）/ `session.in_progress` / `session.idle` / `session.failed` / `error` / `requires_action`（仅当前 MCP 待办）；取消在 live 折叠为 `turn.completed(status="cancelled")`，回放固定为 `completed`；`turn.subagent_id` 恒 `null` | 仍缺 17 种：8 种环境生命周期、工具输出增量、subagent 3 种、`turn.cancelled`、reasoning 4 种；文本 delta 已实现但**不持久化**：实时逐 chunk，回放只有一条全文，事件 id 跨投递不一致；reasoning delta 尚未实现；环境与工具增量没有运行时事实 |
 | P1 | 环境投影 | `Environment.EnvironmentResourceOpenAIHosted` 必需字段含 `capability_directories`、`files`、`network`、`packages`、`plugins`、`skills`（`container_size`、`desktop` 可选）；`AgentSession.environment` 必填 | hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 来自绑定记录的 `last_run_id`（可能是上次预留值，与当前 state 不一致）；SSE `agent.session.*` 的 `OfficialSession` 携带同一 `{type,id}` 投影（未知环境为 `{"type":"none"}`，不造 id） | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `capability_directories` / `files` / `network` / `packages` / `plugins` / `skills` 没有同步通道 |
-| P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 网关不做 token 记账；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
+| P1 | turn 用量与错误 | `Turn.usage` 是 `TokenUsage` 或 `null`；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 是按 turn 累计的网关对象：`input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_creation_tokens`/`total_tokens`/`context_used`/`context_size`/`model`/`request_id`/`calls`；`input_tokens = inputTokens - cacheReadTokens - cacheCreationTokens`（饱和减），`total_tokens` 为四项之和；每次非 replay 的 `usage_update` 累加并立即 upsert，turn 终止写同一累计值，实时 `turn.completed`/`turn.failed` 与 `turns.retrieve` 一致；缺 `_meta` 时只写 `context_used`/`context_size`，不伪造 token；失败 turn 实时发 `error`；回放只在最后一 turn 且会话 `failed` 时发 `error`（`message` 为空），其余已关闭 turn 回放为 `completed`；`turns.retrieve` 读持久 turn 行 | 只记录宿主上报的 token，不做计价；宿主未协商 `token_stats` 或从未上报时 `usage` 仍为 `null`；回放层不读 turn 行，只能重建 `code` / `type`；失败文本只在实时帧与持久 turn 行 |
 | P1 | 未映射资源 | `turns/{id}/items`、`subagents/{id}/items`、`subagents/{id}/turns*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；`subagents` 的 list/retrieve 已按官方页型实现，`subagents/{id}` 的 items/turns 仍不可用 | 官方 item 的 `turn_id` 是必需字段，而子 agent 的逐轮 turn 没有持久化；traces/artifacts 没有产生源；turns items 也没有官方结构映射 |
 | P2 | MCP 工具形状 | `agent.tools[].transport`：`{type:"http", server_url, headers?, authorization?}` 或 `{type:"stdio", command, cwd, ...}`；`allowed_tools` 在调用侧过滤工具 | 接受官方 `transport` 形状：`transport.type="http"` 映射为内部 `server_url`/`headers`，`transport.authorization` 在缺少同名 `Authorization` 头时写入该头——值没有 auth scheme 前缀时补 `Bearer`，已带 `Bearer`/`Basic` 等前缀则原样使用（不会出现 `Bearer Bearer`），空值 → `400 invalid_input`；平铺 `server_url`/`headers` 保留为 deprecated alias（两种形状的 URL 不一致 → `400 invalid_input`，`details.field` 指向 `transport`；一致则接受）。`transport.type="stdio"` 与未知类型 → `422 unsupported_tool`（`details.field` 指向 `transport.type`，`details.value` 是收到的类型）。`require_approval` 经宿主审批通道强制执行（产生 `requires_action`）；`allowed_tools` 只记录在 ACP `_meta`，未在调用侧强制过滤 | 本部署没有 stdio 进程运行时；`allowed_tools` 没有消费方，不能当作安全边界 |
 | P2 | `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 网关只有 root agent，子 agent 维度不存在，没有可过滤的 agent 标识 |
@@ -391,6 +391,15 @@ const body = /** @type {any} */ (page).body; // TypeScript 中 body 是 protecte
 | `DELETE` | `/v1/agents/sessions/{logicalId}` | `sessions.delete` → `{id,object:"agent.session.deleted",deleted:true}`；级联 items/inputs/turns/bindings |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns` | `turns.list`：`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`after`（必须是本会话的 turn id，排他；无效 → `400 invalid_query`）；响应同上 |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | `turns.retrieve`：官方 Turn JSON；不属于该会话 → 404 |
+| `GET` | `/v1/agents/metrics` | 网关扩展（非官方）：按会话聚合窗口内 turn 的 token 用量。`start_time`/`end_time` 是 Unix 微秒（默认最近 24 小时；窗口上限 31 天；`start_time > end_time` → `400 invalid_query`），`limit` 1..=500（默认 50）；返回 `{start_time,end_time,sessions:[{session_id,agent_id,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_tokens,turns,calls,last_active_at}],totals,truncated}`，按 `total_tokens` 倒序，只含至少一个带 usage 事实的 turn 的会话 |
+
+turn 用量（`turns.retrieve`/`turns.list` 的 `usage`）按 turn 累计：
+`{input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_tokens,context_used,context_size,model,request_id,calls}`；
+`input_tokens = inputTokens - cacheReadTokens - cacheCreationTokens`（饱和减），`total_tokens`
+为四项之和；缺少 `_meta` 时只写 context 占用。会话 `usage` 在 `sessions.retrieve`
+（及 create/update 回读）上聚合该会话的 turn；`sessions.list` 保持 `usage:null`。
+`usage_update` 的 `_meta.periReplay` 在投影层丢弃，回放不重复计数；不带 usage 的后续
+写入保留已存值。
 
 - 准入：实际修改或删除在有 admitted slot 的运行 turn 中返回 `409 turn_in_progress`，详情给出
   `suggest:"cancel"`、`event:"agent.session.input.cancel"` 和取消入口
@@ -591,7 +600,9 @@ stateDiagram-v2
 - 真实两库 PostgreSQL 已验证 Swarm 共享绑定转交和最后引用删除；这不等于清除 Bun 的
   工作目录或预留。Loom 存量自动迁移（本版本不支持）、双副本并发首启与删除事务的故障
   边界尚待验收。
-- `turns.usage`/`subagent_id` 恒 `null`；`prompt_cache_options` 只持久化/回显，本地模型链
+- `turns.usage` 记录宿主上报的每 turn token 累计（只有 context、缺少 `_meta` 时仅写
+  `context_used`/`context_size`；从未上报时仍为 `null`）；`subagent_id` 恒 `null`；
+  `prompt_cache_options` 只持久化/回显，本地模型链
   是否使用未验证。官方 SDK 的删除已通过本地 Rivet engine，后台 `ctx.destroy` 的完成时机仍待独立观测。
 - 沙箱空闲回收关闭运行实例但保留 MCP URL、sandboxId 和工作区；下一次工具调用
   唤醒新 run。已跟踪的后台任务在同一 Bun 进程中保活，终态后恢复空闲计时。显式

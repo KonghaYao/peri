@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::forms::{CredentialsState, OnboardingState, PendingCredentials};
+use super::forms::{CredentialsState, ObservabilityState, OnboardingState, PendingCredentials};
 use super::types::{
     ActionId, BannerActions, BannerTone, BannerView, Effect, FieldId, HealthState, Page, Screen,
     SettingsStatus,
@@ -19,6 +19,20 @@ impl App {
     /// Apply a worker event. Stale epochs and purposes are discarded.
     pub fn handle_worker(&mut self, event: WorkerEvent) -> Vec<Effect> {
         match event {
+            WorkerEvent::ObservabilityTested { epoch, result } => {
+                if epoch != self.epoch || !self.observability_testing {
+                    return Vec::new();
+                }
+                self.observability_testing = false;
+                self.observability.status = Some(match result {
+                    Ok(check) => SettingsStatus::Ok(text::observability_test_ok(
+                        check.elapsed,
+                        check.streams,
+                    )),
+                    Err(error) => SettingsStatus::Error(text::observability_error(&error)),
+                });
+                Vec::new()
+            }
             WorkerEvent::ValidationFinished {
                 epoch,
                 purpose,
@@ -56,6 +70,16 @@ impl App {
                         self.session_log.poll.resume();
                         self.session_log.poll.reset_backoff();
                         self.session_log.reload_wanted = true;
+                        for poll in [
+                            &mut self.core_metrics.poll,
+                            &mut self.agent_metrics.poll,
+                            &mut self.request_log.poll,
+                        ] {
+                            poll.reset_backoff();
+                        }
+                        self.core_metrics.reload_wanted = true;
+                        self.agent_metrics.reload_wanted = true;
+                        self.request_log.reload_wanted = true;
                         self.settings_status =
                             Some(SettingsStatus::Ok(text::REAUTHENTICATED.to_owned()));
                         self.request_health()
@@ -67,6 +91,30 @@ impl App {
                 }
             }
             WorkerEvent::HealthFinished(report) => self.apply_health(report),
+            WorkerEvent::CoreMetricsLoaded {
+                epoch,
+                generation,
+                window,
+                result,
+            } => self.handle_core_metrics_loaded(epoch, generation, window, result),
+            WorkerEvent::AgentMetricsLoaded {
+                epoch,
+                generation,
+                window,
+                result,
+            } => self.handle_agent_metrics_loaded(epoch, generation, window, result),
+            WorkerEvent::RequestLogLoaded {
+                epoch,
+                generation,
+                window,
+                page,
+                result,
+            } => self.handle_request_log_loaded(epoch, generation, window, page, result),
+            WorkerEvent::QueryLoaded {
+                epoch,
+                generation,
+                result,
+            } => self.handle_query_loaded(epoch, generation, result),
             WorkerEvent::SessionsLoaded {
                 epoch,
                 generation,
@@ -130,6 +178,18 @@ impl App {
                 self.open_credentials();
                 Vec::new()
             }
+            ActionId::ConfigureObservability => {
+                self.open_observability();
+                Vec::new()
+            }
+            ActionId::TestObservability => self.test_observability(),
+            ActionId::SaveObservability => self.save_observability(),
+            ActionId::CancelObservability => {
+                if self.screen == Screen::SettingsObservability {
+                    self.go_back();
+                }
+                Vec::new()
+            }
             ActionId::SignOut => {
                 self.open_sign_out();
                 Vec::new()
@@ -169,6 +229,10 @@ impl App {
                 Vec::new()
             }
             ActionId::RefreshSessions => self.refresh_sessions_now(),
+            ActionId::RefreshCoreMetrics
+            | ActionId::RefreshAgentMetrics
+            | ActionId::RefreshRequestLog => self.metrics_action(action),
+            ActionId::RunQuery => self.run_query(),
             ActionId::CreateSubmit => self.submit_create(),
             ActionId::AddMetadata => {
                 self.create.add_row();
@@ -240,15 +304,26 @@ impl App {
         self.focus = super::types::Focus::Field(FieldId::CredentialsBaseUrl);
     }
 
+    fn open_observability(&mut self) {
+        let existing = self.observability_config().cloned();
+        self.observability = ObservabilityState::new(existing.as_ref());
+        self.observability_testing = false;
+        self.overlay = None;
+        self.screen = Screen::SettingsObservability;
+        self.focus = super::types::Focus::Field(FieldId::ObservabilityBaseUrl);
+    }
+
     pub(super) fn back_to_settings(&mut self) {
         if self.validation == Some(ValidationPurpose::Credentials) {
             self.validation = None;
             self.pending = None;
         }
+        self.observability_testing = false;
         self.screen = Screen::Main;
         self.page = Page::Settings;
         self.focus = super::types::Focus::Content;
         self.credentials = CredentialsState::default();
+        self.observability = ObservabilityState::default();
     }
 
     pub(super) fn open_sign_out(&mut self) {
@@ -354,6 +429,121 @@ impl App {
         }]
     }
 
+    /// Validate the observability form and return the normalized values.
+    ///
+    /// A blank password keeps the stored one; the saved secret is never put
+    /// back into the form.
+    fn observability_values(&mut self) -> Option<(String, String, String, String)> {
+        self.observability.base_url_error = None;
+        self.observability.org_error = None;
+        self.observability.user_error = None;
+        self.observability.password_error = None;
+        self.observability.form_error = None;
+
+        let raw_base_url = self.observability.base_url.value().trim().to_owned();
+        let base_url = match config::normalize_observability_base_url(&raw_base_url) {
+            Ok(base_url) => base_url,
+            Err(error) => {
+                self.observability.base_url_error = Some(text::observability_config_error(&error));
+                return None;
+            }
+        };
+        let org = self.observability.org.value().trim().to_owned();
+        if org.is_empty() {
+            self.observability.org_error = Some(text::observability_config_error(
+                &config::ObservabilityConfigError::EmptyOrg,
+            ));
+            return None;
+        }
+        let user = self.observability.user.value().trim().to_owned();
+        if user.is_empty() {
+            self.observability.user_error = Some(text::observability_config_error(
+                &config::ObservabilityConfigError::EmptyUser,
+            ));
+            return None;
+        }
+        let typed_password = self.observability.password.value().to_owned();
+        let password = if typed_password.trim().is_empty() {
+            match self.observability_config() {
+                Some(stored) => stored.password().to_owned(),
+                None => {
+                    self.observability.password_error = Some(text::observability_config_error(
+                        &config::ObservabilityConfigError::EmptyPassword,
+                    ));
+                    return None;
+                }
+            }
+        } else {
+            typed_password
+        };
+        self.observability.base_url.set_value(&base_url);
+        self.observability.org.set_value(&org);
+        self.observability.user.set_value(&user);
+        Some((base_url, org, user, password))
+    }
+
+    fn test_observability(&mut self) -> Vec<Effect> {
+        if self.screen != Screen::SettingsObservability || self.observability_testing {
+            return Vec::new();
+        }
+        self.observability.status = None;
+        let Some((base_url, org, user, password)) = self.observability_values() else {
+            return Vec::new();
+        };
+        self.observability_testing = true;
+        vec![Effect::TestObservability {
+            epoch: self.epoch,
+            base_url,
+            org,
+            user,
+            password,
+        }]
+    }
+
+    fn save_observability(&mut self) -> Vec<Effect> {
+        if self.screen != Screen::SettingsObservability || self.observability_testing {
+            return Vec::new();
+        }
+        self.observability.status = None;
+        let Some((base_url, org, user, password)) = self.observability_values() else {
+            return Vec::new();
+        };
+        let observability =
+            match config::ObservabilityConfig::new(&base_url, &org, &user, &password) {
+                Ok(observability) => observability,
+                Err(error) => {
+                    self.observability.form_error = Some(text::observability_config_error(&error));
+                    return Vec::new();
+                }
+            };
+        let Some(current) = self.config.take() else {
+            self.observability.form_error = Some(text::NO_ACTIVE_CONNECTION.to_owned());
+            return Vec::new();
+        };
+        let saved = current.clone().with_observability(observability.clone());
+        if let Err(error) = self.store.save(&saved) {
+            self.config = Some(current);
+            self.observability.form_error = Some(text::config_error(&error));
+            return Vec::new();
+        }
+        self.config = Some(saved);
+        self.core_metrics = super::CoreMetricsState::new();
+        self.request_log = super::RequestLogState::new();
+        self.query = super::QueryState::new();
+        self.observability = ObservabilityState::default();
+        self.observability_testing = false;
+        self.screen = Screen::Main;
+        self.page = Page::Settings;
+        self.focus = super::types::Focus::Content;
+        self.settings_status = Some(SettingsStatus::Ok(text::OBSERVABILITY_SAVED.to_owned()));
+        vec![Effect::AdoptObservability {
+            base_url: observability.base_url().to_owned(),
+            org: observability.org().to_owned(),
+            user: observability.user().to_owned(),
+            password: observability.password().to_owned(),
+        }]
+    }
+
     fn finish_onboarding(&mut self) -> Vec<Effect> {
         let Some(pending) = self.pending.take() else {
             self.onboarding.form_error = Some(text::ERR_VALIDATION_STATE_LOST.to_owned());
@@ -380,6 +570,7 @@ impl App {
         self.session_log.reset();
         self.create = super::CreateFormState::default();
         self.reset_detail_routes();
+        self.reset_metrics_routes();
         self.banner = None;
         self.paused = false;
         self.config_warning = None;
@@ -406,6 +597,17 @@ impl App {
                 return Vec::new();
             }
         };
+        // Editing gateway credentials must keep the optional observability
+        // section: `Config::new` always starts with none.
+        let config = match self
+            .config
+            .as_ref()
+            .and_then(Config::observability)
+            .cloned()
+        {
+            Some(observability) => config.with_observability(observability),
+            None => config,
+        };
         if let Err(error) = self.store.save(&config) {
             self.credentials.form_error = Some(text::config_error(&error));
             return Vec::new();
@@ -420,6 +622,7 @@ impl App {
         self.session_log.reset();
         self.create = super::CreateFormState::default();
         self.reset_detail_routes();
+        self.reset_metrics_routes();
         self.banner = None;
         self.paused = false;
         self.settings_status = Some(SettingsStatus::Ok(text::CREDENTIALS_SAVED.to_owned()));
@@ -449,6 +652,8 @@ impl App {
                 self.focus = super::types::Focus::Field(FieldId::OnboardingBaseUrl);
                 self.onboarding = OnboardingState::default();
                 self.credentials = CredentialsState::default();
+                self.observability = ObservabilityState::default();
+                self.observability_testing = false;
                 self.session_log.reset();
                 self.create = super::CreateFormState::default();
                 self.settings_status = None;

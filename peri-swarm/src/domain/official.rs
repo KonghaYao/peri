@@ -19,12 +19,16 @@
 
 use std::collections::BTreeMap;
 
-use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::item::ItemOrder;
 use crate::domain::session::{EnvironmentRef, PromptCacheOptions, SessionStatus, SessionView};
+
+#[path = "official_time.rs"]
+mod official_time;
+
+pub use official_time::{unix_from_rfc3339, unix_now};
 
 /// Derive the internal turn id from the user item that opened the turn.
 ///
@@ -136,30 +140,6 @@ pub fn session_idle_event_id(turn_id: &str) -> String {
 #[must_use]
 pub fn session_failed_event_id(turn_id: &str) -> String {
     format!("evt_{turn_id}_session_failed")
-}
-
-/// Unix seconds, used for the `created_at`/`started_at` fields an official
-/// `Turn`/session carries.
-#[must_use]
-pub fn unix_now() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(i64::MAX)
-}
-
-/// Convert the persisted RFC3339 item timestamp to Unix seconds.
-///
-/// A malformed timestamp yields `0` rather than a fabricated "now": replay must
-/// be deterministic, and `0` is visibly not a real observation.
-#[must_use]
-pub fn unix_from_rfc3339(value: &str) -> i64 {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.timestamp())
-        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -278,6 +258,16 @@ impl OfficialTurn {
                     "message": message,
                 })
             });
+        self
+    }
+
+    /// Attach the turn's accumulated usage (`Turn.usage`).
+    ///
+    /// The live terminal frames read the same value, so a streamed
+    /// `turn.completed`/`turn.failed` and a later `turns.retrieve` agree.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<Value>) -> Self {
+        self.usage = usage;
         self
     }
 }
@@ -892,8 +882,10 @@ impl OfficialEvent {
             event_id: turn_completed_event_id(turn_id),
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
+            // One source of truth: the event-level usage is the turn's own
+            // value, so the live frame and `turns.retrieve` cannot disagree.
+            usage: turn.usage.clone(),
             turn,
-            usage: None,
         }
     }
 
@@ -903,8 +895,8 @@ impl OfficialEvent {
             event_id: turn_failed_event_id(turn_id),
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
+            usage: turn.usage.clone(),
             turn,
-            usage: None,
         }
     }
 

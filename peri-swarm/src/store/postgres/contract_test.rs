@@ -329,6 +329,23 @@ async fn turns_keep_created_at_and_close_open_rows() {
         .await
         .expect("open probe"));
 
+    // A later usage-less write keeps the fact, the same rule the memory store
+    // implements (`COALESCE(excluded.usage_json, swarm_turns.usage_json)`).
+    store
+        .swarm_upsert_turn(turn("logical-1", "turn-1", TurnStatus::Cancelled, 100))
+        .await
+        .expect("usage-less write");
+    let stored = store
+        .swarm_get_turn("logical-1", "turn-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(stored.status, TurnStatus::Cancelled);
+    assert_eq!(
+        stored.usage, completed.usage,
+        "a usage-less write must not erase the stored usage"
+    );
+
     let page = store
         .swarm_turn_page(
             "logical-1",
@@ -370,6 +387,121 @@ async fn turns_keep_created_at_and_close_open_rows() {
             .await
             .expect("no open turns"),
         0
+    );
+
+    // Both aggregates read the same persisted rows the terminal wrote.
+    let session_rows = store
+        .swarm_session_usage_turns("logical-1", 10)
+        .await
+        .expect("session usage rows");
+    assert_eq!(
+        session_rows
+            .iter()
+            .map(|row| row.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        ["turn-2", "turn-1"],
+        "newest first"
+    );
+    assert_eq!(session_rows[1].usage, completed.usage);
+    let window = store
+        .swarm_turn_usage_window(100, 200, 10)
+        .await
+        .expect("usage window");
+    assert_eq!(
+        window
+            .iter()
+            .map(|row| row.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        ["turn-2", "turn-1"],
+        "the window is inclusive"
+    );
+    assert_eq!(window.len(), 2);
+
+    store.close().await.expect("close");
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PERI_TEST_POSTGRES_URL"]
+async fn usage_observations_touch_only_usage_json() {
+    let Some(fixture) = TestSchema::create().await else {
+        return;
+    };
+    let store = fixture.store().await;
+    store
+        .swarm_upsert_session(session("logical-1", "/workspace/a"))
+        .await
+        .expect("seed");
+
+    // Before the opening write: the fact creates the row it belongs to.
+    store
+        .swarm_record_turn_usage(
+            "logical-1",
+            "turn-early",
+            50,
+            None,
+            &serde_json::json!({"total_tokens": 4}),
+        )
+        .await
+        .expect("early observation");
+    let early = store
+        .swarm_get_turn("logical-1", "turn-early")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(early.status, TurnStatus::InProgress);
+    assert_eq!(early.usage, Some(serde_json::json!({"total_tokens": 4})));
+
+    // An open row is refreshed without touching its status or times.
+    store
+        .swarm_upsert_turn(turn("logical-1", "turn-open", TurnStatus::InProgress, 60))
+        .await
+        .expect("open turn");
+    store
+        .swarm_record_turn_usage(
+            "logical-1",
+            "turn-open",
+            60,
+            None,
+            &serde_json::json!({"total_tokens": 6}),
+        )
+        .await
+        .expect("refresh");
+    let open = store
+        .swarm_get_turn("logical-1", "turn-open")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(open.status, TurnStatus::InProgress);
+    assert_eq!(open.usage, Some(serde_json::json!({"total_tokens": 6})));
+
+    // A terminal row keeps its status, completion time and final usage.
+    let mut terminal = turn("logical-1", "turn-done", TurnStatus::Completed, 70);
+    terminal.started_at = Some(71);
+    terminal.completed_at = Some(72);
+    terminal.usage = Some(serde_json::json!({"total_tokens": 8}));
+    store.swarm_upsert_turn(terminal).await.expect("terminal");
+    store
+        .swarm_record_turn_usage(
+            "logical-1",
+            "turn-done",
+            70,
+            Some(71),
+            &serde_json::json!({"total_tokens": 99}),
+        )
+        .await
+        .expect("late observation");
+    let done = store
+        .swarm_get_turn("logical-1", "turn-done")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(done.status, TurnStatus::Completed);
+    assert_eq!(done.completed_at, Some(72));
+    assert_eq!(
+        done.usage,
+        Some(serde_json::json!({"total_tokens": 8})),
+        "the terminal usage wins over a later observation"
     );
 
     store.close().await.expect("close");

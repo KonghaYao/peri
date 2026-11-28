@@ -1108,3 +1108,62 @@ fn an_approval_result_requires_the_official_response_object() {
     .expect_err("missing decision");
     assert_eq!(field(&error), "events[0].response.decision");
 }
+
+fn metrics_query(value: serde_json::Value) -> super::MetricsQuery {
+    serde_json::from_value(value).expect("metrics query")
+}
+
+#[test]
+fn the_metrics_window_defaults_to_one_day_and_is_bounded() {
+    const DAY_US: i64 = 24 * 60 * 60 * 1_000_000;
+    let now = 1_700_000_000_000_000;
+    let window = super::resolve_metrics_window(&metrics_query(json!({})), now).expect("default");
+    assert_eq!(window.end_time, now);
+    assert_eq!(window.start_time, now - DAY_US);
+    assert_eq!(window.limit, super::MetricsWindow::DEFAULT_LIMIT);
+
+    let explicit = super::resolve_metrics_window(
+        &metrics_query(json!({ "start_time": 10, "end_time": 20, "limit": 3 })),
+        now,
+    )
+    .expect("explicit");
+    assert_eq!((explicit.start_time, explicit.end_time), (10, 20));
+    assert_eq!(explicit.limit, 3);
+
+    let inverted = super::resolve_metrics_window(
+        &metrics_query(json!({ "start_time": 21, "end_time": 20 })),
+        now,
+    )
+    .expect_err("start after end");
+    assert_eq!(field(&inverted), "start_time");
+
+    let too_wide = super::resolve_metrics_window(
+        &metrics_query(json!({
+            "start_time": 0,
+            "end_time": super::MetricsWindow::MAX_WINDOW_US + 1,
+        })),
+        now,
+    )
+    .expect_err("window above the cap");
+    assert_eq!(field(&too_wide), "start_time");
+
+    for limit in [0, super::MetricsWindow::MAX_LIMIT + 1] {
+        let error = super::resolve_metrics_window(&metrics_query(json!({ "limit": limit })), now)
+            .expect_err("limit outside the bound");
+        assert_eq!(field(&error), "limit", "{limit}");
+    }
+}
+
+#[test]
+fn the_metrics_window_accepts_the_exact_cap() {
+    let window = super::resolve_metrics_window(
+        &metrics_query(json!({
+            "start_time": 0,
+            "end_time": super::MetricsWindow::MAX_WINDOW_US,
+            "limit": super::MetricsWindow::MAX_LIMIT,
+        })),
+        1_700_000_000_000_000,
+    )
+    .expect("the documented maximum is accepted");
+    assert_eq!(window.limit, super::MetricsWindow::MAX_LIMIT);
+}

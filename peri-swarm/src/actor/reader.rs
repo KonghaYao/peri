@@ -51,7 +51,8 @@ use crate::domain::{
     declared_approvals, requires_answer, turn_id_for_item, ApprovalDecision, ErrorCode, ErrorKind,
     ItemDelta, ItemKind, ItemSource, ItemView, McpToolSpec, OfficialEvent, OfficialMessageItem,
     OfficialSession, OfficialTurn, RequiredAction, ServerApproval, SessionState, SessionStatus,
-    SettlementReason, StreamEvent, SwarmError, TurnEvent, TurnStatus, APPROVAL_ID_PREFIX,
+    SettlementReason, StreamEvent, SwarmError, TurnEvent, TurnStatus, TurnUsage,
+    APPROVAL_ID_PREFIX,
 };
 use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow};
 
@@ -303,6 +304,23 @@ struct ContinuationRun {
     generation: u64,
 }
 
+/// One terminal turn row write: every column a closing turn sets.
+///
+/// Grouped because the caller already holds all of it in one scope and the
+/// values travel together: the live terminal frame reads the same ones.
+#[derive(Debug)]
+struct TerminalTurnRow {
+    turn_id: String,
+    status: TurnStatus,
+    created_at: i64,
+    started_at: Option<i64>,
+    completed_at: i64,
+    error: Option<Value>,
+    /// Cumulative usage of the turn; `None` keeps whatever an earlier write
+    /// stored.
+    usage: Option<Value>,
+}
+
 /// A terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can close
 /// the turn when the handoff fails.
 #[derive(Debug)]
@@ -353,6 +371,10 @@ struct LogState {
     generation: Option<String>,
     /// Last fatal agent message observed while the turn was active.
     failure: Option<String>,
+    /// Telemetry span covering the current gateway turn. It carries no actor
+    /// semantics: `None` means no turn was opened (or the subscriber filtered
+    /// the target) and every use is a no-op.
+    turn_span: Option<tracing::Span>,
     /// Monotonic count of ingested notifications; used as a drain fence.
     ingested: u64,
     /// Last seq this log appended, cached so a batched append does not pay a
@@ -388,6 +410,21 @@ struct LogState {
     /// Terminal deferred by a steer, kept so [`ItemLog::abandon_steer`] can
     /// close the turn if the handoff fails.
     suppressed_terminal: Option<SuppressedTerminal>,
+    /// Token usage accumulated for the open turn. Reset when a turn opens;
+    /// every persisted row and the live terminal carry the running total so no
+    /// write erases an earlier observation.
+    turn_usage: TurnUsage,
+}
+
+/// End the current turn span (if any) with a terminal status. Called only while
+/// holding the log state lock; recording is cheap and non-blocking.
+fn end_turn_span(state: &mut LogState, status: &'static str) {
+    if let Some(span) = state.turn_span.take() {
+        span.record("status", status);
+        // Dropping the last handle ends the span in `tracing`; there is no
+        // explicit `end` method.
+        drop(span);
+    }
 }
 
 /// Whether a steer's generation could be reserved for the turn the input was
@@ -860,6 +897,54 @@ impl ItemLog {
                     state.failure = Some(message);
                 }
             }
+            Projected::Usage(sample) => self.observe_usage(&sample).await,
+        }
+    }
+
+    /// Fold one `usage_update` into the open turn and persist the running total.
+    ///
+    /// Only an open turn accumulates: a usage frame that arrives after the turn
+    /// closed (or before it started) is dropped instead of being attributed to
+    /// the next turn. Persisting on every observation means a turn that is
+    /// interrupted still reports what it spent; the write touches only
+    /// `usage_json`, so a late frame cannot revive a turn another path already
+    /// closed, and the terminal write carries the same accumulated object.
+    async fn observe_usage(&self, sample: &crate::domain::UsageSample) {
+        let (turn_id, created_at, started_at, usage) = {
+            let mut state = self.state.lock();
+            if state.active.is_none() {
+                return;
+            }
+            let Some(turn_id) = state.turn_id.clone() else {
+                return;
+            };
+            state.turn_usage.observe(sample);
+            let usage = state.turn_usage.to_json();
+            (
+                turn_id,
+                state.turn_created_at.unwrap_or_else(unix_now),
+                state.turn_started_at,
+                usage,
+            )
+        };
+        // No fact in the observation (an empty `usage_update`): nothing to
+        // persist, and writing `NULL` would not add information either.
+        let Some(usage) = usage else {
+            return;
+        };
+        if let Err(error) = self
+            .store
+            .swarm_record_turn_usage(&self.logical_id, &turn_id, created_at, started_at, &usage)
+            .await
+        {
+            // The turn terminal writes the accumulator again, so a failed
+            // intermediate write is not the only chance to persist the total.
+            tracing::warn!(
+                logical_id = %self.logical_id,
+                turn_id,
+                error = %error,
+                "swarm turn usage was not persisted"
+            );
         }
     }
 
@@ -957,13 +1042,23 @@ impl ItemLog {
             state.outstanding_steers.clear();
             state.continuation = None;
             state.suppressed_terminal = None;
+            state.turn_usage = TurnUsage::default();
             state.turn_started_at = Some(started_at);
+            state.turn_span = Some(tracing::info_span!(
+                target: crate::telemetry::TURN_SPAN_TARGET,
+                "peri_swarm.turn",
+                session_id = %self.logical_id,
+                request_id = request_id,
+                turn_id = turn_id,
+                status = tracing::field::Empty,
+            ));
             (created, added)
         };
         let created_at = self.state.lock().turn_created_at.unwrap_or(started_at);
         if let Err(error) = self.set_session_state(SessionState::Running, None).await {
             let mut state = self.state.lock();
             state.active = None;
+            end_turn_span(&mut state, "failed");
             return Err(error);
         }
         // The turn is durable before its first frame: a client can never see
@@ -989,6 +1084,7 @@ impl ItemLog {
             {
                 let mut state = self.state.lock();
                 state.active = None;
+                end_turn_span(&mut state, "failed");
             }
             self.update_state_quiet(SessionState::Idle).await;
             return Err(store_failure("upsert_turn", error));
@@ -1046,6 +1142,7 @@ impl ItemLog {
             state.turn_id = None;
             state.turn_created_at = None;
             state.turn_started_at = None;
+            state.turn_usage = TurnUsage::default();
             state.pending_user_item = None;
         }
     }
@@ -1121,7 +1218,7 @@ impl ItemLog {
         // separately; wait for the reader to go quiet so the completion item
         // carries the whole message rather than the text seen so far.
         self.settle().await;
-        let (streams, failure, turn_id) = {
+        let (streams, failure, turn_id, turn_span) = {
             let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
                 return;
@@ -1170,7 +1267,8 @@ impl ItemLog {
             // the flushed row nor open a stream for the next turn.
             state.closed.extend(streams.keys().cloned());
             let turn_id = state.turn_id.clone();
-            (streams, state.failure.take(), turn_id)
+            let turn_span = state.turn_span.take();
+            (streams, state.failure.take(), turn_id, turn_span)
         };
         // Approvals owned by this turn can no longer be answered: the prompt
         // attempt (and its ACP waiter) is gone. Persist the settlement and
@@ -1192,12 +1290,15 @@ impl ItemLog {
             .flush_streams(streams, turn_id.as_deref())
             .await
             .is_err();
-        let (turn_id, created_at, started_at) = {
+        let (turn_id, created_at, started_at, usage) = {
             let mut state = self.state.lock();
             (
                 state.turn_id.take(),
                 state.turn_created_at.take(),
                 state.turn_started_at.take(),
+                // Take the accumulator with the turn identity: a usage frame
+                // that arrives after this point belongs to no open turn.
+                std::mem::take(&mut state.turn_usage).to_json(),
             )
         };
         self.state.lock().pending_user_item = None;
@@ -1210,6 +1311,10 @@ impl ItemLog {
                 request_id,
                 "swarm turn closed without a recorded turn id"
             );
+            if let Some(span) = turn_span {
+                span.record("status", "failed");
+                drop(span);
+            }
             self.active_watch.send_replace(None);
             return;
         };
@@ -1232,6 +1337,11 @@ impl ItemLog {
             }
             outcome => outcome,
         };
+        let turn_status = match &outcome {
+            TurnOutcome::Completed(stop_reason) if stop_reason == "cancelled" => "cancelled",
+            TurnOutcome::Completed(_) => "completed",
+            TurnOutcome::Failed { .. } => "failed",
+        };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
                 let completed_at = unix_now();
@@ -1245,14 +1355,15 @@ impl ItemLog {
                     TurnStatus::Completed
                 };
                 if let Err(error) = self
-                    .persist_terminal_turn(
-                        &turn_id,
+                    .persist_terminal_turn(TerminalTurnRow {
+                        turn_id: turn_id.clone(),
                         status,
-                        created_at.unwrap_or(completed_at),
+                        created_at: created_at.unwrap_or(completed_at),
                         started_at,
                         completed_at,
-                        None,
-                    )
+                        error: None,
+                        usage: usage.clone(),
+                    })
                     .await
                 {
                     tracing::warn!(
@@ -1277,7 +1388,10 @@ impl ItemLog {
                         status,
                         created_at.unwrap_or(completed_at),
                         Some(completed_at),
-                    ),
+                    )
+                    // Same object the row now holds: the live terminal and a
+                    // later `turns.retrieve` never disagree about usage.
+                    .with_usage(usage.clone()),
                 )));
                 // Immediately after the terminal: the SDK's `TurnState` only
                 // treats `agent.session.idle` as terminal after it observed the
@@ -1291,17 +1405,18 @@ impl ItemLog {
                 let message = failure.unwrap_or(message);
                 let completed_at = unix_now();
                 if let Err(error) = self
-                    .persist_terminal_turn(
-                        &turn_id,
-                        TurnStatus::Failed,
-                        created_at.unwrap_or(completed_at),
+                    .persist_terminal_turn(TerminalTurnRow {
+                        turn_id: turn_id.clone(),
+                        status: TurnStatus::Failed,
+                        created_at: created_at.unwrap_or(completed_at),
                         started_at,
                         completed_at,
-                        Some(json!({
+                        error: Some(json!({
                             "code": "internal_error",
                             "message": message,
                         })),
-                    )
+                        usage: usage.clone(),
+                    })
                     .await
                 {
                     tracing::warn!(
@@ -1330,7 +1445,8 @@ impl ItemLog {
                     )
                     // The failure text is now persisted on the turn row; the
                     // live frame and a later `turns.retrieve` agree.
-                    .with_error(Some(message.clone())),
+                    .with_error(Some(message.clone()))
+                    .with_usage(usage.clone()),
                 )));
                 self.broadcast(StreamEvent::Official(OfficialEvent::error(
                     &turn_id,
@@ -1344,36 +1460,37 @@ impl ItemLog {
                 )));
             }
         }
+        if let Some(span) = turn_span {
+            span.record("status", turn_status);
+            drop(span);
+        }
         // Wake `wait_turn_closed` only after the terminal is out, so a caller
         // that returns from the prompt observes a fully closed turn.
         self.active_watch.send_replace(None);
     }
 
     /// Persist one terminal turn row, keeping the opening `created_at`.
+    ///
+    /// `usage` is the turn's accumulated usage; `None` means the turn observed
+    /// no usage fact and the store keeps whatever an earlier write stored.
     async fn persist_terminal_turn(
         &self,
-        turn_id: &str,
-        status: TurnStatus,
-        created_at: i64,
-        started_at: Option<i64>,
-        completed_at: i64,
-        error: Option<Value>,
+        turn: TerminalTurnRow,
     ) -> Result<(), crate::store::StoreError> {
         self.store
             .swarm_upsert_turn(SwarmTurnRow {
                 logical_id: self.logical_id.clone(),
-                turn_id: turn_id.to_owned(),
-                status,
-                created_at,
-                started_at,
-                completed_at: Some(completed_at),
-                error,
-                usage: None,
+                turn_id: turn.turn_id,
+                status: turn.status,
+                created_at: turn.created_at,
+                started_at: turn.started_at,
+                completed_at: Some(turn.completed_at),
+                error: turn.error,
+                usage: turn.usage,
                 subagent_id: None,
             })
             .await
     }
-
     /// Official session snapshot for `agent.session.idle`/`agent.session.failed`.
     ///
     /// A missing/failed row read still yields a snapshot: the terminal frame is

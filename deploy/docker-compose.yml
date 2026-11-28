@@ -3,6 +3,8 @@
 # postgres：Peri 会话库 + Swarm 状态库（同实例、不同库）
 # rivet-engine：独立运行的 Rivet 控制面
 # rivet-init：一次性创建 peri-swarm node pool
+# openobserve：单节点 OpenObserve，接收 OTLP 并提供查询 UI/API
+# openobserve-init：一次性创建 OTLP 与查询用的专用 admin 账号
 # peri-swarm：网关二进制（HTTP API + 进程内 ACP Host），默认 2 个副本
 # nginx：副本组前面的入口，负责 HTTP 负载转发与 SSE 透传
 
@@ -74,6 +76,56 @@ services:
         condition: service_started
     restart: "no"
 
+  openobserve:
+    image: openobserve/openobserve:${OPENOBSERVE_TAG:-v1.2.0}
+    environment:
+      # 本地盘数据目录；下面挂命名卷。
+      ZO_DATA_DIR: /data
+      # 首次启动创建 root；root 只给 openobserve-init 使用，不做日常账号。
+      ZO_ROOT_USER_EMAIL: ${OPENOBSERVE_ROOT_EMAIL:?set OPENOBSERVE_ROOT_EMAIL in deploy/.env}
+      ZO_ROOT_USER_PASSWORD: ${OPENOBSERVE_ROOT_PASSWORD:?set OPENOBSERVE_ROOT_PASSWORD in deploy/.env}
+    volumes:
+      - openobserve-data:/data
+    ports:
+      # 默认只发布到宿主机 loopback；需要远程访问时由部署方加内网代理/隧道。
+      - "${OPENOBSERVE_PUBLISH_HOST:-127.0.0.1}:${OPENOBSERVE_PORT:-5080}:5080"
+    healthcheck:
+      # 镜像没有 shell/curl/wget。node metrics 会连接本地服务，
+      # 服务未就绪时返回非零，适合直接作为容器 healthcheck。
+      test: ["CMD", "/openobserve", "node", "metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  openobserve-init:
+    image: curlimages/curl:8.11.1
+    # 镜像默认 entrypoint 是 curl；这里改用脚本。
+    entrypoint: ["/bin/sh"]
+    command: ["/openobserve-users.sh"]
+    environment:
+      # 容器网络内地址；脚本启动后还会自己轮询 /healthz。
+      OPENOBSERVE_URL: http://openobserve:5080
+      OPENOBSERVE_ORG: default
+      OPENOBSERVE_ROOT_EMAIL: ${OPENOBSERVE_ROOT_EMAIL:?set OPENOBSERVE_ROOT_EMAIL in deploy/.env}
+      OPENOBSERVE_ROOT_PASSWORD: ${OPENOBSERVE_ROOT_PASSWORD:?set OPENOBSERVE_ROOT_PASSWORD in deploy/.env}
+      OPENOBSERVE_INGEST_EMAIL: ${OPENOBSERVE_INGEST_EMAIL:?set OPENOBSERVE_INGEST_EMAIL in deploy/.env}
+      OPENOBSERVE_INGEST_PASSWORD: ${OPENOBSERVE_INGEST_PASSWORD:?set OPENOBSERVE_INGEST_PASSWORD in deploy/.env}
+      OPENOBSERVE_DASHBOARD_EMAIL: ${OPENOBSERVE_DASHBOARD_EMAIL:?set OPENOBSERVE_DASHBOARD_EMAIL in deploy/.env}
+      OPENOBSERVE_DASHBOARD_PASSWORD: ${OPENOBSERVE_DASHBOARD_PASSWORD:?set OPENOBSERVE_DASHBOARD_PASSWORD in deploy/.env}
+    volumes:
+      # 只读挂载；重复运行是幂等的。
+      - ./init/openobserve-users.sh:/openobserve-users.sh:ro
+    depends_on:
+      openobserve:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   peri-swarm:
     image: peri-swarm:local
     build:
@@ -111,6 +163,17 @@ services:
       RIVETKIT_ENGINE_AUTO_DOWNLOAD: "0"
       # 每个会话的工作目录根；必须是绝对路径（entrypoint 负责创建）。
       PERI_SWARM_WORKSPACE_ROOT: /var/lib/peri-swarm/workspace
+      # OTLP/HTTP 导出到 OpenObserve；OpenObserve 故障只影响遥测，不阻塞网关启动，
+      # 所以这里刻意不设置 depends_on。
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://openobserve:5080/api/default
+      # Basic <base64(ingest email:password)>；由 .env 的 OPENOBSERVE_INGEST_AUTH 提供。
+      OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Basic ${OPENOBSERVE_INGEST_AUTH:?set OPENOBSERVE_INGEST_AUTH in deploy/.env}"
+      # 只覆盖 logs 的 stream 名；网关会合并通用头与信号专用头。
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS: "stream-name=peri_swarm_logs"
+      OTEL_SERVICE_NAME: peri-swarm
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+      OTEL_BSP_SCHEDULE_DELAY: "5000"
+      OTEL_BLRP_SCHEDULE_DELAY: "5000"
     # 容器内固定 8080；宿主侧用端口范围，Docker 会给每个副本分配一个空闲
     # 端口，所以 --scale 不会互相抢端口。正常流量仍走 nginx 的容器网络。
     expose:
@@ -165,3 +228,4 @@ volumes:
   rivet-log:
   rivet-objects:
   peri-swarm-data:
+  openobserve-data:

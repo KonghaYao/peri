@@ -35,6 +35,34 @@ futures.workspace = true
 # elsewhere. Same version as `peri-process` / `peri-js-runtime`.
 libc = "0.2"
 parking_lot.workspace = true
+# OTLP/HTTP tracing, metrics and logs (stage 3). The SDK generation is pinned to
+# `opentelemetry 0.28`, the version RivetKit already resolves in `Cargo.lock`.
+# The async reqwest client plus the async-runtime processors are required:
+# the default batch processors cannot drive an async HTTP client (0.28 only
+# supports `reqwest-blocking-client` from their dedicated thread).
+opentelemetry = { version = "0.28", default-features = false, features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.28", default-features = false, features = [
+    "trace",
+    "metrics",
+    "logs",
+    "rt-tokio",
+    "experimental_trace_batch_span_processor_with_async_runtime",
+    "experimental_logs_batch_log_processor_with_async_runtime",
+    "experimental_metrics_periodicreader_with_async_runtime",
+] }
+opentelemetry-otlp = { version = "0.28", default-features = false, features = [
+    "http-proto",
+    "reqwest-client",
+    "trace",
+    "metrics",
+    "logs",
+] }
+# Bring the `HttpClient` trait into scope. The OTLP exporters get an explicit
+# async `reqwest::Client`: RivetKit enables `reqwest-blocking-client` on the
+# same unified `opentelemetry-otlp` package, and 0.28's built-in client
+# selection then compiles neither branch (see `exporter::http::build_client`).
+opentelemetry-http = { version = "0.28", default-features = false }
+tracing-opentelemetry = { version = "0.29", default-features = false }
 # Pinned to the engine generation verified in `.peri/plans/env-probe.md`
 # (`Rivet 3.1.1`). 3.1.2-rc.1 is deliberately excluded.
 rivetkit = "=3.1.1"

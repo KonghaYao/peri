@@ -10,326 +10,18 @@
 //! `Debug`: they may contain the API key and must never be printed.
 
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::api::{
-    ApiError, ApprovalDecision, ApprovalReceipt, CreateSessionSpec, CreatedSession, Health,
-    HttpSwarmApi, IdempotencyKey, InputReceipt, ItemsPage, Session, SessionPage, SwarmApi, Turns,
-    UpdateSessionSpec,
-};
-use crate::config::Config;
+use crate::api::{ApiError, HttpSwarmApi, SwarmApi};
+use crate::config::{Config, ObservabilityConfig};
+use crate::metrics;
+use crate::observability::{ObservabilityError, OpenObserveClient};
 use crate::ui::text;
 
-/// Why credentials are being validated.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ValidationPurpose {
-    /// First-run onboarding.
-    Onboarding,
-    /// Settings → edit credentials.
-    Credentials,
-    /// Settings → test connection; never saves.
-    TestConnection,
-    /// Error banner → retry after a 401 or transport failure.
-    BannerRetry,
-}
-
-/// Which validation step failed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ValidationStage {
-    /// `GET /healthz` failed.
-    Health,
-    /// The authenticated session-list call failed.
-    Authentication,
-}
-
-/// A failed credential validation with the step that failed.
-#[derive(Clone, Debug)]
-pub struct ValidationFailure {
-    /// Step that failed.
-    pub stage: ValidationStage,
-    /// Structured gateway error.
-    pub error: ApiError,
-}
-
-/// Result of one health poll.
-#[derive(Clone, Debug)]
-pub struct HealthReport {
-    /// UI epoch this poll belongs to.
-    pub epoch: u64,
-    /// Health result.
-    pub result: Result<Health, ApiError>,
-    /// Round-trip time of a successful poll.
-    pub latency: Option<Duration>,
-    /// When the poll completed.
-    pub checked_at: Instant,
-    /// Last contract header observed by the client.
-    pub contract: Option<String>,
-}
-
-/// Which session mutation finished.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MutationKind {
-    /// `POST /v1/agents/sessions/{id}`.
-    Update,
-    /// `DELETE /v1/agents/sessions/{id}`.
-    Delete,
-    /// `POST /v1/agents/sessions/{id}/events` with a message.
-    SendInput,
-    /// `POST /v1/agents/sessions/{id}/events` with cancel.
-    CancelTurn,
-    /// `POST /v1/agents/sessions/{id}/events` with an approval answer.
-    Approval,
-}
-
-/// Typed payload of a finished session mutation.
-#[derive(Clone, Debug)]
-pub enum MutationData {
-    /// The updated session snapshot.
-    Updated(Box<Session>),
-    /// The delete was accepted.
-    Deleted,
-    /// The message or cancel event was accepted.
-    Input(Box<InputReceipt>),
-    /// The approval answer was accepted.
-    Approval(Box<ApprovalReceipt>),
-}
-
-/// Messages from the worker to the UI.
-#[derive(Clone, Debug)]
-pub enum WorkerEvent {
-    /// One validation finished.
-    ValidationFinished {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// What was being validated.
-        purpose: ValidationPurpose,
-        /// Elapsed time on success.
-        result: Result<Duration, ValidationFailure>,
-    },
-    /// One health poll finished.
-    HealthFinished(HealthReport),
-    /// One session-list request finished.
-    SessionsLoaded {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Poll generation; stale responses are discarded by the UI.
-        generation: u64,
-        /// Page size that was requested.
-        limit: u32,
-        /// Result of `GET /v1/agents/sessions`.
-        result: Result<SessionPage, ApiError>,
-    },
-    /// One create request finished.
-    SessionCreated {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Result of `POST /v1/agents/sessions`.
-        result: Result<Box<CreatedSession>, ApiError>,
-    },
-    /// One detail snapshot request finished.
-    SessionLoaded {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Detail poll generation; stale responses are discarded by the UI.
-        generation: u64,
-        /// Session id that was requested.
-        session_id: String,
-        /// Result of `GET /v1/agents/sessions/{id}`.
-        result: Result<Box<Session>, ApiError>,
-    },
-    /// One timeline page finished.
-    ItemsLoaded {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Detail poll generation.
-        generation: u64,
-        /// Session id that was requested.
-        session_id: String,
-        /// Page size that was requested.
-        limit: u32,
-        /// Cursor that was requested; `None` for the newest page.
-        after: Option<String>,
-        /// Result of `GET /v1/agents/sessions/{id}/items`.
-        result: Result<Box<ItemsPage>, ApiError>,
-    },
-    /// One turns page finished.
-    TurnsLoaded {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Detail poll generation.
-        generation: u64,
-        /// Session id that was requested.
-        session_id: String,
-        /// Page size that was requested.
-        limit: u32,
-        /// Cursor that was requested; `None` for the newest page.
-        after: Option<String>,
-        /// Result of `GET /v1/agents/sessions/{id}/turns`.
-        result: Result<Box<Turns>, ApiError>,
-    },
-    /// One session mutation finished.
-    MutationFinished {
-        /// UI epoch at request time.
-        epoch: u64,
-        /// Session id that was mutated.
-        session_id: String,
-        /// Which mutation was attempted.
-        kind: MutationKind,
-        /// Typed result.
-        result: Result<MutationData, ApiError>,
-    },
-    /// The worker could not start.
-    Fatal {
-        /// Safe description without credentials.
-        message: String,
-    },
-}
-
-/// Commands from the UI to the worker. Deliberately not `Debug`.
-pub enum Command {
-    /// Validate candidate credentials without adopting them.
-    Validate {
-        /// UI epoch.
-        epoch: u64,
-        /// Why the credentials are checked.
-        purpose: ValidationPurpose,
-        /// Candidate origin.
-        base_url: String,
-        /// Candidate key. Never printed.
-        api_key: String,
-    },
-    /// Revalidate the active connection without changing credentials.
-    Revalidate {
-        /// UI epoch.
-        epoch: u64,
-        /// Why the check runs.
-        purpose: ValidationPurpose,
-    },
-    /// Adopt credentials after the config file was written.
-    Adopt {
-        /// Validated origin.
-        base_url: String,
-        /// Validated key. Never printed.
-        api_key: String,
-    },
-    /// Run one health poll.
-    Health {
-        /// UI epoch.
-        epoch: u64,
-    },
-    /// Fetch one page of sessions.
-    ListSessions {
-        /// UI epoch.
-        epoch: u64,
-        /// Poll generation the request belongs to.
-        generation: u64,
-        /// Page size.
-        limit: u32,
-    },
-    /// Create one session.
-    CreateSession {
-        /// UI epoch.
-        epoch: u64,
-        /// Validated request body fields.
-        spec: CreateSessionSpec,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Fetch one session snapshot.
-    GetSession {
-        /// UI epoch.
-        epoch: u64,
-        /// Detail poll generation.
-        generation: u64,
-        /// Session id.
-        session_id: String,
-    },
-    /// Fetch one items page.
-    ListItems {
-        /// UI epoch.
-        epoch: u64,
-        /// Detail poll generation.
-        generation: u64,
-        /// Session id.
-        session_id: String,
-        /// Page size.
-        limit: u32,
-        /// Cursor; `None` fetches the newest page.
-        after: Option<String>,
-    },
-    /// Fetch one turns page.
-    ListTurns {
-        /// UI epoch.
-        epoch: u64,
-        /// Detail poll generation.
-        generation: u64,
-        /// Session id.
-        session_id: String,
-        /// Page size.
-        limit: u32,
-        /// Cursor; `None` fetches the newest page.
-        after: Option<String>,
-    },
-    /// Update one session.
-    UpdateSession {
-        /// UI epoch.
-        epoch: u64,
-        /// Session id.
-        session_id: String,
-        /// Validated update fields.
-        spec: UpdateSessionSpec,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Delete one session.
-    DeleteSession {
-        /// UI epoch.
-        epoch: u64,
-        /// Session id.
-        session_id: String,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Send one user message.
-    SendInput {
-        /// UI epoch.
-        epoch: u64,
-        /// Session id.
-        session_id: String,
-        /// Message text.
-        text: String,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Cancel the running turn.
-    CancelTurn {
-        /// UI epoch.
-        epoch: u64,
-        /// Session id.
-        session_id: String,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Answer one pending approval.
-    AnswerApproval {
-        /// UI epoch.
-        epoch: u64,
-        /// Session id.
-        session_id: String,
-        /// Opaque approval request id.
-        request_id: String,
-        /// Approve or deny.
-        decision: ApprovalDecision,
-        /// Submission-scoped idempotency key.
-        key: IdempotencyKey,
-    },
-    /// Drop the active client (sign out).
-    SignOut,
-    /// Stop the worker loop.
-    Shutdown,
-}
+mod protocol;
+pub use protocol::*;
 
 /// Handles for the UI thread.
 pub struct WorkerHandle {
@@ -393,12 +85,156 @@ async fn run(
     initial: Option<Config>,
 ) {
     let mut active = initial.clone();
+    let mut observability = initial.as_ref().and_then(Config::observability).cloned();
     let mut client = initial
         .as_ref()
         .and_then(|config| HttpSwarmApi::from_config(config).ok());
 
     while let Some(command) = commands.recv().await {
         match command {
+            Command::TestObservability {
+                epoch,
+                base_url,
+                org,
+                user,
+                password,
+            } => {
+                let started = Instant::now();
+                let result = match OpenObserveClient::new(&base_url, &org, &user, &password) {
+                    Ok(client) => {
+                        client
+                            .test_connection()
+                            .await
+                            .map(|streams| ObservabilityCheck {
+                                elapsed: started.elapsed(),
+                                streams,
+                            })
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(WorkerEvent::ObservabilityTested { epoch, result })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadCoreMetrics {
+                epoch,
+                generation,
+                window,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match metrics::load_core_metrics(&client, window, unix_micros_now()).await {
+                            Ok(snapshot) => ObservabilityOutcome::Ready(snapshot),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::CoreMetricsLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadAgentMetrics {
+                epoch,
+                generation,
+                window,
+            } => {
+                let result = match client.as_ref() {
+                    Some(client) => {
+                        let end_us = i64::try_from(unix_micros_now()).unwrap_or(i64::MAX);
+                        let start_us = end_us
+                            .saturating_sub(i64::try_from(window.micros()).unwrap_or(i64::MAX));
+                        client
+                            .agent_metrics(start_us, end_us, metrics::AGENT_METRICS_LIMIT)
+                            .await
+                    }
+                    None => Err(ApiError::local(text::WORKER_CLIENT_UNAVAILABLE)),
+                };
+                if events
+                    .send(WorkerEvent::AgentMetricsLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::LoadRequestLog {
+                epoch,
+                generation,
+                window,
+                page,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match metrics::load_request_log(&client, window, page, unix_micros_now())
+                            .await
+                        {
+                            Ok(loaded) => ObservabilityOutcome::Ready(loaded),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::RequestLogLoaded {
+                        epoch,
+                        generation,
+                        window,
+                        page,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::RunQuery {
+                epoch,
+                generation,
+                sql,
+                start_us,
+                end_us,
+                from,
+                size,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match client.search(&sql, start_us, end_us, from, size).await {
+                            Ok(page) => ObservabilityOutcome::Ready(page),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::QueryLoaded {
+                        epoch,
+                        generation,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Command::Validate {
                 epoch,
                 purpose,
@@ -443,12 +279,31 @@ async fn run(
                 }
             }
             Command::Adopt { base_url, api_key } => {
+                // Keep the OpenObserve section the worker already adopted.
+                let preserved = observability.clone();
                 if let Ok(config) = Config::new(&base_url, &api_key) {
+                    let config = match preserved {
+                        Some(observability) => config.with_observability(observability),
+                        None => config,
+                    };
                     client = HttpSwarmApi::from_config(&config).ok();
                     active = Some(config);
                 } else {
                     client = None;
                     active = None;
+                }
+            }
+            Command::AdoptObservability {
+                base_url,
+                org,
+                user,
+                password,
+            } => {
+                if let Ok(adopted) = ObservabilityConfig::new(&base_url, &org, &user, &password) {
+                    observability = Some(adopted.clone());
+                    if let Some(config) = active.take() {
+                        active = Some(config.with_observability(adopted));
+                    }
                 }
             }
             Command::Health { epoch } => {
@@ -699,10 +554,32 @@ async fn run(
             Command::SignOut => {
                 active = None;
                 client = None;
+                observability = None;
             }
             Command::Shutdown => break,
         }
     }
+}
+
+/// Current Unix time in microseconds.
+fn unix_micros_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Build an OpenObserve client from the adopted connection.
+///
+/// `Ok(None)` means no connection was configured; a client construction
+/// failure is reported rather than hidden.
+fn observability_client(
+    observability: Option<&ObservabilityConfig>,
+) -> Result<Option<OpenObserveClient>, ObservabilityError> {
+    let Some(observability) = observability else {
+        return Ok(None);
+    };
+    OpenObserveClient::from_config(observability).map(Some)
 }
 
 async fn validate_new(base_url: &str, api_key: &str) -> Result<(), ValidationFailure> {
@@ -727,3 +604,7 @@ async fn validate_client(client: &HttpSwarmApi) -> Result<(), ValidationFailure>
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "worker_test.rs"]
+mod tests;

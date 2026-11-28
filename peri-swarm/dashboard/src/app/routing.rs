@@ -6,13 +6,13 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Span;
 
-use peri_tui_components::list_nav::{next_selection, previous_selection};
-
 use super::types::{
     ActionId, BannerActions, Effect, FieldId, Focus, Intent, Overlay, Page, Screen,
 };
 use super::App;
 use crate::view_model::StatusBucket;
+
+mod overlay;
 
 impl App {
     /// Route one key press. Returns effects for the runtime.
@@ -73,10 +73,43 @@ impl App {
                         self.apply(Intent::ToggleMenu);
                         return Vec::new();
                     }
+                    '1' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::FifteenMinutes,
+                        ));
+                    }
+                    '2' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::OneHour,
+                        ));
+                    }
+                    '3' if self.screen == Screen::Main && self.metrics_page_active() => {
+                        return self.apply(Intent::SetMetricsWindow(
+                            crate::metrics::TimeWindow::TwentyFourHours,
+                        ));
+                    }
                     'e' if self.active_banner().is_some() => {
                         self.apply(Intent::OpenErrorActions);
                         return Vec::new();
                     }
+                    _ => {}
+                }
+            }
+            if self.screen == Screen::Main
+                && matches!(
+                    self.page,
+                    Page::AgentMetrics | Page::RequestLog | Page::Query
+                )
+            {
+                match key.code {
+                    KeyCode::PageUp if self.page == Page::Query => {
+                        return self.apply(Intent::QueryPagePrev);
+                    }
+                    KeyCode::PageDown if self.page == Page::Query => {
+                        return self.apply(Intent::QueryPageNext);
+                    }
+                    KeyCode::PageUp => return self.apply(Intent::MetricsPagePrev),
+                    KeyCode::PageDown => return self.apply(Intent::MetricsPageNext),
                     _ => {}
                 }
             }
@@ -92,6 +125,9 @@ impl App {
         if let Focus::Field(field) = self.focus {
             if let Some(target) = self.text_area_mut(field) {
                 target.insert_str(text);
+                if field == FieldId::QuerySql {
+                    self.clear_query_validation();
+                }
                 return;
             }
             if let Some(target) = self.field_mut(field) {
@@ -229,6 +265,12 @@ impl App {
             Intent::SessionPagePrev => self.show_page_prev(),
             Intent::SessionPageNext => self.show_page_next(),
             Intent::GoToSessionPage(page) => self.goto_session_page(page),
+            intent @ (Intent::SetMetricsWindow(_)
+            | Intent::MetricsPagePrev
+            | Intent::MetricsPageNext) => self.apply_metrics_intent(intent),
+            Intent::RunQuery => self.run_query(),
+            Intent::QueryPagePrev => self.query_page_prev(),
+            Intent::QueryPageNext => self.query_page_next(),
             Intent::SelectDetailTab(tab) => {
                 self.detail_tab = tab;
                 self.content_scroll = 0;
@@ -341,6 +383,18 @@ impl App {
             FieldId::CredentialsApiKey if self.screen == Screen::SettingsCredentials => {
                 Some(&mut self.credentials.api_key)
             }
+            FieldId::ObservabilityBaseUrl if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.base_url)
+            }
+            FieldId::ObservabilityOrg if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.org)
+            }
+            FieldId::ObservabilityUser if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.user)
+            }
+            FieldId::ObservabilityPassword if self.screen == Screen::SettingsObservability => {
+                Some(&mut self.observability.password)
+            }
             FieldId::SessionSearch
                 if self.screen == Screen::Main && self.page == Page::SessionLog =>
             {
@@ -388,10 +442,20 @@ impl App {
                 Focus::Action(ActionId::SaveCredentials),
                 Focus::Action(ActionId::Back),
             ],
+            Screen::SettingsObservability => vec![
+                Focus::Field(FieldId::ObservabilityBaseUrl),
+                Focus::Field(FieldId::ObservabilityOrg),
+                Focus::Field(FieldId::ObservabilityUser),
+                Focus::Field(FieldId::ObservabilityPassword),
+                Focus::Action(ActionId::TestObservability),
+                Focus::Action(ActionId::SaveObservability),
+                Focus::Action(ActionId::CancelObservability),
+            ],
             Screen::Main if self.page == Page::Settings => vec![
                 Focus::Sidebar,
                 Focus::Action(ActionId::TestConnection),
                 Focus::Action(ActionId::EditCredentials),
+                Focus::Action(ActionId::ConfigureObservability),
                 Focus::Action(ActionId::SignOut),
                 Focus::Action(ActionId::Quit),
             ],
@@ -400,6 +464,12 @@ impl App {
                 Focus::Field(FieldId::SessionSearch),
                 Focus::Action(ActionId::NewSession),
                 Focus::Action(ActionId::RefreshSessions),
+                Focus::Content,
+            ],
+            Screen::Main if self.page == Page::Query => vec![
+                Focus::Sidebar,
+                Focus::Field(FieldId::QuerySql),
+                Focus::Action(ActionId::RunQuery),
                 Focus::Content,
             ],
             Screen::Main => vec![Focus::Sidebar, Focus::Content],
@@ -491,6 +561,14 @@ impl App {
         self.focus = cycle[next];
     }
 
+    /// Whether the active page has a selectable time window.
+    fn metrics_page_active(&self) -> bool {
+        matches!(
+            self.page,
+            Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog | Page::Query
+        )
+    }
+
     pub(super) fn select_page(&mut self, page: Page, focus: Focus) {
         self.screen = Screen::Main;
         self.page = page;
@@ -501,6 +579,7 @@ impl App {
     pub(super) fn go_back(&mut self) {
         match self.screen {
             Screen::SettingsCredentials => self.back_to_settings(),
+            Screen::SettingsObservability => self.back_to_settings(),
             Screen::SessionEdit => {
                 self.edit = super::EditFormState::default();
                 self.screen = Screen::SessionDetail;
@@ -554,9 +633,15 @@ impl App {
         // Editing the search returns to the first page of the narrower set.
         let before =
             (field == FieldId::SessionSearch).then(|| self.session_log.search.value().to_owned());
+        // A validation message describes the previous text; clear it on edits,
+        // but not when Ctrl-Enter just produced a new one.
+        let before_sql = (field == FieldId::QuerySql).then(|| self.query.sql.text.clone());
         let effects = self.handle_field_input(field, key);
         if before.is_some_and(|before| before != self.session_log.search.value()) {
             self.session_log.reset_page();
+        }
+        if before_sql.is_some_and(|before| before != self.query.sql.text) {
+            self.clear_query_validation();
         }
         effects
     }
@@ -581,6 +666,7 @@ impl App {
             let action = match self.screen {
                 Screen::Onboarding => Some(ActionId::Submit),
                 Screen::SettingsCredentials => Some(ActionId::SaveCredentials),
+                Screen::SettingsObservability => Some(ActionId::SaveObservability),
                 Screen::SessionEdit => Some(ActionId::EditSubmit),
                 _ => None,
             };
@@ -653,6 +739,9 @@ impl App {
                 Screen::SessionCreate => self.activate_action(ActionId::CreateSubmit),
                 Screen::SessionDetail => self.activate_action(ActionId::SendMessage),
                 Screen::SessionEdit => self.activate_action(ActionId::EditSubmit),
+                Screen::Main if self.page == Page::Query => {
+                    self.activate_action(ActionId::RunQuery)
+                }
                 _ => Vec::new(),
             };
         }
@@ -802,123 +891,6 @@ impl App {
                 _ => Vec::new(),
             },
             Focus::Field(_) => Vec::new(),
-        }
-    }
-
-    fn handle_overlay_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        let Some(overlay) = self.overlay else {
-            return Vec::new();
-        };
-        match overlay {
-            Overlay::Help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-                ) {
-                    self.overlay = None;
-                }
-                Vec::new()
-            }
-            Overlay::ConfirmSignOut => match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    Vec::new()
-                }
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
-                    self.overlay_cursor = 1 - self.overlay_cursor.min(1);
-                    Vec::new()
-                }
-                KeyCode::Enter => {
-                    if self.overlay_cursor == 0 {
-                        self.overlay = None;
-                        Vec::new()
-                    } else {
-                        self.activate_action(ActionId::ConfirmSignOut)
-                    }
-                }
-                _ => Vec::new(),
-            },
-            Overlay::NarrowMenu => match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    Vec::new()
-                }
-                KeyCode::Up => {
-                    self.overlay_cursor = previous_selection(self.overlay_cursor);
-                    Vec::new()
-                }
-                KeyCode::Down => {
-                    self.overlay_cursor = next_selection(self.overlay_cursor, Page::ALL.len());
-                    Vec::new()
-                }
-                KeyCode::Home => {
-                    self.overlay_cursor = 0;
-                    Vec::new()
-                }
-                KeyCode::End => {
-                    self.overlay_cursor = Page::ALL.len() - 1;
-                    Vec::new()
-                }
-                KeyCode::Enter => {
-                    let page = Page::ALL[self.overlay_cursor.min(Page::ALL.len() - 1)];
-                    self.apply(Intent::SelectMenuPage(page))
-                }
-                _ => Vec::new(),
-            },
-            Overlay::ErrorActions => match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    Vec::new()
-                }
-                KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Tab
-                | KeyCode::BackTab => {
-                    self.overlay_cursor = 1 - self.overlay_cursor.min(1);
-                    Vec::new()
-                }
-                KeyCode::Enter => {
-                    self.overlay = None;
-                    if self.overlay_cursor == 0 {
-                        self.retry()
-                    } else {
-                        self.open_settings();
-                        Vec::new()
-                    }
-                }
-                _ => Vec::new(),
-            },
-            Overlay::ConfirmDeleteSession | Overlay::ConfirmCancelTurn => match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    Vec::new()
-                }
-                KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::Tab
-                | KeyCode::BackTab => {
-                    self.overlay_cursor = 1 - self.overlay_cursor.min(1);
-                    Vec::new()
-                }
-                KeyCode::Enter => {
-                    if self.overlay_cursor == 0 {
-                        self.overlay = None;
-                        Vec::new()
-                    } else {
-                        let action = if overlay == Overlay::ConfirmDeleteSession {
-                            ActionId::ConfirmDeleteSession
-                        } else {
-                            ActionId::ConfirmCancelTurn
-                        };
-                        self.activate_action(action)
-                    }
-                }
-                _ => Vec::new(),
-            },
         }
     }
 }
