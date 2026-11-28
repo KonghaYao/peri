@@ -66,9 +66,13 @@ api_key = "…"
 [observability]
 base_url = "http://127.0.0.1:5080"
 org = "default"
-user = "peri-swarm-dashboard"
+user = "peri-swarm-dashboard@example.invalid"
 password = "…"
 ```
+
+`user` 必须与 `deploy/init/openobserve-users.sh` 创建账号时使用的
+`OPENOBSERVE_DASHBOARD_EMAIL` 一致。OpenObserve v1.2.0 的 Basic auth 使用完整 email；
+只写短名（如 `peri-swarm-dashboard`）会返回 `401 Unauthorized`。
 
 Core metrics、Agent metrics、Request log 与 Query 均已实现；Sandbox metrics 保持诚实的
 空页（网关只报告 sandbox 类型/id，没有资源级指标）。
@@ -79,9 +83,10 @@ Core metrics、Agent metrics、Request log 与 Query 均已实现；Sandbox metr
   `_search` SQL）。查询 `peri_swarm_http_server_requests` 与
   `peri_swarm_http_server_duration_bucket`，时间窗 15m/1h/24h（默认 15m）；页面可见时
   每 15 秒轮询。指标为累计计数器，而 v1.2.0 不支持 `rate()`/`increase()`（返回空矩阵），
-  因此客户端读取少量原始样本并将正向增量相加（进程重启不会产生负流量）。错误率只统计
-  5xx；p95 由 `le` 桶增量做直方图插值，落在 `+Inf` 桶时显示 `—`，不虚构有限值。页面
-  展示实际样本覆盖范围；刷新失败保留上一次成功数据并标记 `stale`。
+  因此客户端读取 PromQL `query_range` 的 step 评估样本，并将相邻样本的正向增量相加
+  （进程重启不会产生负流量）。错误率只统计 5xx；p95 由 `le` 桶增量做直方图插值，落在
+  `+Inf` 桶时显示 `—`，不虚构有限值。页面展示 PromQL 评估区间，不等同于原始 OTel
+  观测点范围；刷新失败保留上一次成功数据并标记 `stale`。
 - **Agent metrics**：来自网关 `GET /v1/agents/metrics`，不依赖 OpenObserve。固定请求
   窗口内最多 500 个会话（`limit=500`），客户端每页 10 条（窗口 15m/1h/24h，默认 15m）；
   总计行使用响应的 `totals`。`truncated=true` 时显示

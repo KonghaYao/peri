@@ -440,10 +440,10 @@ passed / 0 failed / 1 ignored（比上一轮 +4；`tests/live_gateway.rs` 需真
    初始化幂等；错误 root 密码 401 且非零退出；OTLP logs 写入 200 且可搜；dashboard 账号
    写入探针 200；`down -v` 清理成功。未跑完整栈、默认 5080 与保留策略。
 5. **dashboard 页面**：Core metrics 使用 OpenObserve PromQL（v1.2.0 的 metrics 流对
-   `_search` 返回 400）；由于 `rate`/`increase`/`delta` 返回空矩阵，客户端按累计样本的
-   正向增量计算窗口值；窗口 15m/1h/24h（默认 15m），页面可见时 15 秒轮询；错误率只统计
-   5xx，p95 用 histogram `le` 桶增量插值，落 `+Inf` 或无观测显示 `—`，并展示实际样本
-   覆盖范围。Agent metrics 走网关 `/v1/agents/metrics`，不依赖 OpenObserve；`limit=500`、
+   `_search` 返回 400）；由于 `rate`/`increase`/`delta` 返回空矩阵，客户端读取 PromQL
+   `query_range` 的 step 评估样本并按正向增量计算窗口值；窗口 15m/1h/24h（默认 15m），
+   页面可见时 15 秒轮询；错误率只统计 5xx，p95 用 histogram `le` 桶增量插值，落 `+Inf`
+   或无观测显示 `—`，并展示 PromQL 评估区间（不等同于原始 OTel 观测点范围）。Agent metrics 走网关 `/v1/agents/metrics`，不依赖 OpenObserve；`limit=500`、
    每页 10 条、默认 15m，`totals` 汇总，`truncated` 提示覆盖最新 500 会话，Cache 为
    read+creation，缺失显示 `—`。Request log 用 SQL 查 `peri_swarm_logs`；`_timestamp` 为
    微秒，`ORDER BY _timestamp DESC`，每页 10 条，`total` 只表示页级行数，界面只显示

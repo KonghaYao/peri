@@ -26,7 +26,7 @@
 - Observability 配置：Settings 的只读状态、`Configure observability` 子页、
   `Test`/`Save`/`Cancel`，保存后立即采用新连接。
 - Core metrics：OpenObserve PromQL 视图，requests/min、5xx 错误率、p95 延迟、总请求数与
-  实际样本覆盖范围；15 秒轮询。
+  PromQL 评估区间；15 秒轮询。
 - Agent metrics：网关 `GET /v1/agents/metrics` 的按会话 token 聚合；15 秒轮询，
   `limit=500`、每页 10 条。
 - Request log：OpenObserve SQL 查询 `peri_swarm_logs`；15 秒轮询，服务端分页每页 10 条。
@@ -215,8 +215,9 @@ Core metrics、Request log 与 Query 不经过网关，由 worker 使用已保�
   `400`（`Search stream not found`）。Core metrics 只能走 PromQL；日志等非 metrics
   stream 的查询走 SQL，Query 页对任意 stream 发送单条 SELECT。
 - 该版本的 PromQL 不支持 `rate()`、`increase()` 与 `delta()`（返回空矩阵）。Core metrics
-  读取累计 counter 的少量原始样本，在客户端把相邻样本的正向增量相加；进程重启不会产生
-  负流量。采样起点之前的首个增量无法归因，页面用实际样本的覆盖范围说明区间。
+  读取 PromQL `query_range` 的 step 评估样本，并在客户端把相邻样本的正向增量相加；进程
+  重启不会产生负流量。采样起点之前的首个增量无法归因，页面展示 PromQL 评估区间（不等同
+  于原始 OTel 观测点范围）。
 - Core metrics 查询 `peri_swarm_http_server_requests`（counter）与
   `peri_swarm_http_server_duration_bucket`（histogram）；错误率只统计 `status=~"5.."`。
   p95 用 `le` 桶增量插值，落入 `+Inf` 桶或没有观测时返回 `None`，页面显示 `—`。
