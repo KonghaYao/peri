@@ -395,3 +395,104 @@ fn test_viewport_window_centers_on_cursor_only_when_needed() {
     // 视口高度 0 被 clamp 到 1，光标行仍落在窗口内
     assert_eq!(super::viewport_window(6, 5, 0), (5, 6));
 }
+
+fn area_styles() -> TextAreaStyles {
+    TextAreaStyles {
+        cursor: cursor_style(),
+        selection: sel_style(),
+        placeholder: ph_style(),
+        base: Style::default(),
+    }
+}
+
+#[test]
+fn test_render_text_area_with_cursor_returns_cursor_cell() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = super::TextAreaState::default();
+    state.insert_str("ab\ncd");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 10, 5));
+    let rect = Rect::new(0, 0, 10, 5);
+    let position = super::render_text_area_with_cursor(
+        &mut buf,
+        rect,
+        &state,
+        true,
+        Style::default(),
+        area_styles(),
+        None,
+    );
+    // 边框内起点 (1,1)，光标在第 2 个视觉行、第 2 列。
+    assert_eq!(position, Some(ratatui::layout::Position::new(3, 2)));
+}
+
+#[test]
+fn test_render_text_area_with_selection_does_not_panic() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = super::TextAreaState::default();
+    state.insert_str("hello\nworld");
+    state.cursor = 7;
+    state.cursor_word_left_extend();
+    assert!(state.has_selection());
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
+    let rect = Rect::new(0, 0, 20, 6);
+    let focused = super::render_text_area_with_cursor(
+        &mut buf,
+        rect,
+        &state,
+        true,
+        Style::default(),
+        area_styles(),
+        None,
+    );
+    assert!(focused.is_some());
+    // "world" starts on the inner second row; its selected first character
+    // carries the selection background.
+    assert_eq!(buf[(1, 2)].style().bg, Some(Color::DarkGray));
+    let unfocused = super::render_text_area_with_cursor(
+        &mut buf,
+        rect,
+        &state,
+        false,
+        Style::default(),
+        area_styles(),
+        None,
+    );
+    assert_eq!(unfocused, None);
+}
+
+#[test]
+fn test_render_text_area_with_cursor_rejects_tiny_rects() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let state = super::TextAreaState::default();
+    let mut buf = Buffer::empty(Rect::new(0, 0, 4, 4));
+    assert_eq!(
+        super::render_text_area_with_cursor(
+            &mut buf,
+            Rect::new(0, 0, 1, 4),
+            &state,
+            true,
+            Style::default(),
+            area_styles(),
+            None,
+        ),
+        None
+    );
+    assert_eq!(
+        super::render_text_area_with_cursor(
+            &mut buf,
+            Rect::new(0, 0, 4, 2),
+            &state,
+            true,
+            Style::default(),
+            area_styles(),
+            None,
+        ),
+        None
+    );
+}

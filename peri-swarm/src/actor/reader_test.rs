@@ -3982,3 +3982,167 @@ async fn a_staged_delta_is_dropped_when_its_stream_closed_before_the_flush() {
         .expect("rows");
     assert_eq!(rows.len(), 1, "the dropped delta wrote nothing: {rows:?}");
 }
+
+/// One `usage_update` as `peri-acp` emits it when `token_stats` is negotiated.
+fn usage_update(
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    used: u64,
+    size: u64,
+) -> serde_json::Value {
+    json!({
+        "sessionId": "agent-1",
+        "update": {
+            "sessionUpdate": "usage_update",
+            "used": used,
+            "size": size,
+            "_meta": {
+                "inputTokens": input,
+                "outputTokens": output,
+                "cacheReadTokens": cache_read,
+                "cacheCreationTokens": cache_creation,
+                "requestId": "req-usage",
+                "model": "claude-test",
+            },
+        },
+    })
+}
+
+/// The turn accumulator is persisted by every observation and by the terminal;
+/// no write in between may erase it.
+#[tokio::test]
+async fn usage_updates_accumulate_into_the_open_turn_and_survive_the_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    let opening = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(opening.usage, None, "opening a turn observes no usage");
+
+    log.ingest(
+        "session/update",
+        &usage_update(1_000, 10, 600, 100, 950, 200_000),
+    )
+    .await;
+    let observed = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    let first = observed
+        .usage
+        .clone()
+        .expect("the observation persisted itself");
+    assert_eq!(first["input_tokens"], json!(300), "cache leaves input");
+    assert_eq!(first["output_tokens"], json!(10));
+    assert_eq!(first["cache_read_tokens"], json!(600));
+    assert_eq!(first["cache_creation_tokens"], json!(100));
+    assert_eq!(first["total_tokens"], json!(1_010));
+    assert_eq!(first["context_used"], json!(950));
+    assert_eq!(first["context_size"], json!(200_000));
+    assert_eq!(first["model"], json!("claude-test"));
+    assert_eq!(first["request_id"], json!("req-usage"));
+    assert_eq!(first["calls"], json!(1));
+
+    log.ingest(
+        "session/update",
+        &usage_update(200, 5, 0, 0, 1_200, 200_000),
+    )
+    .await;
+    let observed = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    let second = observed.usage.expect("second observation");
+    assert_eq!(second["input_tokens"], json!(500), "counters add up");
+    assert_eq!(second["output_tokens"], json!(15));
+    assert_eq!(second["total_tokens"], json!(1_215));
+    assert_eq!(
+        second["context_used"],
+        json!(1_200),
+        "context keeps the latest"
+    );
+    assert_eq!(second["calls"], json!(2));
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let closed = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(closed.status, TurnStatus::Completed);
+    assert_eq!(
+        closed.usage,
+        Some(second.clone()),
+        "the terminal write keeps the accumulated usage"
+    );
+    let frame_usage = drain(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnCompleted { usage, .. }) => Some(usage),
+            _ => None,
+        })
+        .expect("turn.completed");
+    assert_eq!(
+        frame_usage,
+        Some(second),
+        "the live frame and turns.retrieve agree"
+    );
+}
+
+/// A usage frame that arrives after the terminal belongs to no turn: it must
+/// neither extend the closed turn nor leak into the next one.
+#[tokio::test]
+async fn usage_after_the_terminal_is_not_attributed_to_the_next_turn() {
+    let Fixture { log, store, .. } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.ingest("session/update", &usage_update(100, 1, 0, 0, 10, 1_000))
+        .await;
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let closed = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    let closed_usage = closed.usage.expect("usage");
+
+    log.ingest(
+        "session/update",
+        &usage_update(9_999, 999, 0, 0, 999, 1_000),
+    )
+    .await;
+    let still_closed = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        still_closed.usage,
+        Some(closed_usage),
+        "a late usage frame does not change the closed row"
+    );
+
+    log.begin_turn("req-2", "turn_2")
+        .await
+        .expect("second turn");
+    let next = store
+        .swarm_get_turn("agent-1", "turn_2")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        next.usage, None,
+        "the next turn starts with a clear accumulator"
+    );
+}

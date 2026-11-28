@@ -122,8 +122,8 @@ pub struct SwarmTurnRow {
 
 impl SwarmTurnRow {
     /// Public projection. `agent_id` is the gateway's single root convention;
-    /// `subagent_id`/`usage` stay whatever the caller persisted (today both
-    /// are always `None`).
+    /// `subagent_id`/`usage` stay whatever the caller persisted (usage is the
+    /// gateway's cumulative turn usage when the host reported any).
     #[must_use]
     pub fn to_official(&self) -> OfficialTurn {
         OfficialTurn {
@@ -140,6 +140,24 @@ impl SwarmTurnRow {
             usage: self.usage.clone(),
         }
     }
+}
+
+/// One turn row carrying the persisted usage fact and its session's model.
+///
+/// Usage aggregates read turn rows through this projection instead of asking
+/// SQL to parse the TEXT `usage_json`: the gateway owns that shape, so one Rust
+/// decoder serves both stores.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmTurnUsageRow {
+    pub logical_id: String,
+    pub turn_id: String,
+    /// Unix seconds when the turn opened.
+    pub created_at: i64,
+    pub usage: Option<Value>,
+    /// `swarm_sessions.model`; an observed usage model wins over this value.
+    pub model: Option<String>,
+    /// `swarm_sessions.last_activity_at` (RFC3339).
+    pub last_active_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -310,9 +328,11 @@ pub struct SwarmBindingRow {
 
 /// Async storage port consumed by the actor-side service (S4+) and S6.
 ///
-/// Every method is scoped by `logical_id`; there is no cross-session query and
-/// no generic SQL surface. Implementations must surface conflicts instead of
-/// renumbering or overwriting rows.
+/// Every method is scoped by `logical_id` except
+/// [`SwarmStore::swarm_turn_usage_window`], the one bounded cross-session read
+/// the Agent-metrics report needs. There is no generic SQL surface.
+/// Implementations must surface conflicts instead of renumbering or
+/// overwriting rows.
 #[async_trait]
 pub trait SwarmStore: Send + Sync {
     async fn swarm_upsert_session(&self, row: SwarmSessionRow) -> Result<(), StoreError>;
@@ -421,8 +441,26 @@ pub trait SwarmStore: Send + Sync {
     ///
     /// `begin_turn` writes `in_progress`; the terminal write replaces status,
     /// `started_at`/`completed_at`, `error`, `usage` and `subagent_id` while
-    /// keeping the opening `created_at`.
+    /// keeping the opening `created_at`. A `None` usage keeps the stored value:
+    /// a later write cannot erase usage an earlier observation persisted.
     async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), StoreError>;
+    /// Record the open turn's cumulative usage without changing any other
+    /// column.
+    ///
+    /// The actor writes on every `usage_update` so an interrupted turn keeps
+    /// what it already spent. Only `usage_json` is touched on an existing row:
+    /// a concurrently persisted terminal (status, completion time, error) must
+    /// not be reverted to `in_progress` by a late observation, and a terminal
+    /// row keeps its own usage. A missing row is created as `in_progress` so a
+    /// usage fact that arrives before the opening write is not lost.
+    async fn swarm_record_turn_usage(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+        created_at: i64,
+        started_at: Option<i64>,
+        usage: &Value,
+    ) -> Result<(), StoreError>;
     async fn swarm_get_turn(
         &self,
         logical_id: &str,
@@ -436,6 +474,27 @@ pub trait SwarmStore: Send + Sync {
         logical_id: &str,
         window: &TurnsWindow,
     ) -> Result<Vec<SwarmTurnRow>, StoreError>;
+    /// Every turn of one session with its usage fact, newest first, at most
+    /// `limit` rows.
+    ///
+    /// The session usage aggregate reads one query per session through this
+    /// port; callers pass `limit + 1` when they need a truncation probe.
+    async fn swarm_session_usage_turns(
+        &self,
+        logical_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError>;
+    /// Turns opened in `[start_at, end_at]` (Unix seconds) across sessions,
+    /// newest first, at most `limit` rows.
+    ///
+    /// The Agent-metrics report scans one bounded window through this port;
+    /// sessions deleted concurrently simply do not appear.
+    async fn swarm_turn_usage_window(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError>;
     /// Close every non-terminal turn of a session (crash reconciliation).
     /// Returns the number of rows updated.
     async fn swarm_close_open_turns(

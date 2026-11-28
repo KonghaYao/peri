@@ -242,6 +242,8 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 | F-SWARM-014 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official_item.rs)、[投影](../../peri-swarm/src/service/official_items.rs)；[测试](../../peri-swarm/src/domain/official_item_test.rs)、[投影用例](../../peri-swarm/src/service/official_items_test.rs)、[分页](../../peri-swarm/tests/it/items_pagination_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；补充证据见下方官方 items 组分页验收；缺口：真实 SDK 只消费过消息项 | 四类官方投影、恢复行排除、悬挂调用状态、游标与回扫上限由用例覆盖；真实 `/items` 为 `raw=3 official=3` |
 | F-SWARM-015 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/request.rs)、[受理](../../peri-swarm/src/actor/service.rs)、[错误](../../peri-swarm/src/domain/error.rs)；[测试](../../peri-swarm/tests/it/http_contract/official_cancel.rs)、[actor 取消](../../peri-swarm/src/actor/service_cancel_test.rs)、[flush 失败](../../peri-swarm/src/actor/reader_test.rs)；[证据](peri-swarm-agents-compat-item-granularity-2026-11-26.md)；缺口：真实宿主 30s 取消超时与重发失败的上游行为未验证；取消 turn 落库失败只记录日志 | 事件解析、202 收据、两类下发失败、管理冲突与取消 turn 保持 `cancelled` 由用例覆盖；真实宿主未跑 |
 | F-SWARM-016 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/official.rs)、[实时](../../peri-swarm/src/actor/reader.rs)、[回放](../../peri-swarm/src/service/mod.rs)；[测试](../../peri-swarm/src/actor/reader_test.rs)、[回放用例](../../peri-swarm/src/service/in_memory_test.rs)、[历史多行](../../peri-swarm/src/actor/service_test.rs)；[证据](peri-swarm-official-text-delta-2026-11-26.md)；缺口：reasoning delta 未实现；回放无 chunk 边界；历史同 itemId 多条 complete 行未测；added 首段去重未用真实客户端验证；关闭-广播窄竞态未复现 | 实时 85 chunk / 回放 1 条 336 字符全文 delta 在本地 Compose 单 turn 实测；`72c10cfe9` 上 lib 421 / it 115 / 27 ignored 与 PG 20 通过；未验证项不构成验收 |
+| F-SWARM-017 | 源码存在 | [契约](../design/peri-swarm-dashboard.md) | [源码](../../peri-swarm/dashboard/src/main.rs)、[状态机](../../peri-swarm/dashboard/src/app.rs)、[HTTP 客户端](../../peri-swarm/dashboard/src/api.rs)；[测试](../../peri-swarm/dashboard/src/app_test.rs)、[配置](../../peri-swarm/dashboard/src/config_test.rs)、[API](../../peri-swarm/dashboard/src/api_test.rs)、[鼠标命中](../../peri-swarm/dashboard/src/ui/mouse_test.rs)、[live smoke（ignored）](../../peri-swarm/dashboard/tests/live_gateway.rs)；缺口：人工 TUI 走查未覆盖发送、审批、退出登录；自动 live smoke 只覆盖只读 health + 列表；无像素快照；500 条上限与长时间轮询未压测；真实 401/409/502 信封未验证；Session log 分页器仅在本地 stub 数据源上做过 pty 点击验证，未在真实网关验证；固定宽度分页器与本地排序已在本地 120 条 stub 上完成 pty 验证，未在真实网关验证。观测与查询见 F-SWARM-018 | crate check/test/clippy/fmt 与静态门通过；组件 548 + 74、dashboard 333 passed / 0 failed / 1 ignored（观测页加入后的当前全量）；真实网关只读 live smoke 通过；真实 pty 人工走查列表/设置/详情/标签点击与一次 create/edit/delete 通过，发现并修复详情页标签点击偏移（回归测试覆盖）；按钮改为 Primary 填充块 / Secondary·Danger 纯文字，抓屏不再出现方括号按钮；Session log 的 `Load more` 已替换为客户端分页器（每页 10 条，末页 `Next ›` 按 50 条步长追加至 500）；分页控件改为固定字符宽度（页码带预留最宽窗口，翻页时 `Next ›` 不移动），列表改为按 `last_active_at` 降序、同值 `created_at` 降序稳定排序，二者由单元/渲染命中测试覆盖；固定宽度分页器与本地排序另在本地 120 条 stub 上完成 pty 走查（12 页时 `Next ›` 同列、最新在前、末页不追加） |
+| F-SWARM-018 | 源码存在 | [dashboard 契约](../design/peri-swarm-dashboard.md)、[网关用量契约](../design/peri-swarm.md) | [usage 领域](../../peri-swarm/src/domain/usage.rs)、[usage 聚合](../../peri-swarm/src/service/usage.rs)、[usage 投影](../../peri-swarm/src/actor/reader.rs)、[OTel](../../peri-swarm/src/telemetry.rs)、[HTTP 遥测](../../peri-swarm/src/http/telemetry.rs)、[部署 compose](../../deploy/docker-compose.yml)、[OpenObserve 初始化](../../deploy/init/openobserve-users.sh)、[dashboard 观测客户端](../../peri-swarm/dashboard/src/observability.rs)、[查询规则](../../peri-swarm/dashboard/src/query.rs)；[测试](../../peri-swarm/src/domain/usage_test.rs)、[遥测配置](../../peri-swarm/src/telemetry_test.rs)、[访问日志](../../peri-swarm/src/http/telemetry_test.rs)、[观测客户端](../../peri-swarm/dashboard/src/observability_test.rs)、[指标页状态](../../peri-swarm/dashboard/src/app/metrics_test.rs)、[查询页状态](../../peri-swarm/dashboard/src/app/query_test.rs)；缺口：Agent metrics 未对真实网关做端到端页面验证；Query 未对真实 OpenObserve 做端到端页面验证；完整 Compose 栈未跑；观测页无人工 TTY 走查；Postgres usage SQL 未对真实数据库运行；p95 为 histogram 桶内近似；OSS dashboard 账号可写；`openobserve-init` 不轮换密码、默认保留策略未配置；两副本 `service.instance.id` 未验证；5s shutdown 上限不完全可靠 | 阶段 2 网关 460 unit + 127 integration passed / 29 ignored；阶段 3 480 unit + 128 integration（608 passed）/ 29 ignored，OTLP stub 收到三类信号且无敏感泄漏；阶段 5a/5b/6a dashboard 240/290/333 passed / 1 ignored；隔离 compose project 验证 OpenObserve healthy、初始化幂等、OTLP 写入 200 可搜、dashboard 账号写入探针 200；未验证项不构成验收 |
 
 ### PR #614 Swarm 补充验收
 
@@ -285,3 +287,200 @@ PERI_TEST_POSTGRES_URL=postgresql://postgres@localhost/peri_test \
 ### F-TASK-001 补充验收
 
 基线为 `a2c0149` 加本次补丁。在受控本地文件和网页工具上，Luna 将 14/14 个调查委派给 explorer，另 4/4 个已知位置查询或改代码的对照任务均选对执行者。四个交付任务覆盖本地追踪、网页查证、混合核对和网页不可用。首次 3/4 满足取证要求，同一子会话补回混合核对的源码定位后达到 4/4。该模拟未测生产流量、实际联网或后台任务生命周期。
+
+### F-SWARM-017 补充验收
+
+基线为 `b9fd1a293` 加 `feat/peri-swarm-dashboard` 的未提交变更。本行覆盖
+`peri-swarm-dashboard` crate 的自动检查、一次真实网关只读冒烟，以及一次真实 pty 上的
+人工 TUI 端到端走查。
+
+```bash
+./scripts/cargo-rmcp-patched.sh check --locked -p peri-swarm-dashboard --all-targets
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm-dashboard
+./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm-dashboard --all-targets -- -D warnings
+cargo fmt --check
+bash scripts/check-layer-imports.sh
+python3 scripts/check-feature-catalog.py
+bash scripts/check-file-size.sh
+git diff --check
+```
+
+结果：check/clippy/fmt/layer-imports/catalog/diff 通过；crate 测试 187 passed / 0 failed /
+1 ignored（`tests/live_gateway.rs`）。`bash scripts/check-file-size.sh` 在 `PATH` 缺少 `rg`
+时无法启动；注入 VS Code 自带 ripgrep 后退出 1，67 个超限文件全部为仓库既有文件，本次
+新增/修改文件均低于 1000 行（最大 993 行）。
+
+真实网关只读冒烟（2026-11-27）：对本地 Compose 网关 `http://127.0.0.1:8080`，从
+`deploy/.env` 读取凭据且全程不打印 key，运行
+`cargo test -p peri-swarm-dashboard --test live_gateway -- --ignored`。
+`health_then_list_sessions` 通过（1 passed / 0 failed）：`GET /healthz` 返回 `ok`，
+携带 Bearer 的 `GET /v1/agents/sessions?limit=1` 成功，`x-peri-swarm-contract` 为 `1`。
+该冒烟未执行任何写操作，也未覆盖真实 401/409/502 信封。
+
+人工 TUI 端到端走查（2026-11-27）：真实 pty（tmux 140×40，独立
+`HOME=/tmp/peri-dash-e2e`）连接同一网关。首启 onboarding 预填 Base URL，API key 粘贴后
+显示为掩码且未出现在抓屏中，提交后配置目录 `0700`/文件 `0600` 并进入 dashboard；列表
+显示真实 8 条会话与状态 chips，Settings 的 `[ Test connection ]` 返回
+“Connection OK in 4 ms”。鼠标切换侧栏、打开会话详情、点击 Timeline/Turns/Info 均生效，
+键盘 Left/Right 仍可循环。写路径经 `[ Create ]` 创建 `e2e-check-2711`，用编辑表单把
+model 改为 `stub-model` 并生效，`[ Delete ]` 确认覆盖层外点击被吞掉，删除成功后再次
+查询列表确认该会话不存在（8 条，计数 0）。走查发现详情页标签点击区域相对绘制文字左移
+（`Info` 偏移 5 列而不可点击），已修复为与 `Tabs` 渲染一致的 1 列左内边距和 5 列标签
+间距，新增回归测试 `tab_hit_regions_cover_the_drawn_labels`，并在真实终端按可见标签
+首列点击 Info/Turns/Timeline 复验通过。
+
+明确缺口：自动 live smoke 只覆盖只读 health + 列表，写路径仅有上述一次人工
+create/edit/delete 记录；未人工走查发送消息、审批与退出登录；没有像素快照；500 条上限
+与长时间轮询未压测；真实 401/409/502 信封未验证；未做 release 构建。以上缺口不构成
+验收。
+
+### F-SWARM-017 Session log 排序与固定宽度分页器验收
+
+基线为 `1bbb7dec6` 加未提交的组件改造、按钮外观、分页器与本地排序改动，未创建提交。本轮
+未运行真实网关、未读写 `deploy/.env` 或用户配置；另外用本机 120 条只读 stub 完成了 pty
+走查（见下）。
+
+```bash
+./scripts/cargo-rmcp-patched.sh fmt --check
+./scripts/cargo-rmcp-patched.sh clippy -p peri-tui-components -p peri-swarm-dashboard --all-targets -- -D warnings
+./scripts/cargo-rmcp-patched.sh test -p peri-tui-components
+./scripts/cargo-rmcp-patched.sh test -p peri-swarm-dashboard
+git diff --check
+git status --short Cargo.lock
+```
+
+结果：fmt/clippy/diff 通过，`Cargo.lock` 无改动；`peri-tui-components` 548 个库测试
+（其中 21 个 `pagination`，比上一轮 +3）与 74 个 storybook 测试通过；dashboard 217
+passed / 0 failed / 1 ignored（比上一轮 +4；`tests/live_gateway.rs` 需真实网关）。
+
+覆盖内容：
+
+1. 组件：页码窗口（全部显示、中段/首段/末段省略号、页码不重不漏、当前页必在其中）、
+   `prev` 在首页禁用、`next` 在末页且无 `has_more` 时禁用、`has_more` 启用末页的
+   `next`、每个控件矩形与绘制文字等宽、页码带内部相邻控件间隔 1 列、当前页为
+   accent-on-selection 加粗、窄行回退到 `prev 当前/总数 next`、极窄裁剪、零面积与
+   `page_count == 0`、页码钳制；固定宽度：页码控件占 `digits` 列（含当前页）、省略号
+   固定 1 列、`page_count ∈ [1..=30]` 的所有当前页窗口宽度不超过预留宽度、
+   `page_count ∈ {1,6,7,8,9,20,50}` 翻页时 `Next` 列与整行宽度不变、窄行指示器宽度
+   恒定。
+2. 状态：每页 10 条的切片与页码、空集合算一页、过滤/搜索回到第 1 页、已加载页之间翻页
+   不发请求、末页 `next` 按 50 条步长抬升 limit 并在新数据到达后落到 pending 页、
+   pending 页在旧的在途响应到达后仍保留、数据不足时继续等待、集合已取完时丢弃 pending、
+   失败清除 pending、集合缩小时的页码与光标钳制、`PgUp`/`PgDn` 仅在内容区生效、
+   行光标为页内坐标、最多 500 条；排序：旧→新输入在 `apply_page` 后最近活跃的排第一、
+   25 条乱序日期第 1 页为最新 10 条且末页为最旧 5 条、`last_active_at` 相同保持输入
+   顺序、`last_active_at` 相同时按 `created_at` 降序。
+3. 命中与会话页：分页器每个启用控件的命中区与绘制文字一致；点击页码与 `Next ›` 后表格只
+   绘制当前页；首页的 `‹ Prev` 与末页无更多数据时的 `Next ›` 不注册命中区；页脚提示包含
+   `PgUp/PgDn page`，帮助覆盖层新增一行分页说明；会话页不再出现 `Load more`。
+
+### pty 走查（本地 120 条数据源）
+
+在 tmux 中以 140×40 运行重建后的二进制，`HOME` 指向临时目录，数据源为
+`127.0.0.1:18082` 上按 `limit` 返回 120 条会话的只读 stub（`limit < 120` 时
+`has_more = true`，数据按最旧→最新返回），未使用网关凭据。观察到：
+
+1. 本地排序生效：第 1 页为 `sess-120..111`，第 12 页为 `sess-010..001`，每页 10 条。
+2. 12 页时页脚显示 `‹ Prev 1 … 10 11 12 Next ›`；用 `PgDn`/`PgUp` 走完全部 12 页，
+   `Next ›` 始终位于同一列（第 61 列），当前页为 2 列宽的 accent 填充块。
+3. 在第 5 页点 `Next ›` 只发一次 `limit=100` 请求（stub 日志确认），落到第 6 页；
+   在第 10 页点 `Next ›` 只发一次 `limit=150`，落到第 11 页并显示 12 页。
+4. 末页 `Next ›` 为暗色；点击它之后只有既有的轮询请求，没有追加请求。
+5. 切换 status chip 与输入搜索都回到第 1 页；清空搜索后第 1 页仍为 `sess-120`。
+
+明确缺口：固定宽度分页器与本地排序尚未在真实网关数据上验证；终端高度不足时（如 79×24）
+需要滚动才能看到分页器（与原 `Load more` 相同，本轮未复测）；500 条上限下的分页器渲染
+性能未压测；`pending_page` 依赖后续响应包含该页，若网关在 `has_more = true` 时持续返回
+不足的数据，等待会一直保留到下一次刷新（不会自动清空，也不会重复发请求）。
+
+### F-SWARM-018 观测与查询验收
+
+基线为 `feat/peri-swarm-observability` 的提交序列 `97270b03e`（导航与空页）→
+`a9e544afb`（usage + Agent metrics）→ `9e15c3fae`（OTel）→ `92d61f52d`（OpenObserve
+部署）→ `093ec8a22`（观测配置与客户端）→ `8a78dcd4a`（Core/Agent/Request 页面）→
+`23e103064`（Agent metrics 15s）→ `4fde4431f`（Query 页）。本节记录各阶段门禁与隔离
+部署探针；本节文档变更本身未重跑这些检查。
+
+1. **导航**：侧栏 13 项，分组 Monitor 6 / Resources 4 / Platform 3。`Page::is_implemented()`
+   为 SessionLog、Settings、CoreMetrics、AgentMetrics、RequestLog、Query。Sandbox metrics
+   和 Agents、Artifacts、Vaults、MCP、Automations、Nodes 仍是有意空页；Sandbox metrics
+   的文案明确说明网关只报告 sandbox 类型/id，没有 CPU/内存/资源指标。旧页 Environment
+   templates、Skills、Files、Projects and keys 已删除；没有 Overview、SSE 或 demo/mock 数据。
+2. **usage 与 Agent metrics**：网关在 `token_stats=true` 时投影并累加 `usage_update`；
+   回放过滤保留，重连不重复计数。`input_tokens = inputTokens - cacheReadTokens -
+   cacheCreationTokens`（饱和减），`total_tokens` 为 input/output/cache_read/cache_creation
+   之和；`context_used`/`context_size`、`model`、`request_id` 取最新观测，`calls` 累加；
+   缺 `_meta` 时只写 context，不伪造 token。每次非 replay usage 立即 upsert，后续写入用
+   COALESCE 保留已存值；turn 终止写累计值，实时 `turn.completed`/`turn.failed` 与
+   `turns.retrieve` 一致。`sessions.retrieve`（及 create/update 回读）聚合该会话的持久
+   turn；`sessions.list` 保持 `usage:null`。
+   `GET /v1/agents/metrics?start_time=<us>&end_time=<us>&limit=N` 在 auth guard 内：默认
+   最近 24 小时、窗口上限 31 天、`limit` 1..=500、`start_time > end_time` → 400；按会话
+   返回 input/output/cache read/cache create/total/turns/calls/last_active_at，`totals`
+   覆盖整窗，`truncated` 表示扫描达到上限；没有任何 usage 事实的会话不出现，不显示 0。
+   已知缺口：Postgres usage SQL 未对真实数据库运行；`usage_update` 合并进 root turn 的
+   边角未单测。
+3. **OTel**：标准 OTel 环境变量驱动，未设置 endpoint 或 `OTEL_SDK_DISABLED=true` 时
+   no-op（不建连、不报错）。traces、metrics、logs 三类信号走 OTLP/HTTP；`service.name`
+   默认 `peri-swarm`，`service.instance.id` 为 `HOSTNAME:pid`，不是共享 machine-id。
+   Provider 是进程局部的；`main` 持有 guard 到 `run()` 返回之后，Drop 时 5 秒有界 flush
+   （current-thread runtime 下该上限不完全可靠）。HTTP middleware 不读/不缓冲 body；
+   `/healthz` 完全跳过；`/events` 不计入延迟直方图。指标为
+   `peri_swarm.http.server.requests` 与 `peri_swarm.http.server.duration`。访问日志只含
+   method、route、status、duration_ms、session_id、request_id；不记录 header/query/body/
+   `Authorization`/`Cookie`/幂等键。阶段 3 的 OTLP stub 收到三类信号，未发现敏感信息泄漏，
+   SSE 未被包裹。
+4. **OpenObserve 部署**：镜像 `openobserve/openobserve:v1.2.0`（由 `OPENOBSERVE_TAG`
+   固定）；一次性 `curlimages/curl:8.11.1` 初始化容器；镜像无 shell/curl/wget/nc/busybox，
+   healthcheck 用 `/openobserve node metrics`；命名卷 `openobserve-data`；默认发布
+   `${OPENOBSERVE_PUBLISH_HOST:-127.0.0.1}:${OPENOBSERVE_PORT:-5080}:5080`；
+   `restart: unless-stopped`、`no-new-privileges`。初始化脚本幂等创建
+   `peri-swarm-ingest`（OTLP 写入）与 `peri-swarm-dashboard`（dashboard 查询），两者在
+   OSS v1.2.0 都是 admin。网关没有硬 `depends_on` OpenObserve，OOM/重启不阻塞网关。
+   隔离 compose project 验证：`compose config --quiet` 通过；`openobserve` healthy；
+   初始化幂等；错误 root 密码 401 且非零退出；OTLP logs 写入 200 且可搜；dashboard 账号
+   写入探针 200；`down -v` 清理成功。未跑完整栈、默认 5080 与保留策略。
+5. **dashboard 页面**：Core metrics 使用 OpenObserve PromQL（v1.2.0 的 metrics 流对
+   `_search` 返回 400）；由于 `rate`/`increase`/`delta` 返回空矩阵，客户端读取 PromQL
+   `query_range` 的 step 评估样本并按正向增量计算窗口值；窗口 15m/1h/24h（默认 15m），
+   页面可见时 15 秒轮询；错误率只统计 5xx，p95 用 histogram `le` 桶增量插值，落 `+Inf`
+   或无观测显示 `—`，并展示 PromQL 评估区间（不等同于原始 OTel 观测点范围）。Agent metrics 走网关 `/v1/agents/metrics`，不依赖 OpenObserve；`limit=500`、
+   每页 10 条、默认 15m，`totals` 汇总，`truncated` 提示覆盖最新 500 会话，Cache 为
+   read+creation，缺失显示 `—`。Request log 用 SQL 查 `peri_swarm_logs`；`_timestamp` 为
+   微秒，`ORDER BY _timestamp DESC`，每页 10 条，`total` 只表示页级行数，界面只显示
+   `Page N`。Query 为手动 SELECT-only：非空、≤8 KiB、无 NUL、首 token 为 `SELECT`
+   （大小写不敏感）、只允许一个末尾分号且正文不得再有分号；窗口 15m/1h/24h（默认 1h），
+   20 行/页、最多 100 行，不轮询，只显示 `Page N`；列优先响应 `columns`（兼容字符串或
+   `{name}` 对象），否则取行 JSON 键并集，null 显示 `—`，嵌套值显示紧凑 JSON，长值 96
+   字符截断，超宽列裁剪并提示 `Showing N of M columns.`。Core/Agent/Request 15 秒轮询，
+   仅页面可见且无 overlay 时请求，不重叠，generation 丢弃旧响应，失败保留上次成功数据并
+   标 stale，退避 3→6→12→24→30 秒；离开页面暂停。未配置 `[observability]` 时 Core/Request/
+   Query 显示 “Observability is not configured.” + Settings 按钮，Agent metrics 仍工作，
+   不伪造数据。Sandbox metrics 为空页，文案说明没有资源级指标。
+6. **安全边界**：dashboard 用专用 admin 账号直连 OpenObserve（不用 root）；OSS v1.2.0 的
+   create-user API 只接受 admin/service_account，viewer/editor 返回 400；ingestion token
+   只写；没有只读 API key/endpoint。dashboard 账号可写，Core 的 PromQL 与 Request/Query
+   的 SELECT-only 都只是防误操作，不是安全边界。配置依赖 `0600` 文件、内网/loopback、
+   专用账号与密码轮换；密码遮蔽、保存后不回显，`Debug` 与错误脱敏，客户端禁用重定向并
+   设 10 秒超时。
+7. **门禁命令与结果**：
+
+```bash
+./scripts/cargo-rmcp-patched.sh fmt --check
+./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -D warnings
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm
+./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm-dashboard --all-targets -- -D warnings
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm-dashboard
+```
+
+阶段 1 dashboard 217 passed / 1 ignored；阶段 2 网关 460 unit + 127 integration passed，
+29 ignored（21 需 `PERI_TEST_POSTGRES_URL`，8 外部/Rivet），fmt/clippy 通过；阶段 3
+480 unit + 128 integration（608 passed）/ 29 ignored，fmt/clippy 通过；阶段 5a/5b/6a
+dashboard 分别为 240/290/333 passed、各 1 ignored，fmt/clippy 通过。以上为阶段记录，
+本轮文档变更未重跑。
+
+明确缺口：真实网关 Agent metrics 端到端、真实 OpenObserve Query 端到端、完整 Compose
+栈、观测页人工 TTY 走查、Postgres usage SQL 实跑、p95 精确性均未验证；OSS dashboard
+账号可写；`openobserve-init` 不轮换密码、默认保留策略未配置；两副本
+`service.instance.id` 未在真实 Compose 下核对；OTel 5 秒 shutdown 上限不完全可靠。
+以上缺口不构成验收。

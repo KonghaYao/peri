@@ -6,6 +6,9 @@ use crate::domain::{
     SessionState,
 };
 
+#[path = "memory_test_usage.rs"]
+mod usage;
+
 fn session_row(logical_id: &str, cwd: &str) -> SwarmSessionRow {
     SwarmSessionRow {
         logical_id: logical_id.to_owned(),

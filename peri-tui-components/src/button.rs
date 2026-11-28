@@ -1,12 +1,20 @@
 use peri_theme::theme::ThemeDefinition;
 use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
     style::{Modifier, Style},
     text::Span,
 };
 
+use crate::text::truncate_to_width;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonChrome {
+    /// 反色填充块：用于页面主操作。
     Filled,
+    /// 只有标签文字：用于次要操作，靠色调区分。
+    Plain,
+    /// 旧式方括号外观：`[ label ]`；保留给既有调用方。
     Bracketed { padded: bool },
 }
 
@@ -15,6 +23,7 @@ impl ButtonChrome {
     pub fn text(self, label: &str) -> String {
         match self {
             Self::Filled => format!(" {label} "),
+            Self::Plain => label.to_owned(),
             Self::Bracketed { padded: true } => format!("[ {label} ]"),
             Self::Bracketed { padded: false } => format!("[{label}]"),
         }
@@ -49,13 +58,64 @@ pub struct ButtonVisual {
     pub width: u16,
 }
 
+fn text_width(text: &str) -> u16 {
+    Span::raw(text).width().min(u16::MAX as usize) as u16
+}
+
 pub fn button_visual(spec: ButtonSpec<'_>, theme: &ThemeDefinition) -> ButtonVisual {
     let text = spec.chrome.text(spec.label);
-    let width = Span::raw(text.as_str()).width().min(u16::MAX as usize) as u16;
     ButtonVisual {
+        width: text_width(&text),
         text,
         style: button_style(spec.chrome, spec.tone, spec.state, theme),
-        width,
+    }
+}
+
+/// A draw-only button.
+///
+/// The widget never registers hit regions or claims focus: the host owns
+/// geometry, hit testing and focus, and passes the resulting state in.
+pub struct Button<'a> {
+    pub label: &'a str,
+    pub chrome: ButtonChrome,
+    pub tone: ButtonTone,
+    pub state: ButtonState,
+}
+
+impl<'a> Button<'a> {
+    #[must_use]
+    pub fn new(label: &'a str, chrome: ButtonChrome, tone: ButtonTone, state: ButtonState) -> Self {
+        Self {
+            label,
+            chrome,
+            tone,
+            state,
+        }
+    }
+
+    /// Width of the chrome text in cells. Independent of [`Self::state`].
+    #[must_use]
+    pub fn width(&self) -> u16 {
+        text_width(&self.chrome.text(self.label))
+    }
+
+    /// Draw the button into `rect`, clipping the text to `rect.width`.
+    pub fn render(&self, buf: &mut Buffer, rect: Rect, theme: &ThemeDefinition) {
+        let rect = rect.intersection(buf.area);
+        if rect.is_empty() {
+            return;
+        }
+        let visual = button_visual(
+            ButtonSpec {
+                label: self.label,
+                chrome: self.chrome,
+                tone: self.tone,
+                state: self.state,
+            },
+            theme,
+        );
+        let text = truncate_to_width(&visual.text, usize::from(rect.width));
+        buf.set_string(rect.x, rect.y, text, visual.style);
     }
 }
 

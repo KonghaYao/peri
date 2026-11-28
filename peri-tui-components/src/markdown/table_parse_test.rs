@@ -182,3 +182,36 @@ fn test_table_8_typical_agent_output() {
 }
 
 use ratatui_kit::components::ComponentTheme as _;
+
+#[test]
+fn themed_table_wrapper_renders_with_theme_palette() {
+    use peri_theme::bridge::ThemeDefinitionExt;
+    use ratatui_kit::components::{ComponentTheme, TableTheme};
+
+    let segments = super::parse_markdown(
+        "| name | value |\n|---|---|\n| a | 2 |",
+        30,
+        Palette::default(),
+        TEST_BASE_FG,
+    );
+    let data = segments
+        .iter()
+        .find_map(|segment| match segment {
+            MarkdownSegment::Table(data) => Some(data),
+            _ => None,
+        })
+        .expect("table segment");
+
+    let theme = peri_theme::builtin::dark_theme();
+    let lines = super::table_data_to_lines_with_theme(data, 30, &theme);
+    let plain =
+        super::table_data_to_lines(data, &TableTheme::from_palette(&theme.to_palette()), 30);
+    assert_eq!(lines, plain);
+    assert!(!lines.is_empty());
+    let text: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect();
+    assert!(text.contains("name"));
+    assert!(text.contains('2'));
+}

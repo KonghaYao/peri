@@ -144,6 +144,114 @@ impl TextAreaState {
         self.cursor = self.len();
     }
 
+    // ── 选区扩展（Shift+移动） ────────────────────────
+
+    /// 选中全部文本；空文本清除选区。
+    pub fn select_all(&mut self) {
+        self.desired_col = None;
+        if self.is_empty() {
+            self.cursor = 0;
+            self.selection_start = None;
+        } else {
+            self.selection_start = Some(0);
+            self.cursor = self.len();
+        }
+    }
+
+    /// 左移一个字符并保留选区（Shift+Left）。
+    pub fn cursor_left_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    /// 右移一个字符并保留选区（Shift+Right）。
+    pub fn cursor_right_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        if self.cursor < self.len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// 左移到上一个词边界并保留选区。
+    pub fn cursor_word_left_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        self.cursor = word::prev_word_boundary(&self.text, self.cursor);
+    }
+
+    /// 右移到下一个词边界并保留选区。
+    pub fn cursor_word_right_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        self.cursor = word::next_word_boundary(&self.text, self.cursor);
+    }
+
+    /// 到文本首并保留选区。
+    pub fn cursor_home_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        self.cursor = 0;
+    }
+
+    /// 到文本尾并保留选区。
+    pub fn cursor_end_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        self.cursor = self.len();
+    }
+
+    /// 到当前行首并保留选区。
+    pub fn cursor_line_home_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        let (line, _) = self.cursor_line_col();
+        self.cursor = Self::line_col_to_cursor(&self.text, line, 0);
+    }
+
+    /// 到当前行尾并保留选区。
+    pub fn cursor_line_end_extend(&mut self) {
+        self.start_selection();
+        self.desired_col = None;
+        let (line, _) = self.cursor_line_col();
+        let line_len = self
+            .text
+            .split('\n')
+            .nth(line)
+            .unwrap_or("")
+            .chars()
+            .count();
+        self.cursor = Self::line_col_to_cursor(&self.text, line, line_len);
+    }
+
+    /// 上移一行并保留选区。
+    pub fn cursor_line_up_extend(&mut self) -> bool {
+        self.start_selection();
+        let (line, col) = self.cursor_line_col();
+        if line == 0 {
+            return false;
+        }
+        self.desired_col = None;
+        self.cursor = Self::line_col_to_cursor(&self.text, line - 1, col);
+        true
+    }
+
+    /// 下移一行并保留选区。
+    pub fn cursor_line_down_extend(&mut self) -> bool {
+        self.start_selection();
+        let (line, col) = self.cursor_line_col();
+        let last_line = self.text.matches('\n').count();
+        if line >= last_line {
+            return false;
+        }
+        self.desired_col = None;
+        self.cursor = Self::line_col_to_cursor(&self.text, line + 1, col);
+        true
+    }
+
     // ── 词删除 ────────────────────────────────────────
 
     /// 删除光标前一个词（Ctrl+W）。

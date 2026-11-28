@@ -227,3 +227,5 @@
 | F-SWARM-014 | L1 | 官方 items 投影；`data` 为官方条目，`items` 保留原始行，恢复行不投影 | [契约](../design/peri-swarm.md) |
 | F-SWARM-015 | L1 | 官方取消；cancel 事件受理、收据后写、首次与重发失败可分 | [契约](../design/peri-swarm.md) |
 | F-SWARM-016 | L1 | 官方文本 delta；实时逐 chunk、回放单条全文，chunk 不落库 | [契约](../design/peri-swarm.md) |
+| F-SWARM-017 | L3 | Swarm 管理 TUI；onboarding、sessions、actions、settings 四类入口 | [设计](../design/peri-swarm-dashboard.md) |
+| F-SWARM-018 | L3 | 观测与查询；usage 记账、OTel 三信号、OpenObserve 部署与 dashboard 观测页 | [dashboard 契约](../design/peri-swarm-dashboard.md)、[网关用量契约](../design/peri-swarm.md) |

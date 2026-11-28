@@ -14,6 +14,7 @@ use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService, Tur
 use peri_swarm::store::{
     InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
     SwarmItemRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
+    SwarmTurnUsageRow,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -1190,6 +1191,19 @@ impl SwarmStore for FailingStore {
         self.inner.swarm_upsert_turn(row).await
     }
 
+    async fn swarm_record_turn_usage(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+        created_at: i64,
+        started_at: Option<i64>,
+        usage: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .swarm_record_turn_usage(logical_id, turn_id, created_at, started_at, usage)
+            .await
+    }
+
     async fn swarm_get_turn(
         &self,
         logical_id: &str,
@@ -1204,6 +1218,27 @@ impl SwarmStore for FailingStore {
         window: &TurnsWindow,
     ) -> Result<Vec<SwarmTurnRow>, StoreError> {
         self.inner.swarm_turn_page(logical_id, window).await
+    }
+
+    async fn swarm_session_usage_turns(
+        &self,
+        logical_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        self.inner
+            .swarm_session_usage_turns(logical_id, limit)
+            .await
+    }
+
+    async fn swarm_turn_usage_window(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        self.inner
+            .swarm_turn_usage_window(start_at, end_at, limit)
+            .await
     }
 
     async fn swarm_close_open_turns(

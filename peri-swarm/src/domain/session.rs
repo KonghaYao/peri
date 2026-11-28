@@ -360,7 +360,9 @@ pub struct SessionView {
     /// Official `AgentSession.vault_ids`; the gateway exposes no vaults.
     #[serde(rename = "vault_ids", default)]
     pub vault_ids: Vec<String>,
-    /// Official `AgentSession.usage`; `null` when unknown, which is always.
+    /// Official `AgentSession.usage`: the session's aggregated turn usage on
+    /// `sessions.retrieve`; `null` when no turn observed any usage, and on
+    /// `sessions.list` (which does not scan turns).
     #[serde(default)]
     pub usage: Option<Value>,
     /// Official `AgentSession.error`; `null` while the session is not failed.

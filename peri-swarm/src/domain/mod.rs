@@ -13,6 +13,7 @@ pub mod official;
 pub mod official_item;
 pub mod session;
 pub mod subagent;
+pub mod usage;
 pub mod workspace;
 
 pub use approval::{
@@ -41,5 +42,9 @@ pub use session::{
 };
 pub use subagent::{
     OfficialSubagent, SubagentPage, SubagentRecord, SubagentsWindow, SUBAGENT_OBJECT,
+};
+pub use usage::{
+    metrics_session, totals_json, AgentMetrics, AgentMetricsSession, MetricsWindow, TokenSample,
+    TurnUsage, UsageSample, UsageTotals,
 };
 pub use workspace::resolve_cwd;

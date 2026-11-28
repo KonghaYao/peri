@@ -16,3 +16,4 @@ mod state_store_support;
 mod state_store_test;
 mod streaming_test;
 mod subagents_test;
+mod telemetry_test;
