@@ -943,5 +943,13 @@ impl V2Stdio {
 mod tests;
 
 #[cfg(test)]
+#[path = "errors_test.rs"]
+mod errors_tests;
+
+#[cfg(test)]
+#[path = "cancel_test.rs"]
+mod cancel_tests;
+
+#[cfg(test)]
 #[path = "boundary_test.rs"]
 mod boundary_tests;
