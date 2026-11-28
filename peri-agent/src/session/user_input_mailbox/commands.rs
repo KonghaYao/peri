@@ -342,8 +342,27 @@ impl UserInputMailbox {
         &self,
         request: &DispatchUserInputsRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
-        let fingerprint =
-            crate::session::user_input_mailbox::state::compute_fingerprint(("dispatch", request));
+        self.dispatch_with_policy(request, true).await
+    }
+
+    /// Admit a prompt without interrupting a model request already in flight.
+    pub async fn dispatch_non_interrupting(
+        &self,
+        request: &DispatchUserInputsRequest,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        self.dispatch_with_policy(request, false).await
+    }
+
+    async fn dispatch_with_policy(
+        &self,
+        request: &DispatchUserInputsRequest,
+        may_interrupt: bool,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        let fingerprint = crate::session::user_input_mailbox::state::compute_fingerprint((
+            "dispatch",
+            request,
+            may_interrupt,
+        ));
         self.validate_current(
             &request.session_id,
             &request.generation,
@@ -463,7 +482,7 @@ impl UserInputMailbox {
                 // Compact、idle 与收尾阶段只放行 MQ，由下一次 Receive 在同一 attempt
                 // 内摄取。MQ 放行已在前一步完成：必须先移交再中断，避免漏发。
                 let model_request_in_flight = state.model_request_in_flight;
-                let hard_cancel = model_request_in_flight && unconsumed_handoff;
+                let hard_cancel = may_interrupt && model_request_in_flight && unconsumed_handoff;
                 if let Some(active) = state.active.as_mut() {
                     // Stop 收尾中的重新发送是明确继续：Stop 已取消令牌，这里只把
                     // reason 从 Stop 改为 Steer，让宿主保留续跑而不是抑制激活。
@@ -543,8 +562,28 @@ impl UserInputMailbox {
         &self,
         request: &TakeBackUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
-        let fingerprint =
-            crate::session::user_input_mailbox::state::compute_fingerprint(("takeback", request));
+        self.withdraw(request, false).await
+    }
+
+    /// Withdraw an input even after dispatch, provided Receive has not moved it
+    /// into canonical history. The store decides the race, not the observer.
+    pub async fn withdraw_uncommitted(
+        &self,
+        request: &TakeBackUserInputRequest,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        self.withdraw(request, true).await
+    }
+
+    async fn withdraw(
+        &self,
+        request: &TakeBackUserInputRequest,
+        include_dispatching: bool,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        let fingerprint = crate::session::user_input_mailbox::state::compute_fingerprint((
+            "takeback",
+            request,
+            include_dispatching,
+        ));
         self.validate_current(
             &request.session_id,
             &request.generation,
@@ -568,7 +607,9 @@ impl UserInputMailbox {
                 .records
                 .iter()
                 .find(|record| {
-                    record.input_id == request.input_id && record.state == UserInputState::Queued
+                    record.input_id == request.input_id
+                        && (record.state == UserInputState::Queued
+                            || include_dispatching && record.state == UserInputState::Dispatching)
                 })
                 .map(|record| record.fingerprint)
         };
@@ -622,6 +663,7 @@ impl UserInputMailbox {
                         // 未交付即撤回：释放 enqueue 时预留的日志槽位。
                         record.delivery_reserved = false;
                     }
+                    state.ready.retain(|id| id != &request.input_id);
                     state.revision += 1;
                     crate::session::user_input_mailbox::window::retain_terminal(
                         &mut state,

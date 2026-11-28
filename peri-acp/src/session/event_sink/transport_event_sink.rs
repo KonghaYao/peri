@@ -258,6 +258,9 @@ impl EventSink for TransportEventSink {
         let original_event = event;
         let origin = event.child_origin();
         let event = event.payload();
+        if matches!(event, ExecutorEvent::AgentExecutionFailed { .. }) {
+            self.transport.observe_execution_failure(session_id).await;
+        }
         if let ExecutorEvent::SystemReminder {
             reminder,
             source_agent_id,

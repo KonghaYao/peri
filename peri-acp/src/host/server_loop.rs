@@ -2,6 +2,7 @@
 
 mod history;
 mod notification;
+mod stdio_preview_input;
 
 use std::sync::Arc;
 

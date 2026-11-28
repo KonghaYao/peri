@@ -12,6 +12,14 @@ use std::sync::Arc;
 /// to/from the underlying transport (mpsc channels, stdio, WebSocket, etc.).
 #[async_trait]
 pub trait AcpTransport: Send + Sync {
+    /// Only the opt-in stdio version adapter may issue internal input requests.
+    fn owns_stdio_preview_requests(&self) -> bool {
+        false
+    }
+
+    /// A protocol may project this execution fact into its foreground result.
+    async fn observe_execution_failure(&self, _session_id: &str) {}
+
     /// Send a request and wait for a response.
     ///
     /// Connected silence has no built-in timeout. Cancelling the caller releases
