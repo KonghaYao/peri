@@ -188,11 +188,16 @@ curl -fsS -u "$OPENOBSERVE_DASHBOARD_EMAIL:$OPENOBSERVE_DASHBOARD_PASSWORD" \
   `peri-swarm-ingest` 和 `peri-swarm-dashboard` 都是 admin。dashboard 账号
   可以写，dashboard 的 SELECT-only 只是客户端校验，**不是安全边界**；安全性依赖
   OpenObserve 只在 loopback/内网、专用账号和凭据保密。凭据泄露即等于写权限。
+- `openobserve-init` 是幂等的，但**不轮换已存在账号的密码**：改密码需要先在 OpenObserve
+  内更新，再把新值同步到 `.env`；只改 `.env` 不会更新已有账号。
+- 网关对 OpenObserve 没有硬依赖：compose 刻意不给 `peri-swarm` 加 `depends_on`，
+  OpenObserve OOM 或重启不阻塞网关启动与请求服务，只影响遥测导出和观测页。
 - OpenObserve 的 root/ingest/dashboard 凭据与 Postgres/Rivet/Peri 的 secret 是
-  两套秘密，不要复用。所有 OpenObserve 凭据都应定期轮换：在 OpenObserve 内更新
-  账号密码，再把新值同步到 `.env`（dashboard 账号还要同步到 dashboard 配置）；
-  root 轮换后要保证 `openobserve-init` 能登录，ingest 密码变化后要重新生成并
-  同步 `OPENOBSERVE_INGEST_AUTH`。
+  两套秘密，不要复用。这些变量都在 `.env.example` 的 `--- Observability: OpenObserve
+  ---` 分组；所有 OpenObserve 凭据都应定期轮换：在 OpenObserve 内更新账号密码，再把
+  新值同步到 `.env`（dashboard 账号还要同步到 dashboard 配置）；root 轮换后要保证
+  `openobserve-init` 能登录，ingest 密码变化后要重新生成并同步
+  `OPENOBSERVE_INGEST_AUTH`。
 - OpenObserve 数据在 `openobserve-data` 卷，按 stream 配置 retention；
   不设置保留期会持续增长。`down -v` 会清空。
 - OpenObserve 使用 AGPL-3.0；分发修改版或作为网络服务提供前确认许可证义务。

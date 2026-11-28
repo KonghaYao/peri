@@ -70,30 +70,39 @@ user = "peri-swarm-dashboard"
 password = "…"
 ```
 
-本阶段实现配置、连接测试、Core metrics、Agent metrics 与 Request log 页面；Sandbox
-metrics 保持诚实的空页（网关没有资源级指标），Query 留给后续阶段。
+Core metrics、Agent metrics、Request log 与 Query 均已实现；Sandbox metrics 保持诚实的
+空页（网关只报告 sandbox 类型/id，没有资源级指标）。
 
-## Metrics 与 Request log 数据源
+## Metrics、Request log 与 Query 数据源
 
 - **Core metrics**：直连 OpenObserve，只使用 PromQL（该版本对 metrics 流不接受
   `_search` SQL）。查询 `peri_swarm_http_server_requests` 与
-  `peri_swarm_http_server_duration_bucket`，时间窗 15m/1h/24h；页面可见时每 15 秒轮询。
-  指标为累计计数器，而 v1.2.0 不支持 `rate()`/`increase()`（返回空矩阵），因此客户端读取
-  少量原始样本并将正向增量相加（进程重启不会产生负流量）。错误率只统计 5xx；p95 由
-  `le` 桶增量做直方图插值，落在 `+Inf` 桶时显示 `—`，不虚构有限值。页面展示实际样本
-  覆盖范围；刷新失败保留上一次成功数据并标记 `stale`。
+  `peri_swarm_http_server_duration_bucket`，时间窗 15m/1h/24h（默认 15m）；页面可见时
+  每 15 秒轮询。指标为累计计数器，而 v1.2.0 不支持 `rate()`/`increase()`（返回空矩阵），
+  因此客户端读取少量原始样本并将正向增量相加（进程重启不会产生负流量）。错误率只统计
+  5xx；p95 由 `le` 桶增量做直方图插值，落在 `+Inf` 桶时显示 `—`，不虚构有限值。页面
+  展示实际样本覆盖范围；刷新失败保留上一次成功数据并标记 `stale`。
 - **Agent metrics**：来自网关 `GET /v1/agents/metrics`，不依赖 OpenObserve。固定请求
-  窗口内最多 500 个会话（`limit=500`），客户端每页 10 条；总计行使用响应的 `totals`。
-  `truncated=true` 时显示 “Window truncated; totals cover the newest 500 sessions.”。
-  缺失的 token 字段显示 `—`；Cache 列展示 `cache_read_tokens + cache_creation_tokens`。
+  窗口内最多 500 个会话（`limit=500`），客户端每页 10 条（窗口 15m/1h/24h，默认 15m）；
+  总计行使用响应的 `totals`。`truncated=true` 时显示
+  “Window truncated; totals cover the newest 500 sessions.”。缺失的 token 字段显示
+  `—`；Cache 列展示 `cache_read_tokens + cache_creation_tokens`。
 - **Request log**：直连 OpenObserve，SQL 查询 `peri_swarm_logs`。SQL 固定以下形状：
   `WHERE _timestamp >= ? AND _timestamp < ? ORDER BY _timestamp DESC LIMIT 11 OFFSET ?`；
-  返回 11 行是为了判断是否存在下一页，界面每页显示 10 行。时间、method、route、
-  status、duration、session 任一缺失时显示 `—`。OpenObserve 的 `_search.total` 在带
-  OFFSET 时不是全局总数，因此页面只显示 “Page N”，不声称总数。
-- Core metrics 与 Request log 未配置 `[observability]` 时显示
+  返回 11 行是为了判断是否存在下一页，界面每页显示 10 行，窗口 15m/1h/24h（默认 15m）。
+  时间、method、route、status、duration、session 任一缺失时显示 `—`。OpenObserve 的
+  `_search.total` 在带 OFFSET 时不是全局总数，因此页面只显示 “Page N”，不声称总数。
+- **Query**：直连 OpenObserve 的 `POST /api/{org}/_search`，手动运行，不轮询。只接受
+  单条 `SELECT`：非空、≤8 KiB、无 NUL、首 token 为 `SELECT`（大小写不敏感）、只允许一个
+  末尾分号，正文不得再有分号。窗口 15m/1h/24h（默认 1h），`from`/`size` 服务端分页，
+  每页 20 行、最多 100 行（5 页）；`Next` 只在当前页满 20 行且未到 100 行上限时启用。列优先取响应
+  `columns`，否则用行 JSON 键的并集；`null` 显示 `—`，嵌套值显示紧凑 JSON，单格超过
+  96 字符截断，放不下的列裁剪并显示 “Showing N of M columns.”。
+- Core metrics、Request log 与 Query 未配置 `[observability]` 时显示
   “Observability is not configured.” 并提供跳转 Settings 的按钮；Agent metrics 不受影响。
 - 所有请求带 generation；切换窗口、换页或手动刷新会使旧响应失效，不会覆盖新数据。
+- 窗口 chips 可用鼠标或 `1`/`2`/`3`；Core/Agent/Request 用 `r` 立即刷新，Query 用
+  `Run` 或 `Ctrl-Enter` 运行，`PgUp`/`PgDn` 翻页（文本字段聚焦时不拦截）。
 
 ## 安全说明
 
@@ -118,13 +127,16 @@ metrics 保持诚实的空页（网关没有资源级指标），Query 留给后
 ## 页面状态
 
 侧栏共 13 项（Monitor 6 / Resources 4 / Platform 3），全部可见、可点击；没有 Overview。
+旧页 Environment templates、Skills、Files、Projects and keys 已删除。
 
 | 分组 | 页面 | 状态 |
 | --- | --- | --- |
-| Monitor | Core metrics / Agent metrics / Request log | 已实现（OpenObserve / 网关数据） |
+| Monitor | Core metrics | 已实现（OpenObserve metrics） |
+| Monitor | Agent metrics | 已实现（网关 `/v1/agents/metrics`） |
 | Monitor | Sandbox metrics | 空页，说明网关没有资源级指标 |
-| Monitor | Query | 空页，本构建未实现 |
 | Monitor | Session log | 已实现（默认页） |
+| Monitor | Request log | 已实现（OpenObserve `peri_swarm_logs`） |
+| Monitor | Query | 已实现（只读 SQL） |
 | Resources | Agents / Artifacts / Vaults / MCP | 空页，说明能力边界或“本构建未实现” |
 | Platform | Automations / Nodes | 空页，说明能力边界或“本构建未实现” |
 | Platform | Settings | 已实现 |
@@ -141,23 +153,27 @@ metrics 保持诚实的空页（网关没有资源级指标），Query 留给后
 - New session：Logical ID、Model、CWD、Instructions、Metadata 行与可折叠的
   tools/environment/prompt_cache_options JSON。成功后打开新会话详情。
 - Settings：连接信息、`Test connection`、`Edit credentials`、`Configure observability`、
-  `Sign out`、`Quit`。
+  `Sign out`、`Quit`。Observability 子页的 `Test` 请求 `GET /api/{org}/streams`，`Save`
+  只做本地校验并写盘，随后立即采用新连接；密码始终遮蔽且保存后不回显。
 - Core metrics：窗口 chips、Refresh、requests/min、5xx 错误率、p95、总请求数与实际数据
   范围；15 秒轮询，窗口 chips 可用鼠标或 `1`/`2`/`3`，`r` 刷新。
 - Agent metrics：窗口 chips、Refresh、总计行、8 列表格、每页 10 条的 Prev/Next；
   `PgUp`/`PgDn` 同效。
 - Request log：窗口 chips、Refresh、时间/method/route/status/duration/session 表格、
   每页 10 条的服务端分页；`PgUp`/`PgDn` 同效。
+- Query：SQL 编辑器、窗口 chips、`Run`、结果表格与 Prev/Next；`Ctrl-Enter` 运行，
+  `PgUp`/`PgDn` 翻页，`Run` 总是回到第 1 页。没有自动刷新。
 - 空页会给出“为什么为空”和“网关实际支持什么”，从不编造数据。
 
 ## 限制
 
-- **只轮询，没有 SSE**。列表、详情和健康检查按固定间隔拉取；没有流式消费入口。
+- **只轮询，没有 SSE**。Session log、详情、健康检查以及 Core/Agent/Request 按固定间隔
+  拉取；Query 只在手动 `Run` 或翻页时请求。没有流式消费入口。
 - **排序在客户端完成**：网关按 `logical_id desc` 返回，但 `logicalId` 是调用方任意字符串，
   不保证时间顺序。UI 在收到响应后按 `last_active_at` 降序、同值按 `created_at` 降序做稳定
   排序，时间完全相同时保留网关返回顺序；页脚标注
   `Newest activity first · N loaded`。搜索和计数仍只覆盖已加载集合。
-- 单网关、单凭据；没有多 profile、Overview、指标聚合或跨节点视图。
+- 单网关、单凭据；没有多 profile、Overview 或跨节点视图。
 - OpenObserve 的 PromQL 方言有限：`rate()`、`increase()` 与 `delta()` 返回空矩阵，
   因此 Core metrics 在客户端按累计计数器的正向增量计算窗口值；采样起点之前的首个增量
   无法归因，页面以实际样本范围说明覆盖区间。
@@ -165,10 +181,12 @@ metrics 保持诚实的空页（网关没有资源级指标），Query 留给后
   OTel SDK 默认的秒级桶较粗，p95 是桶内插值近似值。
 - Request log 不提供总数（OpenObserve 在 OFFSET 下返回的 `total` 只是本页行数），
   只显示当前页码；访问日志不含 query string、headers 或 body。
+- Query 最多读取 100 行（5 页 × 20 行）；`Next` 依赖当前页满页，`total` 不参与判断。
+  本地 SELECT-only 校验只防误操作，不是权限或安全边界。
 - Agent metrics 只请求窗口内最多 500 个会话；响应 `truncated=true` 时总计覆盖扫描到的
   最新行，不是整个窗口的完整总计。
-- Sandbox metrics、Query、Agents、Artifacts、Vaults、MCP、Automations、Nodes 在本构建中
-  仍为空页，文案说明为什么为空。
+- Sandbox metrics、Agents、Artifacts、Vaults、MCP、Automations、Nodes 在本构建中
+  仍为空页，文案说明为什么为空；Sandbox metrics 明确说明没有 CPU/内存/资源指标。
 - 编辑不发送 `instructions`：网关更新端点只接受 `agent.model`、`metadata`、
   `prompt_cache_options`（`deny_unknown_fields`），表单中 instructions 只读。创建表单也不
   发送首条消息。
@@ -177,14 +195,17 @@ metrics 保持诚实的空页（网关没有资源级指标），Query 留给后
 ## 测试
 
 ```bash
+./scripts/cargo-rmcp-patched.sh fmt --check
 ./scripts/cargo-rmcp-patched.sh check --locked -p peri-swarm-dashboard --all-targets
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm-dashboard
 ./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm-dashboard --all-targets -- -D warnings
 ```
 
-测试包含配置/API/view-model/poll/app 单测，以及 80x24、100x30、140x40 的渲染与鼠标命中
-测试。`tests/live_gateway.rs` 默认 `#[ignore]`，只有显式提供
-`PERI_SWARM_DASHBOARD_IT_BASE_URL` 与 `PERI_SWARM_DASHBOARD_IT_API_KEY` 时才连接真实网关：
+当前 crate 为 333 passed / 0 failed / 1 ignored（`tests/live_gateway.rs` 需真实网关）；
+阶段 6a 记录的 fmt/clippy 通过。测试包含配置/API/view-model/poll/app 单测，以及 60、100、
+140 列等 TestBackend 断点下的渲染与鼠标命中测试。`tests/live_gateway.rs` 默认 `#[ignore]`，
+只有显式提供 `PERI_SWARM_DASHBOARD_IT_BASE_URL` 与 `PERI_SWARM_DASHBOARD_IT_API_KEY`
+时才连接真实网关：
 
 ```bash
 PERI_SWARM_DASHBOARD_IT_BASE_URL=http://127.0.0.1:8080 \
