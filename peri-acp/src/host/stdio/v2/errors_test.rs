@@ -86,12 +86,12 @@ async fn a_setup_with_an_unusable_cwd_is_invalid_params_not_the_host_code() {
     let mut harness = Harness::start();
     harness.negotiate().await;
     let id = RequestId::Number(2100);
+    // Only the host judges the directory unusable, so the adapter must forward
+    // this: the path has to be absolute on every platform, not a POSIX literal
+    // that Windows rejects as Invalid params before anything is forwarded.
+    let unusable_cwd = format!("{CWD}/no-such-project");
     harness
-        .request(
-            id.clone(),
-            "session/new",
-            json!({"cwd": "/no/such/project"}),
-        )
+        .request(id.clone(), "session/new", json!({"cwd": unusable_cwd}))
         .await;
     let forwarded = harness.expect_forwarded().await;
     assert_eq!(forwarded.method, "session/new");
