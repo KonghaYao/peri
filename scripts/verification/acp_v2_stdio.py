@@ -311,7 +311,12 @@ def lifecycle(binary, root, schema):
         assert peer.response(peer.request("session/prompt", prompt(doomed, "gone")))["error"]["code"] == -32002
         assert all(x["sessionId"] != doomed for x in
                    peer.call("session/list", {}, "ListSessionsResponse")["sessions"])
-        assert peer.response(peer.request("session/delete", {"sessionId": doomed}))["error"]["code"] == -32002
+        # Deleting it again is a durable no-op: the adapter still forwards the
+        # request, the host answers success, and the empty payload carries no
+        # state to clean up a second time.
+        repeated = peer.response(peer.request("session/delete", {"sessionId": doomed}))
+        assert "error" not in repeated, repeated
+        assert repeated["result"] == {}, repeated
         print("PASS v2 session/delete drops the session and its connection slot")
         # A 255-character key is the accepted upper bound; the 256-character
         # key above was rejected without creating a receipt.

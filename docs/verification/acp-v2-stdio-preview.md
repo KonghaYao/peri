@@ -122,7 +122,8 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
   a_cleanup_incomplete_setup_mapping_is_internal_and_keeps_the_host_data}`。
 - **`-32002` 的 `data.sessionId`**：preview-only handler（prompt 的内部 input 端、
   resume 的配置快照）现在带请求里的会话 id；prompt 的错误结算原样返回该 error。
-  回归 `host::stdio::v2::errors_tests::preview_only_handlers_name_the_session_they_could_not_serve`。
+  配置快照的失败只在适配器内记 warn、resume 回复省略 `configOptions`，客户端看不到
+  该 `-32002`。回归 `host::stdio::v2::errors_tests::preview_only_handlers_name_the_session_they_could_not_serve`。
 - **回放 hold 的合并语义**：`session_info_update` 是 pinned v2 的补丁，hold/flush 不再
   按 kind 合并；`available_commands_update` / `config_option_update` /
   `current_mode_update` 仍只保留最新整表。回归

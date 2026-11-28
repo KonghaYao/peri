@@ -427,8 +427,11 @@ impl Connection {
     /// a request therefore passes untouched — otherwise a v1 connection bound to
     /// A could not page B's history, and a successful page would bind the
     /// connection to B. Capability truth stays with the host, which re-runs the
-    /// same classifier with the connection's real declarations; a malformed
-    /// request reaches it and gets the host's own error shape.
+    /// same classifier with the connection's real declarations. A request the
+    /// classifier cannot treat as read-only history keeps the setup admission:
+    /// an unbound connection sees the host's own error shape, while a connection
+    /// bound to another session (or with a setup in flight) is refused here
+    /// first.
     pub(super) fn admit_v1_setup(&mut self, method: &str, params: &Value) -> V1Admission {
         if method == "session/load" && read_only_history(params) {
             return V1Admission::Pass;

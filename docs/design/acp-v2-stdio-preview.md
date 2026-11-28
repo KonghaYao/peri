@@ -28,8 +28,12 @@ later withdrawal or the shared close fails.
 
 - One connection holds one **slot** per session it attached. `session/new` and
   `session/resume` never reject because another session is attached; prompts,
-  updates, cancellations and closes route by `sessionId`, and closing or
-  deleting one session never affects the others. The shared host keeps its
+  updates, cancellations and closes route by `sessionId`, and within one
+  connection closing or deleting one session never affects the others. There is
+  no cross-connection notification: deleting a session another connection has
+  attached succeeds at the host and leaves that connection's slot `Attached`; it
+  learns the outcome from the host on its next request, or by closing the slot.
+  The shared host keeps its
   historical one-session-per-connection gate for ACP v1, the TUI and in-process
   transports; only a transport that declares
   `AcpTransport::allows_concurrent_sessions` (the v2 adapter) skips it.
@@ -38,8 +42,11 @@ later withdrawal or the shared close fails.
   classified by the host before it reserves anything, answered from storage and
   never attached, so it passes without taking the gate and without binding the
   connection to the paged session. `session/new`, `session/fork`,
-  `session/resume` and an initial `session/load` keep the setup admission; a
-  malformed history request reaches the host and gets its own error shape.
+  `session/resume` and an initial `session/load` keep the setup admission. A
+  request the classifier cannot treat as read-only history keeps that admission
+  too: an unbound connection sees the host's own error shape, while a connection
+  bound to another session (or with a setup in flight) is refused by the adapter
+  first with `-32010`.
 - Each slot owns a turn epoch and the foreground state machine
   `Idle → Running → RequiresAction → Running → Idle`. Turn start increments the
   epoch; the first outstanding permission/elicitation of a `Running` session
@@ -218,10 +225,12 @@ session`) becomes `-32603` with `data.reason = "session_cleanup_incomplete"` and
 `-32602` (Invalid params, host message kept); list storage failures and prompt
 workspace errors are `-32603` (Internal error, host message kept).
 
-`-32002` always names the session it is about in `data.sessionId`, including the
-preview-only handlers behind `session/prompt`'s internal input endpoint and the
-resume configuration fetch: the request named that session, so a client may drop
-its local state.
+Every `-32002` that reaches the client names the session it is about in
+`data.sessionId`, including the preview-only handler behind
+`session/prompt`'s internal input endpoint: the request named that session, so a
+client may drop its local state. A `session/resume` configuration refresh that
+fails internally is not such a response: the adapter only logs it and omits
+`configOptions` from the resume reply.
 
 `-32020` is **not** an execution-failure report: a failed execution ends the
 turn with `state_update.error.code = -32603` and `stopReason = "error"`.
