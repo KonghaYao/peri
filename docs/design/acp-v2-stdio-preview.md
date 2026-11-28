@@ -183,7 +183,7 @@ rewritten to `-32020` with the original `data.reason` (or `server_error`).
 
 `-32010` is the host's overloaded conflict code. The **only** v2 outbound path
 that forwards it is the close-incomplete settlement of `session/close` (and the
-shared close/delete gate behind it). Every other host `-32010` is mapped in
+shared close/delete gate behind it); any other close/delete failure is `-32603`. Every other host `-32010` is mapped in
 `errors.rs::host_failure`: a transient setup refusal (`Session is executing`,
 `Session is closing`) becomes `-32020` + `data.reason = "session_busy"` when the
 session id is known; a setup whose client-supplied cwd/location cannot be used is
@@ -207,7 +207,7 @@ turn with `state_update.error.code = -32603` and `stopReason = "error"`.
 | v2 setup whose client-supplied cwd/location cannot be used (host `-32010`) | `-32602` | host message kept |
 | `session/list` storage failure, prompt workspace/resource failure (host `-32010`) | `-32603` | host message kept |
 | execution failure reported in the state snapshot | `-32603` | `state_update.error = { code: -32603, message: … }`, `stopReason = "error"` |
-| host-passthrough close/delete close-incomplete failure | `-32010` | passthrough |
+| close/delete gate timeout (`Session close incomplete`) | `-32010` | passthrough; every other close/delete failure is `-32603` with the host message |
 
 ## Capabilities and peer requests
 

@@ -362,6 +362,23 @@ fn host_failures_map_only_the_documented_codes() {
         .code,
         -32603
     );
+
+    // Only the close-incomplete settlement keeps the host's `-32010`; every
+    // other close failure is internal.
+    let mapped = host_failure(
+        AcpError::new(
+            -32010,
+            "Session close incomplete: active execution has not stopped",
+        ),
+        HostContext::Close,
+    );
+    assert_eq!(mapped.code, -32010);
+    let mapped = host_failure(
+        AcpError::new(-32010, "session store unavailable"),
+        HostContext::Close,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "session store unavailable");
 }
 
 #[tokio::test]
@@ -479,6 +496,51 @@ async fn a_version_zero_initialize_keeps_the_v1_negotiation() {
     let (answered, result) = harness.expect_out().await.response();
     assert_eq!(answered, id);
     assert_eq!(result.expect("v1 reply")["protocolVersion"], 1);
+}
+
+#[tokio::test]
+async fn only_the_close_incomplete_failure_keeps_the_host_conflict_code() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let incomplete = RequestId::Number(2400);
+    harness
+        .request(
+            incomplete.clone(),
+            "session/close",
+            json!({"sessionId": "A"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session close incomplete: active execution has not stopped",
+            )),
+        )
+        .await;
+    let error = expect_error(&harness, incomplete, -32010).await;
+    assert!(error.message.contains("close incomplete"), "{error}");
+
+    // Any other close failure is a host-internal failure, not the retryable
+    // close-incomplete settlement.
+    let other = RequestId::Number(2401);
+    harness
+        .request(other.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "session store unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, other, -32603).await;
+    assert_eq!(error.message, "session store unavailable");
+    harness.expect_quiet().await;
 }
 
 #[tokio::test]

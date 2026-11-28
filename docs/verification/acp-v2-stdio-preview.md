@@ -87,6 +87,7 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
   `idle`、stale success 不冲刷 takeover 的 deferred、pending resume 期间的 done 仍结束
   turn、宿主 `-32010` 在 replay 与无 replay 的 resume 上都映射为 `session_busy`；
   失败 replay 在结束后补发被 hold 压掉的最终状态（含 `cancelled`/`error` stop reason）、
+  close/delete 只有 close-incomplete 保留 `-32010`（其余 close 失败为 `-32603`）、
   被已提交 attach 取代的迟到失败不删除 slot、失败 takeover 保持 `Attaching` 并恢复
   owner 的 replay 状态、cursorless 等待中的 `session/cancel` 仍到达宿主。
 

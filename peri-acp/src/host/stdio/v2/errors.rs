@@ -43,6 +43,9 @@ pub(super) const SESSION_SWITCH: i64 = -32010;
 /// running turn, or the session is being closed. The message, not the code,
 /// decides whether a host `-32010` is such a retryable conflict.
 const HOST_TRANSIENT_REFUSALS: [&str; 2] = ["Session is executing", "Session is closing"];
+/// The host's close/delete gate timeout. This is the only `-32010` the v2
+/// outbound surface forwards.
+const HOST_CLOSE_INCOMPLETE: &str = "Session close incomplete";
 
 pub(super) fn unknown_method(method: &str) -> AcpError {
     AcpError::new(
@@ -162,6 +165,9 @@ pub(super) enum HostContext<'a> {
     SessionList,
     /// A prompt's admission/workspace path.
     Prompt,
+    /// `session/close` / `session/delete`; only the close-incomplete settlement
+    /// keeps the host code.
+    Close,
 }
 
 /// Map a host-passthrough error that a v2 client would misread.
@@ -179,8 +185,11 @@ pub(super) enum HostContext<'a> {
 ///   caller can name the session;
 /// - a setup whose client-supplied location cannot be used is Invalid params
 ///   (`-32602`) with the host's message intact;
-/// - host resource/internal failures (list storage, prompt workspace checks)
-///   are `-32603`, again keeping the message.
+/// - host resource/internal failures (list storage, prompt workspace checks,
+///   a close that failed for another reason) are `-32603`, again keeping the
+///   message;
+/// - a close/delete gate timeout keeps `-32010`: it is the one retryable
+///   close-incomplete settlement the v2 surface exposes.
 pub(super) fn host_failure(error: AcpError, context: HostContext<'_>) -> AcpError {
     if error.code == SESSION_SWITCH {
         if HOST_TRANSIENT_REFUSALS
@@ -196,7 +205,10 @@ pub(super) fn host_failure(error: AcpError, context: HostContext<'_>) -> AcpErro
         }
         return match context {
             HostContext::Setup { .. } => invalid_params(error.message),
-            HostContext::SessionList | HostContext::Prompt => internal(error.message),
+            HostContext::Close if error.message.starts_with(HOST_CLOSE_INCOMPLETE) => error,
+            HostContext::Close | HostContext::SessionList | HostContext::Prompt => {
+                internal(error.message)
+            }
         };
     }
     normalize(error)

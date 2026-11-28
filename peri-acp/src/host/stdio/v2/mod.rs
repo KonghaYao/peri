@@ -891,7 +891,13 @@ impl AcpTransport for V2Stdio {
             Some(Reply::Close(sid) | Reply::Delete(sid)) if result.is_ok() => {
                 Ok(self.teardown(&mut wire, &sid).await)
             }
-            Some(Reply::Close(_) | Reply::Delete(_)) => result,
+            Some(Reply::Close(_) | Reply::Delete(_)) => result.map_err(|error| {
+                if two {
+                    errors::host_failure(error, errors::HostContext::Close)
+                } else {
+                    error
+                }
+            }),
             None => result,
         };
         let result = if two {
