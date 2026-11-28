@@ -79,6 +79,11 @@ pub(super) struct Slot {
     pub execution_failed: bool,
     pub prompts: Prompts,
     pub replay: Option<Replay>,
+    /// The session's configuration options as last reported by the host, in
+    /// their v2 shape. `session/set_config_option` validates against this list so
+    /// an unknown id or an out-of-range value is refused instead of being
+    /// silently accepted by the v1 handler.
+    pub config: Vec<Value>,
     held: Vec<Value>,
 }
 
@@ -94,6 +99,7 @@ impl Slot {
             execution_failed: false,
             prompts: Prompts::default(),
             replay: None,
+            config: Vec::new(),
             held: Vec::new(),
         }
     }
@@ -221,6 +227,17 @@ pub(super) enum Reply {
     Input(String),
     Withdraw(String),
     Cancel,
+    /// `session/set_config_option`: the reply's `configOptions` need the v2
+    /// identity field.
+    ConfigOptions,
+    /// A `session/resume` reply parked until the host answers the configuration
+    /// fetch; the client request is answered once its option list is known.
+    ConfigFetch {
+        client: RequestId,
+        session: String,
+        /// The already-projected reply that is waiting for `configOptions`.
+        result: Result<Value, AcpError>,
+    },
     /// A v1 setup whose success binds the connection's single session.
     V1Setup {
         /// `Some` for `session/load|resume`, `None` for `session/new|fork`.

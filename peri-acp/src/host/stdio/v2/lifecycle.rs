@@ -213,13 +213,18 @@ pub(super) fn list_sessions(id: RequestId, params: &Value) -> Routed {
 }
 
 /// Project a v1 lifecycle result into its v2 shape.
+///
+/// v2 replaced the mode/model surfaces with `configOptions`, so the legacy
+/// `modes`/`models` blocks and the v1 `_meta` never reach the client; the option
+/// list itself is kept with the v2 identity field (`session/load` and
+/// `session/new` already return it).
 pub(super) fn lifecycle_result(method: &str, mut result: Value) -> Value {
     if method == "session/new" || method == "session/resume" {
         if let Some(object) = result.as_object_mut() {
-            // This preview does not yet advertise session config controls.
-            for key in ["modes", "models", "configOptions", "_meta"] {
+            for key in ["modes", "models"] {
                 object.remove(key);
             }
+            super::config::project_options(object);
         }
     }
     result

@@ -413,6 +413,74 @@ def lifecycle(binary, root, schema):
         approval.close()
         print("PASS v2 real permission request, requires_action, rejection, peer cancellation, idle, no tool side effect")
 
+        # S3: the configuration surface is the same on every entry point, and the
+        # mode it exposes is the connection's actual approval policy.
+        config = Peer(binary, root, 2, schema)
+        peers.append(config)
+        new = config.call("session/new", {"cwd": str(root)}, "NewSessionResponse")
+        config.sid = sid = new["sessionId"]
+        options = new.get("configOptions") or []
+        assert options, f"session/new must advertise config options: {new}"
+        assert all("id" not in option for option in options), options
+        ids = [option["configId"] for option in options]
+        assert ids[:3] == ["mode", "model", "thinking_effort"], ids
+        mode = options[0]
+        assert mode["type"] == "select" and mode["category"] == "mode", mode
+        assert mode["currentValue"] == "default", mode
+        assert "bypass" in [value["value"] for value in mode["options"]], mode
+        commands = config.update(0, "available_commands_update")
+        listed = commands["params"]["update"]["availableCommands"]
+        assert listed and all(command["type"] == "command" for command in listed), listed
+        assert "compact" in [command["name"] for command in listed], listed
+        print("PASS v2 session/new ConfigOptions + AvailableCommands v2 shapes")
+
+        start = len(config.frames)
+        changed = config.call("session/set_config_option", {
+            "sessionId": sid, "configId": "mode", "type": "id", "value": "bypass"
+        }, "SetSessionConfigOptionResponse")
+        assert all("id" not in option for option in changed["configOptions"]), changed
+        selected = next(o for o in changed["configOptions"] if o["configId"] == "mode")
+        assert selected["currentValue"] == "bypass", selected
+        update = config.update(start, "config_option_update")
+        assert next(o for o in update["params"]["update"]["configOptions"]
+                    if o["configId"] == "mode")["currentValue"] == "bypass", update
+        # An unknown value, option or session is refused and leaves the
+        # configuration untouched; a boolean value type is not advertised.
+        for params in [
+            {"sessionId": sid, "configId": "mode", "type": "id", "value": "nonsense"},
+            {"sessionId": sid, "configId": "nope", "type": "id", "value": "bypass"},
+            {"sessionId": sid, "configId": "mode", "type": "boolean", "value": True},
+        ]:
+            refusal = config.response(config.request("session/set_config_option", params))["error"]
+            assert refusal["code"] == -32602, refusal
+        missing = "00000000-0000-7000-8000-000000000002"
+        unknown = config.response(config.request("session/set_config_option", {
+            "sessionId": missing, "configId": "mode", "type": "id", "value": "bypass"
+        }))["error"]
+        assert unknown["code"] == -32002 and unknown["data"]["sessionId"] == missing, unknown
+        print("PASS v2 set_config_option projects configOptions and refuses unknown input")
+
+        # The changed mode governs the next turn: the tool the default policy
+        # asked about above now runs without a permission request, so the refused
+        # requests above cannot have reset the mode either.
+        start = len(config.frames)
+        config.response(config.request("session/prompt", prompt(sid, "[[tool:verify]] bypass mode probe")),
+                        "PromptResponse")
+        config.until(lambda f: f in config.frames[start:]
+                     and f.get("method") == "session/update"
+                     and f["params"]["sessionId"] == sid
+                     and f["params"]["update"].get("sessionUpdate") == "state_update"
+                     and f["params"]["update"].get("state") == "idle")
+        assert not any(f.get("method") == "session/request_permission" for f in config.frames[start:]), \
+            "the new mode must apply to the next turn's approval policy"
+        assert (root / "approval-probe.txt").exists(), "the bypassed tool must have run"
+        usage = config.update(start, "usage_update")["params"]["update"]
+        assert usage["used"] == 0 and isinstance(usage["size"], int), usage
+        assert "cost" not in usage, usage
+        config.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
+        config.close()
+        print("PASS v2 mode change governs the next turn; UsageUpdate carries used/size only")
+
         for enabled in [True, False]:
             legacy = Peer(binary, root, 1, schema, preview=enabled)
             peers.append(legacy)

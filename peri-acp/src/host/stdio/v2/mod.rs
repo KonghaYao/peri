@@ -6,6 +6,7 @@
 //! byte-identical by forwarding it untouched.
 
 mod capabilities;
+mod config;
 mod errors;
 mod lifecycle;
 mod params;
@@ -17,12 +18,13 @@ mod updates;
 #[path = "test_harness.rs"]
 mod harness;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
@@ -36,6 +38,7 @@ pub(in crate::host) const INPUT: &str = "_peri/stdio-v2/input";
 pub(in crate::host) const WITHDRAW: &str = "_peri/stdio-v2/withdraw";
 pub(in crate::host) const CANCEL: &str = "_peri/stdio-v2/cancel";
 pub(in crate::host) const CLOSE: &str = "_peri/stdio-v2/close";
+pub(in crate::host) const CONFIG: &str = "_peri/stdio-v2/config";
 
 /// Methods v2 never advertises per-object cancellation for.
 const OBJECT_CANCELS: [&str; 2] = ["terminal/cancel", "tool_call/cancel"];
@@ -52,6 +55,15 @@ pub(super) struct V2Stdio {
     inner: Arc<dyn AcpTransport>,
     permissions: Arc<SharedPermissionMode>,
     wire: Mutex<Connection>,
+    /// Requests the adapter owes the host while answering it (the configuration
+    /// snapshot a `session/resume` reply waits for).
+    ///
+    /// The host answers a setup request on its receive loop, so calling back
+    /// through `inner` would wait on the loop that is currently blocked on this
+    /// reply. These are returned from `recv` instead, exactly like a client
+    /// request, and the client's own reply stays parked until they are answered.
+    pending: Mutex<VecDeque<IncomingMessage>>,
+    pending_wake: Notify,
 }
 
 impl V2Stdio {
@@ -63,13 +75,43 @@ impl V2Stdio {
             inner,
             permissions,
             wire: Mutex::default(),
+            pending: Mutex::default(),
+            pending_wake: Notify::new(),
         }
+    }
+
+    /// Queue a request the host must answer before it can see the client's reply.
+    async fn park(&self, message: IncomingMessage) {
+        self.pending.lock().await.push_back(message);
+        self.pending_wake.notify_waiters();
     }
 
     async fn update(&self, sid: &str, update: Value) -> Result<(), AcpError> {
         self.inner
             .send_notification("session/update", json!({"sessionId":sid,"update":update}))
             .await
+    }
+
+    /// Send projected updates for one session.
+    ///
+    /// A `config_option_update` also refreshes the option cache that
+    /// `session/set_config_option` validates against, so the adapter's view of
+    /// what is settable always matches what the client was last told.
+    async fn emit(
+        &self,
+        slot: &mut state::Slot,
+        sid: &str,
+        updates: Vec<Value>,
+    ) -> Result<(), AcpError> {
+        for update in updates {
+            if update.get("sessionUpdate").and_then(Value::as_str) == Some("config_option_update") {
+                if let Some(options) = update.get("configOptions").and_then(Value::as_array) {
+                    slot.config = options.clone();
+                }
+            }
+            self.update(sid, update).await?;
+        }
+        Ok(())
     }
 
     /// Route one inbound message, translating or answering it as needed.
@@ -104,7 +146,7 @@ impl V2Stdio {
         method: String,
         params: Value,
     ) -> Option<IncomingMessage> {
-        if matches!(method.as_str(), INPUT | WITHDRAW | CANCEL | CLOSE) {
+        if matches!(method.as_str(), INPUT | WITHDRAW | CANCEL | CLOSE | CONFIG) {
             let _ = self
                 .inner
                 .send_response(id, Err(errors::unknown_method(&method)))
@@ -222,12 +264,10 @@ impl V2Stdio {
             "session/close" => lifecycle::close_session(wire, id.clone(), &params),
             "session/delete" => lifecycle::delete_session(wire, id.clone(), &params),
             "session/prompt" => lifecycle::prompt(wire, id.clone(), &params),
-            // S3 lands the config surface; until then the method is not advertised.
-            "session/set_config_option"
-            | "auth/login"
-            | "auth/logout"
-            | "session/fork"
-            | "mcp/message" => Routed::Answered(Err(errors::unknown_method(&method))),
+            "session/set_config_option" => config::set_config_option(wire, id.clone(), &params),
+            "auth/login" | "auth/logout" | "session/fork" | "mcp/message" => {
+                Routed::Answered(Err(errors::unknown_method(&method)))
+            }
             m if OBJECT_CANCELS.contains(&m) => {
                 Routed::Answered(Err(errors::unsupported_object_cancel(m)))
             }
@@ -534,9 +574,7 @@ impl AcpTransport for V2Stdio {
                     }
                 });
                 if let Some(updates) = updates::project_update(update, reset) {
-                    for update in updates {
-                        self.update(&sid, update).await?;
-                    }
+                    self.emit(slot, &sid, updates).await?;
                 }
             }
             "peri/agent_event" => {
@@ -580,7 +618,20 @@ impl AcpTransport for V2Stdio {
 
     async fn recv(&self) -> Option<IncomingMessage> {
         loop {
-            if let Some(message) = self.inbound(self.inner.recv().await?).await {
+            // Register before observing the queue so a park that lands while this
+            // task is waiting for the client cannot be missed.
+            let parked = self.pending_wake.notified();
+            tokio::pin!(parked);
+            parked.as_mut().enable();
+            if let Some(message) = self.pending.lock().await.pop_front() {
+                return Some(message);
+            }
+            let message = tokio::select! {
+                biased;
+                () = &mut parked => continue,
+                message = self.inner.recv() => message?,
+            };
+            if let Some(message) = self.inbound(message).await {
                 return Some(message);
             }
         }
@@ -647,6 +698,42 @@ impl AcpTransport for V2Stdio {
                 }
                 return Ok(());
             }
+            Some(Reply::ConfigOptions) => result.map(|mut value| {
+                if let Some(object) = value.as_object_mut() {
+                    config::project_options(object);
+                }
+                value
+            }),
+            Some(Reply::ConfigFetch {
+                client,
+                session,
+                result: mut parked,
+            }) => {
+                let fetch = result;
+                match (parked.as_mut(), fetch) {
+                    (Ok(value), Ok(reply)) => {
+                        let options = config::options_from(&reply);
+                        if let Some(slot) = wire.slots.get_mut(&session) {
+                            slot.config = options.clone();
+                        }
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("configOptions".into(), Value::Array(options));
+                        }
+                    }
+                    // The session is attached and usable; a missing option list
+                    // is reported as "no options advertised" rather than by
+                    // failing a resume the host already committed.
+                    (Ok(_), Err(error)) => tracing::warn!(
+                        code = error.code,
+                        session = %session,
+                        "ACP v2 configuration fetch failed; the resume reply omits configOptions"
+                    ),
+                    (Err(_), _) => {}
+                }
+                let parked =
+                    parked.map_err(|error| if two { errors::normalize(error) } else { error });
+                return self.inner.send_response(client, parked).await;
+            }
             Some(Reply::Setup {
                 session,
                 replay,
@@ -658,9 +745,10 @@ impl AcpTransport for V2Stdio {
                 } else {
                     "session/new"
                 };
+                let mut sid: Option<String> = None;
                 match &result {
                     Ok(value) => {
-                        let sid = session
+                        sid = session
                             .as_deref()
                             .or_else(|| value.get("sessionId").and_then(Value::as_str))
                             .map(str::to_owned);
@@ -674,13 +762,29 @@ impl AcpTransport for V2Stdio {
                                     .await?;
                             }
                             if session.is_some() {
+                                // v2 reports the state snapshot and the session
+                                // metadata before the resume reply: the snapshot
+                                // is required after any replay and before it, and
+                                // the host pushes the command table and options
+                                // ahead of its own reply.
                                 self.update(sid, updates::state(foreground, None)).await?;
+                                let held = slot.flush_held();
+                                let projected = held
+                                    .into_iter()
+                                    .flat_map(|update| {
+                                        updates::project_update(update, false).unwrap_or_default()
+                                    })
+                                    .collect();
+                                self.emit(slot, sid, projected).await?;
+                            } else {
+                                // A new session's id only becomes routable with
+                                // the reply, so its metadata waits for it.
+                                flush = slot
+                                    .flush_held()
+                                    .into_iter()
+                                    .map(|update| (sid.to_owned(), update))
+                                    .collect();
                             }
-                            flush = slot
-                                .flush_held()
-                                .into_iter()
-                                .map(|update| (sid.to_owned(), update))
-                                .collect();
                         }
                     }
                     Err(_) => {
@@ -705,11 +809,53 @@ impl AcpTransport for V2Stdio {
                 let projected = result
                     .map(|value| lifecycle::lifecycle_result(method, value))
                     .map_err(|error| if two { errors::normalize(error) } else { error });
+                // Cache the option list the host reported; `session/new` and
+                // `session/load` already carry it in their reply.
+                if let Ok(value) = &projected {
+                    if let Some(options) = value.get("configOptions").and_then(Value::as_array) {
+                        if let Some(slot) = sid
+                            .as_deref()
+                            .and_then(|session_id| wire.slots.get_mut(session_id))
+                        {
+                            slot.config = options.clone();
+                        }
+                    }
+                }
+                // A resume reply has no v1 `configOptions`; ask the host for the
+                // list `session/new` returns and answer the client once it is
+                // known, so both entry points expose the same configuration
+                // surface. `session/load` already replayed it.
+                if projected.is_ok() && session.is_some() && !replay {
+                    if let Some(session_id) = sid.as_deref() {
+                        let config_id = RequestId::String(uuid::Uuid::now_v7().to_string());
+                        wire.replies.insert(
+                            config_id.clone(),
+                            Reply::ConfigFetch {
+                                client: id,
+                                session: session_id.to_owned(),
+                                result: projected,
+                            },
+                        );
+                        self.park(IncomingMessage::Request {
+                            id: config_id,
+                            method: CONFIG.into(),
+                            params: config::fetch_params(session_id),
+                        })
+                        .await;
+                        return Ok(());
+                    }
+                }
                 self.inner.send_response(id, projected).await?;
                 for (sid, update) in flush {
-                    let projected = updates::project_held(update).unwrap_or_default();
-                    for update in projected {
-                        self.update(&sid, update).await?;
+                    let slot = wire.slots.get_mut(&sid);
+                    let projected = updates::project_update(update, false).unwrap_or_default();
+                    match slot {
+                        Some(slot) => self.emit(slot, &sid, projected).await?,
+                        None => {
+                            for update in projected {
+                                self.update(&sid, update).await?;
+                            }
+                        }
                     }
                 }
                 return Ok(());

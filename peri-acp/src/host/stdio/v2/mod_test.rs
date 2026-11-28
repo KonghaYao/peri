@@ -3,7 +3,9 @@
 
 use serde_json::json;
 
-use super::harness::{begin_turn, code, expect_error, expect_state, permission, Harness, CWD};
+use super::harness::{
+    begin_turn, code, config_options, expect_error, expect_state, permission, Harness, CWD,
+};
 use super::WITHDRAW;
 use crate::transport::types::{AcpError, RequestId};
 use crate::transport::AcpTransport;
@@ -170,7 +172,7 @@ async fn concurrent_permissions_resume_running_only_after_the_last_one() {
 }
 
 #[tokio::test]
-async fn metadata_pushed_while_resuming_is_flushed_after_the_reply() {
+async fn metadata_pushed_while_resuming_precedes_the_reply() {
     let mut harness = Harness::start();
     harness.negotiate().await;
     harness.open("A").await;
@@ -207,14 +209,21 @@ async fn metadata_pushed_while_resuming_is_flushed_after_the_reply() {
     harness
         .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
         .await;
-    // Snapshot, then the reply itself, then the parked metadata.
+    // v2 hands the client the state snapshot and the session metadata before the
+    // resume reply, so it can route them without racing the response.
     expect_state(&harness, "A", "idle").await;
-    let (answered, result) = harness.expect_out().await.response();
-    assert_eq!(answered, id);
-    assert_eq!(result.expect("resume")["sessionId"], "A");
     let held = harness.expect_out().await.update();
     assert_eq!(held["sessionUpdate"], "session_info_update");
     assert_eq!(held["title"], "restored");
+    // The reply itself waits for the session's configuration snapshot, which v1
+    // resume does not return.
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("resume");
+    assert_eq!(result["sessionId"], "A");
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert!(result["configOptions"][0].get("id").is_none());
 
     // Once attached the same update is no longer parked.
     harness
@@ -306,7 +315,6 @@ async fn unsupported_methods_and_object_cancels_use_the_documented_codes() {
         ("session/fork", -32601),
         ("providers/list", -32601),
         ("mcp/message", -32601),
-        ("session/set_config_option", -32601),
         ("terminal/cancel", -32602),
         ("tool_call/cancel", -32602),
         ("not/a/method", -32601),
@@ -676,4 +684,146 @@ async fn delete_settles_parked_prompts_and_drops_the_slot() {
         )
         .await;
     expect_error(&harness, RequestId::Number(3002), -32002).await;
+}
+
+#[tokio::test]
+async fn a_new_session_reports_its_config_options_in_the_v2_shape() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(50);
+    harness
+        .request(id.clone(), "session/new", json!({"cwd": CWD}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({
+                "sessionId": "A",
+                "modes": {"currentModeId": "default"},
+                "configOptions": config_options("default"),
+                "_meta": {"peri.identity": "opaque"}
+            })),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("new session reply");
+    assert_eq!(result["sessionId"], "A");
+    // v2 has no modes block and no private metadata; `configOptions` is carried
+    // in its v2 identity shape.
+    assert!(result.get("modes").is_none());
+    assert!(result.get("_meta").is_none());
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert_eq!(result["configOptions"][0]["currentValue"], "default");
+    assert!(result["configOptions"][0].get("id").is_none());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn set_config_option_round_trips_through_the_v1_request_shape() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness
+        .open_with_config("A", config_options("default"))
+        .await;
+
+    let id = RequestId::Number(51);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "bypass"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/set_config_option");
+    assert_eq!(
+        forwarded.params,
+        json!({"sessionId": "A", "configId": "mode", "value": "bypass"})
+    );
+    // The host pushes the new list and returns it in the reply; both reach the
+    // client with the v2 identity field.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "config_option_update",
+                   "configOptions": config_options("bypass")}),
+        )
+        .await;
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"configOptions": config_options("bypass"), "_meta": {"x": 1}})),
+        )
+        .await;
+    let update = harness.expect_out().await.update();
+    assert_eq!(update["sessionUpdate"], "config_option_update");
+    assert_eq!(update["configOptions"][0]["configId"], "mode");
+    assert_eq!(update["configOptions"][0]["currentValue"], "bypass");
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("set config reply");
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert!(result.get("_meta").is_none());
+
+    // The refreshed list is what the next request validates against.
+    let id = RequestId::Number(52);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "default"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.params["value"], "default");
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"configOptions": config_options("default")})),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn set_config_option_refuses_unknown_sessions_options_and_values() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness
+        .open_with_config("A", config_options("default"))
+        .await;
+
+    let id = RequestId::Number(60);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "ghost", "configId": "mode", "type": "id", "value": "bypass"}),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32002).await;
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "ghost");
+
+    for (offset, params) in [
+        json!({"sessionId": "A", "type": "id", "value": "bypass"}),
+        json!({"sessionId": "A", "configId": "mode", "type": "boolean", "value": true}),
+        json!({"sessionId": "A", "configId": "nope", "type": "id", "value": "bypass"}),
+        json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "nonsense"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(61 + offset as i64);
+        harness
+            .request(id.clone(), "session/set_config_option", params)
+            .await;
+        expect_error(&harness, id, -32602).await;
+    }
+    // Every rejection is decided before the host sees the request, so the
+    // configuration cannot have moved.
+    harness.expect_quiet().await;
 }

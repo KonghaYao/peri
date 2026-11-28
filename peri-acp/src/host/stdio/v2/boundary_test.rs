@@ -3,7 +3,9 @@
 
 use serde_json::json;
 
-use super::harness::{begin_turn, expect_error, expect_state, permission, Harness, CWD};
+use super::harness::{
+    begin_turn, config_options, expect_error, expect_state, permission, Harness, CWD,
+};
 use crate::transport::types::{AcpError, RequestId};
 use crate::transport::AcpTransport;
 
@@ -157,6 +159,7 @@ async fn a_stale_failed_resume_keeps_the_newer_attach() {
         .respond(newer_forwarded.id, Ok(json!({"sessionId": "A"})))
         .await;
     expect_state(&harness, "A", "idle").await;
+    harness.fetch_config("A", config_options("default")).await;
     let (answered, result) = harness.expect_out().await.response();
     assert_eq!(answered, newer);
     assert!(result.is_ok());
@@ -223,6 +226,7 @@ async fn a_completion_from_a_replaced_slot_cannot_publish_running() {
         .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
         .await;
     expect_state(&harness, "A", "idle").await;
+    harness.fetch_config("A", config_options("default")).await;
     let (answered, result) = harness.expect_out().await.response();
     assert_eq!(answered, RequestId::Number(701));
     assert!(result.is_ok());
@@ -250,7 +254,7 @@ async fn a_completion_from_a_replaced_slot_cannot_publish_running() {
 }
 
 #[tokio::test]
-async fn metadata_held_while_resuming_is_projected_on_flush() {
+async fn metadata_held_while_resuming_is_projected_before_the_reply() {
     let mut harness = Harness::start();
     harness.negotiate().await;
     harness.open("A").await;
@@ -267,7 +271,8 @@ async fn metadata_held_while_resuming_is_projected_on_flush() {
     assert_eq!(forwarded.method, "session/resume");
     for update in [
         json!({"sessionUpdate": "available_commands_update",
-               "availableCommands": [{"name": "verify", "description": "run the probe"}]}),
+               "availableCommands": [{"name": "verify", "description": "run the probe",
+                                      "input": {"hint": "what to verify"}}]}),
         json!({"sessionUpdate": "config_option_update",
                "configOptions": [{"id": "mode", "name": "Session Mode", "type": "select",
                                   "currentValue": "default", "options": []}]}),
@@ -281,24 +286,28 @@ async fn metadata_held_while_resuming_is_projected_on_flush() {
     harness
         .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
         .await;
+    // The state snapshot, then the metadata parked while attaching: both reach
+    // the client *before* the resume reply, in the order the host produced them,
+    // in their v2 shape.
     expect_state(&harness, "A", "idle").await;
-    let (answered, result) = harness.expect_out().await.response();
-    assert_eq!(answered, id);
-    assert!(result.is_ok());
-
-    // Metadata parked while attaching reaches the client after the reply, in
-    // the order the host produced it, in its v2 shape.
     let commands = harness.expect_out().await.update();
     assert_eq!(commands["sessionUpdate"], "available_commands_update");
     assert_eq!(commands["availableCommands"][0]["type"], "command");
     assert_eq!(commands["availableCommands"][0]["name"], "verify");
+    assert_eq!(commands["availableCommands"][0]["input"]["type"], "text");
+    assert_eq!(
+        commands["availableCommands"][0]["input"]["hint"],
+        "what to verify"
+    );
     let options = harness.expect_out().await.update();
     assert_eq!(options["sessionUpdate"], "config_option_update");
     assert_eq!(options["configOptions"][0]["configId"], "mode");
     assert!(options["configOptions"][0].get("id").is_none());
-    let mode = harness.expect_out().await.update();
-    assert_eq!(mode["sessionUpdate"], "current_mode_update");
-    assert_eq!(mode["currentModeId"], "default");
-    assert!(mode.get("_meta").is_none());
+    // `current_mode_update` has no v2 equivalent and is dropped; the reply waits
+    // for the option snapshot v1 resume does not return.
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert!(result.is_ok());
     harness.expect_quiet().await;
 }

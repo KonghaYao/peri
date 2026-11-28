@@ -34,6 +34,23 @@ pub(super) const CWD: &str = r"C:\workspace";
 #[cfg(not(windows))]
 pub(super) const CWD: &str = "/workspace";
 
+/// A v1-shaped option list matching what the host builds for a live session.
+pub(super) fn config_options(mode: &str) -> Value {
+    json!([{
+        "id": "mode",
+        "name": "Session Mode",
+        "type": "select",
+        "currentValue": mode,
+        "category": "mode",
+        "options": [
+            {"value": "default", "name": "Default"},
+            {"value": "accept_edit", "name": "Accept Edit"},
+            {"value": "auto", "name": "Auto Mode"},
+            {"value": "bypass", "name": "Bypass"}
+        ]
+    }])
+}
+
 #[derive(Debug)]
 pub(super) enum Out {
     Notification {
@@ -363,6 +380,11 @@ impl Harness {
 
     /// Create a session as the client would: `session/new` + accepted reply.
     pub(super) async fn open(&mut self, sid: &str) {
+        self.open_with_config(sid, json!([])).await;
+    }
+
+    /// Create a session whose host reply advertises a configuration list.
+    pub(super) async fn open_with_config(&mut self, sid: &str, options: Value) {
         let id = self.id();
         self.request(id.clone(), "session/new", json!({"cwd": CWD}))
             .await;
@@ -370,7 +392,7 @@ impl Harness {
         assert_eq!(forwarded.method, "session/new");
         self.respond(
             forwarded.id,
-            Ok(json!({"sessionId": sid, "modes": {}, "configOptions": []})),
+            Ok(json!({"sessionId": sid, "modes": {}, "configOptions": options})),
         )
         .await;
         let (answered, result) = self.expect_out().await.response();
@@ -456,6 +478,18 @@ impl Harness {
             }}),
         )
         .await;
+    }
+
+    /// Answer the option snapshot a `session/resume` reply waits for.
+    ///
+    /// A resume has no v1 `configOptions`, so the adapter asks the host for the
+    /// list before it answers the client; the reply keeps its v1 shape.
+    pub(super) async fn fetch_config(&mut self, session_id: &str, options: Value) {
+        let forwarded = self.expect_forwarded().await;
+        assert_eq!(forwarded.method, super::CONFIG);
+        assert_eq!(forwarded.params["sessionId"], session_id);
+        self.respond(forwarded.id, Ok(json!({"configOptions": options})))
+            .await;
     }
 
     pub(super) fn v2(&self) -> Arc<V2Stdio> {
