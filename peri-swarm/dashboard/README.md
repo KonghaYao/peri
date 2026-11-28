@@ -180,8 +180,8 @@ Core metrics、Agent metrics、Request log 与 Query 均已实现；Sandbox metr
   `Newest activity first · N loaded`。搜索和计数仍只覆盖已加载集合。
 - 单网关、单凭据；没有多 profile、Overview 或跨节点视图。
 - OpenObserve 的 PromQL 方言有限：`rate()`、`increase()` 与 `delta()` 返回空矩阵，
-  因此 Core metrics 在客户端按累计计数器的正向增量计算窗口值；采样起点之前的首个增量
-  无法归因，页面以实际样本范围说明覆盖区间。
+  因此 Core metrics 在客户端按 PromQL step 评估样本的正向增量计算窗口值；采样起点之前
+  的首个增量无法归因，页面展示 PromQL 评估区间。
 - Core metrics 的 p95 依赖 OTel histogram 桶；落在 `+Inf` 桶或没有观测时显示 `—`。
   OTel SDK 默认的秒级桶较粗，p95 是桶内插值近似值。
 - Request log 不提供总数（OpenObserve 在 OFFSET 下返回的 `total` 只是本页行数），
