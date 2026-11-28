@@ -420,19 +420,29 @@ async fn otlp_exports_three_signals_without_leaking_requests() {
         "the health probe must not be exported"
     );
 
-    let metrics = all_payloads
-        .iter()
-        .find(|body| body.contains("peri_swarm.http.server.requests"))
-        .expect("requests metric export");
+    // A 50ms batch delay can split one logical signal across several OTLP
+    // requests (a slower runner exports earlier), so join every payload for a
+    // signal instead of inspecting only the first one.
+    let signal_payloads = |suffix: &str| {
+        payloads
+            .iter()
+            .filter(|(path, _)| path.ends_with(suffix))
+            .map(|(_, body)| body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let metrics = signal_payloads("/v1/metrics");
+    assert!(
+        metrics.contains("peri_swarm.http.server.requests"),
+        "requests metric export missing"
+    );
     assert!(metrics.contains("peri_swarm.http.server.duration"));
     assert!(metrics.contains("route"));
     assert!(metrics.contains("status"));
 
-    let logs = payloads
-        .iter()
-        .find(|(path, _)| path.ends_with("/v1/logs"))
-        .map(|(_, body)| body.as_str())
-        .expect("log export");
+    let logs = signal_payloads("/v1/logs");
+    assert!(!logs.is_empty(), "log export missing");
     assert!(logs.contains("peri_swarm.http.access"));
     assert!(logs.contains("request_id"));
     assert!(logs.contains("session_id"));
@@ -440,11 +450,8 @@ async fn otlp_exports_three_signals_without_leaking_requests() {
     assert!(logs.contains("duration_ms"));
     assert!(logs.contains("unmatched"));
 
-    let traces = payloads
-        .iter()
-        .find(|(path, _)| path.ends_with("/v1/traces"))
-        .map(|(_, body)| body.as_str())
-        .expect("trace export");
+    let traces = signal_payloads("/v1/traces");
+    assert!(!traces.is_empty(), "trace export missing");
     assert!(traces.contains("/v1/agents/sessions/{logical_id}"));
 
     drop(guard);

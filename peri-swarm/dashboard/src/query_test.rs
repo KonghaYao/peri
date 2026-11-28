@@ -70,7 +70,8 @@ fn columns_prefer_reported_names_then_row_keys() {
     // Reported names win outright; row keys are not appended.
     assert_eq!(resolve_columns(&reported, &hits), ["b"]);
 
-    // Without reported names the union follows the JSON key order.
+    // Without reported names the union is sorted, so it does not depend on
+    // `serde_json`'s map implementation or workspace feature unification.
     assert_eq!(resolve_columns(&[], &hits), ["a", "b", "c"]);
     // Non-object rows contribute nothing and never panic.
     assert_eq!(

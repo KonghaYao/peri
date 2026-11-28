@@ -11,6 +11,8 @@
 //! Validation never echoes the statement, so an error message is always safe to
 //! display and log.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 /// Largest statement the Query page accepts, in UTF-8 bytes.
@@ -157,8 +159,11 @@ fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char
 /// Column names for a result page.
 ///
 /// Server-reported names win, in server order. When the server omits
-/// `columns`, the keys of every row form the fallback, in first-appearance
-/// order. The order is stable in both cases.
+/// `columns`, the keys of every row form the fallback, sorted by name.
+///
+/// The fallback is sorted on purpose: `serde_json`'s map is a `BTreeMap`
+/// unless workspace feature unification enables `preserve_order`, so relying
+/// on key iteration order would make the column order depend on the build.
 #[must_use]
 pub fn resolve_columns(reported: &[String], hits: &[Value]) -> Vec<String> {
     let mut columns: Vec<String> = Vec::new();
@@ -168,15 +173,19 @@ pub fn resolve_columns(reported: &[String], hits: &[Value]) -> Vec<String> {
         }
         return columns;
     }
+    let mut names = BTreeSet::new();
     for hit in hits {
         let Some(object) = hit.as_object() else {
             continue;
         };
         for name in object.keys() {
-            push_column(&mut columns, name);
+            let name = name.trim();
+            if !name.is_empty() {
+                names.insert(name.to_owned());
+            }
         }
     }
-    columns
+    names.into_iter().collect()
 }
 
 fn push_column(columns: &mut Vec<String>, name: &str) {
