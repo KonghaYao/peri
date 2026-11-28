@@ -127,7 +127,10 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
         StdioAssembly::Configured(cfg)
             if std::env::var("PERI_ACP_V2_PREVIEW").as_deref() == Ok("1") =>
         {
-            Arc::new(v2::V2Stdio::new(stdio, Arc::clone(&cfg.permission_mode)))
+            Arc::new(v2::V2Stdio::new(
+                Arc::new(stdio),
+                Arc::clone(&cfg.permission_mode),
+            ))
         }
         _ => Arc::new(stdio),
     };

@@ -44,3 +44,33 @@ SQLite database and loopback model. The matrix additionally asserts:
 The probe drains stderr while the agent runs and reaps the child when
 `initialize` fails. All five original PASS lines and the added protocol-edge
 line passed; the official `v2_one_shot_client` example passed in the same run.
+
+## S1 multi-session and explicit negotiation
+
+Base: `0b6ca2f74`. Same command, isolated SQLite database, loopback model,
+macOS arm64; `--official-client` used the unmodified 3.5.0 `v2_one_shot_client`.
+The matrix and the official client both exited 0.
+
+This run **supersedes** the earlier one-active-session assertion above: a v2
+connection now holds several sessions, so `session/new` while another session is
+attached succeeds and a resume of a session the connection never attached fails
+with the host's code (never `-32000`). The matrix now asserts:
+
+- two sessions on one connection, a turn on the second one, then **two turns in
+  flight at the same time** on the two sessions, then a single close — the
+  closed session's prompt is `-32002` while the other still runs;
+- `session/delete` removes the session from `session/list` and from the
+  connection (`session/prompt` and a second `session/delete` are `-32002`);
+- error-code shapes: unknown session `-32002` with `data.sessionId`, missing and
+  relative `cwd` `-32602`, unadvertised `additionalDirectories` `-32602`,
+  `terminal/cancel` and `tool_call/cancel` `-32602`, `auth/login` `-32601`;
+- the previous checks (repeat `initialize`, key bounds and dedup, replay
+  ordering, both cancellation scopes, durable withdrawal, approval probe, v1
+  client with the preview on and off) are unchanged.
+
+Adapter-level behaviour that has no wire probe is covered by
+`cargo test -p peri-acp --lib -- host::stdio::v2`: per-session routing and close
+isolation, stale-epoch completions, concurrent permission aggregation,
+`Attaching` hold/flush ordering, elicitation capability gating, `$/cancel_request`
+scope, and delete settlement.
+

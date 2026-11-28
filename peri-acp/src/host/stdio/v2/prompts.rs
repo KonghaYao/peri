@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 
 use crate::transport::types::{AcpError, RequestId};
 
+use super::errors;
+
 const MAX_PENDING_PER_SESSION: usize = 32;
 const MAX_WAITERS: usize = 16;
 const MAX_RECEIPTS: usize = 4096;
@@ -62,7 +64,7 @@ impl Prompts {
                     return Err(conflict());
                 }
                 if pending.waiters.len() >= MAX_WAITERS {
-                    return Err(busy());
+                    return Err(errors::prompt_capacity(session_id));
                 }
                 pending.waiters.push(id);
                 return Ok(Admission::Pending);
@@ -76,7 +78,7 @@ impl Prompts {
                 .count()
                 >= MAX_PENDING_PER_SESSION
         {
-            return Err(busy());
+            return Err(errors::prompt_capacity(session_id));
         }
         let message_id = uuid::Uuid::now_v7().to_string();
         self.pending.insert(
@@ -173,10 +175,6 @@ fn conflict() -> AcpError {
 /// ACP v2 keys are opaque strings of 1 to 255 **characters**, not bytes.
 pub(super) fn valid_idempotency_key(key: &str) -> bool {
     !key.is_empty() && key.chars().count() <= 255
-}
-
-fn busy() -> AcpError {
-    AcpError::new(-32000, "ACP prompt receipt capacity reached")
 }
 
 #[cfg(test)]

@@ -31,12 +31,17 @@ enum SessionSwitchPhase {
 struct SessionSwitchState {
     generation: u64,
     phase: SessionSwitchPhase,
+    /// The negotiated protocol addresses sessions by id, so there is no single
+    /// "current" session to switch away from.
+    multi_session: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionSetupReservationKind {
     Preparing,
     Reuse,
+    /// Multi-session connection: the reservation commits no binding.
+    Unbound,
 }
 
 /// setup 准入票据：失败、取消或任意 early return 都由 Drop 回滚本代 Preparing。
@@ -145,6 +150,15 @@ impl ConnectionContext {
             self.initialized = true;
             self.negotiated_caps = Some(caps);
         }
+    }
+
+    /// Let this connection hold several sessions at once.
+    ///
+    /// Set from the transport before the loop starts: only a protocol that
+    /// addresses sessions by id (ACP v2 stdio) may opt out of the historical
+    /// one-session-per-connection gate.
+    pub(crate) fn allow_concurrent_sessions(&mut self) {
+        self.session_switch.lock().multi_session = true;
     }
 
     /// 本连接协商出的 peri caps。
@@ -277,6 +291,20 @@ impl ConnectionContext {
         request: SessionSetupRequest<'_>,
     ) -> Result<SessionSetupReservation, AcpError> {
         let mut state = self.session_switch.lock();
+        if matches!(state.phase, SessionSwitchPhase::Closed) {
+            return Err(AcpError::new(-32800, "request cancelled"));
+        }
+        if state.multi_session {
+            // The negotiated protocol addresses every session by id: any number
+            // of setups may be in flight and no binding is committed, so the
+            // one-session gate does not apply.
+            return Ok(SessionSetupReservation {
+                state: Arc::clone(&self.session_switch),
+                generation: state.generation,
+                kind: SessionSetupReservationKind::Unbound,
+                finished: false,
+            });
+        }
         let kind = match &state.phase {
             SessionSwitchPhase::Closed => {
                 return Err(AcpError::new(-32800, "request cancelled"));

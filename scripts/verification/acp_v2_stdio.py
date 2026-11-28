@@ -167,14 +167,72 @@ def lifecycle(binary, root, schema):
         assert peer.response(peer.request("initialize", {"protocolVersion": 65536, "info": client}))["error"]["code"] == -32602
         sid = peer.sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
         assert peer.response(peer.request("initialize", {"protocolVersion": 2, "info": client}))["error"]["code"] == -32600
-        # The adapter enforces the preview's one active session per connection.
-        assert peer.response(peer.request("session/new", {"cwd": str(root)}))["error"]["code"] == -32000
-        assert peer.response(peer.request("session/resume", {
+        # v2 addresses every session by id, so one connection may hold several.
+        other = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        assert other != sid
+        # A resume of a session this connection never attached is a host-level
+        # failure, never the v1-style "one active session" rejection: `-32000`
+        # is reserved for Authentication required in the pinned schema.
+        unknown = peer.response(peer.request("session/resume", {
             "sessionId": "00000000-0000-7000-8000-000000000000", "cwd": str(root)
-        }))["error"]["code"] == -32000
+        }))["error"]
+        assert unknown["code"] != -32000, unknown
+        # cwd is a required absolute path; the preview advertises neither extra
+        # roots nor system prompts.
+        assert peer.response(peer.request("session/new", {}))["error"]["code"] == -32602
+        assert peer.response(peer.request("session/new", {"cwd": "relative"}))["error"]["code"] == -32602
+        assert peer.response(peer.request("session/new", {
+            "cwd": str(root), "additionalDirectories": [str(root)]
+        }))["error"]["code"] == -32602
+        # Per-object cancellation is never advertised.
+        assert peer.response(peer.request("terminal/cancel", {
+            "sessionId": sid, "terminalId": "t"
+        }))["error"]["code"] == -32602
+        assert peer.response(peer.request("tool_call/cancel", {
+            "sessionId": sid, "toolCallId": "t"
+        }))["error"]["code"] == -32602
+        assert peer.response(peer.request("auth/login", {}))["error"]["code"] == -32601
+        # An unknown session names itself in the error data.
+        ghost = "00000000-0000-7000-8000-000000000001"
+        missing = peer.response(peer.request("session/prompt", prompt(ghost, "ghost")))["error"]
+        assert missing["code"] == -32002 and missing["data"]["sessionId"] == ghost, missing
         # Idempotency keys are 1..255 characters, not bytes.
         assert peer.response(peer.request("session/prompt", prompt(sid, "Too long", "k" * 256)))["error"]["code"] == -32602
-        print("PASS v2 initialize repeat/version bounds, single active session, prompt key bounds")
+        print("PASS v2 initialize repeat/version bounds, multi-session admission, "
+              "setup/error-code shapes, prompt key bounds")
+        # Cross-session routing: a turn on the second session stays on it.
+        start = len(peer.frames)
+        assert "result" in peer.response(peer.request("session/prompt", prompt(other, "Second session turn")),
+                                        "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == other
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle")
+        # Turns of two sessions may be in flight at the same time: the host
+        # serializes per session, not per connection.
+        start = len(peer.frames)
+        first = peer.request("session/prompt", prompt(sid, "Concurrent turn A"))
+        second = peer.request("session/prompt", prompt(other, "Concurrent turn B"))
+        peer.response(first, "PromptResponse")
+        peer.response(second, "PromptResponse")
+        for target in (sid, other):
+            peer.until(lambda f: f in peer.frames[start:]
+                       and f.get("method") == "session/update"
+                       and f["params"]["sessionId"] == target
+                       and f["params"]["update"].get("sessionUpdate") == "state_update"
+                       and f["params"]["update"].get("state") == "idle")
+        peer.call("session/close", {"sessionId": other}, "CloseSessionResponse")
+        assert peer.response(peer.request("session/prompt", prompt(other, "Closed")))["error"]["code"] == -32002
+        print("PASS v2 two sessions on one connection; concurrent turns; per-session close isolation")
+        # session/delete removes the session from the list and its slot.
+        doomed = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        peer.call("session/delete", {"sessionId": doomed}, "DeleteSessionResponse")
+        assert peer.response(peer.request("session/prompt", prompt(doomed, "gone")))["error"]["code"] == -32002
+        assert all(x["sessionId"] != doomed for x in
+                   peer.call("session/list", {}, "ListSessionsResponse")["sessions"])
+        assert peer.response(peer.request("session/delete", {"sessionId": doomed}))["error"]["code"] == -32002
+        print("PASS v2 session/delete drops the session and its connection slot")
         # A 255-character key is the accepted upper bound; the 256-character
         # key above was rejected without creating a receipt.
         key = "k" * 255
