@@ -9,6 +9,7 @@ mod error;
 mod handlers;
 pub mod request;
 mod sse;
+mod telemetry;
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use axum::Router;
 
 use crate::config::SwarmConfig;
 use crate::service::SwarmService;
+use crate::telemetry::HttpTelemetry;
 
 pub const CONTRACT_VERSION: &str = "1";
 pub const CONTRACT_HEADER: &str = "x-peri-swarm-contract";
@@ -35,12 +37,33 @@ pub const MAX_MODEL_BYTES: usize = 256;
 pub struct AppState {
     service: Arc<dyn SwarmService>,
     config: Arc<SwarmConfig>,
+    telemetry: Option<HttpTelemetry>,
 }
 
 impl AppState {
     #[must_use]
     pub fn new(service: Arc<dyn SwarmService>, config: Arc<SwarmConfig>) -> Self {
-        Self { service, config }
+        Self {
+            service,
+            config,
+            telemetry: None,
+        }
+    }
+
+    /// Attach the HTTP telemetry handle. Without one the router is byte-for-byte
+    /// the pre-telemetry router: no middleware, no metric/log side effects.
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: HttpTelemetry) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Attach an optional handle (the process passes whatever `telemetry::init`
+    /// produced; tests pass `None` for the disabled path).
+    #[must_use]
+    pub fn with_optional_telemetry(mut self, telemetry: Option<HttpTelemetry>) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     #[must_use]
@@ -52,12 +75,18 @@ impl AppState {
     pub fn config(&self) -> &SwarmConfig {
         &self.config
     }
+
+    #[must_use]
+    pub fn telemetry(&self) -> Option<&HttpTelemetry> {
+        self.telemetry.as_ref()
+    }
 }
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("bind_addr", &self.config.bind_addr)
+            .field("telemetry", &self.telemetry.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -146,8 +175,19 @@ pub fn build_router(state: AppState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard));
-    Router::new()
+    let layer_state = state.clone();
+    let router = Router::new()
         .route("/healthz", get(handlers::healthz))
         .merge(sessions)
-        .with_state(state)
+        .with_state(state);
+    if layer_state.telemetry().is_some() {
+        // Outermost layer: it observes unmatched paths and auth rejections too,
+        // and it ends at the response headers (the SSE body is never wrapped).
+        router.layer(middleware::from_fn_with_state(
+            layer_state,
+            telemetry::observe,
+        ))
+    } else {
+        router
+    }
 }

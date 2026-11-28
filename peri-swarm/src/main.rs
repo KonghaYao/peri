@@ -4,15 +4,21 @@
 //! the gateway plus the Rivet registry until SIGINT. A missing or invalid remote
 //! configuration is a startup failure; the process never degrades to a local
 //! SQLite store.
+//!
+//! OpenTelemetry is initialized first. The guard installs the process
+//! subscriber (or keeps the pre-telemetry fmt subscriber when OTLP is unset) and
+//! stays alive until `start()` has drained the gateway and closed both stores,
+//! so the final flush happens after the store close.
 
 use std::process::ExitCode;
 
-use peri_swarm::bootstrap::{run, BootstrapConfig};
+use peri_swarm::bootstrap::{run_with_telemetry, BootstrapConfig};
+use peri_swarm::telemetry::{self, HttpTelemetry};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    init_tracing();
-    match start().await {
+    let telemetry = telemetry::init();
+    match start(telemetry.http_telemetry()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // stderr is not filtered by RUST_LOG: a failed start must stay
@@ -24,16 +30,9 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn start() -> Result<(), peri_swarm::bootstrap::BootstrapError> {
+async fn start(
+    telemetry: Option<HttpTelemetry>,
+) -> Result<(), peri_swarm::bootstrap::BootstrapError> {
     let config = BootstrapConfig::from_env()?;
-    run(config).await
-}
-
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("peri_swarm=info,warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    run_with_telemetry(config, telemetry).await
 }

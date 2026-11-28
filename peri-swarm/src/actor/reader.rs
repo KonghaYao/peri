@@ -371,6 +371,10 @@ struct LogState {
     generation: Option<String>,
     /// Last fatal agent message observed while the turn was active.
     failure: Option<String>,
+    /// Telemetry span covering the current gateway turn. It carries no actor
+    /// semantics: `None` means no turn was opened (or the subscriber filtered
+    /// the target) and every use is a no-op.
+    turn_span: Option<tracing::Span>,
     /// Monotonic count of ingested notifications; used as a drain fence.
     ingested: u64,
     /// Last seq this log appended, cached so a batched append does not pay a
@@ -410,6 +414,17 @@ struct LogState {
     /// every persisted row and the live terminal carry the running total so no
     /// write erases an earlier observation.
     turn_usage: TurnUsage,
+}
+
+/// End the current turn span (if any) with a terminal status. Called only while
+/// holding the log state lock; recording is cheap and non-blocking.
+fn end_turn_span(state: &mut LogState, status: &'static str) {
+    if let Some(span) = state.turn_span.take() {
+        span.record("status", status);
+        // Dropping the last handle ends the span in `tracing`; there is no
+        // explicit `end` method.
+        drop(span);
+    }
 }
 
 /// Whether a steer's generation could be reserved for the turn the input was
@@ -1029,12 +1044,21 @@ impl ItemLog {
             state.suppressed_terminal = None;
             state.turn_usage = TurnUsage::default();
             state.turn_started_at = Some(started_at);
+            state.turn_span = Some(tracing::info_span!(
+                target: crate::telemetry::TURN_SPAN_TARGET,
+                "peri_swarm.turn",
+                session_id = %self.logical_id,
+                request_id = request_id,
+                turn_id = turn_id,
+                status = tracing::field::Empty,
+            ));
             (created, added)
         };
         let created_at = self.state.lock().turn_created_at.unwrap_or(started_at);
         if let Err(error) = self.set_session_state(SessionState::Running, None).await {
             let mut state = self.state.lock();
             state.active = None;
+            end_turn_span(&mut state, "failed");
             return Err(error);
         }
         // The turn is durable before its first frame: a client can never see
@@ -1060,6 +1084,7 @@ impl ItemLog {
             {
                 let mut state = self.state.lock();
                 state.active = None;
+                end_turn_span(&mut state, "failed");
             }
             self.update_state_quiet(SessionState::Idle).await;
             return Err(store_failure("upsert_turn", error));
@@ -1193,7 +1218,7 @@ impl ItemLog {
         // separately; wait for the reader to go quiet so the completion item
         // carries the whole message rather than the text seen so far.
         self.settle().await;
-        let (streams, failure, turn_id) = {
+        let (streams, failure, turn_id, turn_span) = {
             let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
                 return;
@@ -1242,7 +1267,8 @@ impl ItemLog {
             // the flushed row nor open a stream for the next turn.
             state.closed.extend(streams.keys().cloned());
             let turn_id = state.turn_id.clone();
-            (streams, state.failure.take(), turn_id)
+            let turn_span = state.turn_span.take();
+            (streams, state.failure.take(), turn_id, turn_span)
         };
         // Approvals owned by this turn can no longer be answered: the prompt
         // attempt (and its ACP waiter) is gone. Persist the settlement and
@@ -1285,6 +1311,10 @@ impl ItemLog {
                 request_id,
                 "swarm turn closed without a recorded turn id"
             );
+            if let Some(span) = turn_span {
+                span.record("status", "failed");
+                drop(span);
+            }
             self.active_watch.send_replace(None);
             return;
         };
@@ -1306,6 +1336,11 @@ impl ItemLog {
                 }
             }
             outcome => outcome,
+        };
+        let turn_status = match &outcome {
+            TurnOutcome::Completed(stop_reason) if stop_reason == "cancelled" => "cancelled",
+            TurnOutcome::Completed(_) => "completed",
+            TurnOutcome::Failed { .. } => "failed",
         };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
@@ -1424,6 +1459,10 @@ impl ItemLog {
                         .await,
                 )));
             }
+        }
+        if let Some(span) = turn_span {
+            span.record("status", turn_status);
+            drop(span);
         }
         // Wake `wait_turn_closed` only after the terminal is out, so a caller
         // that returns from the prompt observes a fully closed turn.
