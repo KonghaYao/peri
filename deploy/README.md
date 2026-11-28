@@ -1,14 +1,17 @@
 # Peri Swarm（单机 Compose）
 
-一个 compose 拉起 Peri Swarm core：
+一个 compose 拉起 Peri Swarm core 和 OpenObserve 遥测栈：
 
 - `postgres`：`peri_session`（Peri 会话库）+ `peri_swarm_state`（Swarm 状态库）
 - `rivet-engine`：独立运行的 Rivet 3.x 控制面，filesystem 存储
 - `rivet-init`：一次性创建 `peri-swarm` node pool
+- `openobserve`：单节点 OpenObserve v1.2.0，接收 OTLP 并提供查询 UI/API
+- `openobserve-init`：一次性创建 OTLP 与查询用的两个专用 admin 账号
 - `peri-swarm`：网关二进制（HTTP API + 进程内 ACP Host），默认 2 个副本
 - `nginx`：副本组前面的入口，负责 HTTP 转发与 SSE 透传
 
-> 本机已按下面步骤启动并完成检查（2 副本 + nginx + 一次建/删会话）；换机器时按本文准备。
+> 本机已按下面步骤启动并完成检查（2 副本 + nginx + 一次建/删会话）；
+> OpenObserve 的健康、账号与写入检查见「检查」。
 
 ## 前置
 
@@ -26,9 +29,20 @@ cp .env.example .env
 openssl rand -hex 24   # POSTGRES_PASSWORD
 openssl rand -hex 32   # PERI_SWARM_API_KEY
 openssl rand -hex 32   # RIVET_ADMIN_TOKEN
+printf '%sAa1!' "$(openssl rand -hex 12)"   # OpenObserve root/ingest/dashboard（各跑一次）
 ```
 
-把三个值填进 `.env`；`POSTGRES_PASSWORD` 只用 URL 安全字符，因为它会拼进两个 DSN。
+把值填进 `.env`；`POSTGRES_PASSWORD` 只用 URL 安全字符，因为它会拼进两个 DSN。
+OpenObserve 密码要求 8–128 位，且包含大写、小写、数字和特殊字符；root、ingest、
+dashboard 各用一个独立值。不要把 `replace-with-*` 占位值直接用于启动；root 密码
+不满足策略会导致 OpenObserve 启动失败。生成 ingest 的 Basic auth：
+
+```bash
+printf '%s:%s' "$OPENOBSERVE_INGEST_EMAIL" "$OPENOBSERVE_INGEST_PASSWORD" \
+  | base64 | tr -d '\n'
+```
+
+把结果填到 `OPENOBSERVE_INGEST_AUTH`；ingest 密码变化后必须重新生成。
 
 2. 填写模型配置：
 
@@ -66,6 +80,9 @@ sudo chown 10001:10001 config/peri-swarm/settings.json
 docker compose up -d --build
 ```
 
+`openobserve-init` 会在 OpenObserve healthy 后创建两个账号并退出；`docker compose ps -a`
+中应为 `Exited (0)`。
+
 若本机 buildkit 拉不到基础镜像或解析不了外网域名，改用文末的 host 网络预构建 + `--no-build`。
 
 ## 端口
@@ -74,6 +91,7 @@ docker compose up -d --build
 | --- | --- | --- |
 | 对外入口 | `${PERI_SWARM_PORT:-8080}` + `${PERI_SWARM_PUBLISH_HOST:-127.0.0.1}` | nginx 发布，正常客户端只用这个 |
 | 副本直连 | `${PERI_SWARM_REPLICA_PORT_RANGE:-8100-8199}` | Docker 给每个副本分配一个空闲宿主端口，仅调试用 |
+| OpenObserve UI/API | `${OPENOBSERVE_PUBLISH_HOST:-127.0.0.1}:${OPENOBSERVE_PORT:-5080}` | OTLP 接收与查询；只发布 loopback，禁止公开暴露 |
 
 副本不发布固定端口，否则 `--scale` 会互相抢端口；范围由 Docker 逐个分配。
 `docker compose ps` 的 PORTS 列就是各副本实际拿到的端口。正常流量走 nginx 的
@@ -98,6 +116,35 @@ docker compose exec --index=1 peri-swarm sh -c \
 ```bash
 docker compose exec --index=1 peri-swarm cat /var/lib/peri-swarm/machine-id
 docker compose exec --index=2 peri-swarm cat /var/lib/peri-swarm/machine-id
+```
+
+### OpenObserve
+
+```bash
+set -a; . ./.env; set +a
+OO_URL="http://${OPENOBSERVE_PUBLISH_HOST:-127.0.0.1}:${OPENOBSERVE_PORT:-5080}"
+
+curl -fsS "$OO_URL/healthz"
+docker compose ps openobserve          # 应为 healthy
+docker compose ps -a openobserve-init  # 应为 Exited (0)
+
+curl -fsS -u "$OPENOBSERVE_ROOT_EMAIL:$OPENOBSERVE_ROOT_PASSWORD" \
+  "$OO_URL/api/default/users" \
+  | jq -r '.data[] | [.email, .role] | @tsv'   # 需要 jq；也可直接看 JSON
+# 期望 peri-swarm-ingest 和 peri-swarm-dashboard，role 都是 admin
+
+# OTLP/HTTP 写入，与 peri-swarm 使用同一个 ingest 账号
+now=$(($(date +%s) * 1000000))
+curl -fsS -u "$OPENOBSERVE_INGEST_EMAIL:$OPENOBSERVE_INGEST_PASSWORD" \
+  -H 'Content-Type: application/json' -H 'stream-name: peri_swarm_logs' \
+  -d "{\"resourceLogs\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"peri-swarm\"}}]},\"scopeLogs\":[{\"logRecords\":[{\"timeUnixNano\":\"${now}000\",\"severityText\":\"INFO\",\"body\":{\"stringValue\":\"deploy-check\"}}]}]}]}" \
+  "$OO_URL/api/default/v1/logs"
+
+# dashboard 专用账号查询（它能写，见下方注意）
+curl -fsS -u "$OPENOBSERVE_DASHBOARD_EMAIL:$OPENOBSERVE_DASHBOARD_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d "{\"query\":{\"sql\":\"SELECT * FROM \\\"peri_swarm_logs\\\"\",\"start_time\":$((now-3600000000)),\"end_time\":$((now+3600000000)),\"size\":10}}" \
+  "$OO_URL/api/default/_search?type=logs"
 ```
 
 ## 会话
@@ -127,14 +174,28 @@ docker compose exec --index=2 peri-swarm cat /var/lib/peri-swarm/machine-id
   `peri_session`，否则启动会报「这是 Peri 会话库」。
 - 状态库首次启动必须是空的；网关会自己建表并写 `swarm_meta`。
 - `docker compose down -v` 会同时清空两个数据库、Rivet 的
-  `rivet-log`/`rivet-objects` 和 `peri-swarm-data`。`rivet-log` 里有尚未落到
-  对象存储的写入，**有数据时不要单独删它**。
+  `rivet-log`/`rivet-objects`、`peri-swarm-data` 和 `openobserve-data`。
+  `rivet-log` 里有尚未落到对象存储的写入，**有数据时不要单独删它**。
 - `peri-swarm` 在容器内绑 `0.0.0.0:8080`（端口映射需要），对外只发布
   `127.0.0.1`；启动日志里的 non-loopback WARN 是预期。
 - 模型 key 只在 `config/peri-swarm/settings.json`（Compose secret）里；不要把它
   写进 `.env` 或提交。`settings.json` 仍是占位值时网关能启动，但第一次真实会话
   会因 key/model 无效失败。
 - nginx 只做 HTTP 转发和 SSE 透传；TLS 与统一鉴权应由更外层入口负责。
+- OpenObserve 镜像没有 shell/curl/wget；`openobserve` 的 healthcheck 使用镜像内的
+  `/openobserve node metrics`，不要改成 curl。
+- OSS v1.2.0 不能创建 viewer/editor；`openobserve-init` 创建的
+  `peri-swarm-ingest` 和 `peri-swarm-dashboard` 都是 admin。dashboard 账号
+  可以写，dashboard 的 SELECT-only 只是客户端校验，**不是安全边界**；安全性依赖
+  OpenObserve 只在 loopback/内网、专用账号和凭据保密。凭据泄露即等于写权限。
+- OpenObserve 的 root/ingest/dashboard 凭据与 Postgres/Rivet/Peri 的 secret 是
+  两套秘密，不要复用。所有 OpenObserve 凭据都应定期轮换：在 OpenObserve 内更新
+  账号密码，再把新值同步到 `.env`（dashboard 账号还要同步到 dashboard 配置）；
+  root 轮换后要保证 `openobserve-init` 能登录，ingest 密码变化后要重新生成并
+  同步 `OPENOBSERVE_INGEST_AUTH`。
+- OpenObserve 数据在 `openobserve-data` 卷，按 stream 配置 retention；
+  不设置保留期会持续增长。`down -v` 会清空。
+- OpenObserve 使用 AGPL-3.0；分发修改版或作为网络服务提供前确认许可证义务。
 - `rivetdev/engine` 的 tag 需要 pin；官方文档默认 `latest`，与仓库
   `rivetkit 3.1.1` 的兼容性需要实测。engine 的 `/health` 之后几秒内 API 可能
   返回 `depot.overloaded`，`rivet-init` 会重试。
