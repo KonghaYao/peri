@@ -322,6 +322,17 @@ async fn a_stale_success_keeps_the_metadata_parked_for_the_takeover() {
     assert!(result.is_ok());
     harness.expect_quiet().await;
 
+    // The stale success recorded a completed attach but must leave the takeover
+    // in `Attaching`: metadata arriving after it is still parked, not emitted
+    // ahead of the owner's flush.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "late"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+
     // The owner flushes the parked metadata before its own reply.
     harness
         .respond(newer_forwarded.id, Ok(json!({"sessionId": "A"})))
@@ -330,6 +341,9 @@ async fn a_stale_success_keeps_the_metadata_parked_for_the_takeover() {
     let held = harness.expect_out().await.update();
     assert_eq!(held["sessionUpdate"], "session_info_update");
     assert_eq!(held["title"], "takeover");
+    let late = harness.expect_out().await.update();
+    assert_eq!(late["sessionUpdate"], "session_info_update");
+    assert_eq!(late["title"], "late");
     harness.fetch_config("A", config_options("default")).await;
     let (answered, result) = harness.expect_out().await.response();
     assert_eq!(answered, newer);

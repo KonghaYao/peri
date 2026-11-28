@@ -419,10 +419,11 @@ impl V2Stdio {
         let Some(slot) = wire.slots.get_mut(sid) else {
             return;
         };
-        // A slot that is still attaching only accepts live events while it is
-        // replaying, which is the one case where the host streams activity
-        // before the setup reply.
-        if slot.attach != Attach::Attached && slot.replay.is_none() {
+        // A slot that is still attaching only accepts live events for a turn
+        // that is already running (or while it replays), which is the one case
+        // where the host streams activity before the setup reply. Dropping a
+        // done event for such a turn would leave the foreground state running.
+        if slot.attach != Attach::Attached && slot.replay.is_none() && slot.foreground.is_idle() {
             return;
         }
         match event {
@@ -656,7 +657,10 @@ impl AcpTransport for V2Stdio {
                 let Some(slot) = wire.slots.get_mut(&sid) else {
                     return Ok(());
                 };
-                if slot.attach != Attach::Attached && slot.replay.is_none() {
+                if slot.attach != Attach::Attached
+                    && slot.replay.is_none()
+                    && slot.foreground.is_idle()
+                {
                     return Ok(());
                 }
                 let reason = params

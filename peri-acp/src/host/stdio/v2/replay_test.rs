@@ -2,9 +2,9 @@
 
 use serde_json::json;
 
-use crate::transport::types::RequestId;
+use crate::transport::types::{AcpError, RequestId};
 
-use super::super::harness::{begin_turn, expect_state, Harness, CWD};
+use super::super::harness::{begin_turn, expect_error, expect_state, Harness, CWD};
 use super::MAX_DEFERRED_UPDATES;
 
 fn replay_start() -> serde_json::Value {
@@ -238,6 +238,54 @@ async fn a_cancel_during_replay_still_stops_the_turn_and_converges_to_idle() {
     assert_eq!(answered, id);
     assert!(result.is_ok());
     harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_pending_resume_never_drops_the_turn_end() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    begin_turn(&harness, "A").await;
+
+    let resume = RequestId::Number(4600);
+    harness
+        .request(
+            resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+
+    // The turn ends while the resume is still pending. Ending the foreground
+    // state must not depend on the attach phase: otherwise a later host
+    // rejection leaves the session looking `running` forever.
+    harness.send_done("A", "end_turn").await;
+    expect_state(&harness, "A", "idle").await;
+
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, resume, -32010).await;
+
+    // The slot is attached again; a replay request reaches the host instead of
+    // being refused from a stale foreground state.
+    let replay = RequestId::Number(4601);
+    harness
+        .request(
+            replay,
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/load");
 }
 
 #[tokio::test]

@@ -152,7 +152,13 @@ pub(super) async fn settle_setup(
                 // reply, so it has no takeover to defer to; a
                 // resume completion must still own the slot.
                 let owned = session.is_none() || slot.setup == owner;
-                slot.attach = Attach::Attached;
+                // Only the owning attempt publishes the attach phase. A stale
+                // success records that an attach completed, but must not lift
+                // the takeover's `Attaching`: live metadata for the still
+                // pending owner would otherwise bypass the hold.
+                if owned {
+                    slot.attach = Attach::Attached;
+                }
                 slot.attached = true;
                 let foreground = slot.foreground;
                 if owned && session.is_some() {

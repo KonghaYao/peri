@@ -56,8 +56,11 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 - **S1 方法面/错误码**：重复 `initialize`、`protocolVersion` 边界、多会话、setup 参数、
   `-32002` 的 `data.sessionId`、`terminal/cancel`/`tool_call/cancel` 的 `-32602`、`auth/*`
   的 `-32601`、prompt key 1..=255。
-- **S1 并发**：两个会话的两个 turn 必须都报告 `running` 后才出现任一 `idle`；串行执行的
-  实现无法通过该断言。
+- **S1 并发**：两个会话的两个 turn 必须都报告 `running` 后才出现任一 `idle`。探针以
+  **首个 `idle`** 作为 turn 结束边界，不再把 prompt ACK 顺序当作 turn 结束证据（ACK 是
+  交付确认，可以远早于 turn 结束）。临时把 per-session prompt lock 改成全局锁后跑同一
+  矩阵，`EXIT=1`，失败点正是该断言：
+  `turn ... was still missing running when the first session went idle; the turns did not overlap`。
 - **S2 幂等**：跨三个进程的 key 重试返回同一 `messageId`、不重复插入、同 key 不同内容
   `-32602`、key 按会话隔离、重放只出现一次。
 - **S3 配置面**：`session/new` 的 `configOptions`（`configId`、无 `id`）、
@@ -73,7 +76,25 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
   `replay_complete`（进程内测试）。
 - **S4 进程内**：`host::stdio::v2::replay` 覆盖活动 turn 中 resume 的 hold/flush 顺序、
   live chunk 不产生替换边界、1024 条缓冲上限与溢出、回放期间 `session/cancel` 收敛到
-  `idle`、stale success 不冲刷 takeover 的 deferred。
+  `idle`、stale success 不冲刷 takeover 的 deferred、pending resume 期间的 done 仍结束
+  turn。
+
+## 复审收口（`7a544cf29` 的 CodeRabbit 复审）
+
+- **A（并发探针的 ACK 顺序）**：已修复。矩阵只以首个 `idle` 判定 turn 结束；prompt
+  ACK 只消费、不参与顺序断言。串行变体实测 `EXIT=1`（见上）。
+- **B（stale success 推进 attach 阶段）**：已修复。非 owner 成功只记录
+  `slot.attached = true`，不把 takeover 的 `Attaching` 改成 `Attached`；回归
+  `a_stale_success_keeps_the_metadata_parked_for_the_takeover` 在 stale 响应后再发一条
+  `session_info_update`，断言它仍被 park，直到 owner 完成才按序冲刷。
+- **C（Attaching 时丢弃 done）**：已修复。`peri/agent_event` 与
+  `peri/agent_event_done` 的 guard 只在「slot 未 attach、未回放且没有 live turn」时丢弃
+  事件；回归 `a_pending_resume_never_drops_the_turn_end` 在 resume pending 时发 done，
+  断言 `idle` 仍发布，随后 host `-32010` 失败不留下 `running`，后续 replay 仍能转发。
+- **D（设计文档仍称 `set_config_option` 不支持）**：已在设计文档重写中修正；配置面列为
+  已实现，不再出现在 `-32601` 表。
+- **E（held 元数据顺序）**：已修正。文档明确 plain resume 成功时 state 快照与 held
+  元数据在响应**之前**；只有 `session/new` 的元数据在响应之后。
 
 ## 已知限制
 
