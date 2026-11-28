@@ -242,6 +242,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Bound on the reachability probe for an engine this process must not spawn.
 const RIVET_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often idle allocator pages are returned to the OS.
+///
+/// One burst of 1000 empty sessions leaves roughly 1.3 GiB of freed-but-retained
+/// glibc arena pages behind. The pages are reusable by later allocations, but
+/// glibc never hands them back on its own, so the process keeps that high-water
+/// RSS until restarted. Ten minutes bounds the retention window without adding
+/// scheduling pressure to a maintenance-only task.
+const ALLOCATOR_TRIM_INTERVAL: Duration = Duration::from_secs(600);
+
 /// A parse or validation failure of the process environment.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
@@ -743,6 +752,30 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         })
     };
 
+    // Maintenance only: a panic or a failed trim is logged and never stops the
+    // gateway, so this task is drained on shutdown but not selected on.
+    let mut trim_task: JoinHandle<Result<(), String>> = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(ALLOCATOR_TRIM_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // `interval` fires once immediately; consume it so the first trim
+            // happens one full interval after start.
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => return Ok(()),
+                    _ = ticker.tick() => {
+                        // Blocking libc call: keep it off the reactor thread.
+                        if tokio::task::spawn_blocking(trim_allocator).await.is_err() {
+                            tracing::warn!("allocator trim task failed");
+                        }
+                    }
+                }
+            }
+        })
+    };
+
     tracing::info!(
         addr = %bound,
         rivet = %rivet_endpoint,
@@ -779,6 +812,7 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
     if !registry_done {
         drain("rivet registry", &mut registry_task).await;
     }
+    drain("allocator trim", &mut trim_task).await;
 
     // Close both stores even when the first one fails, and only report a close
     // failure when nothing else already failed.
@@ -878,6 +912,22 @@ fn task_end(
         Err(error) => format!("{component} task failed: {error}"),
     }
 }
+
+/// Return free allocator pages to the OS (Linux/glibc only; a no-op elsewhere).
+///
+/// Only glibc retains trimmed-free arena memory after a burst; elsewhere this
+/// stays a no-op so the maintenance task keeps one shape on every target.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() {
+    // SAFETY: glibc's malloc_trim is thread-safe; it only returns free pages
+    // to the OS and never invalidates live allocations.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() {}
 
 /// Wait for a cancelled task, aborting it when the grace period expires.
 async fn drain(component: &'static str, task: &mut JoinHandle<Result<(), String>>) {
