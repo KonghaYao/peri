@@ -228,7 +228,9 @@ Core metrics、Request log 与 Query 不经过网关，由 worker 使用已保�
   `{name}` 对象），否则取行 JSON 键的并集；`null` 显示 `—`，嵌套值显示紧凑 JSON，单格
   超过 96 字符截断；放不下的列被裁剪并显示 `Showing N of M columns.`。
 - Request log 的 `_timestamp` 是 Unix 微秒，SQL 固定按 `_timestamp DESC` 排序；时间、
-  method、route、status、duration、session 任一缺失时显示 `—`。
+  method、route、status、duration、session 任一缺失时显示 `—`。SQL 使用 `SELECT *`：
+  流 schema 直到出现会话路由请求才包含 `session_id`，固定列会触发
+  `unknown field 'session_id'`；客户端解析时只取已知字段。
 
 ### 5.2 更新契约（`agent.model`，无 instructions）
 

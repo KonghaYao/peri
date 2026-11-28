@@ -114,7 +114,12 @@ fn missing_series_stays_empty() {
 #[test]
 fn request_log_sql_is_bounded_and_paged() {
     let sql = request_log_sql(1_000, 2_000, 2);
-    assert!(sql.contains("FROM \"peri_swarm_logs\""), "{sql}");
+    // OpenObserve's stream schema may not contain session_id until a
+    // session-scoped request is ingested, so a fixed column list would fail.
+    assert!(
+        sql.starts_with("SELECT * FROM \"peri_swarm_logs\""),
+        "{sql}"
+    );
     assert!(sql.contains("_timestamp >= 1000"), "{sql}");
     assert!(sql.contains("_timestamp < 2000"), "{sql}");
     assert!(sql.contains("ORDER BY _timestamp DESC"), "{sql}");

@@ -354,10 +354,16 @@ pub(crate) async fn load_core_metrics(
 /// The time bounds are repeated inside the SQL as well as in the `_search`
 /// request so the statement is self-describing; both are numeric values built
 /// here, never user input.
+///
+/// Reads every field instead of a fixed column list: OpenObserve derives the
+/// stream schema from ingested records, and `session_id` is only attached to
+/// session-scoped requests. Selecting it unconditionally fails with
+/// `unknown field 'session_id'` until such a record exists. Parsing still keeps
+/// only the known columns.
 fn request_log_sql(start_us: u64, end_us: u64, page: usize) -> String {
     let offset = page.saturating_mul(REQUEST_LOG_PAGE_SIZE);
     format!(
-        "SELECT _timestamp, method, route, status, duration_ms, session_id FROM \"{REQUEST_LOG_STREAM}\" \
+        "SELECT * FROM \"{REQUEST_LOG_STREAM}\" \
          WHERE _timestamp >= {start_us} AND _timestamp < {end_us} \
          ORDER BY _timestamp DESC LIMIT {REQUEST_LOG_FETCH} OFFSET {offset}"
     )

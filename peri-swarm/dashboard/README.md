@@ -93,7 +93,9 @@ Core metrics、Agent metrics、Request log 与 Query 均已实现；Sandbox metr
   “Window truncated; totals cover the newest 500 sessions.”。缺失的 token 字段显示
   `—`；Cache 列展示 `cache_read_tokens + cache_creation_tokens`。
 - **Request log**：直连 OpenObserve，SQL 查询 `peri_swarm_logs`。SQL 固定以下形状：
-  `WHERE _timestamp >= ? AND _timestamp < ? ORDER BY _timestamp DESC LIMIT 11 OFFSET ?`；
+  `SELECT * FROM "peri_swarm_logs" WHERE _timestamp >= ? AND _timestamp < ? ORDER BY _timestamp DESC LIMIT 11 OFFSET ?`；
+  使用 `SELECT *` 是因为 OpenObserve 的流 schema 直到出现会话路由请求才包含 `session_id`，
+  固定列在字段缺失时会报 unknown field；客户端只解析已知字段。
   返回 11 行是为了判断是否存在下一页，界面每页显示 10 行，窗口 15m/1h/24h（默认 15m）。
   时间、method、route、status、duration、session 任一缺失时显示 `—`。OpenObserve 的
   `_search.total` 在带 OFFSET 时不是全局总数，因此页面只显示 “Page N”，不声称总数。
