@@ -327,3 +327,14 @@ fn debug_output_never_contains_header_or_endpoint_values() {
 fn default_log_filter_is_unchanged() {
     assert_eq!(DEFAULT_LOG_FILTER, "peri_swarm=info,warn");
 }
+
+#[test]
+fn duration_histogram_uses_second_scale_boundaries() {
+    let bounds = super::HTTP_DURATION_BOUNDARIES_SECONDS;
+    assert!(bounds.iter().all(|bound| bound.is_finite() && *bound > 0.0));
+    assert!(bounds.windows(2).all(|pair| pair[0] < pair[1]));
+    // Millisecond-scale request latency must land in a finite bucket instead
+    // of the SDK default (0, 5] seconds bucket.
+    assert!(bounds.iter().any(|bound| *bound <= 0.01));
+    assert!(bounds.last().is_some_and(|bound| *bound >= 10.0));
+}

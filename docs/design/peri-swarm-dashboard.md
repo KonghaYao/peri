@@ -220,7 +220,8 @@ Core metrics、Request log 与 Query 不经过网关，由 worker 使用已保�
   于原始 OTel 观测点范围）。
 - Core metrics 查询 `peri_swarm_http_server_requests`（counter）与
   `peri_swarm_http_server_duration_bucket`（histogram）；错误率只统计 `status=~"5.."`。
-  p95 用 `le` 桶增量插值，落入 `+Inf` 桶或没有观测时返回 `None`，页面显示 `—`。
+  p95 用 `le` 桶增量插值，落入 `+Inf` 桶、没有观测，或窗口内混有两代桶边界
+  （滚动升级后）时返回 `None`，页面显示 `—`。
 - `_search` 的 `total` 在带 `OFFSET` 时只是当前页返回的行数，不是全局匹配数；Request log
   每页请求 11 行（判断是否有下一页），只显示 10 行和 `Page N`，不显示总数。
 - Query 使用同一 `_search`，`from`/`size` 分页，每页 20 行、最多 100 行（5 页）；`Next`
@@ -283,7 +284,8 @@ instructions**；编辑页的 instructions 只读，并在页面上说明原因�
 - HTTP middleware 不读取、不缓冲请求体，SSE 响应保持原 body；`/healthz` 完全跳过；
   `/events` 只记录请求计数与一条访问日志，不计入延迟直方图。
 - 指标名：`peri_swarm.http.server.requests`（counter，属性 method/route/status）与
-  `peri_swarm.http.server.duration`（histogram，单位秒）。
+  `peri_swarm.http.server.duration`（histogram，单位秒；显式桶边界 `0.005…10s`，
+  不使用 SDK 默认的毫秒刻度桶，否则亚秒请求全部落进 `(0, 5s]`，p95 失去意义）。
 - 访问日志字段只有 method、route、status、duration_ms、session_id（仅当路径段是纯标识符）
   与 request_id（网关生成）。不记录 header、query、body、`Authorization`、`Cookie` 或
   幂等键。

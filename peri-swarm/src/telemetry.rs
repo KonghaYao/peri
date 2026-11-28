@@ -58,6 +58,16 @@ pub const ACCESS_LOG_TARGET: &str = "peri_swarm.access";
 pub const HTTP_REQUESTS_METRIC: &str = "peri_swarm.http.server.requests";
 pub const HTTP_DURATION_METRIC: &str = "peri_swarm.http.server.duration";
 
+/// Explicit bucket boundaries in seconds for [`HTTP_DURATION_METRIC`].
+///
+/// The SDK default boundaries are the OpenTelemetry millisecond defaults
+/// (`0, 5, 10, 25, ...`). Recording seconds into them puts every sub-5-second
+/// request into one bucket, so a p95 computed from the histogram is meaningless.
+/// These Prometheus-style second boundaries keep sub-second resolution.
+pub const HTTP_DURATION_BOUNDARIES_SECONDS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
 pub const ENV_SDK_DISABLED: &str = "OTEL_SDK_DISABLED";
 pub const ENV_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 pub const ENV_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
@@ -561,6 +571,7 @@ impl HttpTelemetry {
                         .f64_histogram(HTTP_DURATION_METRIC)
                         .with_unit("s")
                         .with_description("HTTP server request duration in seconds")
+                        .with_boundaries(HTTP_DURATION_BOUNDARIES_SECONDS.to_vec())
                         .build(),
                 ),
             ),

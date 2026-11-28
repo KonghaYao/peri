@@ -231,6 +231,13 @@ fn bucket_counts(series: &[crate::observability::PromSeries]) -> Vec<(f64, f64)>
 /// the open `+Inf` bucket: the dashboard does not invent a finite latency for
 /// an upper-bounded-unknown tail.
 fn histogram_quantile(quantile: f64, buckets: &[(f64, f64)]) -> Option<f64> {
+    // Two generations of `le` series can coexist in one window after the
+    // bucket boundaries change (or across a rollout). Each generation is
+    // cumulative on its own, but mixed together the counts can decrease.
+    // Interpolating those would invent a latency, so report unknown instead.
+    if buckets.windows(2).any(|pair| pair[1].1 < pair[0].1) {
+        return None;
+    }
     let total = buckets.last()?.1;
     if !total.is_finite() || total <= 0.0 {
         return None;

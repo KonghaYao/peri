@@ -72,6 +72,23 @@ fn histogram_quantile_in_the_open_bucket_is_unknown() {
 }
 
 #[test]
+fn histogram_quantile_rejects_mixed_generations() {
+    // The old default buckets and the new second-scale buckets can both be
+    // present for one window after a boundary change. Their cumulative counts
+    // are not comparable, so the percentile must stay unknown.
+    let buckets = [
+        (0.005, 3.0),
+        (0.01, 3.0),
+        (2.5, 3.0),
+        (5.0, 8.0),
+        (10.0, 8.0),
+        (25.0, 3.0),
+        (f64::INFINITY, 8.0),
+    ];
+    assert_eq!(histogram_quantile(0.95, &buckets), None);
+}
+
+#[test]
 fn snapshot_reports_rates_coverage_and_p95() {
     let requests = [series(&[], &[(1_000, 100.0), (1_060, 160.0)])];
     let errors = [series(&[], &[(1_000, 6.0), (1_060, 12.0)])];
