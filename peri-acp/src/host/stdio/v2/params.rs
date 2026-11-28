@@ -11,11 +11,12 @@ use super::errors;
 /// Translate a v2 `initialize` request into the v1 host's parameter shape.
 ///
 /// v2 grants no v1 client filesystem/terminal execution capabilities. The
-/// client's elicitation declaration is carried through so the host-side broker
-/// sees the same facts; everything the adapter needs itself (`peri.*`) is added
-/// under the internal `_meta`. `peri.replay` is set because the preview always
-/// serves replay; `peri.userInputQueue` because prompts go through the durable
-/// mailbox.
+/// client's elicitation declaration (`capabilities.elicitation` on the v2 wire)
+/// is carried through as the v1 `clientCapabilities` field the host reads, so
+/// the host-side broker sees the same facts; everything the adapter needs itself
+/// (`peri.*`) is added under the internal `_meta`. `peri.replay` is set because
+/// the preview always serves replay; `peri.userInputQueue` because prompts go
+/// through the durable mailbox.
 pub(super) fn initialize_params(params: &Value) -> Result<Value, AcpError> {
     let Some(info) = params.get("info") else {
         return Err(errors::invalid_params("ACP v2 initialize requires info"));
@@ -29,7 +30,7 @@ pub(super) fn initialize_params(params: &Value) -> Result<Value, AcpError> {
     }
     let mut capabilities = serde_json::Map::new();
     if let Some(elicitation) = params
-        .get("clientCapabilities")
+        .get("capabilities")
         .and_then(|capabilities| capabilities.get("elicitation"))
         .filter(|elicitation| elicitation.is_object())
     {

@@ -1,10 +1,11 @@
+use super::super::harness::CWD;
 use super::{initialize_params, prompt_blocks, setup_params};
 use serde_json::json;
 
 #[test]
 fn v2_negotiation_never_inherits_v1_client_tool_capabilities() {
     let params = initialize_params(&json!({
-        "info":{"name":"client","version":"1"}, "clientCapabilities": {"terminal":true}
+        "info":{"name":"client","version":"1"}, "capabilities": {"terminal":true}
     }))
     .unwrap();
     assert!(params["clientCapabilities"].get("terminal").is_none());
@@ -17,7 +18,7 @@ fn initialize_keeps_the_client_elicitation_declaration_and_internal_caps() {
     let params = initialize_params(&json!({
         "protocolVersion": 2,
         "info": {"name": "client", "version": "1"},
-        "clientCapabilities": {"elicitation": {"form": {}}, "auth": {"terminal": {}}}
+        "capabilities": {"elicitation": {"form": {}}, "auth": {"terminal": {}}}
     }))
     .unwrap();
     let capabilities = &params["clientCapabilities"];
@@ -32,7 +33,7 @@ fn initialize_keeps_the_client_elicitation_declaration_and_internal_caps() {
 
 #[test]
 fn setup_requires_an_absolute_cwd_and_refuses_unadvertised_fields() {
-    assert!(setup_params(&json!({"cwd": "/workspace"})).is_ok());
+    assert!(setup_params(&json!({"cwd": CWD})).is_ok());
     assert_eq!(
         setup_params(&json!({})).unwrap_err().code,
         -32602,
@@ -45,21 +46,21 @@ fn setup_requires_an_absolute_cwd_and_refuses_unadvertised_fields() {
         -32602
     );
     assert_eq!(
-        setup_params(&json!({"cwd": "/workspace", "additionalDirectories": ["/other"]}))
+        setup_params(&json!({"cwd": CWD, "additionalDirectories": ["/other"]}))
             .unwrap_err()
             .code,
         -32602,
         "additionalDirectories is not advertised"
     );
-    assert!(setup_params(&json!({"cwd": "/workspace", "additionalDirectories": []})).is_ok());
+    assert!(setup_params(&json!({"cwd": CWD, "additionalDirectories": []})).is_ok());
     assert_eq!(
-        setup_params(&json!({"cwd": "/workspace", "systemPrompt": {"text": "hi"}}))
+        setup_params(&json!({"cwd": CWD, "systemPrompt": {"text": "hi"}}))
             .unwrap_err()
             .code,
         -32602,
         "systemPrompt is not advertised"
     );
-    assert!(setup_params(&json!({"cwd": "/workspace", "systemPrompt": null})).is_ok());
+    assert!(setup_params(&json!({"cwd": CWD, "systemPrompt": null})).is_ok());
 }
 
 #[test]

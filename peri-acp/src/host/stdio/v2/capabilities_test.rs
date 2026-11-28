@@ -4,14 +4,14 @@ use serde_json::json;
 #[test]
 fn elicitation_modes_require_an_explicit_declaration() {
     let form = ClientCapabilities::capture(&json!({
-        "clientCapabilities": {"elicitation": {"form": {}}}
+        "capabilities": {"elicitation": {"form": {}}}
     }));
     assert!(form.elicitation_form);
     assert!(!form.elicitation_url);
     assert!(form.supports_form_elicitation());
 
     let url = ClientCapabilities::capture(&json!({
-        "clientCapabilities": {"elicitation": {"url": {}}}
+        "capabilities": {"elicitation": {"url": {}}}
     }));
     assert!(!url.elicitation_form);
     assert!(url.elicitation_url);
@@ -24,10 +24,12 @@ fn elicitation_modes_require_an_explicit_declaration() {
     // malformed value must not unlock a request the client cannot answer.
     for absent in [
         json!({}),
-        json!({"clientCapabilities": {}}),
-        json!({"clientCapabilities": {"elicitation": null}}),
-        json!({"clientCapabilities": {"elicitation": {"form": null}}}),
-        json!({"clientCapabilities": {"elicitation": {"form": true}}}),
+        json!({"capabilities": {}}),
+        json!({"capabilities": {"elicitation": null}}),
+        json!({"capabilities": {"elicitation": {"form": null}}}),
+        json!({"capabilities": {"elicitation": {"form": true}}}),
+        // The v1 field name is not a v2 declaration.
+        json!({"clientCapabilities": {"elicitation": {"form": {}}}}),
     ] {
         let caps = ClientCapabilities::capture(&absent);
         assert!(!caps.elicitation_form, "{absent}");

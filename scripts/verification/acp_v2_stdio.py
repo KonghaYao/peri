@@ -209,11 +209,23 @@ def lifecycle(binary, root, schema):
                    and f["params"]["sessionId"] == other
                    and f["params"]["update"].get("sessionUpdate") == "state_update"
                    and f["params"]["update"].get("state") == "idle")
-        # Turns of two sessions may be in flight at the same time: the host
-        # serializes per session, not per connection.
+        # Turns of two sessions must genuinely overlap: the host serializes per
+        # session, not per connection. Both prompts are written before either is
+        # awaited, and each session has to report `running` before the first
+        # `idle` of either arrives — a serialized implementation cannot pass.
         start = len(peer.frames)
         first = peer.request("session/prompt", prompt(sid, "Concurrent turn A"))
         second = peer.request("session/prompt", prompt(other, "Concurrent turn B"))
+
+        def running(target):
+            return peer.until(lambda f: f in peer.frames[start:]
+                              and f.get("method") == "session/update"
+                              and f["params"]["sessionId"] == target
+                              and f["params"]["update"].get("sessionUpdate") == "state_update"
+                              and f["params"]["update"].get("state") == "running")
+
+        running_a = running(sid)
+        running_b = running(other)
         peer.response(first, "PromptResponse")
         peer.response(second, "PromptResponse")
         for target in (sid, other):
@@ -222,6 +234,15 @@ def lifecycle(binary, root, schema):
                        and f["params"]["sessionId"] == target
                        and f["params"]["update"].get("sessionUpdate") == "state_update"
                        and f["params"]["update"].get("state") == "idle")
+        first_idle = min(index for index in range(start, len(peer.frames))
+                         if peer.frames[index].get("method") == "session/update"
+                         and peer.frames[index]["params"]["sessionId"] in (sid, other)
+                         and peer.frames[index]["params"]["update"].get("sessionUpdate") == "state_update"
+                         and peer.frames[index]["params"]["update"].get("state") == "idle")
+        for target, frame in ((sid, running_a), (other, running_b)):
+            assert peer.frames.index(frame) < first_idle, (
+                f"turn {target!r} was still missing `running` when the first session went idle; "
+                "the turns did not overlap")
         peer.call("session/close", {"sessionId": other}, "CloseSessionResponse")
         assert peer.response(peer.request("session/prompt", prompt(other, "Closed")))["error"]["code"] == -32002
         print("PASS v2 two sessions on one connection; concurrent turns; per-session close isolation")

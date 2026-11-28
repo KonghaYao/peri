@@ -223,6 +223,9 @@ impl Harness {
     }
 
     /// Complete `initialize`, optionally declaring client capabilities.
+    ///
+    /// The declaration goes under the v2 field name `capabilities`; the adapter
+    /// translates it to the v1 `clientCapabilities` the host reads.
     pub(super) async fn negotiate_with(&mut self, capabilities: Value) {
         let id = self.id();
         let mut params = json!({
@@ -230,7 +233,7 @@ impl Harness {
             "info": {"name": "probe", "version": "1"}
         });
         if capabilities != json!({}) {
-            params["clientCapabilities"] = capabilities;
+            params["capabilities"] = capabilities;
         }
         self.request(id.clone(), "initialize", params).await;
         let forwarded = self.expect_forwarded().await;
@@ -240,6 +243,31 @@ impl Harness {
         let (answered, result) = self.expect_out().await.response();
         assert_eq!(answered, id);
         assert_eq!(result.expect("initialize result")["protocolVersion"], 2);
+    }
+
+    /// Complete a v1 `initialize`, which the adapter forwards untouched.
+    pub(super) async fn negotiate_v1(&mut self) {
+        let id = self.id();
+        self.request(
+            id.clone(),
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": true}}}),
+        )
+        .await;
+        let forwarded = self.expect_forwarded().await;
+        assert_eq!(forwarded.method, "initialize");
+        assert_eq!(
+            forwarded.params["clientCapabilities"]["fs"]["readTextFile"], true,
+            "v1 parameters must reach the host unchanged"
+        );
+        self.respond(
+            forwarded.id,
+            Ok(json!({"protocolVersion": 1, "agentCapabilities": {}})),
+        )
+        .await;
+        let (answered, result) = self.expect_out().await.response();
+        assert_eq!(answered, id);
+        assert_eq!(result.expect("v1 initialize result")["protocolVersion"], 1);
     }
 
     pub(super) async fn request(&self, id: RequestId, method: &str, params: Value) {
@@ -449,4 +477,41 @@ pub(super) struct Forwarded {
 pub(super) struct Submission {
     pub request: RequestId,
     pub input: String,
+}
+
+/// The error code of a failed response.
+pub(super) fn code(error: &AcpError) -> i64 {
+    error.code
+}
+
+/// Read the next outbound item and require it to be a `session/update` state.
+pub(super) async fn expect_state(harness: &Harness, sid: &str, state: &str) -> Value {
+    let out = harness.expect_out().await;
+    let (method, params) = match out {
+        Out::Notification { method, params } => (method, params),
+        other => panic!("expected a state notification, got {other:?}"),
+    };
+    assert_eq!(method, "session/update");
+    assert_eq!(params["sessionId"], sid, "state update for another session");
+    let update = &params["update"];
+    assert_eq!(update["sessionUpdate"], "state_update", "{update}");
+    assert_eq!(update["state"], state, "{update}");
+    update.clone()
+}
+
+pub(super) async fn expect_error(harness: &Harness, id: RequestId, expected: i64) -> AcpError {
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let error = result.expect_err("expected an error reply");
+    assert_eq!(code(&error), expected, "{error}");
+    error
+}
+
+pub(super) async fn begin_turn(harness: &Harness, sid: &str) {
+    harness.start_turn(sid).await;
+    expect_state(harness, sid, "running").await;
+}
+
+pub(super) fn permission(sid: &str) -> Value {
+    json!({"sessionId": sid, "toolCall": {"title": "run a tool"}})
 }

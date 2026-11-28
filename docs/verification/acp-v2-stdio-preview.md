@@ -53,12 +53,15 @@ The matrix and the official client both exited 0.
 
 This run **supersedes** the earlier one-active-session assertion above: a v2
 connection now holds several sessions, so `session/new` while another session is
-attached succeeds and a resume of a session the connection never attached fails
-with the host's code (never `-32000`). The matrix now asserts:
+attached succeeds. A resume of a **non-existent** session id fails with the
+host's code (never `-32000`); a session this *process* had not attached yet is
+resumable, which the restart probes below rely on. The matrix now asserts:
 
 - two sessions on one connection, a turn on the second one, then **two turns in
-  flight at the same time** on the two sessions, then a single close — the
-  closed session's prompt is `-32002` while the other still runs;
+  flight at the same time** on the two sessions — each session must report
+  `running` before either reports `idle`, so a serialized implementation cannot
+  pass — then both turns end and one `session/close`; the closed session's
+  prompt is `-32002` while the other session stays attached;
 - `session/delete` removes the session from `session/list` and from the
   connection (`session/prompt` and a second `session/delete` are `-32002`);
 - error-code shapes: unknown session `-32002` with `data.sessionId`, missing and
@@ -68,11 +71,25 @@ with the host's code (never `-32000`). The matrix now asserts:
   ordering, both cancellation scopes, durable withdrawal, approval probe, v1
   client with the preview on and off) are unchanged.
 
+A v1 client on the same preview wrapper keeps the host's one-session gate: the
+wrapper reports multi-session support before the negotiated version is known, so
+the shared host skips its gate for every connection through it and the adapter
+enforces it for v1 connections (`-32010` with `data.reason`
+`session_switch_requires_close`, or `session_setup_in_progress` while another
+setup is in flight). v2 connections are unaffected.
+
+Metadata updates parked while a session is attaching (`available_commands_update`,
+`config_option_update`, `current_mode_update`) are flushed after the attach
+reply, in the pinned v2 shapes (`type: "command"` on commands, `configId` on
+config options). The live S1 subset still drops them; S3 extends it.
+
 Adapter-level behaviour that has no wire probe is covered by
 `cargo test -p peri-acp --lib -- host::stdio::v2`: per-session routing and close
-isolation, stale-epoch completions, concurrent permission aggregation,
-`Attaching` hold/flush ordering, elicitation capability gating, `$/cancel_request`
-scope, and delete settlement.
+isolation (including close while another session's turn is in flight), stale
+epoch and stale slot completions, concurrent permission aggregation, `Attaching`
+hold/flush ordering, a stale failed resume not detaching a newer attach, the v1
+one-session gate, elicitation capability gating, `$/cancel_request` scope, and
+delete settlement.
 
 ## S2 durable idempotency keys
 

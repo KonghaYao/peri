@@ -30,7 +30,7 @@ use crate::transport::AcpTransport;
 
 use capabilities::ClientCapabilities;
 
-use state::{Attach, Connection, Foreground, Reply, Routed, Slot};
+use state::{Attach, Connection, Foreground, Reply, Routed};
 
 pub(in crate::host) const INPUT: &str = "_peri/stdio-v2/input";
 pub(in crate::host) const WITHDRAW: &str = "_peri/stdio-v2/withdraw";
@@ -113,6 +113,27 @@ impl V2Stdio {
         }
         wire.initialized = true;
         wire.version = state::Version::One;
+        // The shared host skipped its one-session gate for this connection
+        // because the wrapper reports multi-session support before the version
+        // is known; a v1 connection keeps that gate here.
+        match wire.admit_v1_setup(&method, &params) {
+            state::V1Admission::Pass => {}
+            state::V1Admission::Tracked(reply) => {
+                wire.replies.insert(id.clone(), reply);
+            }
+            state::V1Admission::Refused(error) => {
+                let _ = self.inner.send_response(id, Err(error)).await;
+                return None;
+            }
+        }
+        // A confirmed close/delete releases the v1 binding, as it does in the
+        // shared host.
+        if matches!(method.as_str(), "session/close" | "session/delete") {
+            if let Some(sid) = params.get("sessionId").and_then(Value::as_str) {
+                wire.replies
+                    .insert(id.clone(), Reply::V1Close(sid.to_owned()));
+            }
+        }
         Some(IncomingMessage::Request { id, method, params })
     }
 
@@ -421,13 +442,16 @@ impl AcpTransport for V2Stdio {
         if matches!(method, "session/request_permission" | "elicitation/create") {
             if let Some(sid) = sid.as_deref() {
                 let mut wire = self.wire.lock().await;
-                let step = wire.slots.get_mut(sid).and_then(Slot::block);
-                if let Some((epoch, publish)) = step {
+                let step = wire.slots.get_mut(sid).and_then(|slot| {
+                    slot.block()
+                        .map(|(epoch, publish)| (slot.incarnation, epoch, publish))
+                });
+                if let Some((incarnation, epoch, publish)) = step {
                     if publish {
                         self.update(sid, updates::state(Foreground::RequiresAction, None))
                             .await?;
                     }
-                    blocked = Some(epoch);
+                    blocked = Some((incarnation, epoch));
                 }
             }
         }
@@ -450,12 +474,12 @@ impl AcpTransport for V2Stdio {
                 .send_cancellable_request(method, params, token.clone())
                 .await
         };
-        if let (Some(epoch), Some(sid)) = (blocked, sid.as_deref()) {
+        if let (Some((incarnation, epoch)), Some(sid)) = (blocked, sid.as_deref()) {
             let mut wire = self.wire.lock().await;
             let published = wire
                 .slots
                 .get_mut(sid)
-                .is_some_and(|slot| slot.unblock(epoch));
+                .is_some_and(|slot| slot.unblock(incarnation, epoch));
             if published {
                 self.update(sid, updates::state(Foreground::Running, None))
                     .await?;
@@ -627,6 +651,7 @@ impl AcpTransport for V2Stdio {
                 session,
                 replay,
                 created,
+                owner,
             }) => {
                 let method = if session.is_some() {
                     "session/resume"
@@ -640,10 +665,7 @@ impl AcpTransport for V2Stdio {
                             .or_else(|| value.get("sessionId").and_then(Value::as_str))
                             .map(str::to_owned);
                         if let Some(sid) = sid.as_deref() {
-                            let slot = wire
-                                .slots
-                                .entry(sid.to_owned())
-                                .or_insert_with(|| Slot::new(Attach::Attached));
+                            let slot = wire.insert_slot(sid, Attach::Attached);
                             slot.attach = Attach::Attached;
                             let foreground = slot.foreground;
                             if replay {
@@ -663,13 +685,19 @@ impl AcpTransport for V2Stdio {
                     }
                     Err(_) => {
                         if let Some(sid) = session.as_deref() {
-                            if created {
-                                wire.slots.remove(sid);
-                            } else if let Some(slot) = wire.slots.get_mut(sid) {
-                                // The previous attach is still live.
-                                slot.attach = Attach::Attached;
-                                slot.replay = None;
-                                slot.flush_held();
+                            // A newer attach may already own the slot; only the
+                            // attempt that still owns it may unwind it, and a
+                            // takeover keeps its own held updates and waiter.
+                            let owned = wire.slots.get(sid).is_some_and(|slot| slot.setup == owner);
+                            if owned {
+                                if created {
+                                    wire.slots.remove(sid);
+                                } else if let Some(slot) = wire.slots.get_mut(sid) {
+                                    // The previous attach is still live.
+                                    slot.attach = Attach::Attached;
+                                    slot.replay = None;
+                                    slot.flush_held();
+                                }
                             }
                         }
                     }
@@ -679,13 +707,34 @@ impl AcpTransport for V2Stdio {
                     .map_err(|error| if two { errors::normalize(error) } else { error });
                 self.inner.send_response(id, projected).await?;
                 for (sid, update) in flush {
-                    let projected = updates::project_update(update, false).unwrap_or_default();
+                    let projected = updates::project_held(update).unwrap_or_default();
                     for update in projected {
                         self.update(&sid, update).await?;
                     }
                 }
                 return Ok(());
             }
+            Some(Reply::V1Setup { session }) => {
+                match &result {
+                    Ok(value) => {
+                        let sid = session
+                            .as_deref()
+                            .or_else(|| value.get("sessionId").and_then(Value::as_str))
+                            .map(str::to_owned);
+                        match sid {
+                            Some(sid) => wire.commit_v1_setup(&sid),
+                            None => wire.fail_v1_setup(),
+                        }
+                    }
+                    Err(_) => wire.fail_v1_setup(),
+                }
+                result
+            }
+            Some(Reply::V1Close(sid)) if result.is_ok() => {
+                wire.release_v1_session(&sid);
+                result
+            }
+            Some(Reply::V1Close(_)) => result,
             Some(Reply::Close(sid) | Reply::Delete(sid)) if result.is_ok() => {
                 Ok(self.teardown(&mut wire, &sid).await)
             }
@@ -733,3 +782,7 @@ impl V2Stdio {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "boundary_test.rs"]
+mod boundary_tests;

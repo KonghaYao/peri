@@ -1,14 +1,21 @@
 use super::{Attach, Foreground, Slot};
 
+/// A slot with the identity `Connection::insert_slot` would give it.
+fn new_slot(attach: Attach) -> Slot {
+    let mut slot = Slot::new(attach);
+    slot.incarnation = 1;
+    slot
+}
+
 fn running() -> Slot {
-    let mut slot = Slot::new(Attach::Attached);
+    let mut slot = new_slot(Attach::Attached);
     assert!(slot.begin_turn());
     slot
 }
 
 #[test]
 fn turn_start_publishes_running_once_and_bumps_the_epoch() {
-    let mut slot = Slot::new(Attach::Attached);
+    let mut slot = new_slot(Attach::Attached);
     assert_eq!(slot.foreground, Foreground::Idle);
     // Idle sessions are not blocked on user action.
     assert_eq!(slot.block(), None);
@@ -32,11 +39,11 @@ fn concurrent_blocking_requests_only_return_to_running_after_the_last_one() {
     assert_eq!(slot.blocking, 2);
 
     assert!(
-        !slot.unblock(epoch),
+        !slot.unblock(slot.incarnation, epoch),
         "one of two completions must not resume the turn"
     );
     assert_eq!(slot.foreground, Foreground::RequiresAction);
-    assert!(slot.unblock(epoch));
+    assert!(slot.unblock(slot.incarnation, epoch));
     assert_eq!(slot.foreground, Foreground::Running);
     assert_eq!(slot.blocking, 0);
 }
@@ -47,7 +54,7 @@ fn a_completion_from_a_cancelled_turn_cannot_publish_running() {
     let (epoch, _) = slot.block().expect("block");
     slot.cancel_turn();
     assert_eq!(slot.blocking, 0);
-    assert!(!slot.unblock(epoch));
+    assert!(!slot.unblock(slot.incarnation, epoch));
     // The done event that follows the cancellation is what publishes `idle`;
     // the stale completion must not publish anything in between.
     assert_eq!(slot.foreground, Foreground::RequiresAction);
@@ -59,17 +66,17 @@ fn a_completion_from_a_finished_turn_cannot_publish_running() {
     let (epoch, _) = slot.block().expect("block");
     assert!(slot.end_turn());
     assert_eq!(slot.foreground, Foreground::Idle);
-    assert!(!slot.unblock(epoch));
+    assert!(!slot.unblock(slot.incarnation, epoch));
     assert_eq!(slot.foreground, Foreground::Idle);
     // A new turn cannot be resumed by the previous turn's completion either.
     assert!(slot.begin_turn());
-    assert!(!slot.unblock(epoch));
+    assert!(!slot.unblock(slot.incarnation, epoch));
     assert_eq!(slot.foreground, Foreground::Running);
 }
 
 #[test]
 fn turn_end_publishes_idle_only_for_foreground_work() {
-    let mut slot = Slot::new(Attach::Attached);
+    let mut slot = new_slot(Attach::Attached);
     assert!(!slot.end_turn());
     assert_eq!(slot.epoch, 1);
     let mut slot = running();
@@ -82,7 +89,7 @@ fn turn_end_publishes_idle_only_for_foreground_work() {
 #[test]
 fn attach_hold_is_bounded_and_flushes_in_order() {
     use super::MAX_HELD_UPDATES;
-    let mut slot = Slot::new(Attach::Attaching);
+    let mut slot = new_slot(Attach::Attaching);
     for index in 0..MAX_HELD_UPDATES + 8 {
         slot.hold(serde_json::json!({"index": index}));
     }

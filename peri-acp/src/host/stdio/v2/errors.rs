@@ -25,6 +25,8 @@ pub(super) const CANCELLED: i64 = -32800;
 /// Peri-defined server error for capacity/backpressure (pinned allows custom
 /// server errors in `-32000..=-32099`).
 pub(super) const CAPACITY: i64 = -32020;
+/// The host's one-session-per-connection rejection (v1 surface only).
+pub(super) const SESSION_SWITCH: i64 = -32010;
 
 pub(super) fn unknown_method(method: &str) -> AcpError {
     AcpError::new(
@@ -78,6 +80,31 @@ pub(super) fn already_initialized() -> AcpError {
 
 pub(super) fn invalid_protocol_version() -> AcpError {
     AcpError::new(INVALID_PARAMS, "Invalid protocolVersion")
+}
+
+/// The v1 connection still holds another session.
+///
+/// The preview wrapper reports multi-session support before the version is
+/// negotiated, so the shared host no longer applies this gate; the adapter
+/// enforces it for `Version::One` with the host's code, reason and message
+/// (`host/connection_context.rs`).
+pub(super) fn session_switch_required() -> AcpError {
+    session_switch(
+        crate::host::connection_context::SESSION_SWITCH_REQUIRED_REASON,
+        "Close the current session with session/close before switching sessions",
+    )
+}
+
+/// Another v1 setup is still in flight on this connection.
+pub(super) fn session_setup_in_progress() -> AcpError {
+    session_switch(
+        crate::host::connection_context::SESSION_SETUP_IN_PROGRESS_REASON,
+        "Another session setup is in progress",
+    )
+}
+
+fn session_switch(reason: &'static str, message: &'static str) -> AcpError {
+    AcpError::new(SESSION_SWITCH, message).with_data(json!({ "reason": reason }))
 }
 
 /// `terminal/cancel` and `tool_call/cancel`: this agent never advertises per-object

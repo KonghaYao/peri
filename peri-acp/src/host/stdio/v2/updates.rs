@@ -53,6 +53,77 @@ pub(super) fn project_update(
     Some(vec![update])
 }
 
+/// Project a metadata update that was parked while a session was attaching.
+///
+/// The live path still keeps the S1 update subset, but an attach-time snapshot is
+/// the only one the client may never receive again: dropping it loses the
+/// session's command table or configuration state rather than deferring it. The
+/// held kinds are therefore projected to their pinned v2 shapes; everything else
+/// keeps the live rules (`session_info_update` included).
+pub(super) fn project_held(mut update: Value) -> Option<Vec<Value>> {
+    let kind = update.get("sessionUpdate")?.as_str()?.to_owned();
+    match kind.as_str() {
+        "available_commands_update" => {
+            if let Some(commands) = update
+                .get_mut("availableCommands")
+                .and_then(Value::as_array_mut)
+            {
+                for command in commands.iter_mut() {
+                    *command = command_to_v2(std::mem::take(command));
+                }
+            }
+        }
+        "config_option_update" => {
+            if let Some(options) = update
+                .get_mut("configOptions")
+                .and_then(Value::as_array_mut)
+            {
+                for option in options.iter_mut() {
+                    *option = config_option_to_v2(std::mem::take(option));
+                }
+            }
+        }
+        // v2 replaced the v1 mode surface with configuration options and has no
+        // mode update. The pinned `SessionUpdate` reserves unknown kinds for
+        // forward compatibility, so the held snapshot passes through unchanged.
+        "current_mode_update" => {}
+        _ => return project_update(update, false),
+    }
+    if let Some(object) = update.as_object_mut() {
+        object.remove("_meta");
+    }
+    Some(vec![update])
+}
+
+/// v1 commands carry no kind discriminator; v2 requires `type: "command"`.
+fn command_to_v2(mut command: Value) -> Value {
+    if let Some(object) = command.as_object_mut() {
+        object.entry("type").or_insert_with(|| json!("command"));
+    }
+    command
+}
+
+/// v2 renamed the option identity (`id` → `configId`) and select groups
+/// (`group` → `groupId`); every other field keeps its v1 shape.
+fn config_option_to_v2(mut option: Value) -> Value {
+    if let Some(object) = option.as_object_mut() {
+        if let Some(id) = object.remove("id") {
+            object.entry("configId").or_insert(id);
+        }
+        if let Some(groups) = object.get_mut("options").and_then(Value::as_array_mut) {
+            for group in groups.iter_mut() {
+                let Some(group) = group.as_object_mut() else {
+                    continue;
+                };
+                if let Some(id) = group.remove("group") {
+                    group.entry("groupId").or_insert(id);
+                }
+            }
+        }
+    }
+    option
+}
+
 /// Foreground state snapshot published as a `state_update`.
 pub(super) fn state(foreground: Foreground, stop_reason: Option<&str>) -> Value {
     let mut update = json!({

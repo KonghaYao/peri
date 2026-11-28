@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::transport::types::{AcpError, RequestId};
 
 use super::capabilities::ClientCapabilities;
+use super::errors;
 use super::prompts::Prompts;
 
 /// Upper bound on notifications parked while a setup request is in flight. The
@@ -62,6 +63,13 @@ pub(super) struct Replay {
 
 pub(super) struct Slot {
     pub attach: Attach,
+    /// Identity of this slot object within the connection. A slot dropped by
+    /// close/delete and re-created by a later attach gets a new value, so a
+    /// completion captured before the close cannot act on its replacement.
+    pub incarnation: u64,
+    /// Identity of the newest setup that bound this slot. A failed setup only
+    /// undoes the slot when it still owns it.
+    pub setup: u64,
     /// Turn identity. Bumped on start, end, cancel and teardown so a stale
     /// blocking-request completion cannot publish a state for a newer turn.
     pub epoch: u64,
@@ -78,6 +86,8 @@ impl Slot {
     pub(super) fn new(attach: Attach) -> Self {
         Self {
             attach,
+            incarnation: 0,
+            setup: 0,
             epoch: 0,
             foreground: Foreground::Idle,
             blocking: 0,
@@ -124,8 +134,15 @@ impl Slot {
 
     /// A blocking peer request completed (any outcome). Returns whether
     /// `running` must be published because this was the last one outstanding.
-    pub(super) fn unblock(&mut self, epoch: u64) -> bool {
-        if self.epoch != epoch || self.foreground != Foreground::RequiresAction {
+    ///
+    /// The completion names both the slot incarnation and the turn epoch it was
+    /// captured under; either changing means the request belonged to a slot or
+    /// turn this session no longer has.
+    pub(super) fn unblock(&mut self, incarnation: u64, epoch: u64) -> bool {
+        if self.incarnation != incarnation
+            || self.epoch != epoch
+            || self.foreground != Foreground::RequiresAction
+        {
             return false;
         }
         self.blocking = self.blocking.saturating_sub(1);
@@ -196,12 +213,31 @@ pub(super) enum Reply {
         replay: bool,
         /// The slot was created by this setup and must be dropped on failure.
         created: bool,
+        /// The setup that bound the slot. A failure only unwinds this attempt.
+        owner: u64,
     },
     Close(String),
     Delete(String),
     Input(String),
     Withdraw(String),
     Cancel,
+    /// A v1 setup whose success binds the connection's single session.
+    V1Setup {
+        /// `Some` for `session/load|resume`, `None` for `session/new|fork`.
+        session: Option<String>,
+    },
+    /// A v1 close, which releases that binding when it succeeds.
+    V1Close(String),
+}
+
+/// The v1 one-session gate's answer to an inbound setup request.
+pub(super) enum V1Admission {
+    /// Not a setup request: forward untouched.
+    Pass,
+    /// Forward; the reply binds or releases the connection's session.
+    Tracked(Reply),
+    /// Refused before the host sees it, with the host's own error shape.
+    Refused(AcpError),
 }
 
 #[derive(Default)]
@@ -214,11 +250,88 @@ pub(super) struct Connection {
     pub client: ClientCapabilities,
     pub replies: HashMap<RequestId, Reply>,
     pub slots: HashMap<String, Slot>,
+    /// Source of [`Slot::incarnation`]. Monotonic per connection.
+    next_incarnation: u64,
+    /// The v1 session this connection currently holds.
+    ///
+    /// The preview wrapper reports `allows_concurrent_sessions` before the
+    /// version is negotiated, so the shared host skips its historical
+    /// one-session gate for every connection through it. A v1 client gets that
+    /// gate here instead.
+    v1_current: Option<String>,
+    /// A v1 setup is in flight and may bind the connection.
+    v1_setup: bool,
 }
 
 impl Connection {
     pub(super) fn is_two(&self) -> bool {
         matches!(self.version, Version::Two)
+    }
+
+    /// Insert a slot if absent; a new slot gets a fresh connection-wide identity.
+    pub(super) fn insert_slot(&mut self, session_id: &str, attach: Attach) -> &mut Slot {
+        use std::collections::hash_map::Entry;
+
+        match self.slots.entry(session_id.to_owned()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                self.next_incarnation = self.next_incarnation.wrapping_add(1);
+                let incarnation = self.next_incarnation;
+                let mut slot = Slot::new(attach);
+                slot.incarnation = incarnation;
+                entry.insert(slot)
+            }
+        }
+    }
+
+    /// Reproduce the host's one-session-per-connection rule for a v1 client.
+    ///
+    /// Mirrors `host::connection_context`: a setup is refused while another one
+    /// is in flight; a connection that holds a session may only re-attach that
+    /// same session; close releases it. v2 connections never reach this.
+    pub(super) fn admit_v1_setup(&mut self, method: &str, params: &Value) -> V1Admission {
+        let restore = match method {
+            "session/new" | "session/fork" => None,
+            "session/load" | "session/resume" => Some(
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ),
+            _ => return V1Admission::Pass,
+        };
+        if self.v1_setup {
+            return V1Admission::Refused(errors::session_setup_in_progress());
+        }
+        if self.v1_current.is_some() {
+            let reuse = restore
+                .as_ref()
+                .is_some_and(|requested| requested.as_deref() == self.v1_current.as_deref());
+            return if reuse {
+                V1Admission::Pass
+            } else {
+                V1Admission::Refused(errors::session_switch_required())
+            };
+        }
+        self.v1_setup = true;
+        V1Admission::Tracked(Reply::V1Setup {
+            session: restore.flatten(),
+        })
+    }
+
+    pub(super) fn commit_v1_setup(&mut self, session_id: &str) {
+        self.v1_setup = false;
+        self.v1_current = Some(session_id.to_owned());
+    }
+
+    pub(super) fn fail_v1_setup(&mut self) {
+        self.v1_setup = false;
+    }
+
+    pub(super) fn release_v1_session(&mut self, session_id: &str) {
+        if self.v1_current.as_deref() == Some(session_id) {
+            self.v1_current = None;
+        }
     }
 
     /// The slot of a session this connection may still address.

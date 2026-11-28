@@ -16,12 +16,14 @@ pub(super) struct ClientCapabilities {
 impl ClientCapabilities {
     /// Capture the elicitation modes advertised in `initialize`.
     ///
-    /// Per the pinned schema an absent or `null` mode is "not advertised" and an
-    /// empty object advertises it; anything else is treated as not advertised so
-    /// a malformed declaration cannot unlock a request the client cannot answer.
+    /// v2 names the client declaration `capabilities` (v1's `clientCapabilities`
+    /// is not part of the pinned `InitializeRequest`). Per the pinned schema an
+    /// absent or `null` mode is "not advertised" and an empty object advertises
+    /// it; anything else is treated as not advertised so a malformed declaration
+    /// cannot unlock a request the client cannot answer.
     pub(super) fn capture(params: &Value) -> Self {
         let elicitation = params
-            .get("clientCapabilities")
+            .get("capabilities")
             .and_then(|capabilities| capabilities.get("elicitation"));
         Self {
             elicitation_form: advertised(elicitation, "form"),

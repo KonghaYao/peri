@@ -1,48 +1,12 @@
 //! Adapter-level tests: the v2 state machine, routing and error surface driven
 //! through an in-process fake transport.
 
-use serde_json::{json, Value};
+use serde_json::json;
 
-use super::harness::Harness;
+use super::harness::{begin_turn, code, expect_error, expect_state, permission, Harness, CWD};
 use super::WITHDRAW;
 use crate::transport::types::{AcpError, RequestId};
 use crate::transport::AcpTransport;
-
-fn code(error: &AcpError) -> i64 {
-    error.code
-}
-
-/// Read the next outbound item and require it to be a `session/update` state.
-async fn expect_state(harness: &Harness, sid: &str, state: &str) -> Value {
-    let out = harness.expect_out().await;
-    let (method, params) = match out {
-        super::harness::Out::Notification { method, params } => (method, params),
-        other => panic!("expected a state notification, got {other:?}"),
-    };
-    assert_eq!(method, "session/update");
-    assert_eq!(params["sessionId"], sid, "state update for another session");
-    let update = &params["update"];
-    assert_eq!(update["sessionUpdate"], "state_update", "{update}");
-    assert_eq!(update["state"], state, "{update}");
-    update.clone()
-}
-
-async fn expect_error(harness: &Harness, id: RequestId, expected: i64) -> AcpError {
-    let (answered, result) = harness.expect_out().await.response();
-    assert_eq!(answered, id);
-    let error = result.expect_err("expected an error reply");
-    assert_eq!(code(&error), expected, "{error}");
-    error
-}
-
-async fn begin_turn(harness: &Harness, sid: &str) {
-    harness.start_turn(sid).await;
-    expect_state(harness, sid, "running").await;
-}
-
-fn permission(sid: &str) -> Value {
-    json!({"sessionId": sid, "toolCall": {"title": "run a tool"}})
-}
 
 #[tokio::test]
 async fn a_connection_may_hold_several_sessions() {
@@ -80,6 +44,8 @@ async fn closing_one_session_never_silences_the_other() {
     harness.open("A").await;
     harness.open("B").await;
     begin_turn(&harness, "A").await;
+    // B's turn is still in flight when A closes.
+    begin_turn(&harness, "B").await;
 
     let id = RequestId::Number(900);
     harness
@@ -112,7 +78,7 @@ async fn closing_one_session_never_silences_the_other() {
     let error = expect_error(&harness, RequestId::Number(901), -32002).await;
     assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
 
-    // B is untouched.
+    // B is untouched: its in-flight turn keeps streaming and ends normally.
     harness
         .send_update(
             "B",
@@ -122,6 +88,8 @@ async fn closing_one_session_never_silences_the_other() {
     let out = harness.expect_out().await;
     let (_, params) = out.notification();
     assert_eq!(params["sessionId"], "B");
+    harness.send_done("B", "end_turn").await;
+    expect_state(&harness, "B", "idle").await;
 
     // Closing a session this connection never attached is a success.
     harness
@@ -212,7 +180,7 @@ async fn metadata_pushed_while_resuming_is_flushed_after_the_reply() {
         .request(
             id.clone(),
             "session/resume",
-            json!({"sessionId": "A", "cwd": "/workspace"}),
+            json!({"sessionId": "A", "cwd": CWD}),
         )
         .await;
     let forwarded = harness.expect_forwarded().await;
@@ -269,7 +237,7 @@ async fn a_failed_resume_leaves_no_slot_behind() {
         .request(
             RequestId::Number(600),
             "session/resume",
-            json!({"sessionId": "B", "cwd": "/workspace"}),
+            json!({"sessionId": "B", "cwd": CWD}),
         )
         .await;
     let forwarded = harness.expect_forwarded().await;
@@ -300,7 +268,7 @@ async fn replayed_chunks_get_a_replacement_boundary() {
         .request(
             RequestId::Number(700),
             "session/resume",
-            json!({"sessionId": "A", "cwd": "/workspace", "replayFrom": {"type": "start"}}),
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
         )
         .await;
     let forwarded = harness.expect_forwarded().await;
@@ -375,8 +343,8 @@ async fn session_setup_parameters_are_validated() {
     for (offset, params) in [
         json!({}),
         json!({"cwd": "relative"}),
-        json!({"cwd": "/workspace", "additionalDirectories": ["/other"]}),
-        json!({"cwd": "/workspace", "systemPrompt": {"text": "x"}}),
+        json!({"cwd": CWD, "additionalDirectories": ["/other"]}),
+        json!({"cwd": CWD, "systemPrompt": {"text": "x"}}),
     ]
     .into_iter()
     .enumerate()
@@ -396,7 +364,7 @@ async fn session_setup_parameters_are_validated() {
         .request(
             id.clone(),
             "session/resume",
-            json!({"sessionId": "A", "cwd": "/workspace", "replayFrom": {"type": "message"}}),
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "message"}}),
         )
         .await;
     expect_error(&harness, id, -32602).await;
@@ -414,7 +382,7 @@ async fn elicitation_is_gated_on_the_client_form_capability() {
             repeat.clone(),
             "initialize",
             json!({"protocolVersion": 2, "info": {"name": "probe", "version": "1"},
-                   "clientCapabilities": {"elicitation": {"form": {}}}}),
+                   "capabilities": {"elicitation": {"form": {}}}}),
         )
         .await;
     let forwarded = harness.expect_forwarded().await;
@@ -626,7 +594,7 @@ async fn cancel_request_withdraws_a_parked_prompt_and_ignores_everything_else() 
     // its own answer (nothing is left dangling).
     let setup = RequestId::Number(4300);
     harness
-        .request(setup.clone(), "session/new", json!({"cwd": "/workspace"}))
+        .request(setup.clone(), "session/new", json!({"cwd": CWD}))
         .await;
     let forwarded = harness.expect_forwarded().await;
     harness

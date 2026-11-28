@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::transport::types::RequestId;
 
 use super::params as wire;
-use super::state::{Attach, Connection, Replay, Reply, Routed, Slot};
+use super::state::{Attach, Connection, Replay, Reply, Routed};
 use super::{errors, CLOSE, INPUT};
 
 /// `session/new`: one more session on the same connection.
@@ -25,6 +25,7 @@ pub(super) fn new_session(connection: &mut Connection, id: RequestId, params: &V
             session: None,
             replay: false,
             created: true,
+            owner: 0,
         },
     );
     Routed::Forward {
@@ -63,17 +64,18 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
     if let Some(object) = forwarded.as_object_mut() {
         object.remove("replayFrom");
     }
-    let created = match connection.slots.get_mut(&session_id) {
+    let (created, owner) = match connection.slots.get_mut(&session_id) {
         Some(slot) => {
             slot.attach = Attach::Attaching;
             slot.replay = replay.then(Replay::default);
-            false
+            slot.setup += 1;
+            (false, slot.setup)
         }
         None => {
-            let mut slot = Slot::new(Attach::Attaching);
+            let slot = connection.insert_slot(&session_id, Attach::Attaching);
             slot.replay = replay.then(Replay::default);
-            connection.slots.insert(session_id.clone(), slot);
-            true
+            slot.setup = 1;
+            (true, 1)
         }
     };
     connection.replies.insert(
@@ -82,6 +84,7 @@ pub(super) fn resume_session(connection: &mut Connection, id: RequestId, params:
             session: Some(session_id),
             replay,
             created,
+            owner,
         },
     );
     Routed::Forward {
