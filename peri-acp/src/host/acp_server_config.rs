@@ -426,14 +426,18 @@ pub(super) async fn run_acp_server_inner(
     // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
     let oauth_event_rx = cfg.oauth_event_rx.take();
     let cfg = Arc::new(cfg);
-    let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
+    let mut connection_context = connection::ConnectionContext::new(
         cfg.stdio_command_filter
             && (cfg.mcp_apps_relay.is_some()
                 || cfg
                     .workspace_assembly
                     .as_ref()
                     .is_some_and(|source| source.mcp_profile.apps_enabled())),
-    )));
+    );
+    if transport.allows_concurrent_sessions() {
+        connection_context.allow_concurrent_sessions();
+    }
+    let connection = Arc::new(tokio::sync::Mutex::new(connection_context));
     oauth_delivery::spawn_oauth_consumer(oauth_event_rx, &transport, &cfg, &connection);
     let sessions: SharedSessions = sessions;
     // Per-session prompt serialization lock: the next prompt for the same session only

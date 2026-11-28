@@ -3,10 +3,12 @@
 use serde_json::{json, Value};
 
 use peri_acp_types::session::{
-    DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInputState,
+    DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest,
+    UserInputQueueReceipt, UserInputState,
 };
 
 use super::ServerLoop;
+use crate::host::stdio::v2::errors;
 use crate::transport::types::{AcpError, RequestId};
 
 impl ServerLoop<'_> {
@@ -67,13 +69,13 @@ impl ServerLoop<'_> {
             let state = sessions
                 .get(sid)
                 .filter(|state| !state.closing && state.close_in_flight == 0)
-                .ok_or_else(|| AcpError::new(-32002, "Session not active"))?;
+                .ok_or_else(|| errors::session_unavailable(sid, "Session not active"))?;
             state.environment.clone()
         };
         let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(self.cfg);
         if !cfg.session_manager.get_caps(sid).user_input_queue {
-            return Err(AcpError::new(
-                -32002,
+            return Err(errors::session_unavailable(
+                sid,
                 "Session has no ACP Preview input endpoint",
             ));
         }
@@ -153,12 +155,12 @@ impl ServerLoop<'_> {
             if withdraw(input_id.to_owned()).await? {
                 return Ok(json!({}));
             }
-            return Err(AcpError::new(-32602, "Prompt is no longer withdrawable"));
+            return Err(errors::invalid_params("Prompt is no longer withdrawable"));
         }
 
         let (_, content, _) = crate::dispatch::extract_prompt_params(params)?;
         crate::host::workspace::reassert_expected(cfg, sid, None).await?;
-        mailbox
+        let enqueued = mailbox
             .enqueue(&EnqueueUserInputRequest {
                 session_id: sid.to_owned(),
                 generation: generation.clone(),
@@ -170,50 +172,119 @@ impl ServerLoop<'_> {
             })
             .await
             .map_err(mailbox_error)?;
-        if let Err(error) = mailbox
+        match enqueued_state(&enqueued, input_id) {
+            // The message is already in canonical history: a retry of a keyed
+            // submission. Nothing is pending, so the adapter acknowledges the
+            // original id instead of waiting for a delivery event that cannot
+            // arrive; the message is not replayed as a new `user_message`.
+            UserInputState::Delivered => return Ok(input_reply(input_id, DELIVERED)),
+            // A confirmed withdrawal in this session generation retired the id:
+            // the mailbox refuses to re-insert it, so the retry must be told it
+            // is over rather than wait for a delivery that will never happen.
+            UserInputState::Withdrawn => return Err(withdrawn()),
+            _ => {}
+        }
+        let dispatched = mailbox
             .dispatch_non_interrupting(&DispatchUserInputsRequest {
                 session_id: sid.to_owned(),
                 generation: generation.clone(),
                 command_id: command(),
                 input_ids: vec![input_id.to_owned()],
             })
-            .await
-        {
+            .await;
+        let schedule_delivery = || {
+            crate::host::user_input::schedule_mailbox(
+                sid,
+                self.sessions,
+                self.prompt_locks,
+                self.cfg,
+                self.transport,
+                self.cont_tx,
+            )
+        };
+        if let Err(error) = dispatched {
             // The store could not confirm whether the input was handed off.
             // Withdrawal decides the race: a confirmed withdrawal means
             // nothing was inserted, so an error is safe and a same-key retry
             // cannot duplicate it. Otherwise the input may still be received;
             // the adapter gets no ACK for it, so delivery must be scheduled
             // before acknowledging or an idle session never runs it.
-            match resolve_dispatch_failure(withdraw(input_id.to_owned()).await, || {
-                crate::host::user_input::schedule_mailbox(
-                    sid,
-                    self.sessions,
-                    self.prompt_locks,
-                    self.cfg,
-                    self.transport,
-                    self.cont_tx,
-                )
-            }) {
-                DispatchFailureReply::Failed => return Err(dispatch_error(error)),
-                DispatchFailureReply::Scheduled => return Ok(json!({})),
+            match resolve_dispatch_failure(withdraw(input_id.to_owned()).await, schedule_delivery) {
+                DispatchFailureReply::Failed => Err(dispatch_error(error)),
+                DispatchFailureReply::Scheduled => Ok(input_reply(input_id, QUEUED)),
             }
+        } else {
+            // A dispatch receipt can still report a state that changed between
+            // the enqueue and the dispatch: the input may have been delivered
+            // (its `user_message` and canonical row already exist) or withdrawn.
+            // Neither may stay queued — one would wait for a delivery event that
+            // already fired, and the other can never deliver.
+            dispatched_reply(
+                &dispatched.expect("checked above"),
+                input_id,
+                schedule_delivery,
+            )
         }
-
-        crate::host::user_input::schedule_mailbox(
-            sid,
-            self.sessions,
-            self.prompt_locks,
-            self.cfg,
-            self.transport,
-            self.cont_tx,
-        );
-        Ok(json!({}))
     }
 }
 
+/// Reply state: the adapter must wait for the committed-delivery event.
+const QUEUED: &str = "queued";
+/// Reply state: the message is already in the transcript; acknowledge at once.
+const DELIVERED: &str = "delivered";
+
+/// The state the enqueue receipt reports for this input.
+fn enqueued_state(receipt: &UserInputQueueReceipt, input_id: &str) -> UserInputState {
+    receipt
+        .results
+        .iter()
+        .find(|item| item.input_id == input_id)
+        .map_or(UserInputState::Unknown, |item| item.state)
+}
+
+/// Answers a dispatch the mailbox accepted.
+///
+/// The state can still move between the enqueue and the dispatch, so the
+/// receipt — not the enqueue result — decides what is owed:
+///
+/// - `Delivered`: the message is already in the transcript. The adapter is told
+///   so at once; waiting would hang on a delivery event that already fired, and
+///   `schedule` must not run for an input that has nothing left to deliver.
+/// - `Withdrawn`: a withdrawal of this very input committed, so no delivery can
+///   follow and the id is retired for this session generation.
+/// - anything else: the input is still pending; `schedule` starts delivery and
+///   the adapter waits for the committed-delivery event.
+fn dispatched_reply(
+    receipt: &UserInputQueueReceipt,
+    input_id: &str,
+    schedule: impl FnOnce(),
+) -> Result<Value, AcpError> {
+    match enqueued_state(receipt, input_id) {
+        UserInputState::Delivered => Ok(input_reply(input_id, DELIVERED)),
+        UserInputState::Withdrawn => Err(withdrawn()),
+        _ => {
+            schedule();
+            Ok(input_reply(input_id, QUEUED))
+        }
+    }
+}
+
+/// The internal `_peri/stdio-v2/input` reply shape the v2 adapter reads.
+fn input_reply(input_id: &str, state: &str) -> Value {
+    json!({"messageId": input_id, "state": state})
+}
+
+/// A submission whose message was withdrawn before insertion: the id is retired
+/// for this session generation, so the retry cannot park on a delivery event.
+fn withdrawn() -> AcpError {
+    AcpError::new(
+        -32800, // v2 `Request cancelled`, see v2/errors.rs
+        "Prompt was withdrawn before insertion; use a new idempotency key",
+    )
+}
+
 fn invalid() -> AcpError {
-    AcpError::new(-32602, "Invalid internal ACP Preview input")
+    errors::invalid_params("Invalid internal ACP Preview input")
 }
 
 /// How a failed dispatch whose handoff could not be confirmed must reply.
@@ -304,16 +375,15 @@ async fn settle_failed_close(
 mod tests;
 
 fn mailbox_error(error: impl std::fmt::Display) -> AcpError {
-    AcpError::new(-32602, error.to_string())
+    errors::invalid_params(error.to_string())
 }
 
 /// A confirmed withdrawal means the dispatch failure did not insert anything.
 /// A storage failure is then a retryable internal error, not invalid params.
 fn dispatch_error(error: peri_agent::session::user_input_mailbox::UserInputQueueError) -> AcpError {
     use peri_agent::session::user_input_mailbox::UserInputQueueError;
-    let code = match &error {
-        UserInputQueueError::Store(_) => -32603,
-        _ => -32602,
-    };
-    AcpError::new(code, error.to_string())
+    match &error {
+        UserInputQueueError::Store(_) => errors::internal(error.to_string()),
+        _ => errors::invalid_params(error.to_string()),
+    }
 }

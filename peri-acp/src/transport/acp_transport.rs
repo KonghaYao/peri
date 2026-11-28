@@ -17,6 +17,15 @@ pub trait AcpTransport: Send + Sync {
         false
     }
 
+    /// Whether this connection's protocol addresses every session by id, so a
+    /// single connection may keep several sessions attached at once.
+    ///
+    /// The ACP v1 surface (and the in-process transports) keep the historical
+    /// one-session-per-connection rule; only the v2 stdio preview opts in.
+    fn allows_concurrent_sessions(&self) -> bool {
+        false
+    }
+
     /// A protocol may project this execution fact into its foreground result.
     async fn observe_execution_failure(&self, _session_id: &str) {}
 

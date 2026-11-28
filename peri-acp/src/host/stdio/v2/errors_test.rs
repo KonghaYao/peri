@@ -1,0 +1,378 @@
+//! Adapter-level failure surface: documented error codes and the host failure
+//! mapping applied per request context.
+
+use serde_json::json;
+
+use super::harness::{expect_error, Harness, CWD};
+use crate::transport::types::{AcpError, RequestId};
+
+#[test]
+fn host_failures_map_only_the_documented_codes() {
+    use super::errors::{host_failure, HostContext};
+
+    let busy = || AcpError::new(-32010, "Session is executing; retry after the current turn");
+    let mapped = host_failure(
+        busy(),
+        HostContext::Setup {
+            session_id: Some("A"),
+        },
+    );
+    assert_eq!(mapped.code, -32020);
+    assert_eq!(mapped.data.expect("reason")["reason"], "session_busy");
+
+    // A setup cwd the host cannot use is the request's Invalid params, with
+    // the host's diagnostic message intact.
+    let mapped = host_failure(
+        AcpError::new(-32010, "workspace location is unavailable"),
+        HostContext::Setup {
+            session_id: Some("A"),
+        },
+    );
+    assert_eq!(mapped.code, -32602);
+    assert_eq!(mapped.message, "workspace location is unavailable");
+
+    // `session/new` has no session id, so the busy shape cannot be used.
+    let mapped = host_failure(busy(), HostContext::Setup { session_id: None });
+    assert_eq!(mapped.code, -32603);
+
+    // Storage and prompt workspace failures are host-side, not client input.
+    let mapped = host_failure(
+        AcpError::new(-32010, "store offline"),
+        HostContext::SessionList,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "store offline");
+    let mapped = host_failure(
+        AcpError::new(-32010, "workspace location is unavailable"),
+        HostContext::Prompt,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "workspace location is unavailable");
+
+    // The overloaded `-32000` keeps its documented remap; other codes pass.
+    assert_eq!(
+        host_failure(AcpError::new(-32000, "busy"), HostContext::Prompt).code,
+        -32020
+    );
+    assert_eq!(
+        host_failure(
+            AcpError::new(-32603, "x"),
+            HostContext::Setup { session_id: None }
+        )
+        .code,
+        -32603
+    );
+
+    // Only the close-incomplete settlement keeps the host's `-32010`; every
+    // other close failure is internal.
+    let mapped = host_failure(
+        AcpError::new(
+            -32010,
+            "Session close incomplete: active execution has not stopped",
+        ),
+        HostContext::Close,
+    );
+    assert_eq!(mapped.code, -32010);
+    let mapped = host_failure(
+        AcpError::new(-32010, "session store unavailable"),
+        HostContext::Close,
+    );
+    assert_eq!(mapped.code, -32603);
+    assert_eq!(mapped.message, "session store unavailable");
+}
+
+#[tokio::test]
+async fn a_setup_with_an_unusable_cwd_is_invalid_params_not_the_host_code() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(2100);
+    // Only the host judges the directory unusable, so the adapter must forward
+    // this: the path has to be absolute on every platform, not a POSIX literal
+    // that Windows rejects as Invalid params before anything is forwarded.
+    let unusable_cwd = format!("{CWD}/no-such-project");
+    harness
+        .request(id.clone(), "session/new", json!({"cwd": unusable_cwd}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/new");
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "workspace location is unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32602).await;
+    assert_eq!(error.message, "workspace location is unavailable");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_list_storage_failure_is_an_internal_error() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(2101);
+    harness
+        .request(id.clone(), "session/list", json!({"cwd": CWD}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::SESSION_LIST);
+    harness
+        .respond(forwarded.id, Err(AcpError::new(-32010, "store offline")))
+        .await;
+    let error = expect_error(&harness, id, -32603).await;
+    assert_eq!(error.message, "store offline");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_prompt_workspace_failure_is_an_internal_error() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    let id = harness.request_prompt("A", "hello", None).await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::INPUT);
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "workspace location is unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32603).await;
+    assert_eq!(error.message, "workspace location is unavailable");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn only_the_close_incomplete_failure_keeps_the_host_conflict_code() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let incomplete = RequestId::Number(2400);
+    harness
+        .request(
+            incomplete.clone(),
+            "session/close",
+            json!({"sessionId": "A"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session close incomplete: active execution has not stopped",
+            )),
+        )
+        .await;
+    let error = expect_error(&harness, incomplete, -32010).await;
+    assert!(error.message.contains("close incomplete"), "{error}");
+
+    // Any other close failure is a host-internal failure, not the retryable
+    // close-incomplete settlement.
+    let other = RequestId::Number(2401);
+    harness
+        .request(other.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "session store unavailable")),
+        )
+        .await;
+    let error = expect_error(&harness, other, -32603).await;
+    assert_eq!(error.message, "session store unavailable");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_cleanup_incomplete_setup_keeps_a_close_retry_slot() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+
+    let resume = RequestId::Number(2500);
+    harness
+        .request(
+            resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session A cleanup incomplete: manager=busy, environment_drained=false",
+            )
+            .with_data(json!({
+                "reason": "session_cleanup_incomplete",
+                "sessionId": "A",
+            }))),
+        )
+        .await;
+    let error = expect_error(&harness, resume, -32603).await;
+    let data = error.data.expect("cleanup data is kept");
+    assert_eq!(data["reason"], "session_cleanup_incomplete");
+    assert_eq!(data["sessionId"], "A");
+
+    // The host still holds the session's close, so the slot is not addressable:
+    // no prompt can reach it.
+    let prompt = RequestId::Number(2501);
+    harness
+        .request(
+            prompt.clone(),
+            "session/prompt",
+            json!({"sessionId": "A", "prompt": [{"type": "text", "text": "early"}]}),
+        )
+        .await;
+    let error = expect_error(&harness, prompt, -32002).await;
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
+
+    // The explicit close is the only way to drain the host's cleanup, so it must
+    // still reach the host through the retained slot.
+    let close = RequestId::Number(2502);
+    harness
+        .request(close.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::CLOSE);
+    harness.respond(forwarded.id, Ok(json!({}))).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, close);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_prefix_only_cleanup_incomplete_setup_names_the_resume_target() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+
+    let resume = RequestId::Number(2510);
+    harness
+        .request(
+            resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    // The restore dispatch's refusal carries no `data`; only the prefix and the
+    // request's own session id identify the cleanup-incomplete session.
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session close incomplete: resume the close before loading this session",
+            )),
+        )
+        .await;
+    let error = expect_error(&harness, resume, -32603).await;
+    let data = error.data.expect("cleanup data is filled in");
+    assert_eq!(data["reason"], "session_cleanup_incomplete");
+    assert_eq!(data["sessionId"], "A");
+
+    let close = RequestId::Number(2511);
+    harness
+        .request(close.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::CLOSE);
+    harness.respond(forwarded.id, Ok(json!({}))).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, close);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_cleanup_incomplete_setup_mapping_is_internal_and_keeps_the_host_data() {
+    use super::errors::{host_failure, HostContext};
+
+    let mapped = host_failure(
+        AcpError::new(
+            -32010,
+            "Session A cleanup incomplete: manager=busy, environment_drained=false",
+        )
+        .with_data(json!({"reason": "session_cleanup_incomplete", "sessionId": "A"})),
+        HostContext::Setup {
+            session_id: Some("A"),
+        },
+    );
+    assert_eq!(mapped.code, -32603);
+    let data = mapped.data.expect("host data is kept");
+    assert_eq!(data["reason"], "session_cleanup_incomplete");
+    assert_eq!(data["sessionId"], "A");
+
+    // A prefix-only refusal is the same condition with a different shape.
+    let mapped = host_failure(
+        AcpError::new(
+            -32010,
+            "Session close incomplete: resume the close before loading this session",
+        ),
+        HostContext::Setup {
+            session_id: Some("B"),
+        },
+    );
+    assert_eq!(mapped.code, -32603);
+    let data = mapped.data.expect("cleanup data is filled in");
+    assert_eq!(data["reason"], "session_cleanup_incomplete");
+    assert_eq!(data["sessionId"], "B");
+}
+
+#[test]
+fn preview_only_handlers_name_the_session_they_could_not_serve() {
+    let error = super::errors::session_unavailable("A", "Session not active");
+    assert_eq!(error.code, -32002);
+    assert_eq!(error.message, "Session not active");
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
+
+    let error = super::errors::session_not_found("B");
+    assert_eq!(error.code, -32002);
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "B");
+}
+
+#[tokio::test]
+async fn unsupported_methods_and_object_cancels_use_the_documented_codes() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    for (offset, (method, expected)) in [
+        ("auth/login", -32601),
+        ("auth/logout", -32601),
+        ("session/fork", -32601),
+        ("providers/list", -32601),
+        ("mcp/message", -32601),
+        ("terminal/cancel", -32602),
+        ("tool_call/cancel", -32602),
+        ("not/a/method", -32601),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(1000 + offset as i64);
+        harness.request(id.clone(), method, json!({})).await;
+        expect_error(&harness, id, expected).await;
+    }
+    // `-32000` means Authentication required in v2: host passthroughs that use
+    // it for backpressure are rewritten instead of leaking through.
+    assert_eq!(
+        super::errors::normalize(AcpError::new(-32000, "busy")).code,
+        -32020
+    );
+    assert_eq!(
+        super::errors::normalize(AcpError::new(-32000, "busy"))
+            .data
+            .expect("reason")["reason"],
+        "server_error"
+    );
+    assert_eq!(
+        super::errors::normalize(AcpError::new(-32603, "x")).code,
+        -32603
+    );
+}

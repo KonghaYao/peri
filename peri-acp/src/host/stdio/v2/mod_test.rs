@@ -1,37 +1,735 @@
-use super::{Connection, Version};
+//! Adapter-level tests: the v2 state machine, routing, protocol gating and
+//! configuration driven through an in-process fake transport.
 
-fn foreground(sid: &str) -> Connection {
-    Connection {
-        version: Version::Two,
-        active: Some(sid.into()),
-        foreground: true,
-        epoch: 7,
-        ..Connection::default()
+use serde_json::json;
+
+use super::harness::{
+    begin_turn, code, config_options, expect_error, expect_state, permission, Harness, CWD,
+};
+use crate::transport::types::{AcpError, RequestId};
+use crate::transport::AcpTransport;
+
+#[tokio::test]
+async fn a_connection_may_hold_several_sessions() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness.open("B").await;
+
+    let a = harness.enqueue_prompt("A", "hello A").await;
+    let b = harness.enqueue_prompt("B", "hello B").await;
+    harness.deliver("A", &a).await;
+    expect_state(&harness, "A", "running").await;
+    let message = harness.expect_out().await.update();
+    assert_eq!(message["sessionUpdate"], "user_message");
+    assert_eq!(message["messageId"], a.input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, a.request);
+    assert_eq!(result.expect("prompt ack")["messageId"], a.input.as_str());
+
+    // B keeps its own prompt pending and its own turn.
+    harness.deliver("B", &b).await;
+    expect_state(&harness, "B", "running").await;
+    let message = harness.expect_out().await.update();
+    assert_eq!(message["sessionUpdate"], "user_message");
+    assert_eq!(message["messageId"], b.input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, b.request);
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn closing_one_session_never_silences_the_other() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness.open("B").await;
+    begin_turn(&harness, "A").await;
+    // B's turn is still in flight when A closes.
+    begin_turn(&harness, "B").await;
+
+    let id = RequestId::Number(900);
+    harness
+        .request(id.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, super::CLOSE);
+    harness.respond(forwarded.id, Ok(json!(["queued"]))).await;
+    // Foreground work is reported as cancelled before the close reply.
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert!(result.is_ok());
+
+    // A's slot is gone: its updates and prompts are no longer routed.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+    harness
+        .request(
+            RequestId::Number(901),
+            "session/prompt",
+            json!({"sessionId": "A", "prompt": [{"type": "text", "text": "ghost"}]}),
+        )
+        .await;
+    let error = expect_error(&harness, RequestId::Number(901), -32002).await;
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
+
+    // B is untouched: its in-flight turn keeps streaming and ends normally.
+    harness
+        .send_update(
+            "B",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t"}),
+        )
+        .await;
+    let out = harness.expect_out().await;
+    let (_, params) = out.notification();
+    assert_eq!(params["sessionId"], "B");
+    harness.send_done("B", "end_turn").await;
+    expect_state(&harness, "B", "idle").await;
+
+    // Closing a session this connection never attached is a success.
+    harness
+        .request(
+            RequestId::Number(902),
+            "session/close",
+            json!({"sessionId": "elsewhere"}),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, RequestId::Number(902));
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn a_completion_from_an_ended_turn_cannot_publish_running() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    begin_turn(&harness, "A").await;
+
+    let v2 = harness.v2();
+    let request = tokio::spawn(async move {
+        v2.send_request("session/request_permission", permission("A"))
+            .await
+    });
+    let peer = harness.fake().next_peer().await;
+    assert_eq!(peer.method, "session/request_permission");
+    let update = harness.expect_out().await.update();
+    assert_eq!(update["state"], "requires_action");
+
+    // The turn ends while the permission is still outstanding.
+    harness.send_done("A", "cancelled").await;
+    expect_state(&harness, "A", "idle").await;
+
+    peer.respond(Ok(json!({"outcome": {"outcome": "cancelled"}})));
+    assert!(request.await.expect("request task").is_ok());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn concurrent_permissions_resume_running_only_after_the_last_one() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    begin_turn(&harness, "A").await;
+
+    let first = harness.v2();
+    let second = harness.v2();
+    let one = tokio::spawn(async move {
+        first
+            .send_request("session/request_permission", permission("A"))
+            .await
+    });
+    let first_peer = harness.fake().next_peer().await;
+    let two = tokio::spawn(async move {
+        second
+            .send_request("session/request_permission", permission("A"))
+            .await
+    });
+    let second_peer = harness.fake().next_peer().await;
+
+    // The aggregation publishes `requires_action` once for the turn.
+    let update = harness.expect_out().await.update();
+    assert_eq!(update["state"], "requires_action");
+
+    let granted = json!({"outcome": {"outcome": "selected", "optionId": "allow_once"}});
+    first_peer.respond(Ok(granted.clone()));
+    assert!(one.await.expect("task").is_ok());
+    // One of two outstanding requests is not progress.
+    harness.expect_quiet().await;
+
+    second_peer.respond(Ok(granted));
+    assert!(two.await.expect("task").is_ok());
+    let update = harness.expect_out().await.update();
+    assert_eq!(update["state"], "running");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn metadata_pushed_while_resuming_precedes_the_reply() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let id = RequestId::Number(500);
+    harness
+        .request(
+            id.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/resume");
+
+    // The host may push metadata before the resume reply is written.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "restored"}),
+        )
+        .await;
+    harness.expect_quiet().await;
+    // Live activity is not parked, only session metadata is.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t"}),
+        )
+        .await;
+    let live = harness.expect_out().await.update();
+    assert_eq!(live["sessionUpdate"], "tool_call_update");
+
+    harness
+        .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    // v2 hands the client the state snapshot and the session metadata before the
+    // resume reply, so it can route them without racing the response.
+    expect_state(&harness, "A", "idle").await;
+    let held = harness.expect_out().await.update();
+    assert_eq!(held["sessionUpdate"], "session_info_update");
+    assert_eq!(held["title"], "restored");
+    // The reply itself waits for the session's configuration snapshot, which v1
+    // resume does not return.
+    harness.fetch_config("A", config_options("default")).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("resume");
+    assert_eq!(result["sessionId"], "A");
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert!(result["configOptions"][0].get("id").is_none());
+
+    // Once attached the same update is no longer parked.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "session_info_update", "title": "live"}),
+        )
+        .await;
+    let live = harness.expect_out().await.update();
+    assert_eq!(live["title"], "live");
+}
+
+#[tokio::test]
+async fn a_failed_resume_leaves_no_slot_behind() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness.open("B").await;
+    harness
+        .request(
+            RequestId::Number(600),
+            "session/resume",
+            json!({"sessionId": "B", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(-32010, "Session is closing")),
+        )
+        .await;
+    expect_error(&harness, RequestId::Number(600), -32020).await;
+    // B was already attached, so it keeps receiving updates.
+    harness
+        .send_update(
+            "B",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t"}),
+        )
+        .await;
+    let (_, params) = harness.expect_out().await.notification();
+    assert_eq!(params["sessionId"], "B");
+}
+
+#[tokio::test]
+async fn replayed_chunks_get_a_replacement_boundary() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness
+        .request(
+            RequestId::Number(700),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "start"}}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/load");
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1",
+                   "content": {"type": "text", "text": "replayed"},
+                   "_meta": {"periReplay": true}}),
+        )
+        .await;
+    let reset = harness.expect_out().await.update();
+    assert_eq!(reset["sessionUpdate"], "agent_message");
+    assert_eq!(reset["messageId"], "m1");
+    let chunk = harness.expect_out().await.update();
+    assert_eq!(chunk["sessionUpdate"], "agent_message_chunk");
+    harness
+        .respond(forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    let marker = harness.expect_out().await.update();
+    assert_eq!(marker["sessionUpdate"], "replay_complete");
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, RequestId::Number(700));
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn preview_only_internal_methods_are_rejected_on_v1_connections() {
+    let mut harness = Harness::start();
+    harness.negotiate_v1().await;
+    for (offset, method) in [
+        super::SESSION_LIST,
+        super::INPUT,
+        super::WITHDRAW,
+        super::CANCEL,
+        super::CLOSE,
+        super::CONFIG,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(2200 + offset as i64);
+        harness.request(id.clone(), method, json!({})).await;
+        expect_error(&harness, id, -32601).await;
     }
+    harness.expect_quiet().await;
 }
 
-#[test]
-fn requires_action_completion_of_a_cancelled_turn_cannot_publish_running() {
-    let mut connection = foreground("A");
-    assert!(connection.is_current_turn("A", 7));
-    // The turn is cancelled while its permission completion waits for `wire`.
-    connection.epoch += 1;
-    assert!(!connection.is_current_turn("A", 7));
+#[tokio::test]
+async fn a_v2_initialize_without_client_info_is_invalid_params() {
+    let mut harness = Harness::start();
+    let id = RequestId::Number(2300);
+    harness
+        .request(id.clone(), "initialize", json!({"protocolVersion": 2}))
+        .await;
+    let error = expect_error(&harness, id, -32602).await;
+    assert!(error.message.contains("info"), "{error}");
+    harness.expect_quiet().await;
 }
 
-#[test]
-fn requires_action_completion_cannot_leak_into_a_new_turn_or_session() {
-    let mut connection = foreground("A");
-    // A newer foreground turn started.
-    connection.epoch += 1;
-    assert!(!connection.is_current_turn("A", 7));
-    // The connection closed or idled.
-    connection.epoch = 8;
-    connection.foreground = false;
-    assert!(!connection.is_current_turn("A", 8));
-    // Another session became active.
-    connection.foreground = true;
-    connection.active = Some("B".into());
-    assert!(!connection.is_current_turn("A", 8));
-    assert!(connection.is_current_turn("B", 8));
+#[tokio::test]
+async fn a_version_zero_initialize_keeps_the_v1_negotiation() {
+    let mut harness = Harness::start();
+    let id = RequestId::Number(2301);
+    harness
+        .request(
+            id.clone(),
+            "initialize",
+            json!({"protocolVersion": 0, "clientCapabilities": {}}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "initialize");
+    harness
+        .respond(forwarded.id, Ok(json!({"protocolVersion": 1})))
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert_eq!(result.expect("v1 reply")["protocolVersion"], 1);
+}
+
+#[tokio::test]
+async fn session_setup_parameters_are_validated() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    for (offset, params) in [
+        json!({}),
+        json!({"cwd": "relative"}),
+        json!({"cwd": CWD, "additionalDirectories": ["/other"]}),
+        json!({"cwd": CWD, "systemPrompt": {"text": "x"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(2000 + offset as i64);
+        harness.request(id.clone(), "session/new", params).await;
+        expect_error(&harness, id, -32602).await;
+    }
+    let id = RequestId::Number(2010);
+    harness
+        .request(id.clone(), "session/list", json!({"cursor": "opaque"}))
+        .await;
+    expect_error(&harness, id, -32602).await;
+    // Replay cursors other than `start` are not implemented.
+    let id = RequestId::Number(2011);
+    harness
+        .request(
+            id.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": {"type": "message"}}),
+        )
+        .await;
+    expect_error(&harness, id, -32602).await;
+}
+
+#[tokio::test]
+async fn elicitation_is_gated_on_the_client_form_capability() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    // Client declarations commit with a successful initialize: a failed repeat
+    // must not leave the connection believing the client supports forms.
+    let repeat = RequestId::Number(1);
+    harness
+        .request(
+            repeat.clone(),
+            "initialize",
+            json!({"protocolVersion": 2, "info": {"name": "probe", "version": "1"},
+                   "capabilities": {"elicitation": {"form": {}}}}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(forwarded.id, Err(AcpError::new(-32603, "host failure")))
+        .await;
+    expect_error(&harness, repeat, -32603).await;
+
+    let params = json!({"sessionId": "A", "mode": "form", "message": "pick one"});
+    let error = harness
+        .v2()
+        .send_request("elicitation/create", params.clone())
+        .await
+        .expect_err("a client without elicitation.form must not receive the request");
+    assert_eq!(code(&error), -32601);
+    assert_eq!(
+        harness.fake().peer_count().await,
+        0,
+        "no request may reach the client"
+    );
+
+    let mut declared = Harness::start();
+    declared
+        .negotiate_with(json!({"elicitation": {"form": {}}}))
+        .await;
+    let request = {
+        let v2 = declared.v2();
+        tokio::spawn(async move { v2.send_request("elicitation/create", params).await })
+    };
+    let peer = declared.fake().next_peer().await;
+    assert_eq!(peer.method, "elicitation/create");
+    assert_eq!(peer.params["mode"], "form");
+    peer.respond(Ok(json!({"action": {"action": "accept", "content": {}}})));
+    assert!(request.await.expect("task").is_ok());
+
+    // Permission requests are baseline and never gated.
+    let mut plain = Harness::start();
+    plain.negotiate().await;
+    plain.open("A").await;
+    begin_turn(&plain, "A").await;
+    let v2 = plain.v2();
+    let request = tokio::spawn(async move {
+        v2.send_request("session/request_permission", permission("A"))
+            .await
+    });
+    let peer = plain.fake().next_peer().await;
+    peer.respond(Ok(json!({"outcome": {"outcome": "cancelled"}})));
+    assert!(request.await.expect("task").is_ok());
+}
+
+#[tokio::test]
+async fn a_keyed_retry_of_an_inserted_prompt_reuses_the_persisted_identity() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    // First submission: the derived id travels to the host as the input id.
+    let (request, forwarded) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    let input = forwarded.params["inputId"]
+        .as_str()
+        .expect("input id")
+        .to_owned();
+    assert_eq!(
+        uuid::Uuid::parse_str(&input)
+            .expect("input id is a uuid")
+            .get_version_num(),
+        5,
+        "keyed submissions derive their identity"
+    );
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "queued"})),
+        )
+        .await;
+    harness
+        .deliver(
+            "A",
+            &super::harness::Submission {
+                request: request.clone(),
+                input: input.clone(),
+            },
+        )
+        .await;
+    expect_state(&harness, "A", "running").await;
+    let echoed = harness.expect_out().await.update();
+    assert_eq!(echoed["sessionUpdate"], "user_message");
+    assert_eq!(echoed["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, request);
+    assert_eq!(result.expect("first prompt")["messageId"], input.as_str());
+    harness.send_done("A", "end_turn").await;
+    expect_state(&harness, "A", "idle").await;
+
+    // Retry: the same key derives the same id, so the host can only report the
+    // existing message. The retry is acknowledged immediately, without a second
+    // `user_message` echo and without waiting for a delivery that cannot come.
+    let (retry, forwarded) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    assert_eq!(
+        forwarded.params["inputId"],
+        input.as_str(),
+        "a keyed retry must address the same persistent identity"
+    );
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "delivered"})),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, retry);
+    assert_eq!(result.expect("retry")["messageId"], input.as_str());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_keyed_retry_joins_the_submission_still_in_flight() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let (first, forwarded) = harness
+        .send_prompt_with("A", "one submission", Some("key"))
+        .await;
+    let input = forwarded.params["inputId"]
+        .as_str()
+        .expect("input id")
+        .to_owned();
+    // The retry is parked on the first submission: nothing reaches the host.
+    let second = harness
+        .request_prompt("A", "one submission", Some("key"))
+        .await;
+    harness.expect_quiet().await;
+
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "queued"})),
+        )
+        .await;
+    harness
+        .deliver(
+            "A",
+            &super::harness::Submission {
+                request: first.clone(),
+                input: input.clone(),
+            },
+        )
+        .await;
+
+    expect_state(&harness, "A", "running").await;
+    let echoed = harness.expect_out().await.update();
+    assert_eq!(echoed["sessionUpdate"], "user_message");
+    assert_eq!(echoed["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, first);
+    assert_eq!(result.expect("first")["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, second);
+    assert_eq!(result.expect("join")["messageId"], input.as_str());
+}
+
+#[tokio::test]
+async fn keyed_retries_in_different_sessions_are_independent() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness.open("B").await;
+
+    let (_, left) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    let (_, right) = harness
+        .send_prompt_with("B", "same input", Some("key"))
+        .await;
+    assert_ne!(
+        left.params["inputId"], right.params["inputId"],
+        "keys are scoped to one session"
+    );
+}
+
+#[tokio::test]
+async fn a_new_session_reports_its_config_options_in_the_v2_shape() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    let id = RequestId::Number(50);
+    harness
+        .request(id.clone(), "session/new", json!({"cwd": CWD}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({
+                "sessionId": "A",
+                "modes": {"currentModeId": "default"},
+                "configOptions": config_options("default"),
+                "_meta": {"peri.identity": "opaque"}
+            })),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("new session reply");
+    assert_eq!(result["sessionId"], "A");
+    // v2 has no modes block and no private metadata; `configOptions` is carried
+    // in its v2 identity shape.
+    assert!(result.get("modes").is_none());
+    assert!(result.get("_meta").is_none());
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert_eq!(result["configOptions"][0]["currentValue"], "default");
+    assert!(result["configOptions"][0].get("id").is_none());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn set_config_option_round_trips_through_the_v1_request_shape() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness
+        .open_with_config("A", config_options("default"))
+        .await;
+
+    let id = RequestId::Number(51);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "bypass"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/set_config_option");
+    assert_eq!(
+        forwarded.params,
+        json!({"sessionId": "A", "configId": "mode", "value": "bypass"})
+    );
+    // The host pushes the new list and returns it in the reply; both reach the
+    // client with the v2 identity field.
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "config_option_update",
+                   "configOptions": config_options("bypass")}),
+        )
+        .await;
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"configOptions": config_options("bypass"), "_meta": {"x": 1}})),
+        )
+        .await;
+    let update = harness.expect_out().await.update();
+    assert_eq!(update["sessionUpdate"], "config_option_update");
+    assert_eq!(update["configOptions"][0]["configId"], "mode");
+    assert_eq!(update["configOptions"][0]["currentValue"], "bypass");
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    let result = result.expect("set config reply");
+    assert_eq!(result["configOptions"][0]["configId"], "mode");
+    assert!(result.get("_meta").is_none());
+
+    // The refreshed list is what the next request validates against.
+    let id = RequestId::Number(52);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "default"}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.params["value"], "default");
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"configOptions": config_options("default")})),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, id);
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn set_config_option_refuses_unknown_sessions_options_and_values() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness
+        .open_with_config("A", config_options("default"))
+        .await;
+
+    let id = RequestId::Number(60);
+    harness
+        .request(
+            id.clone(),
+            "session/set_config_option",
+            json!({"sessionId": "ghost", "configId": "mode", "type": "id", "value": "bypass"}),
+        )
+        .await;
+    let error = expect_error(&harness, id, -32002).await;
+    assert_eq!(error.data.expect("sessionId data")["sessionId"], "ghost");
+
+    for (offset, params) in [
+        json!({"sessionId": "A", "type": "id", "value": "bypass"}),
+        json!({"sessionId": "A", "configId": "mode", "type": "boolean", "value": true}),
+        json!({"sessionId": "A", "configId": "nope", "type": "id", "value": "bypass"}),
+        json!({"sessionId": "A", "configId": "mode", "type": "id", "value": "nonsense"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = RequestId::Number(61 + offset as i64);
+        harness
+            .request(id.clone(), "session/set_config_option", params)
+            .await;
+        expect_error(&harness, id, -32602).await;
+    }
+    // Every rejection is decided before the host sees the request, so the
+    // configuration cannot have moved.
+    harness.expect_quiet().await;
 }

@@ -2,11 +2,71 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::{
-    close_error, confirmed_withdrawals, dispatch_error, resolve_dispatch_failure,
+    close_error, confirmed_withdrawals, dispatch_error, dispatched_reply, resolve_dispatch_failure,
     settle_failed_close, DispatchFailureReply,
 };
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
+use peri_acp_types::session::{
+    UserInputItemResult, UserInputQueueReceipt, UserInputQueueSnapshot, UserInputState,
+};
 use peri_agent::session::user_input_mailbox::UserInputQueueError;
+
+/// A dispatch/enqueue receipt reporting one input's state.
+fn receipt(state: UserInputState) -> UserInputQueueReceipt {
+    UserInputQueueReceipt {
+        snapshot: UserInputQueueSnapshot {
+            session_id: "session-1".to_owned(),
+            generation: "g".to_owned(),
+            revision: 1,
+            active_request_id: None,
+            items: Vec::new(),
+            terminal_items: Vec::new(),
+        },
+        results: vec![UserInputItemResult {
+            input_id: "input-a".to_owned(),
+            state,
+        }],
+        taken_back: None,
+    }
+}
+
+#[test]
+fn a_dispatch_that_already_delivered_answers_without_scheduling() {
+    let mut scheduled = 0;
+    let reply = dispatched_reply(&receipt(UserInputState::Delivered), "input-a", || {
+        scheduled += 1
+    })
+    .expect("an already delivered input is acknowledged");
+    assert_eq!(reply, json!({"messageId": "input-a", "state": "delivered"}));
+    assert_eq!(
+        scheduled, 0,
+        "已交付的输入不能再调度投递：它没有待投递内容，适配器也不等投递事件"
+    );
+
+    // A withdrawal that committed between the enqueue and the dispatch cannot
+    // deliver, so it fails the request and schedules nothing either.
+    let mut scheduled = 0;
+    let error = dispatched_reply(&receipt(UserInputState::Withdrawn), "input-a", || {
+        scheduled += 1
+    })
+    .expect_err("a withdrawn input cannot be queued");
+    assert_eq!(error.code, -32800);
+    assert_eq!(scheduled, 0, "已确认撤回的输入没有可投递内容");
+
+    // Anything still pending keeps the old contract: schedule delivery, then
+    // let the adapter wait for the delivery event.
+    for state in [
+        UserInputState::Queued,
+        UserInputState::Dispatching,
+        UserInputState::Unknown,
+    ] {
+        let mut scheduled = 0;
+        let reply =
+            dispatched_reply(&receipt(state), "input-a", || scheduled += 1).expect("queued reply");
+        assert_eq!(reply, json!({"messageId": "input-a", "state": "queued"}));
+        assert_eq!(scheduled, 1, "仍未投递的输入必须调度投递");
+    }
+}
 
 #[test]
 fn unconfirmed_dispatch_schedules_delivery_before_acknowledging() {

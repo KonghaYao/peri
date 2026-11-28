@@ -301,9 +301,13 @@ impl UserInputMailbox {
                     }
                     _ => Vec::new(),
                 };
-                let results = crate::session::user_input_mailbox::state::results_for(
-                    &state,
-                    std::slice::from_ref(&request.input_id),
+                let results = crate::session::user_input_mailbox::state::handed_off_results(
+                    outcome.disposition,
+                    crate::session::user_input_mailbox::state::results_for(
+                        &state,
+                        std::slice::from_ref(&request.input_id),
+                    ),
+                    &request.input_id,
                 );
                 crate::session::user_input_mailbox::state::remember_command(
                     &mut state,

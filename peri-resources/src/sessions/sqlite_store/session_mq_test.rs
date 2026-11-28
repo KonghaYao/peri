@@ -551,6 +551,22 @@ async fn enqueue_after_receive_reports_already_handed_off() {
     assert_eq!(again.disposition, MqEnqueueDisposition::AlreadyHandedOff);
     assert_eq!(mq_count(&fixture, &thread).await, 0);
 
+    // 稳定 ID（ACP v2 幂等键派生）下，同 ID 不同正文不是重试而是冲突。
+    let changed = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "edited after hand off"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(changed.kind(), SessionResourceErrorKind::Conflict { .. }),
+        "同 ID 已移交的正文必须一致: {changed:?}"
+    );
+    assert_eq!(
+        history_len(&fixture, &thread).await,
+        1,
+        "冲突不写第二条历史"
+    );
+
     let cross = fixture
         .data
         .mq_enqueue(&other, input(id, "hand off"))

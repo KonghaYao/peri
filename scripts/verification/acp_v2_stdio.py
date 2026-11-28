@@ -93,9 +93,10 @@ class Peer:
         self.send({"id": self.seq, "method": method, "params": params})
         return self.seq
 
-    def until(self, predicate, timeout=25):
+    def until(self, predicate, timeout=25, after=0):
         due = time.monotonic() + timeout
-        for frame in self.frames:
+        for index in range(after, len(self.frames)):
+            frame = self.frames[index]
             if predicate(frame):
                 return frame
         while time.monotonic() < due:
@@ -153,6 +154,32 @@ def prompt(sid, text, key=None):
     return result
 
 
+def page_through(peer, limit, cwd, cursor=None, max_pages=1000):
+    """Walk `session/list` until it terminates.
+
+    The server controls `nextCursor`; a repeated cursor or an unbounded page
+    count would otherwise make this loop run forever (each response resets the
+    per-call timeout). Both are treated as protocol failures here.
+    """
+    ids = []
+    seen = set()
+    pages = 0
+    while True:
+        params = {"cwd": cwd, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        page = peer.call("session/list", params, "ListSessionsResponse")
+        assert len(page["sessions"]) <= limit, page
+        ids += [entry["sessionId"] for entry in page["sessions"]]
+        cursor = page.get("nextCursor")
+        if not cursor:
+            return ids
+        assert cursor not in seen, f"session/list repeated a cursor: {cursor}"
+        seen.add(cursor)
+        pages += 1
+        assert pages <= max_pages, f"session/list did not terminate after {pages} pages"
+
+
 def lifecycle(binary, root, schema):
     peers = []
     try:
@@ -167,14 +194,130 @@ def lifecycle(binary, root, schema):
         assert peer.response(peer.request("initialize", {"protocolVersion": 65536, "info": client}))["error"]["code"] == -32602
         sid = peer.sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
         assert peer.response(peer.request("initialize", {"protocolVersion": 2, "info": client}))["error"]["code"] == -32600
-        # The adapter enforces the preview's one active session per connection.
-        assert peer.response(peer.request("session/new", {"cwd": str(root)}))["error"]["code"] == -32000
-        assert peer.response(peer.request("session/resume", {
+        # v2 addresses every session by id, so one connection may hold several.
+        other = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        assert other != sid
+        # A resume of a session this connection never attached is a host-level
+        # failure, never the v1-style "one active session" rejection: `-32000`
+        # is reserved for Authentication required in the pinned schema.
+        unknown = peer.response(peer.request("session/resume", {
             "sessionId": "00000000-0000-7000-8000-000000000000", "cwd": str(root)
-        }))["error"]["code"] == -32000
+        }))["error"]
+        assert unknown["code"] != -32000, unknown
+        # cwd is a required absolute path; the preview advertises neither extra
+        # roots nor system prompts.
+        assert peer.response(peer.request("session/new", {}))["error"]["code"] == -32602
+        assert peer.response(peer.request("session/new", {"cwd": "relative"}))["error"]["code"] == -32602
+        assert peer.response(peer.request("session/new", {
+            "cwd": str(root), "additionalDirectories": [str(root)]
+        }))["error"]["code"] == -32602
+        # A v2 setup must not forward the host's overloaded `-32010`: an
+        # absolute but unusable cwd is Invalid params with the host's
+        # diagnostic message. If the host message changes, update this branch
+        # explicitly (it asserts the shape, not only the code).
+        unavailable_cwd = peer.response(peer.request("session/new", {
+            "cwd": str(root / "no-such-directory")
+        }))["error"]
+        assert unavailable_cwd["code"] == -32602, unavailable_cwd
+        assert unavailable_cwd["code"] != -32010, unavailable_cwd
+        assert "workspace location is unavailable" in unavailable_cwd["message"], unavailable_cwd
+        # Per-object cancellation is never advertised.
+        assert peer.response(peer.request("terminal/cancel", {
+            "sessionId": sid, "terminalId": "t"
+        }))["error"]["code"] == -32602
+        assert peer.response(peer.request("tool_call/cancel", {
+            "sessionId": sid, "toolCallId": "t"
+        }))["error"]["code"] == -32602
+        assert peer.response(peer.request("auth/login", {}))["error"]["code"] == -32601
+        # An unknown session names itself in the error data.
+        ghost = "00000000-0000-7000-8000-000000000001"
+        missing = peer.response(peer.request("session/prompt", prompt(ghost, "ghost")))["error"]
+        assert missing["code"] == -32002 and missing["data"]["sessionId"] == ghost, missing
         # Idempotency keys are 1..255 characters, not bytes.
         assert peer.response(peer.request("session/prompt", prompt(sid, "Too long", "k" * 256)))["error"]["code"] == -32602
-        print("PASS v2 initialize repeat/version bounds, single active session, prompt key bounds")
+        print("PASS v2 initialize repeat/version bounds, multi-session admission, "
+              "setup/error-code shapes, prompt key bounds")
+        # Cross-session routing: a turn on the second session stays on it.
+        start = len(peer.frames)
+        assert "result" in peer.response(peer.request("session/prompt", prompt(other, "Second session turn")),
+                                        "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == other
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle")
+        # Turns of two sessions must genuinely overlap: the host serializes per
+        # session, not per connection. Both prompts are written before either is
+        # awaited, and A's tool directive holds its turn open (the stub's `hold`
+        # command), so B has to report `running` while A is still active. The
+        # held tool needs the bypass policy; the default policy would park the
+        # turn on an approval the probe never answers. Frames are located from
+        # `start` by position: a value search would find the earlier `running`
+        # frame of the previous turn and could accept a serialized
+        # implementation.
+        peer.call("session/set_config_option", {
+            "sessionId": sid, "configId": "mode", "type": "id", "value": "bypass"
+        }, "SetSessionConfigOptionResponse")
+        start = len(peer.frames)
+        first = peer.request("session/prompt", prompt(sid, "Concurrent turn A [[tool:hold]]"))
+        second = peer.request("session/prompt", prompt(other, "Concurrent turn B"))
+
+        def running(target):
+            return peer.until(
+                lambda f: f.get("method") == "session/update"
+                          and f["params"]["sessionId"] == target
+                          and f["params"]["update"].get("sessionUpdate") == "state_update"
+                          and f["params"]["update"].get("state") == "running",
+                after=start)
+
+        def idle(target):
+            return peer.until(
+                lambda f: f.get("method") == "session/update"
+                          and f["params"]["sessionId"] == target
+                          and f["params"]["update"].get("sessionUpdate") == "state_update"
+                          and f["params"]["update"].get("state") == "idle",
+                after=start)
+
+        def position(frame):
+            for index in range(start, len(peer.frames)):
+                if peer.frames[index] is frame:
+                    return index
+            raise AssertionError(f"frame not observed after `start`: {frame}")
+
+        running_a = running(sid)
+        running_b = running(other)
+        # Prompt ACKs are delivery acknowledgements, not turn boundaries: a
+        # session can be acknowledged while its turn (and the other session's
+        # turn) is still running. Consume them without using their position.
+        peer.response(first, "PromptResponse")
+        peer.response(second, "PromptResponse")
+        for target in (sid, other):
+            idle(target)
+        first_idle = min(index for index in range(start, len(peer.frames))
+                         if peer.frames[index].get("method") == "session/update"
+                         and peer.frames[index]["params"]["sessionId"] in (sid, other)
+                         and peer.frames[index]["params"]["update"].get("sessionUpdate") == "state_update"
+                         and peer.frames[index]["params"]["update"].get("state") == "idle")
+        for target, frame in ((sid, running_a), (other, running_b)):
+            assert position(frame) < first_idle, (
+                f"turn {target!r} was still missing `running` when the first session went idle; "
+                "the turns did not overlap")
+        peer.call("session/close", {"sessionId": other}, "CloseSessionResponse")
+        assert peer.response(peer.request("session/prompt", prompt(other, "Closed")))["error"]["code"] == -32002
+        print("PASS v2 two sessions on one connection; concurrent turns; per-session close isolation")
+        # session/delete removes the session from the list and its slot.
+        doomed = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        peer.call("session/delete", {"sessionId": doomed}, "DeleteSessionResponse")
+        assert peer.response(peer.request("session/prompt", prompt(doomed, "gone")))["error"]["code"] == -32002
+        assert all(x["sessionId"] != doomed for x in
+                   peer.call("session/list", {}, "ListSessionsResponse")["sessions"])
+        # Deleting it again is a durable no-op: the adapter still forwards the
+        # request, the host answers success, and the empty payload carries no
+        # state to clean up a second time.
+        repeated = peer.response(peer.request("session/delete", {"sessionId": doomed}))
+        assert "error" not in repeated, repeated
+        assert repeated["result"] == {}, repeated
+        print("PASS v2 session/delete drops the session and its connection slot")
         # A 255-character key is the accepted upper bound; the 256-character
         # key above was rejected without creating a receipt.
         key = "k" * 255
@@ -196,13 +339,118 @@ def lifecycle(binary, root, schema):
         assert peer.frames.index(receipt) < next(i for i in range(start, len(peer.frames)) if
                peer.frames[i].get("params", {}).get("update", {}).get("sessionUpdate") == "agent_message_chunk")
         print("PASS v2 negotiate/new/list; committed echo + early ACK; streamed answer, idle, keyed dedup/conflict")
+
+        # S4: replay ordering and the deferred queue. The host pushes the
+        # configuration snapshot and command table before its load reply; those
+        # live updates must be parked and flushed after the reply, never lost or
+        # interleaved with the replay sequence.
+        replay_at = len(peer.frames)
+        resume = peer.request("session/resume", {
+            "sessionId": sid, "cwd": str(root), "replayFrom": {"type": "start"}
+        })
+        response = peer.response(resume, "ResumeSessionResponse")
+        assert "result" in response, response
+        updates = [f["params"]["update"] for f in peer.frames[replay_at:peer.frames.index(response)]
+                   if f.get("method") == "session/update"]
+        assert sum(u["sessionUpdate"] == "replay_complete" for u in updates) == 1, updates[-5:]
+        boundary = next(i for i, u in enumerate(updates) if u["sessionUpdate"] == "replay_complete")
+        assert updates[boundary + 1]["state"] == "idle", updates[boundary + 1:]
+        assert not any(u["sessionUpdate"] in ("available_commands_update", "config_option_update")
+                       for u in updates[boundary + 1:]), updates[boundary + 1:]
+        after_at = peer.frames.index(response) + 1
+        # Completion fence: the adapter writes the deferred updates immediately
+        # after the reply, before it reads the next request. Waiting for a later
+        # response therefore closes the flush window; counting before that would
+        # miss a duplicate that arrives after the first matching frame.
+        fence = peer.response(peer.request("session/list", {"cwd": str(root), "limit": 1}),
+                              "ListSessionsResponse")
+        fence_at = peer.frames.index(fence)
+        flushed = [f["params"]["update"] for f in peer.frames[after_at:fence_at]
+                   if f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == sid]
+        assert sum(u.get("sessionUpdate") == "available_commands_update"
+                   for u in flushed) == 1, "deferred commands were lost or duplicated"
+        assert sum(u.get("sessionUpdate") == "config_option_update"
+                   for u in flushed) == 1, "deferred options were lost or duplicated"
+        print("PASS v2 replay order replay_complete -> state -> reply; "
+              "deferred live metadata flushed exactly once after the reply")
+
+        # S4 limitation, asserted deterministically: a replay requested while the
+        # session's turn is executing is refused by the shared host's per-session
+        # prompt lock. The adapter reports one stable Peri code for it, so the
+        # probe asserts the *shape of the limited rejection*, not a successful
+        # replay. If the host policy changes, update this branch explicitly.
+        active_sid = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        start = len(peer.frames)
+        held = peer.request("session/prompt", prompt(active_sid, "[[tool:hold]] active turn replay probe"))
+        peer.response(held, "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == active_sid
+                   and f["params"]["update"].get("sessionUpdate") == "tool_call_update")
+        active = peer.response(peer.request("session/resume", {
+            "sessionId": active_sid, "cwd": str(root), "replayFrom": {"type": "start"}
+        }))
+        assert "error" in active, active
+        assert active["error"]["code"] == -32020, active
+        assert active["error"]["data"]["reason"] == "session_busy", active
+        assert active["error"]["data"]["sessionId"] == active_sid, active
+        print("PASS v2 active-turn replay refused deterministically: -32020 reason=session_busy "
+              "(limited rejection, not a successful replay)")
+        peer.send({"method": "session/cancel", "params": {"sessionId": active_sid}})
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == active_sid
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle"
+                   and f["params"]["update"].get("stopReason") == "cancelled")
+        peer.call("session/delete", {"sessionId": active_sid}, "DeleteSessionResponse")
+
         peer.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
         assert peer.response(peer.request("session/prompt", prompt(sid, "Closed")))["error"]["code"] == -32002
+
+        # S4: session/list pages over the durable keyset. Three sessions with
+        # history make a page size of one meaningful; `limit` is a preview-only
+        # extension (the pinned request has no page-size field).
+        third = peer.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        start = len(peer.frames)
+        peer.call("session/prompt", prompt(third, "Third paged session."), "PromptResponse")
+        peer.until(lambda f: f in peer.frames[start:]
+                   and f.get("method") == "session/update"
+                   and f["params"]["sessionId"] == third
+                   and f["params"]["update"].get("sessionUpdate") == "state_update"
+                   and f["params"]["update"].get("state") == "idle")
+        full = peer.call("session/list", {"cwd": str(root)}, "ListSessionsResponse")
+        full_ids = [entry["sessionId"] for entry in full["sessions"]]
+        assert len(full_ids) >= 3, full_ids
+        assert len(set(full_ids)) == len(full_ids), full_ids
+        paged = page_through(peer, 1, str(root))
+        assert paged == full_ids, (paged, full_ids)
+        assert len(paged) == len(set(paged)), paged
+        assert {sid, other, third} <= set(paged), (sid, other, third, paged)
+        assert peer.response(peer.request("session/list", {"cursor": "not-a-cursor"}))["error"]["code"] == -32602
+        assert peer.call("session/list", {"cwd": str(root / "no-such-directory")},
+                         "ListSessionsResponse")["sessions"] == []
+        first_page = peer.call("session/list", {"cwd": str(root), "limit": 2}, "ListSessionsResponse")
+        assert len(first_page["sessions"]) <= 2, first_page
+        first_ids = [entry["sessionId"] for entry in first_page["sessions"]]
+        restart_cursor = first_page.get("nextCursor")
+        assert restart_cursor and len(first_ids) == 2, first_page
+        tail_ids = page_through(peer, 2, str(root), cursor=restart_cursor)
+        assert first_ids + tail_ids == full_ids, (first_ids, tail_ids, full_ids)
+        assert len(tail_ids) == len(set(tail_ids)), tail_ids
+        print("PASS v2 session/list limit=1 order/no duplicates/termination; limit=2 capped and "
+              "resumed without gaps; exact cwd; invalid cursor -32602")
         peer.close()
 
         restored = Peer(binary, root, 2, schema)
         peers.append(restored)
         restored.sid = sid
+        # The cursor captured in the previous process keeps the same durable
+        # keyset position in the new one.
+        tail = page_through(restored, 2, str(root), cursor=restart_cursor)
+        assert tail == tail_ids, (tail, tail_ids)
+        print("PASS v2 session/list cursor remains valid in a new process (durable keyset position)")
         assert restored.response(restored.request("session/resume", {
             "sessionId": sid, "cwd": str(root), "replayFrom": {"type": "unsupported"}
         }))["error"]["code"] == -32602
@@ -242,6 +490,71 @@ def lifecycle(binary, root, schema):
         reopened.close()
         print("PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close")
 
+        # S2: a key's message identity is durable. Same DB, same cwd, new process:
+        # the retry returns the original messageId, inserts nothing, and replay
+        # shows the message exactly once; different content under the key is
+        # `-32602` rather than a silent dedup. Keys are scoped to the session.
+        durable = Peer(binary, root, 2, schema)
+        peers.append(durable)
+        durable.sid = sid
+        durable.call("session/resume", {"sessionId": sid, "cwd": str(root)},
+                     "ResumeSessionResponse")
+        key = "s2-" + "k" * 200
+        text = "Durable idempotent submission."
+        start = len(durable.frames)
+        receipt = durable.call("session/prompt", prompt(sid, text, key), "PromptResponse")
+        durable_message = receipt["messageId"]
+        durable.idle(start)
+        durable.close()
+
+        retry = Peer(binary, root, 2, schema)
+        peers.append(retry)
+        retry.sid = sid
+        retry.call("session/resume", {"sessionId": sid, "cwd": str(root)},
+                   "ResumeSessionResponse")
+        before = len(retry.frames)
+        again = retry.call("session/prompt", prompt(sid, text, key), "PromptResponse")
+        assert again["messageId"] == durable_message, again
+        conflict = retry.response(retry.request("session/prompt", prompt(sid, text + " edited", key)))
+        assert conflict["error"]["code"] == -32602, conflict
+        fresh = retry.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        other = retry.call("session/prompt", prompt(fresh, text, key), "PromptResponse")
+        assert other["messageId"] != durable_message, "keys are scoped to one session"
+        retry.until(lambda f: f.get("method") == "session/update"
+                    and f["params"]["sessionId"] == fresh
+                    and f["params"]["update"].get("sessionUpdate") == "state_update"
+                    and f["params"]["update"].get("state") == "idle")
+        # The replay-echo window stays open until every following reply and the
+        # new session's `idle` are consumed: a retry ACK can arrive before a host
+        # `user_message` echo of the same delivery, and stopping at the ACK would
+        # leave that echo unobserved.
+        assert not any(f.get("method") == "session/update"
+                       and f["params"]["update"].get("messageId") == durable_message
+                       for f in retry.frames[before:]), "a retry must not replay the user message"
+        retry.close()
+
+        counted = Peer(binary, root, 2, schema)
+        peers.append(counted)
+        counted.sid = sid
+        replay_at = len(counted.frames)
+        resume = counted.request("session/resume", {"sessionId": sid, "cwd": str(root),
+                                                   "replayFrom": {"type": "start"}})
+        response = counted.response(resume, "ResumeSessionResponse")
+        assert "result" in response, response
+        replayed = [f["params"]["update"] for f in counted.frames[replay_at:counted.frames.index(response)]
+                    if f.get("method") == "session/update"]
+        # A replayed message is one `user_message` boundary plus its chunk; the
+        # boundary count is the number of inserted messages.
+        seen = sum(u.get("sessionUpdate") == "user_message"
+                   and u.get("messageId") == durable_message for u in replayed)
+        assert seen == 1, "the retried submission must be replayed exactly once, got " \
+            f"{seen}: " + json.dumps([(u.get("sessionUpdate"), u.get("messageId"))
+                                      for u in replayed])[:2000]
+        counted.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
+        counted.close()
+        print("PASS v2 idempotency key survives a restart; same key retried once, "
+              "different content -32602, keys scoped to the session")
+
         # Explicit bypass must be overridden by the negotiated v2 connection;
         # otherwise this probe would see the tool auto-approved and fail.
         approval = Peer(binary, root, 2, schema, permission="bypass")
@@ -273,12 +586,86 @@ def lifecycle(binary, root, schema):
         approval.close()
         print("PASS v2 real permission request, requires_action, rejection, peer cancellation, idle, no tool side effect")
 
+        # S3: the configuration surface is the same on every entry point, and the
+        # mode it exposes is the connection's actual approval policy.
+        config = Peer(binary, root, 2, schema)
+        peers.append(config)
+        new = config.call("session/new", {"cwd": str(root)}, "NewSessionResponse")
+        config.sid = sid = new["sessionId"]
+        options = new.get("configOptions") or []
+        assert options, f"session/new must advertise config options: {new}"
+        assert all("id" not in option for option in options), options
+        ids = [option["configId"] for option in options]
+        assert ids[:3] == ["mode", "model", "thinking_effort"], ids
+        mode = options[0]
+        assert mode["type"] == "select" and mode["category"] == "mode", mode
+        assert mode["currentValue"] == "default", mode
+        assert "bypass" in [value["value"] for value in mode["options"]], mode
+        commands = config.update(0, "available_commands_update")
+        listed = commands["params"]["update"]["availableCommands"]
+        assert listed and all(command["type"] == "command" for command in listed), listed
+        assert "compact" in [command["name"] for command in listed], listed
+        print("PASS v2 session/new ConfigOptions + AvailableCommands v2 shapes")
+
+        start = len(config.frames)
+        changed = config.call("session/set_config_option", {
+            "sessionId": sid, "configId": "mode", "type": "id", "value": "bypass"
+        }, "SetSessionConfigOptionResponse")
+        assert all("id" not in option for option in changed["configOptions"]), changed
+        selected = next(o for o in changed["configOptions"] if o["configId"] == "mode")
+        assert selected["currentValue"] == "bypass", selected
+        update = config.update(start, "config_option_update")
+        assert next(o for o in update["params"]["update"]["configOptions"]
+                    if o["configId"] == "mode")["currentValue"] == "bypass", update
+        # An unknown value, option or session is refused and leaves the
+        # configuration untouched; a boolean value type is not advertised.
+        for params in [
+            {"sessionId": sid, "configId": "mode", "type": "id", "value": "nonsense"},
+            {"sessionId": sid, "configId": "nope", "type": "id", "value": "bypass"},
+            {"sessionId": sid, "configId": "mode", "type": "boolean", "value": True},
+        ]:
+            refusal = config.response(config.request("session/set_config_option", params))["error"]
+            assert refusal["code"] == -32602, refusal
+        missing = "00000000-0000-7000-8000-000000000002"
+        unknown = config.response(config.request("session/set_config_option", {
+            "sessionId": missing, "configId": "mode", "type": "id", "value": "bypass"
+        }))["error"]
+        assert unknown["code"] == -32002 and unknown["data"]["sessionId"] == missing, unknown
+        print("PASS v2 set_config_option projects configOptions and refuses unknown input")
+
+        # The changed mode governs the next turn: the tool the default policy
+        # asked about above now runs without a permission request, so the refused
+        # requests above cannot have reset the mode either.
+        start = len(config.frames)
+        config.response(config.request("session/prompt", prompt(sid, "[[tool:verify]] bypass mode probe")),
+                        "PromptResponse")
+        config.until(lambda f: f in config.frames[start:]
+                     and f.get("method") == "session/update"
+                     and f["params"]["sessionId"] == sid
+                     and f["params"]["update"].get("sessionUpdate") == "state_update"
+                     and f["params"]["update"].get("state") == "idle")
+        assert not any(f.get("method") == "session/request_permission" for f in config.frames[start:]), \
+            "the new mode must apply to the next turn's approval policy"
+        assert (root / "approval-probe.txt").exists(), "the bypassed tool must have run"
+        usage = config.update(start, "usage_update")["params"]["update"]
+        assert usage["used"] == 0 and isinstance(usage["size"], int), usage
+        assert "cost" not in usage, usage
+        config.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
+        config.close()
+        print("PASS v2 mode change governs the next turn; UsageUpdate carries used/size only")
+
         for enabled in [True, False]:
             legacy = Peer(binary, root, 1, schema, preview=enabled)
             peers.append(legacy)
             legacy.sid = legacy.call("session/new", {"cwd": str(root), "mcpServers": []})["sessionId"]
             result = legacy.call("session/prompt", prompt(legacy.sid, "Legacy client still works"))
             assert result["stopReason"] == "end_turn", result
+            # Preview-only internal methods do not exist on a v1 connection,
+            # even when the preview transport is enabled.
+            for internal in ("_peri/stdio-v2/session-list", "_peri/stdio-v2/input",
+                             "_peri/stdio-v2/config"):
+                denied = legacy.response(legacy.request(internal, {}))["error"]
+                assert denied["code"] == -32601, (internal, denied)
             legacy.call("session/close", {"sessionId": legacy.sid})
             legacy.close()
         print("PASS v1 client with Preview enabled and disabled")
@@ -292,7 +679,9 @@ def lifecycle(binary, root, schema):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
-    parser.add_argument("schema", type=Path)
+    parser.add_argument("schema", type=Path, nargs="?",
+                        default=Path(__file__).resolve().parent / "fixtures" / "acp-v2-schema.json",
+                        help="Pinned ACP v2 schema (defaults to the repository fixture)")
     parser.add_argument("--official-client", type=Path,
                         help="Built, unmodified upstream v2_one_shot_client")
     args = parser.parse_args()
@@ -306,7 +695,10 @@ def main():
         stub = subprocess.Popen(
             ["node", str(Path(__file__).resolve().parents[2] / "peri-swarm/scripts/local_model_stub.mjs")],
             env={**os.environ, "PERI_STUB_PORT": str(port), "PERI_STUB_CHUNK_DELAY_MS": "135",
-                 "PERI_STUB_COMMANDS": json.dumps({"verify": "printf probe > approval-probe.txt"})},
+                 "PERI_STUB_COMMANDS": json.dumps({
+                     "verify": "printf probe > approval-probe.txt",
+                     "hold": "sleep 4",
+                 })},
             stdout=subprocess.DEVNULL,
         )
         stack.callback(stub.wait)

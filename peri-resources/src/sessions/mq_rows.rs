@@ -249,6 +249,19 @@ pub(in crate::sessions) fn same_payload(left: &str, right: &str) -> bool {
     }
 }
 
+/// 同 ID 已移交时，历史正文是否必须与本次入队正文一致。
+///
+/// 只有用户提交的 prompt 用稳定身份派生（ACP v2 幂等键 `UUIDv5(sessionId‖key)`），
+/// 因此「同 ID 不同正文」是可检测的客户端冲突，必须如实报告而不是静默去重。系统提醒、
+/// 子代理结果等来源沿用既有语义：它们的稳定 ID 由内容派生，重放时正文不同只说明调用方
+/// 复用了一个旧 ID，投递路径不能因此失败。
+pub(in crate::sessions) fn same_id_requires_same_content(kind: &str, source: &str) -> bool {
+    kind == KIND_PROMPT && source == SOURCE_USER_INPUT
+}
+
+const KIND_PROMPT: &str = "prompt";
+const SOURCE_USER_INPUT: &str = "user_input";
+
 /// 把逐项判定收敛成结果；顺序与选择一致。
 pub(in crate::sessions) fn item_outcome(
     id: peri_acp_types::messages::MessageId,
