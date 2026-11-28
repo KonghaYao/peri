@@ -34,5 +34,8 @@ use startup::{
 };
 
 fn main() -> anyhow::Result<()> {
+    // OSC 7577：取走终端注入的 token 并记录启动参数。必须早于任何线程/子进程创建，
+    // 否则 token 会被 MCP server、shell 工具等子进程继承。
+    peri_tui::kit::program_resume::init();
     startup::run()
 }

@@ -96,6 +96,22 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         (program_status_val,),
     );
 
+    // OSC 7577：把「终端重启后如何恢复本会话」交给终端。同样写在 effect 里，
+    // 与绘制同线程串行。会话变化时重报（切换/新建会话），变为空时清除。
+    let active_session_handle = hooks.use_atom(&atoms::ACTIVE_SESSION_ID);
+    let active_session_val = active_session_handle.read().clone();
+    let active_session_dep = active_session_val.clone();
+    hooks.use_effect(
+        move || {
+            if active_session_val.is_empty() {
+                crate::kit::program_resume::clear();
+            } else {
+                crate::kit::program_resume::report(&active_session_val);
+            }
+        },
+        (active_session_dep,),
+    );
+
     let setup_preflight_active = *setup_preflight.read();
     let wizard_open = *wizard_active.read();
     let setup_phase = *setup_chatgpt.read();

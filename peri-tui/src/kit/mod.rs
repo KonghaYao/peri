@@ -60,6 +60,7 @@ pub mod panic;
 pub(crate) mod permission_mode;
 pub mod popup_overlay;
 pub mod popups;
+pub mod program_resume;
 pub(crate) mod program_status;
 pub(crate) mod retained_bytes;
 pub mod rewind_action;
