@@ -80,6 +80,39 @@ fn columns_prefer_reported_names_then_row_keys() {
 }
 
 #[test]
+fn top_level_limit_and_offset_disable_server_paging_only() {
+    for sql in [
+        "SELECT * FROM \"peri_swarm_logs\" LIMIT 20",
+        "select * from logs limit 20 offset 40",
+        "SELECT * FROM logs OFFSET 10",
+        "SELECT * FROM logs\tLIMIT\t5",
+        "SELECT * FROM logs -- trailing note\nLIMIT 5",
+        "SELECT * FROM logs /* note */ LIMIT 5",
+    ] {
+        assert!(has_top_level_row_limit(sql), "{sql}");
+    }
+
+    for sql in [
+        "SELECT * FROM \"peri_swarm_logs\"",
+        "SELECT 'limit' FROM logs",
+        "SELECT \"limit\" FROM logs",
+        "SELECT `offset` FROM logs",
+        "SELECT * FROM logs WHERE note = 'LIMIT 5'",
+        "SELECT * FROM logs /* LIMIT 5 */",
+        "SELECT * FROM logs -- LIMIT 5",
+        // A subquery limit is part of the row definition, not the page size.
+        "SELECT * FROM (SELECT * FROM logs LIMIT 5)",
+        "SELECT * FROM logs WHERE id IN (SELECT id FROM t LIMIT 3)",
+        "SELECT limited, offsetting FROM logs",
+    ] {
+        assert!(!has_top_level_row_limit(sql), "{sql}");
+    }
+
+    // The validator still accepts a statement with its own limit.
+    assert_eq!(validate_sql("SELECT 1 LIMIT 20"), Ok(()));
+}
+
+#[test]
 fn next_page_needs_a_full_page_and_the_row_cap() {
     assert_eq!(page_offset(0), 0);
     assert_eq!(page_offset(4), 80);

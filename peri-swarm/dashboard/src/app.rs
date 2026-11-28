@@ -85,6 +85,9 @@ pub struct App {
     content_scroll: usize,
     content_max: usize,
     spinner_frame: u64,
+    help_scroll: usize,
+    help_max: usize,
+    help_viewport: u16,
     epoch: u64,
     quit: bool,
 }
@@ -138,6 +141,9 @@ impl App {
             content_scroll: 0,
             content_max: 0,
             spinner_frame: 0,
+            help_scroll: 0,
+            help_max: 0,
+            help_viewport: 0,
             epoch: 0,
             quit: false,
         };
@@ -192,6 +198,9 @@ impl App {
             content_scroll: 0,
             content_max: 0,
             spinner_frame: 0,
+            help_scroll: 0,
+            help_max: 0,
+            help_viewport: 0,
             epoch: 0,
             quit: false,
         }
@@ -244,10 +253,12 @@ impl App {
     #[must_use]
     pub fn action_enabled(&self, action: ActionId) -> bool {
         match action {
-            ActionId::TestConnection
-            | ActionId::EditCredentials
-            | ActionId::SignOut
-            | ActionId::Quit => self.validation.is_none(),
+            // Both actions operate on the saved credentials; without a config
+            // they must not silently do nothing.
+            ActionId::EditCredentials | ActionId::SignOut => {
+                self.validation.is_none() && self.config.is_some()
+            }
+            ActionId::TestConnection | ActionId::Quit => self.validation.is_none(),
             ActionId::ConfigureObservability => {
                 self.validation.is_none() && !self.observability_testing
             }
@@ -269,6 +280,44 @@ impl App {
     /// Advance the loading-spinner frame (called from the runtime tick).
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
+    }
+
+    /// Scroll offset of the Getting-started overlay, in content rows.
+    #[must_use]
+    pub fn help_scroll(&self) -> usize {
+        self.help_scroll
+    }
+
+    /// Record the overlay's content height and viewport and clamp the offset.
+    ///
+    /// Called by the renderer, which is the only place that knows how many
+    /// wrapped rows the help sections need at the current width.
+    pub fn set_help_layout(&mut self, content_height: usize, viewport: u16) {
+        self.help_max = content_height.saturating_sub(usize::from(viewport));
+        self.help_viewport = viewport;
+        self.help_scroll = self.help_scroll.min(self.help_max);
+    }
+
+    /// Scroll the Getting-started overlay by `delta` rows.
+    pub fn scroll_help(&mut self, delta: i32) {
+        self.help_scroll =
+            peri_tui_components::scrollbar::bounded_offset(self.help_scroll, delta, self.help_max);
+    }
+
+    /// Page the Getting-started overlay, keeping one row of context.
+    pub fn page_help(&mut self, down: bool) {
+        let page = i32::from(self.help_viewport.saturating_sub(1).max(1));
+        self.scroll_help(if down { page } else { -page });
+    }
+
+    /// Jump the Getting-started overlay to its first or last row.
+    pub fn jump_help(&mut self, to_end: bool) {
+        self.help_scroll = if to_end { self.help_max } else { 0 };
+    }
+
+    /// Start the Getting-started overlay at the top.
+    pub fn reset_help_scroll(&mut self) {
+        self.help_scroll = 0;
     }
 
     /// Onboarding form.

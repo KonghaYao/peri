@@ -114,20 +114,24 @@ fn render_body(
     }
 
     hits.scroll_zone(body, ScrollZone::Content);
+    // A modal owns its own scrolling; the page scrollbar behind it would look
+    // like part of the overlay, so it is hidden while one is open.
     let bar_area = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
-    if let Some(bar) = VerticalBar::new(
-        body.height,
-        usize::from(body.height),
-        usize::from(rendered.height),
-        usize::from(scroll),
-    ) {
-        bar.paint(
-            bar_area,
-            frame.buffer_mut(),
-            widgets::selected_style(),
-            widgets::dim_style(),
-        );
-        hits.scrollbar(bar_area, ScrollZone::Content, bar);
+    if app.overlay().is_none() {
+        if let Some(bar) = VerticalBar::new(
+            body.height,
+            usize::from(body.height),
+            usize::from(rendered.height),
+            usize::from(scroll),
+        ) {
+            bar.paint(
+                bar_area,
+                frame.buffer_mut(),
+                widgets::selected_style(),
+                widgets::dim_style(),
+            );
+            hits.scrollbar(bar_area, ScrollZone::Content, bar);
+        }
     }
 
     let jump_visible =

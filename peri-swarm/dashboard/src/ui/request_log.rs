@@ -9,6 +9,7 @@ use crate::ui::hit::HitMap;
 use crate::ui::metrics;
 use crate::ui::text;
 use crate::ui::widgets::{self, Rows, StatusTone};
+use crate::view_model;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Column {
@@ -120,10 +121,12 @@ fn render_empty(buf: &mut Buffer, rows: &mut Rows) {
     );
 }
 
+/// Pane width at which the duration column is added and wider cells fit.
+const FULL_TABLE_FROM: u16 = 84;
+
 fn render_table(buf: &mut Buffer, rows: &mut Rows, app: &App) {
     let width = rows.width();
-    let breakpoint = app.viewport_width().max(width);
-    let columns = columns(breakpoint);
+    let columns = columns(width);
     let widths = column_widths(&columns, width);
     if columns.is_empty() || widths.iter().all(|width| *width == 0) {
         return;
@@ -140,12 +143,12 @@ fn render_table(buf: &mut Buffer, rows: &mut Rows, app: &App) {
 
 fn columns(width: u16) -> Vec<Column> {
     let mut columns = vec![Column::Time, Column::Method, Column::Route, Column::Status];
-    if width >= 72 {
+    if width >= FULL_TABLE_FROM {
         columns.push(Column::Duration);
     }
-    if width >= 98 {
-        columns.push(Column::Session);
-    }
+    // The session is the row's identity, so it survives every breakpoint even
+    // when the duration column has to go.
+    columns.push(Column::Session);
     columns
 }
 
@@ -154,14 +157,19 @@ fn column_widths(columns: &[Column], width: u16) -> Vec<u16> {
     if columns.is_empty() || width == 0 {
         return Vec::new();
     }
+    let (time_width, session_width) = if width >= FULL_TABLE_FROM {
+        (14, 18)
+    } else {
+        (9, 12)
+    };
     let fixed: u16 = columns
         .iter()
         .map(|column| match column {
-            Column::Time => 14,
+            Column::Time => time_width,
             Column::Method => 7,
             Column::Status => 6,
             Column::Duration => 9,
-            Column::Session => 12,
+            Column::Session => session_width,
             Column::Route => 0,
         })
         .fold(0, u16::saturating_add);
@@ -180,11 +188,11 @@ fn column_widths(columns: &[Column], width: u16) -> Vec<u16> {
         .iter()
         .map(|column| match column {
             Column::Route => flex_width,
-            Column::Time => 14,
+            Column::Time => time_width,
             Column::Method => 7,
             Column::Status => 6,
             Column::Duration => 9,
-            Column::Session => 12,
+            Column::Session => session_width,
         })
         .collect()
 }
@@ -223,13 +231,22 @@ fn render_row(
             break;
         }
         let (value, style) = match column {
-            Column::Time => (text::request_time(row.timestamp_us), widgets::dim_style()),
+            Column::Time if cell.width >= 12 => {
+                (text::request_time(row.timestamp_us), widgets::dim_style())
+            }
+            Column::Time => (
+                text::request_time_short(row.timestamp_us),
+                widgets::dim_style(),
+            ),
             Column::Method => (
                 text::request_optional(row.method.as_deref()),
                 widgets::muted_style(),
             ),
             Column::Route => (
-                text::request_optional(row.route.as_deref()),
+                view_model::middle_truncate(
+                    &text::request_optional(row.route.as_deref()),
+                    cell.width,
+                ),
                 widgets::muted_style(),
             ),
             Column::Status => (
@@ -241,7 +258,10 @@ fn render_row(
                 widgets::muted_style(),
             ),
             Column::Session => (
-                text::request_optional(row.session_id.as_deref()),
+                view_model::middle_truncate(
+                    &text::request_optional(row.session_id.as_deref()),
+                    cell.width,
+                ),
                 widgets::dim_style(),
             ),
         };

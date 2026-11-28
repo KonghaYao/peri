@@ -18,11 +18,17 @@ impl App {
         };
         match overlay {
             Overlay::Help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-                ) {
-                    self.overlay = None;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
+                        self.overlay = None
+                    }
+                    KeyCode::Up => self.scroll_help(-1),
+                    KeyCode::Down => self.scroll_help(1),
+                    KeyCode::PageUp => self.page_help(false),
+                    KeyCode::PageDown => self.page_help(true),
+                    KeyCode::Home => self.jump_help(false),
+                    KeyCode::End => self.jump_help(true),
+                    _ => {}
                 }
                 Vec::new()
             }

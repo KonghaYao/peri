@@ -271,9 +271,9 @@ pub fn render_cancel_turn_confirm(buf: &mut Buffer, area: Rect, app: &App, hits:
 }
 
 /// Dispatch on the active overlay.
-pub fn render_active(buf: &mut Buffer, area: Rect, app: &App, hits: &mut HitMap) {
+pub fn render_active(buf: &mut Buffer, area: Rect, app: &mut App, hits: &mut HitMap) {
     match app.overlay() {
-        Some(Overlay::Help) => super::help::render(buf, area, hits),
+        Some(Overlay::Help) => super::help::render(buf, area, app, hits),
         Some(Overlay::ConfirmSignOut) => render_sign_out(buf, area, app, hits),
         Some(Overlay::NarrowMenu) => render_menu(buf, area, app, hits),
         Some(Overlay::ErrorActions) => render_error_actions(buf, area, app, hits),

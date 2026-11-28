@@ -201,6 +201,7 @@ impl App {
             ActionId::ShowGettingStarted => {
                 self.overlay = Some(super::types::Overlay::Help);
                 self.overlay_cursor = 0;
+                self.reset_help_scroll();
                 Vec::new()
             }
             ActionId::SaveCredentials => self.submit_credentials(),

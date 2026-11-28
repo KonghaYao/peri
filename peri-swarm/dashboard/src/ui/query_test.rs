@@ -203,6 +203,46 @@ fn cell_values_are_flattened_bounded_and_single_line() {
 }
 
 #[test]
+fn the_pager_and_column_notice_are_visible_without_scrolling() {
+    let (mut app, _dir) = app_with_observability();
+    // A full page of twenty rows used to push both controls below the fold.
+    load_first_page(&mut app, rows(20, 8), Vec::new());
+    for (width, height) in [(120, 40), (80, 24)] {
+        let (terminal, hits) = draw(&mut app, width, height);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Showing "),
+            "column notice missing at {width}x{height}: {text}"
+        );
+        assert!(
+            text.contains(text::PAGE_NEXT),
+            "pager missing at {width}x{height}: {text}"
+        );
+        assert!(
+            hits.region_rect(Intent::QueryPageNext).is_some(),
+            "next page is off screen at {width}x{height}"
+        );
+    }
+}
+
+#[test]
+fn a_limit_statement_explains_that_server_paging_is_off() {
+    let (mut app, _dir) = app_with_observability();
+    set_sql(&mut app, "SELECT * FROM \"peri_swarm_logs\" LIMIT 20");
+    let generation = run_query(&mut app);
+    finish(&mut app, generation, rows(20, 3), Vec::new());
+
+    let (terminal, hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("SQL has LIMIT/OFFSET"), "{text}");
+    assert!(text.contains("server-side paging is off"), "{text}");
+    assert!(hits.region_rect(Intent::QueryPageNext).is_none(), "{text}");
+    assert!(hits.region_rect(Intent::QueryPagePrev).is_none(), "{text}");
+    // The table itself is still drawn for the first page.
+    assert!(text.contains("col0"), "{text}");
+}
+
+#[test]
 fn empty_results_show_the_honest_empty_state() {
     let (mut app, _dir) = app_with_observability();
     load_first_page(&mut app, Vec::new(), Vec::new());
@@ -253,6 +293,41 @@ fn not_configured_offers_settings_and_no_table() {
         .region_rect(Intent::Activate(ActionId::OpenSettings))
         .is_some());
     assert!(!text.contains(text::QUERY_EMPTY), "{text}");
+}
+
+#[test]
+fn a_sql_limit_footer_stops_advertising_paging() {
+    let (mut app, _dir) = app_with_observability();
+    set_sql(&mut app, "SELECT * FROM \"peri_swarm_logs\" LIMIT 20");
+    let generation = run_query(&mut app);
+    finish(&mut app, generation, rows(20, 3), Vec::new());
+    app.apply(Intent::FocusContent);
+    assert!(app.query().manual_limit());
+
+    let (terminal, _hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_QUERY_MANUAL_LIMIT), "{text}");
+    assert!(!text.contains("PgUp/PgDn"), "{text}");
+
+    // Narrow terminals still get the LIMIT note instead of the paging keys.
+    let (terminal, _hits) = draw(&mut app, 79, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("SQL LIMIT/OFFSET"), "{text}");
+    assert!(!text.contains("PgUp/PgDn"), "{text}");
+}
+
+#[test]
+fn a_footer_without_a_sql_limit_keeps_advertising_paging() {
+    let (mut app, _dir) = app_with_observability();
+    load_first_page(&mut app, rows(20, 3), Vec::new());
+    app.apply(Intent::FocusContent);
+    assert!(!app.query().manual_limit());
+
+    let (terminal, _hits) = draw(&mut app, 120, 40);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_QUERY), "{text}");
+    assert!(text.contains("PgUp/PgDn page"), "{text}");
+    assert!(!text.contains(text::FOOTER_QUERY_MANUAL_LIMIT), "{text}");
 }
 
 #[test]

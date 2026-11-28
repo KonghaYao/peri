@@ -180,7 +180,14 @@ fn run_loop(
                     execute(effects, worker);
                     dirty = true;
                 }
-                Event::Resize(_, _) => dirty = true,
+                Event::Resize(_, _) => {
+                    // A resize can reflow the frame the terminal already had,
+                    // so the diff against the previous buffer is not reliable.
+                    // Clearing forces a full repaint and prevents stale glyphs
+                    // (for example a leftover header character).
+                    terminal.clear()?;
+                    dirty = true;
+                }
                 _ => {}
             }
         }

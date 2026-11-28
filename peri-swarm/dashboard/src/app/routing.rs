@@ -67,6 +67,7 @@ impl App {
                     'h' | '?' => {
                         self.overlay = Some(Overlay::Help);
                         self.overlay_cursor = 0;
+                        self.reset_help_scroll();
                         return Vec::new();
                     }
                     'm' => {
@@ -165,6 +166,7 @@ impl App {
             Intent::OpenHelp => {
                 self.overlay = Some(Overlay::Help);
                 self.overlay_cursor = 0;
+                self.reset_help_scroll();
                 Vec::new()
             }
             Intent::OpenSignOut => {
@@ -570,6 +572,12 @@ impl App {
     }
 
     pub(super) fn select_page(&mut self, page: Page, focus: Focus) {
+        // Onboarding owns the screen until credentials are saved: without a
+        // config there is no dashboard to navigate to, and every data page
+        // would sit in an empty, unrecoverable state.
+        if self.config.is_none() {
+            return;
+        }
         self.screen = Screen::Main;
         self.page = page;
         self.focus = focus;

@@ -12,6 +12,8 @@ mod detail;
 pub use detail::*;
 mod errors;
 pub use errors::*;
+mod footer;
+pub use footer::*;
 mod help;
 pub use help::*;
 mod observability;
@@ -48,15 +50,24 @@ pub fn health_label(state: &HealthState) -> String {
 /// Last-refresh label, relative to `now`.
 #[must_use]
 pub fn last_refresh_label(last: Option<Instant>, now: Instant) -> String {
+    format!("last refresh: {}", refresh_age(last, now))
+}
+
+/// Value-only refresh age for label/value rows.
+///
+/// Settings already prints its own `Last refresh` label, so the value must not
+/// repeat the words.
+#[must_use]
+pub fn refresh_age(last: Option<Instant>, now: Instant) -> String {
     let Some(last) = last else {
-        return "last refresh: never".to_owned();
+        return "never".to_owned();
     };
     let seconds = now.saturating_duration_since(last).as_secs();
     match seconds {
-        0 | 1 => "last refresh: just now".to_owned(),
-        2..=59 => format!("last refresh: {seconds}s ago"),
-        60..=3599 => format!("last refresh: {}m ago", seconds / 60),
-        _ => format!("last refresh: {}h ago", seconds / 3600),
+        0 | 1 => "just now".to_owned(),
+        2..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        _ => format!("{}h ago", seconds / 3600),
     }
 }
 
@@ -188,31 +199,6 @@ pub fn field_label(field: FieldId) -> &'static str {
         FieldId::EditPromptCache => "prompt_cache_options",
     }
 }
-
-// ---------------------------------------------------------------------------
-// Footer hints
-// ---------------------------------------------------------------------------
-
-/// Footer hints on wide main pages.
-pub const FOOTER_MAIN: &str =
-    "Tab focus · up/down page · r refresh · n new session · h help · q quit · Ctrl-C quit";
-
-/// Footer hints on narrow main pages where the sidebar is behind the menu button.
-pub const FOOTER_MAIN_NARROW: &str =
-    "menu/Tab focus · r refresh · n new session · h help · q quit · Ctrl-C quit";
-
-/// Footer hints while a text field owns focus.
-pub const FOOTER_FIELD: &str = "Tab next control · Enter submit · Esc leave field · Ctrl-C quit";
-
-/// Footer hints on Settings.
-pub const FOOTER_SETTINGS: &str =
-    "Tab focus · Enter activate · Esc back · h help · q quit · Ctrl-C quit";
-
-/// Footer hints while a modal is open.
-pub const FOOTER_OVERLAY: &str = "Esc close · up/down move · Enter select · mouse: click a choice";
-
-/// Footer hints on the too-small screen.
-pub const FOOTER_TOO_SMALL: &str = "Ctrl-C quit";
 
 /// Scope note for an intentionally empty page.
 pub const SCOPE_EMPTY: &str = "Empty page · no gateway data fetched";
@@ -513,10 +499,18 @@ pub fn banner_text(code: Option<&str>, message: &str) -> String {
 }
 
 /// Unauthorized banner message.
+///
+/// The action comes first so a narrow banner still tells the operator what to
+/// do after the server detail is truncated.
 #[must_use]
 pub fn unauthorized_banner(message: &str) -> String {
-    format!("Authentication failed: {message}. Re-authenticate from Settings.")
+    format!("Re-authenticate from Settings. Authentication failed: {message}.")
 }
+
+/// Shown instead of a spinner on gateway-backed pages while a 401 pause is
+/// active. OpenObserve pages keep loading independently.
+pub const POLLING_PAUSED: &str =
+    "Polling paused: the gateway rejected the API key. Re-authenticate from Settings.";
 
 /// Generic gateway failure banner.
 #[must_use]
@@ -541,8 +535,9 @@ pub const SIGNOUT_TITLE: &str = "Sign out";
 pub const SIGNOUT_MESSAGE: &str =
     "Delete the saved credentials on this machine and return to onboarding?";
 
-/// Sign-out overlay hint.
-pub const SIGNOUT_HINT: &str = "Enter confirms · Esc cancels";
+/// Sign-out overlay hint. Cancel is focused first, so Enter cancels; the hint
+/// describes what the keys do instead of claiming that Enter confirms.
+pub const SIGNOUT_HINT: &str = "Tab/left-right select · Enter activates · Esc cancels";
 
 // ---------------------------------------------------------------------------
 // Empty pages
@@ -691,6 +686,9 @@ pub const EMPTY_SESSIONS_BODY: &str =
 
 /// Shown when the loaded set has no row matching the filter and search.
 pub const NO_SESSIONS_MATCH: &str = "No sessions match the current filter and search.";
+
+/// Shown above the table when the metadata column does not fit.
+pub const METADATA_HIDDEN: &str = "Metadata is hidden at this width; open a session to see it.";
 
 /// Inline list error prefix.
 #[must_use]
@@ -875,6 +873,19 @@ pub const FOOTER_QUERY: &str =
 /// Footer hints on the Query page when the sidebar is behind the menu.
 pub const FOOTER_QUERY_NARROW: &str =
     "menu/Tab focus · 1/2/3 window · Ctrl-Enter run · PgUp/PgDn page · q quit · Ctrl-C quit";
+
+/// Footer hints on the Query page when the executed SQL carries its own
+/// top-level LIMIT/OFFSET.
+///
+/// OpenObserve ignores the request offset in that case, so server-side paging
+/// is off; advertising `PgUp/PgDn page` would promise keys that do nothing.
+pub const FOOTER_QUERY_MANUAL_LIMIT: &str =
+    "1/2/3 window · Ctrl-Enter run · SQL LIMIT/OFFSET · Tab focus · h help · q quit · Ctrl-C quit";
+
+/// Footer hints on the Query page with a SQL LIMIT/OFFSET when the sidebar is
+/// behind the menu.
+pub const FOOTER_QUERY_MANUAL_LIMIT_NARROW: &str =
+    "menu/Tab focus · 1/2/3 window · Ctrl-Enter run · SQL LIMIT/OFFSET · q quit · Ctrl-C quit";
 
 /// Footer hints on the create form.
 pub const FOOTER_CREATE: &str = "Tab next control · click to focus · Esc back · Ctrl-C quit";

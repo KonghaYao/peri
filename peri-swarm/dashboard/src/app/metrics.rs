@@ -441,7 +441,9 @@ impl App {
         if self.config.is_none() || self.page != Page::CoreMetrics {
             return Vec::new();
         }
-        if self.overlay.is_some() || self.paused {
+        // Core metrics come straight from OpenObserve, so a rejected gateway
+        // key (and its global poll pause) does not apply to this page.
+        if self.overlay.is_some() {
             self.core_metrics.poll.pause();
             return Vec::new();
         }
@@ -505,7 +507,9 @@ impl App {
         if self.config.is_none() || self.page != Page::RequestLog {
             return Vec::new();
         }
-        if self.overlay.is_some() || self.paused {
+        // The request log is an OpenObserve query; gateway authentication is
+        // irrelevant, so the 401 pause must not leave it spinning.
+        if self.overlay.is_some() {
             self.request_log.poll.pause();
             return Vec::new();
         }
@@ -904,7 +908,6 @@ impl App {
 
     fn kick_core_metrics(&mut self) -> Vec<Effect> {
         if !self.core_metrics.reload_wanted
-            || self.paused
             || self.overlay.is_some()
             || self.screen != Screen::Main
             || self.page != Page::CoreMetrics
@@ -934,7 +937,6 @@ impl App {
 
     fn kick_request_log(&mut self) -> Vec<Effect> {
         if !self.request_log.reload_wanted
-            || self.paused
             || self.overlay.is_some()
             || self.screen != Screen::Main
             || self.page != Page::RequestLog

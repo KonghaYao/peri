@@ -255,10 +255,33 @@ pub fn header_line(app: &App) -> Line<'static> {
 }
 
 /// Footer hint for the current focus and overlay.
+///
+/// The hint must match where keystrokes actually go: a focused text field
+/// swallows the single-letter shortcuts, so it gets its own hint instead of the
+/// page-level one.
 #[must_use]
 pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
-    if app.overlay().is_some() {
-        return text::FOOTER_OVERLAY;
+    if let Some(overlay) = app.overlay() {
+        return match overlay {
+            crate::app::Overlay::Help => text::FOOTER_HELP,
+            crate::app::Overlay::NarrowMenu => text::FOOTER_MENU,
+            crate::app::Overlay::ErrorActions => text::FOOTER_ERROR_ACTIONS,
+            crate::app::Overlay::ConfirmSignOut
+            | crate::app::Overlay::ConfirmDeleteSession
+            | crate::app::Overlay::ConfirmCancelTurn => text::FOOTER_CONFIRM,
+        };
+    }
+    if app.screen() == crate::app::Screen::Main {
+        if let Focus::Field(field) = app.focus() {
+            return match field {
+                crate::app::FieldId::QuerySql => text::FOOTER_QUERY_FIELD,
+                crate::app::FieldId::SessionSearch => text::FOOTER_SEARCH_FIELD,
+                _ => text::FOOTER_FIELD,
+            };
+        }
+        if app.focus() == Focus::Sidebar {
+            return text::FOOTER_SIDEBAR;
+        }
     }
     match app.screen() {
         crate::app::Screen::Onboarding
@@ -282,7 +305,13 @@ pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
             }
         }
         crate::app::Screen::Main if app.page() == Page::Query => {
-            if narrow {
+            if app.query().manual_limit() {
+                if narrow {
+                    text::FOOTER_QUERY_MANUAL_LIMIT_NARROW
+                } else {
+                    text::FOOTER_QUERY_MANUAL_LIMIT
+                }
+            } else if narrow {
                 text::FOOTER_QUERY_NARROW
             } else {
                 text::FOOTER_QUERY
@@ -329,9 +358,11 @@ pub fn scope_note(app: &App) -> String {
             app.request_log().page(),
             app.request_log().stale(),
         ),
-        crate::app::Screen::Main if app.page() == Page::Query => {
-            text::query_scope(app.query().window(), app.query().applied_page())
-        }
+        crate::app::Screen::Main if app.page() == Page::Query => text::query_scope(
+            app.query().window(),
+            app.query().applied_page(),
+            app.query().manual_limit(),
+        ),
         crate::app::Screen::Main => text::SCOPE_EMPTY.to_owned(),
     }
 }
@@ -456,6 +487,9 @@ pub fn render_sidebar(buf: &mut Buffer, layout: &ShellLayout, app: &App, hits: &
     }
 
     if let (Some(list), Some(actions)) = (layout.sidebar_list, layout.sidebar_actions) {
+        // Without credentials the dashboard is unreachable, so the sidebar is
+        // drawn as an inert, dim preview: no hit regions and no scrolling.
+        let enabled = app.has_config();
         let nav_width = layout.nav_width();
         let rows = nav_rows();
         let start = app.sidebar_scroll();
@@ -470,10 +504,20 @@ pub fn render_sidebar(buf: &mut Buffer, layout: &ShellLayout, app: &App, hits: &
             }
             match row {
                 NavRow::Group(group) => {
-                    widgets::render_section(buf, rect, &format!(" {}", text::group_label(*group)));
+                    let label = format!(" {}", text::group_label(*group));
+                    if enabled {
+                        widgets::render_section(buf, rect, &label);
+                    } else {
+                        buf.set_string(
+                            rect.x,
+                            rect.y,
+                            widgets::fit(&label, rect.width),
+                            widgets::dim_style(),
+                        );
+                    }
                 }
                 NavRow::Page(page) => {
-                    let selected = *page == app.page();
+                    let selected = enabled && *page == app.page();
                     if selected {
                         buf.set_style(rect, widgets::selected_style());
                     }
@@ -481,29 +525,35 @@ pub fn render_sidebar(buf: &mut Buffer, layout: &ShellLayout, app: &App, hits: &
                     let label = format!("{marker} {}", text::page_label(*page));
                     let style = if selected {
                         widgets::selected_style()
-                    } else {
+                    } else if enabled {
                         widgets::muted_style()
+                    } else {
+                        widgets::dim_style()
                     };
                     buf.set_string(rect.x, rect.y, widgets::fit(&label, rect.width), style);
-                    hits.region(Layer::Base, rect, crate::app::Intent::SelectPage(*page));
+                    if enabled {
+                        hits.region(Layer::Base, rect, crate::app::Intent::SelectPage(*page));
+                    }
                 }
             }
         }
-        hits.scroll_zone(list, ScrollZone::Sidebar);
-        let scrollbar_area = Rect::new(list.right().saturating_sub(1), list.y, 1, list.height);
-        if let Some(bar) = VerticalBar::new(
-            list.height,
-            usize::from(list.height),
-            NAV_ROW_COUNT,
-            app.sidebar_scroll(),
-        ) {
-            bar.paint(
-                scrollbar_area,
-                buf,
-                widgets::selected_style(),
-                widgets::dim_style(),
-            );
-            hits.scrollbar(scrollbar_area, ScrollZone::Sidebar, bar);
+        if enabled {
+            hits.scroll_zone(list, ScrollZone::Sidebar);
+            let scrollbar_area = Rect::new(list.right().saturating_sub(1), list.y, 1, list.height);
+            if let Some(bar) = VerticalBar::new(
+                list.height,
+                usize::from(list.height),
+                NAV_ROW_COUNT,
+                app.sidebar_scroll(),
+            ) {
+                bar.paint(
+                    scrollbar_area,
+                    buf,
+                    widgets::selected_style(),
+                    widgets::dim_style(),
+                );
+                hits.scrollbar(scrollbar_area, ScrollZone::Sidebar, bar);
+            }
         }
 
         let divider = Rect::new(list.x, actions[0].y.saturating_sub(1), nav_width, 1);
@@ -516,14 +566,18 @@ pub fn render_sidebar(buf: &mut Buffer, layout: &ShellLayout, app: &App, hits: &
             ActionId::ShowGettingStarted,
             text::action_label(ActionId::ShowGettingStarted),
         );
-        render_sidebar_action(
-            buf,
-            actions[1],
-            app,
-            hits,
-            ActionId::SignOut,
-            text::action_label(ActionId::SignOut),
-        );
+        // Signing out needs saved credentials; during onboarding the row is
+        // not drawn at all instead of offering an inert action.
+        if app.has_config() {
+            render_sidebar_action(
+                buf,
+                actions[1],
+                app,
+                hits,
+                ActionId::SignOut,
+                text::action_label(ActionId::SignOut),
+            );
+        }
     }
 }
 

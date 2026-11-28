@@ -359,6 +359,30 @@ fn health_poll_runs_on_its_interval_only() {
 }
 
 #[test]
+fn onboarding_cannot_be_bypassed_by_navigation_or_credential_actions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut app, _store) = onboarding_app(&dir);
+    assert_eq!(app.screen(), Screen::Onboarding);
+
+    // Mouse and keyboard page selection are both routed through SelectPage.
+    app.apply(Intent::SelectPage(Page::CoreMetrics));
+    assert_eq!(app.screen(), Screen::Onboarding);
+    assert_eq!(app.page(), Page::SessionLog);
+    app.select_page(Page::Settings, Focus::Content);
+    assert_eq!(app.screen(), Screen::Onboarding);
+
+    // Settings actions that need saved credentials are disabled, not silent.
+    assert!(!app.action_enabled(ActionId::EditCredentials));
+    assert!(!app.action_enabled(ActionId::SignOut));
+    assert!(app
+        .apply(Intent::Activate(ActionId::EditCredentials))
+        .is_empty());
+    assert!(app.apply(Intent::Activate(ActionId::SignOut)).is_empty());
+    assert_eq!(app.overlay(), None);
+    assert_eq!(app.screen(), Screen::Onboarding);
+}
+
+#[test]
 fn typing_in_a_field_suppresses_global_shortcuts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut app, _store) = onboarding_app(&dir);

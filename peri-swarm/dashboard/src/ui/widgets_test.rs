@@ -36,3 +36,18 @@ fn secondary_button_draws_only_the_label() {
         .add_modifier
         .contains(Modifier::REVERSED));
 }
+
+#[test]
+fn word_wrap_prefers_spaces_and_hard_splits_long_words() {
+    assert_eq!(wrap_words("", 10), vec![String::new()]);
+    assert_eq!(wrap_words("one two", 20), vec!["one two"]);
+    assert_eq!(wrap_words("one two three", 7), vec!["one two", "three"]);
+    // A word wider than the column is split rather than truncated.
+    assert_eq!(wrap_words("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+    assert_eq!(
+        wrap_words("save a file before anything is stored", 12),
+        vec!["save a file", "before", "anything is", "stored"]
+    );
+    // Wide characters count as two columns.
+    assert_eq!(wrap_words("会话 标识", 6), vec!["会话", "标识"]);
+}

@@ -429,6 +429,66 @@ pub fn wrapped_height(text: &str, width: u16) -> u16 {
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
 }
 
+/// Word-wrap `text` into display lines that fit `width` columns.
+///
+/// Unlike [`wrap_by_width`] this prefers spaces, so prose does not break in the
+/// middle of a word. A word wider than the column is still split, and an empty
+/// string yields one empty line. Callers that need to scroll one line at a time
+/// (the help overlay) use this instead of [`render_body`]'s internal wrapping.
+#[must_use]
+pub fn wrap_words(text: &str, width: u16) -> Vec<String> {
+    let max = usize::from(width);
+    if max == 0 {
+        return vec![text.to_owned()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut rest = word;
+        while display_width(rest) > max {
+            let head = peri_tui_components::text::prefix_by_width(rest, max);
+            if head.is_empty() {
+                // A single grapheme wider than the column occupies its own row.
+                let character = rest.chars().next().unwrap_or_default();
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                lines.push(character.to_string());
+                rest = &rest[character.len_utf8()..];
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            lines.push(head.clone());
+            rest = &rest[head.len()..];
+        }
+        if rest.is_empty() {
+            continue;
+        }
+        if current.is_empty() {
+            current.push_str(rest);
+        } else if display_width(&format!("{current} {rest}")) <= max {
+            current.push(' ');
+            current.push_str(rest);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(rest);
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn display_width(value: &str) -> usize {
+    Span::raw(value).width()
+}
+
 /// Braille frames for loading indicators.
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 

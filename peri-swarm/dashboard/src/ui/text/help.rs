@@ -11,8 +11,11 @@
 /// Help overlay title.
 pub const HELP_TITLE: &str = "Getting started";
 
-/// Help overlay footer.
-pub const HELP_HINT: &str = "Esc closes this overlay · click outside to dismiss";
+/// Help overlay footer inside the panel.
+///
+/// The Esc/close hint lives in the shell footer, so this row only explains how
+/// to scroll; the two never repeat each other.
+pub const HELP_HINT: &str = "wheel or up/down scrolls · PgUp/PgDn pages";
 
 /// One help section.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

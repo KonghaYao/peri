@@ -37,6 +37,9 @@ pub struct QueryState {
     pub(crate) validation_error: Option<String>,
     pub(crate) not_configured: bool,
     pub(crate) ever_loaded: bool,
+    /// The executed statement carries its own top-level LIMIT/OFFSET, so the
+    /// server ignores the request offset and paging must stay off.
+    pub(crate) manual_limit: bool,
 }
 
 impl Default for QueryState {
@@ -56,6 +59,7 @@ impl Default for QueryState {
             validation_error: None,
             not_configured: false,
             ever_loaded: false,
+            manual_limit: false,
         }
     }
 }
@@ -139,10 +143,19 @@ impl QueryState {
         self.ever_loaded
     }
 
+    /// Whether the executed statement carries its own `LIMIT`/`OFFSET`.
+    ///
+    /// OpenObserve then ignores the request offset, so Prev/Next are disabled
+    /// instead of repeating the first page under a new page number.
+    #[must_use]
+    pub fn manual_limit(&self) -> bool {
+        self.manual_limit
+    }
+
     /// Whether an earlier result page exists.
     #[must_use]
     pub fn has_previous(&self) -> bool {
-        self.applied_page > 0
+        !self.manual_limit && self.applied_page > 0
     }
 
     /// Whether a further result page may exist.
@@ -151,7 +164,9 @@ impl QueryState {
     /// being full and the row cap not being reached yet.
     #[must_use]
     pub fn can_next(&self) -> bool {
-        !self.in_flight && query::has_next_page(self.applied_page, self.rows.len())
+        !self.manual_limit
+            && !self.in_flight
+            && query::has_next_page(self.applied_page, self.rows.len())
     }
 
     /// Clear every loaded page but keep the editor, window and generation.
@@ -222,7 +237,7 @@ impl App {
         if self.screen != Screen::Main || self.page != Page::Query || self.query.in_flight {
             return Vec::new();
         }
-        if self.query.applied_page == 0 {
+        if self.query.manual_limit || self.query.applied_page == 0 {
             return Vec::new();
         }
         let Some(sql) = self.query.executed_sql.clone() else {
@@ -243,7 +258,7 @@ impl App {
         if self.screen != Screen::Main || self.page != Page::Query || self.query.in_flight {
             return Vec::new();
         }
-        if !self.query.can_next() {
+        if self.query.manual_limit || !self.query.can_next() {
             return Vec::new();
         }
         let Some(sql) = self.query.executed_sql.clone() else {
@@ -295,6 +310,7 @@ impl App {
         self.query.error = None;
         self.query.validation_error = None;
         self.query.not_configured = false;
+        self.query.manual_limit = query::has_top_level_row_limit(&sql);
         self.query.executed_sql = Some(sql.clone());
         vec![Effect::RunQuery {
             epoch: self.epoch,

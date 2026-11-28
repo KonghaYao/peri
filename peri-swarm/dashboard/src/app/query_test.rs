@@ -331,6 +331,42 @@ fn a_new_run_always_starts_at_the_first_page() {
 }
 
 #[test]
+fn a_statement_with_its_own_limit_disables_server_paging() {
+    let (mut app, _dir) = app_with_observability();
+    set_sql(&mut app, "SELECT * FROM \"peri_swarm_logs\" LIMIT 20");
+    let (generation, ..) = query_request(&app.apply(Intent::RunQuery));
+    finish(&mut app, generation, hits(QUERY_PAGE_SIZE));
+
+    assert!(app.query().manual_limit());
+    assert!(!app.query().can_next());
+    assert!(!app.query().has_previous());
+    // A full page would normally enable Next; the explicit limit must win.
+    assert!(app.apply(Intent::QueryPageNext).is_empty());
+    assert_eq!(app.query().applied_page(), 0);
+
+    // Removing the limit restores paging on the next run.
+    set_sql(&mut app, "SELECT * FROM \"peri_swarm_logs\"");
+    let (generation, ..) = query_request(&app.apply(Intent::RunQuery));
+    finish(&mut app, generation, hits(QUERY_PAGE_SIZE));
+    assert!(!app.query().manual_limit());
+    assert!(app.query().can_next());
+    let (generation, ..) = query_request(&app.apply(Intent::QueryPageNext));
+    finish(&mut app, generation, hits(QUERY_PAGE_SIZE));
+    assert_eq!(app.query().applied_page(), 1);
+}
+
+#[test]
+fn an_offset_only_statement_also_disables_server_paging() {
+    let (mut app, _dir) = app_with_observability();
+    set_sql(&mut app, "SELECT * FROM logs OFFSET 40");
+    let (generation, ..) = query_request(&app.apply(Intent::RunQuery));
+    finish(&mut app, generation, hits(QUERY_PAGE_SIZE));
+    assert!(app.query().manual_limit());
+    assert!(!app.query().can_next());
+    assert!(app.apply(Intent::QueryPageNext).is_empty());
+}
+
+#[test]
 fn editing_the_statement_clears_the_validation_message() {
     let (mut app, _dir) = app_with_observability();
     app.apply(Intent::SelectPage(Page::Query));

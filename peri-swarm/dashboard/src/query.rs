@@ -74,6 +74,86 @@ pub fn validate_sql(sql: &str) -> Result<(), SqlError> {
     Ok(())
 }
 
+/// Whether the statement pins its own row range with a top-level `LIMIT` or
+/// `OFFSET` clause.
+///
+/// OpenObserve v1.2.0 ignores the request-level `from`/`size` when the SQL
+/// carries its own row limit, so server-side paging would silently repeat the
+/// first page. The dashboard therefore disables its pager for such statements
+/// instead of rewriting the user's SQL.
+///
+/// Detection is lexical and conservative: string literals, quoted identifiers,
+/// `--`/`/* */` comments and nested subqueries are skipped, and only bare
+/// keywords at parenthesis depth zero count. A quoted or commented `limit`
+/// never disables the pager; an unusual bare identifier that happens to be
+/// named `limit` does, which only costs a disabled pager.
+#[must_use]
+pub fn has_top_level_row_limit(sql: &str) -> bool {
+    let mut depth = 0i32;
+    let mut token = String::new();
+    let mut found = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\'' | '"' | '`' => {
+                flush_limit_token(&mut token, depth, &mut found);
+                skip_quoted(&mut chars, character);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                flush_limit_token(&mut token, depth, &mut found);
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                flush_limit_token(&mut token, depth, &mut found);
+                chars.next();
+                let mut previous = ' ';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            '(' => {
+                flush_limit_token(&mut token, depth, &mut found);
+                depth = depth.saturating_add(1);
+            }
+            ')' => {
+                flush_limit_token(&mut token, depth, &mut found);
+                depth = depth.saturating_sub(1);
+            }
+            other if other.is_alphanumeric() || other == '_' => token.push(other),
+            _ => flush_limit_token(&mut token, depth, &mut found),
+        }
+    }
+    flush_limit_token(&mut token, depth, &mut found);
+    found
+}
+
+fn flush_limit_token(token: &mut String, depth: i32, found: &mut bool) {
+    if depth == 0 && (token.eq_ignore_ascii_case("limit") || token.eq_ignore_ascii_case("offset")) {
+        *found = true;
+    }
+    token.clear();
+}
+
+fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char) {
+    while let Some(character) = chars.next() {
+        if character == quote {
+            // A doubled quote stays inside the literal (`''`, `""`, ``` `` ```).
+            if chars.peek() == Some(&quote) {
+                chars.next();
+                continue;
+            }
+            return;
+        }
+    }
+}
+
 /// Column names for a result page.
 ///
 /// Server-reported names win, in server order. When the server omits

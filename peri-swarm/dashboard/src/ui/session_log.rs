@@ -41,13 +41,17 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
     }
     if !state.ever_loaded() {
         if state.loading() {
-            widgets::render_loading(
-                buf,
-                rows.line(),
-                app.spinner_frame(),
-                text::LOADING_SESSIONS,
-                widgets::dim_style(),
-            );
+            if app.is_paused() {
+                render_wrapped(buf, rows, text::POLLING_PAUSED, widgets::warning_style());
+            } else {
+                widgets::render_loading(
+                    buf,
+                    rows.line(),
+                    app.spinner_frame(),
+                    text::LOADING_SESSIONS,
+                    widgets::dim_style(),
+                );
+            }
         }
         return cursor;
     }
@@ -163,6 +167,16 @@ fn render_table(
     let widths = view_model::column_widths(&columns, pane_width);
     if columns.is_empty() || widths.iter().all(|width| *width == 0) {
         return;
+    }
+    // Metadata is real data, so its absence from the table is never silent:
+    // the detail page carries the full values.
+    if !columns.contains(&Column::Metadata)
+        && state
+            .sessions()
+            .iter()
+            .any(|session| !session.metadata.is_empty())
+    {
+        render_wrapped(buf, rows, text::METADATA_HIDDEN, widgets::dim_style());
     }
     render_header(buf, rows.line(), &columns, &widths);
     let now = Utc::now().timestamp();

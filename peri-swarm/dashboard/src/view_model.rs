@@ -8,7 +8,7 @@
 //! the source of truth for anything beyond it, so the UI labels the scope
 //! instead of claiming global totals.
 
-use peri_tui_components::text::truncate_to_width;
+use peri_tui_components::text::{prefix_by_width, suffix_by_width, truncate_to_width};
 use ratatui::text::Span;
 
 use crate::api::Session;
@@ -235,26 +235,27 @@ pub fn metadata_summary(session: &Session) -> String {
 /// Session cell split into the primary id and an optional model suffix.
 ///
 /// The two parts always fit in `width` columns together; the model is dropped
-/// before the id drops below a readable size.
+/// before the id drops below a readable size. A truncated id keeps its tail, so
+/// rows that only differ at the end stay distinguishable.
 #[must_use]
 pub fn session_cell(session: &Session, width: u16) -> (String, String) {
-    let width = usize::from(width);
     if width == 0 {
         return (String::new(), String::new());
     }
     let id = session.id.as_str();
     let model = session.agent.model.as_deref().unwrap_or("");
-    let fit_id = |budget: usize| truncate_to_width(id, budget);
     if model.is_empty() || width < 16 {
-        return (fit_id(width), String::new());
+        return (middle_truncate(id, width), String::new());
     }
+    let width = usize::from(width);
     let model_width = display_width(model);
     let id_width = display_width(id);
     if id_width + 1 + model_width <= width {
         return (id.to_owned(), format!(" {model}"));
     }
     let model_budget = model_width.min(width / 2).max(4);
-    let id_text = fit_id(width.saturating_sub(model_budget + 1));
+    let id_budget = u16::try_from(width.saturating_sub(model_budget + 1)).unwrap_or(u16::MAX);
+    let id_text = middle_truncate(id, id_budget);
     let used = display_width(&id_text);
     (
         id_text,
@@ -269,6 +270,32 @@ pub fn session_cell(session: &Session, width: u16) -> (String, String) {
 #[must_use]
 pub fn fit_column(value: &str, width: u16) -> String {
     truncate_to_width(value, usize::from(width))
+}
+
+/// Truncate an identity value keeping both ends visible.
+///
+/// Session ids share a long timestamp prefix, so prefix truncation makes
+/// different rows look identical. Keeping the head and the tail preserves the
+/// distinguishing suffix while still capping the column width.
+#[must_use]
+pub fn middle_truncate(value: &str, width: u16) -> String {
+    let max = usize::from(width);
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(value) <= max {
+        return value.to_owned();
+    }
+    if max == 1 {
+        return "…".to_owned();
+    }
+    let budget = max - 1;
+    let head = budget.div_ceil(2);
+    let tail = budget - head;
+    let mut out = prefix_by_width(value, head);
+    out.push('…');
+    out.push_str(&suffix_by_width(value, tail));
+    out
 }
 
 /// One adaptive table column.
@@ -329,13 +356,19 @@ pub fn columns(terminal_width: u16, pane_width: u16) -> Vec<Column> {
             Column::LastActive,
         ];
     }
+    // Compact: the Status column already flags "Requires action", so the
+    // approval count is the least identifying column. The metadata summary
+    // stays visible instead of being dropped silently.
     let base = vec![Column::Session, Column::Status, Column::LastActive];
     if terminal_width < WIDTH_COMPACT || pane_width < APPROVALS_MIN_PANE {
         return base;
     }
-    let mut columns = base;
-    columns.insert(2, Column::Approvals);
-    columns
+    vec![
+        Column::Session,
+        Column::Status,
+        Column::Metadata,
+        Column::LastActive,
+    ]
 }
 
 /// Width of every column, gaps excluded; `available` includes the gaps.
@@ -347,7 +380,7 @@ pub fn column_widths(columns: &[Column], available: u16) -> Vec<u16> {
     let gaps = u16::try_from(columns.len() - 1).unwrap_or(0);
     let usable = available.saturating_sub(gaps);
     let metadata = if columns.contains(&Column::Metadata) {
-        (usable / 4).clamp(12, 28)
+        (usable / 5).clamp(10, 28)
     } else {
         0
     };

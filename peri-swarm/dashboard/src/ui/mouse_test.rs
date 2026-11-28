@@ -230,3 +230,17 @@ fn dragging_the_thumb_moves_the_sidebar() {
     );
     assert!(drag.is_none());
 }
+
+#[test]
+fn the_wheel_scrolls_the_help_overlay() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::OpenHelp);
+    let (_terminal, hits) = draw(&mut app, 80, 24);
+    assert_eq!(app.help_scroll(), 0);
+    walk(&mut app, &hits, mouse(MouseEventKind::ScrollDown, 40, 12));
+    assert!(app.help_scroll() > 0, "wheel down scrolls help");
+    let offset = app.help_scroll();
+    walk(&mut app, &hits, mouse(MouseEventKind::ScrollUp, 40, 12));
+    assert!(app.help_scroll() < offset, "wheel up scrolls back");
+    assert_eq!(app.overlay(), Some(Overlay::Help));
+}

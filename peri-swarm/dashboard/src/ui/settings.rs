@@ -74,7 +74,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
         buf,
         rows.line(),
         text::LABEL_REFRESH,
-        &text::last_refresh_label(app.last_refresh(), Instant::now()),
+        &text::refresh_age(app.last_refresh(), Instant::now()),
         widgets::muted_style(),
     );
 
@@ -167,7 +167,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
         app,
         hits,
         ActionId::EditCredentials,
-        !busy,
+        !busy && app.has_config(),
         ButtonTone::Secondary,
     );
     action_button(
@@ -176,7 +176,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
         app,
         hits,
         ActionId::ConfigureObservability,
-        !busy,
+        !busy && !app.observability_testing(),
         ButtonTone::Secondary,
     );
     action_button(
@@ -185,7 +185,7 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) {
         app,
         hits,
         ActionId::SignOut,
-        !busy,
+        !busy && app.has_config(),
         ButtonTone::Danger,
     );
     action_button(

@@ -204,3 +204,77 @@ fn wheel_zones_and_sidebar_scrollbar_agree() {
     app.apply(Intent::ScrollSidebar(1));
     assert!(app.sidebar_scroll() > 0);
 }
+
+#[test]
+fn onboarding_draws_an_inert_sidebar_without_navigation_hits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = ConfigStore::at(dir.path().join("config.toml"));
+    let mut app = App::onboarding(store);
+
+    for (width, height) in [(80, 24), (100, 30)] {
+        let (_terminal, hits) = draw(&mut app, width, height);
+        for page in Page::ALL {
+            assert!(
+                hits.region_rect(Intent::SelectPage(page)).is_none(),
+                "{page:?} must not be clickable on onboarding at {width}"
+            );
+        }
+        // Help is not navigation, so it stays available; signing out needs a
+        // saved config and is not even drawn.
+        assert!(hits
+            .region_rect(Intent::Activate(ActionId::ShowGettingStarted))
+            .is_some());
+        assert!(hits
+            .region_rect(Intent::Activate(ActionId::SignOut))
+            .is_none());
+        assert!(hits.wheel_zone(false, 2, 6).is_none());
+    }
+
+    // The menu button only exists on Main, so a narrow onboarding frame has no
+    // way to reach the pages either.
+    let (_terminal, hits) = draw(&mut app, 79, 24);
+    assert!(hits.region_rect(Intent::ToggleMenu).is_none());
+}
+
+#[test]
+fn the_footer_follows_the_focused_control() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::SelectPage(Page::Query));
+    // Page entry lands on the sidebar; move to the content first.
+    app.apply(Intent::FocusContent);
+
+    let (terminal, _hits) = draw(&mut app, 120, 30);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_QUERY), "{text}");
+    assert!(!text.contains("r refresh"), "{text}");
+
+    // A focused SQL editor swallows `m`/`1`, so the footer must not advertise
+    // them as global keys.
+    app.apply(Intent::FocusTextArea(crate::app::FieldId::QuerySql));
+    let (terminal, _hits) = draw(&mut app, 120, 30);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_QUERY_FIELD), "{text}");
+    assert!(!text.contains("1/2/3 window"), "{text}");
+    assert!(!text.contains("r refresh"), "{text}");
+
+    // Sidebar focus: Up/Down change the page, PgUp/PgDn do not.
+    app.apply(Intent::FocusSidebar);
+    let (terminal, _hits) = draw(&mut app, 120, 30);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_SIDEBAR), "{text}");
+    assert!(!text.contains("PgUp/PgDn"), "{text}");
+}
+
+#[test]
+fn the_search_field_footer_describes_search_keys() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::SelectPage(Page::SessionLog));
+    app.apply(Intent::FocusField {
+        field: crate::app::FieldId::SessionSearch,
+        click: None,
+    });
+    let (terminal, _hits) = draw(&mut app, 120, 30);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::FOOTER_SEARCH_FIELD), "{text}");
+    assert!(!text.contains("r refresh"), "{text}");
+}

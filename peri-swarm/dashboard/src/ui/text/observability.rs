@@ -296,6 +296,26 @@ pub fn request_time(timestamp_us: Option<u64>) -> String {
     timestamp_us.map_or_else(|| DASH.to_owned(), clock)
 }
 
+/// Local `hh:mm:ss` label for narrow request-log tables.
+#[must_use]
+pub fn request_time_short(timestamp_us: Option<u64>) -> String {
+    let Some(timestamp_us) = timestamp_us else {
+        return DASH.to_owned();
+    };
+    let Ok(timestamp) = i64::try_from(timestamp_us) else {
+        return DASH.to_owned();
+    };
+    DateTime::from_timestamp_micros(timestamp).map_or_else(
+        || DASH.to_owned(),
+        |timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%H:%M:%S")
+                .to_string()
+        },
+    )
+}
+
 /// HTTP status or an em dash.
 #[must_use]
 pub fn request_status(status: Option<u16>) -> String {
@@ -354,11 +374,19 @@ pub const QUERY_TITLE: &str = "Query";
 /// SQL editor label.
 pub const QUERY_SQL_LABEL: &str = "SQL";
 
-/// Empty-editor placeholder.
-pub const QUERY_SQL_PLACEHOLDER: &str = "SELECT * FROM \"peri_swarm_logs\" LIMIT 20";
+/// Empty-editor placeholder. Deliberately an instruction, not a runnable
+/// statement, so it cannot suggest a `LIMIT` the Run button would reject.
+pub const QUERY_SQL_PLACEHOLDER: &str = "Enter a SELECT statement (Ctrl-Enter runs)";
 
 /// Editor hint, shown under the text area.
 pub const QUERY_HINT: &str = "Read-only SELECT · Ctrl-Enter runs the query";
+
+/// Shown when the executed SQL has its own top-level LIMIT/OFFSET.
+///
+/// OpenObserve ignores the request offset in that case, so the pager is
+/// disabled rather than silently repeating the first page.
+pub const QUERY_MANUAL_LIMIT: &str =
+    "SQL has LIMIT/OFFSET: server-side paging is off. Remove them to page through all rows.";
 
 /// Loading label while a query is running.
 pub const QUERY_RUNNING: &str = "Running…";
@@ -374,11 +402,15 @@ pub const QUERY_CELL_MAX_CHARS: usize = 96;
 
 /// Scope note for the Query page.
 #[must_use]
-pub fn query_scope(window: TimeWindow, page: usize) -> String {
+pub fn query_scope(window: TimeWindow, page: usize, manual_limit: bool) -> String {
+    let position = if manual_limit {
+        "SQL limit".to_owned()
+    } else {
+        format!("page {}", page.saturating_add(1))
+    };
     format!(
-        "Window {} · source OpenObserve logs and traces · page {} · manual run",
-        window_label(window),
-        page.saturating_add(1)
+        "Window {} · source OpenObserve logs and traces · {position} · manual run",
+        window_label(window)
     )
 }
 

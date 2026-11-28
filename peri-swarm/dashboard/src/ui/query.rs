@@ -60,17 +60,40 @@ pub fn render(buf: &mut Buffer, rows: &mut Rows, app: &App, hits: &mut HitMap) -
     }
     if state.rows().is_empty() {
         render_empty(buf, rows);
-        if state.applied_page() > 0 {
+        if state.has_previous() {
             rows.skip(1);
             render_pager(buf, rows, app, hits);
         }
         return cursor;
     }
 
+    // Pager and column-crop notice sit above the table so both stay visible
+    // without scrolling, even with a full 20-row page on a 120x40 terminal.
+    let all = state.columns();
+    let (visible, widths) = column_layout(all.len(), rows.width());
     rows.skip(1);
-    render_table(buf, rows, app);
-    rows.skip(1);
+    if state.manual_limit() {
+        render_wrapped(
+            buf,
+            rows,
+            text::QUERY_MANUAL_LIMIT,
+            widgets::warning_style(),
+        );
+    }
     render_pager(buf, rows, app, hits);
+    if visible < all.len() {
+        render_wrapped(
+            buf,
+            rows,
+            &text::query_columns_truncated(visible, all.len()),
+            widgets::muted_style(),
+        );
+    }
+    if visible == 0 {
+        return cursor;
+    }
+    rows.skip(1);
+    render_table(buf, rows, app, &all[..visible], &widths);
     cursor
 }
 
@@ -170,34 +193,19 @@ fn render_empty(buf: &mut Buffer, rows: &mut Rows) {
     render_wrapped(buf, rows, text::QUERY_EMPTY_HINT, widgets::muted_style());
 }
 
-fn render_table(buf: &mut Buffer, rows: &mut Rows, app: &App) {
+fn render_table(buf: &mut Buffer, rows: &mut Rows, app: &App, columns: &[String], widths: &[u16]) {
     let state = app.query();
-    let all = state.columns();
-    let width = rows.width();
-    let (visible, widths) = column_layout(all.len(), width);
-    if visible == 0 {
-        return;
-    }
     let area = rows.line();
     if area.is_empty() {
         return;
     }
-    render_header(buf, area, &all[..visible], &widths);
+    render_header(buf, area, columns, widths);
     for hit in state.rows() {
         let area = rows.line();
         if area.is_empty() {
             break;
         }
-        render_row(buf, area, hit, &all[..visible], &widths);
-    }
-    if visible < all.len() {
-        rows.skip(1);
-        render_wrapped(
-            buf,
-            rows,
-            &text::query_columns_truncated(visible, all.len()),
-            widgets::muted_style(),
-        );
+        render_row(buf, area, hit, columns, widths);
     }
 }
 

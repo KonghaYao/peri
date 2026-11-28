@@ -132,9 +132,29 @@ fn session_cell_keeps_both_parts_within_the_column() {
     let (id, model) = session_cell(&no_model, 20);
     assert_eq!((id.as_str(), model.as_str()), ("plain", ""));
 
+    // A truncated id keeps its tail, so ids sharing a timestamp prefix differ.
+    let first = session("lt-20261128-003321", "idle", "idle", None, 10);
+    let second = session("lt-20261128-003322", "idle", "idle", None, 10);
+    let (a, _) = session_cell(&first, 12);
+    let (b, _) = session_cell(&second, 12);
+    assert_ne!(a, b, "{a} vs {b}");
+    assert!(a.ends_with("21"), "{a}");
+    assert!(Span::raw(a.as_str()).width() <= 12);
+
     assert_eq!(fit_column("abcdefgh", 4), "abc…");
     assert_eq!(fit_column("ab", 4), "ab");
     assert_eq!(fit_column("ab", 0), "");
+}
+
+#[test]
+fn identity_middle_truncation_keeps_both_ends() {
+    assert_eq!(middle_truncate("abcdefghij", 6), "abc…ij");
+    assert_eq!(middle_truncate("abc", 9), "abc");
+    assert_eq!(middle_truncate("abc", 0), "");
+    assert_eq!(middle_truncate("abc", 1), "…");
+    assert_eq!(middle_truncate("abcdef", 3), "a…f");
+    // Wide characters are never split.
+    assert_eq!(middle_truncate("会话标识符", 5), "会…符");
 }
 
 #[test]
@@ -188,7 +208,7 @@ fn columns_follow_the_shell_breakpoints() {
         vec![
             Column::Session,
             Column::Status,
-            Column::Approvals,
+            Column::Metadata,
             Column::LastActive
         ]
     );
@@ -212,7 +232,12 @@ fn columns_follow_the_shell_breakpoints() {
             "columns must fit: {total} > {pane} at {terminal}"
         );
         assert!(widths.iter().all(|width| *width > 0));
-        assert!(!plan.contains(&Column::Metadata) || widths[4] >= 12);
+        if let Some(index) = plan.iter().position(|column| *column == Column::Metadata) {
+            assert!(
+                widths[index] >= 10,
+                "metadata column must stay readable at {terminal}"
+            );
+        }
     }
 
     assert_eq!(Column::Session.header(), "Session");

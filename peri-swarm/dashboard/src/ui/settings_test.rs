@@ -119,6 +119,37 @@ fn settings_shows_connection_facts_and_exposes_actions() {
 }
 
 #[test]
+fn the_refresh_row_does_not_repeat_its_label_in_the_value() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::OpenSettings);
+    let (terminal, _hits) = draw(&mut app, 100, 30);
+    let buffer = terminal.backend().buffer();
+    let (x, y) = find_label_row(buffer, text::LABEL_REFRESH).expect("refresh row");
+    assert!(x > 0);
+    let row: String = (buffer.area.x..buffer.area.right())
+        .map(|column| buffer[(column, y)].symbol())
+        .collect();
+    assert!(row.contains("never"), "{row}");
+    assert!(!row.contains("last refresh:"), "{row}");
+}
+
+#[test]
+fn the_sign_out_dialog_describes_tab_enter_and_escape_truthfully() {
+    let (mut app, _store, _dir) = connected_app();
+    app.apply(Intent::OpenSettings);
+    app.apply(Intent::OpenSignOut);
+    let (terminal, hits) = draw(&mut app, 100, 30);
+    let text = buffer_text(&terminal);
+    assert!(text.contains(text::SIGNOUT_HINT), "{text}");
+    assert!(!text.contains("Enter confirms"), "{text}");
+    assert_eq!(app.overlay_cursor(), 0, "Cancel stays the default");
+    let cancel = hits
+        .region_rect(Intent::Activate(ActionId::CancelSignOut))
+        .expect("cancel button");
+    assert!(cancel.width > 0);
+}
+
+#[test]
 fn test_connection_button_starts_a_revalidation() {
     let (mut app, _store, _dir) = connected_app();
     app.apply(Intent::OpenSettings);

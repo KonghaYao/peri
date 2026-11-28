@@ -78,12 +78,20 @@ pub fn handle_mouse(
             Vec::new()
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let delta: i32 = if mouse.kind == MouseEventKind::ScrollDown {
+                1
+            } else {
+                -1
+            };
+            // The help overlay has no page scroll zone; its wheel belongs to
+            // the overlay wherever the pointer is.
+            if matches!(app.overlay(), Some(Overlay::Help)) {
+                app.scroll_help(
+                    delta.saturating_mul(i32::from(peri_tui_components::scrollbar::SCROLL_LINES)),
+                );
+                return Vec::new();
+            }
             if let Some(zone) = hits.wheel_zone(overlay_active, mouse.column, mouse.row) {
-                let delta = if mouse.kind == MouseEventKind::ScrollDown {
-                    1
-                } else {
-                    -1
-                };
                 let intent = match zone {
                     ScrollZone::Sidebar => Intent::ScrollSidebar(delta),
                     ScrollZone::Content => Intent::ScrollContent(delta),

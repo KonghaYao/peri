@@ -118,12 +118,58 @@ fn status_approvals_and_metadata_follow_the_column_breakpoints() {
     let (terminal, _) = draw(&mut app, 100, 30);
     let text = buffer_text(&terminal);
     assert!(text.contains("2 pending"));
-    assert!(!text.contains(text::column_header(Column::Metadata)));
+    // The summary is not drawn, but its absence is announced.
+    assert!(!text.contains("team=core"));
+    assert!(text.contains(text::METADATA_HIDDEN), "{text}");
 
     let (terminal, _) = draw(&mut app, 80, 30);
     let text = buffer_text(&terminal);
-    assert!(text.contains("2 pending"));
-    assert!(!text.contains(text::column_header(Column::Metadata)));
+    // Compact tier: approvals give way to the metadata summary, and the
+    // session id keeps a distinguishing tail.
+    assert!(text.contains("team=core"), "{text}");
+    assert!(
+        text.contains(text::column_header(Column::Metadata)),
+        "{text}"
+    );
+    assert!(!text.contains("2 pending"), "{text}");
+}
+
+#[test]
+fn a_narrow_table_still_distinguishes_sessions_sharing_a_prefix() {
+    let (mut app, _dir) = connected_app();
+    feed_page(
+        &mut app,
+        vec![
+            session("lt-20261128-003321", "idle", "idle", None, NOW),
+            session("lt-20261128-003322", "idle", "idle", None, NOW),
+        ],
+    );
+    let (terminal, _) = draw(&mut app, 80, 24);
+    let text = buffer_text(&terminal);
+    assert!(text.contains("003321"), "{text}");
+    assert!(text.contains("003322"), "{text}");
+}
+
+#[test]
+fn a_401_pause_replaces_the_spinner_instead_of_loading_forever() {
+    let (mut app, _dir) = connected_app();
+    app.handle_worker(WorkerEvent::HealthFinished(crate::worker::HealthReport {
+        epoch: app.epoch(),
+        result: Err(ApiError::from_status(
+            401,
+            br#"{"error":{"code":"unauthorized","message":"bad key","details":null}}"#,
+        )),
+        latency: None,
+        checked_at: std::time::Instant::now(),
+        contract: None,
+    }));
+    assert!(app.is_paused());
+    let (terminal, _) = draw(&mut app, 100, 30);
+    let text = buffer_text(&terminal);
+    // The message wraps across rows, so match its first phrase.
+    assert!(text.contains("Polling paused"), "{text}");
+    assert!(text.contains("rejected the API key"), "{text}");
+    assert!(!text.contains(text::LOADING_SESSIONS), "{text}");
 }
 
 #[test]

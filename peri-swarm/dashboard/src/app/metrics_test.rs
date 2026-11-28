@@ -432,6 +432,44 @@ fn agent_metrics_401_pauses_polling_and_shows_the_gateway_banner() {
 }
 
 #[test]
+fn a_gateway_401_does_not_starve_the_openobserve_pages() {
+    let (mut app, _dir) = app_with_observability();
+    // Reproduce the reported state: a rejected gateway key pauses gateway
+    // polling globally.
+    app.apply_unauthorized(&crate::api::ApiError::from_status(
+        401,
+        br#"{"error":{"code":"unauthorized","message":"bad key","details":null}}"#,
+    ));
+    assert!(app.is_paused());
+
+    // Core metrics and the request log read OpenObserve directly, so they must
+    // still issue their first request instead of spinning forever.
+    app.apply(Intent::SelectPage(Page::CoreMetrics));
+    let (generation, window) = core_request(&app.metrics_due(Instant::now()));
+    app.handle_worker(WorkerEvent::CoreMetricsLoaded {
+        epoch: app.epoch(),
+        generation,
+        window,
+        result: ObservabilityOutcome::Ready(core_snapshot()),
+    });
+    assert!(!app.core_metrics().loading());
+    assert!(app.core_metrics().snapshot().is_some());
+
+    app.apply(Intent::SelectPage(Page::RequestLog));
+    let (generation, window, page) = request_log_request(&app.metrics_due(Instant::now()));
+    app.handle_worker(WorkerEvent::RequestLogLoaded {
+        epoch: app.epoch(),
+        generation,
+        window,
+        page,
+        result: ObservabilityOutcome::Ready(request_page(0, 2, false)),
+    });
+    assert!(!app.request_log().loading());
+    assert_eq!(app.request_log().rows().len(), 2);
+    assert!(app.is_paused(), "the gateway pause itself is unchanged");
+}
+
+#[test]
 fn windows_are_selectable_from_the_keyboard() {
     let (mut app, _dir) = app_with_observability();
     app.apply(Intent::SelectPage(Page::CoreMetrics));

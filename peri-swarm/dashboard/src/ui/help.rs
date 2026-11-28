@@ -1,18 +1,24 @@
 //! Getting-started overlay.
+//!
+//! The content is taller than an 80x24 terminal, so the overlay scrolls
+//! independently of the page behind it: wheel, Up/Down, PgUp/PgDn, Home/End.
+//! The shell's page scrollbar is suppressed while an overlay is open, so the
+//! only bar on screen is this overlay's own.
 
 use peri_tui_components::button::ButtonTone;
+use peri_tui_components::scrollbar::VerticalBar;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget};
 
-use crate::app::{ActionId, Intent};
+use crate::app::{ActionId, App, Intent};
 use crate::ui::hit::{HitMap, Layer};
 use crate::ui::text;
-use crate::ui::widgets::{self, Rows};
+use crate::ui::widgets;
 
 /// Render the help overlay over the already-drawn shell.
-pub fn render(buf: &mut Buffer, area: Rect, hits: &mut HitMap) {
+pub fn render(buf: &mut Buffer, area: Rect, app: &mut App, hits: &mut HitMap) {
     if area.width < 12 || area.height < 6 {
         return;
     }
@@ -33,25 +39,59 @@ pub fn render(buf: &mut Buffer, area: Rect, hits: &mut HitMap) {
         return;
     }
 
-    let mut rows = Rows::new(inner);
     let reserve = 1.min(inner.height);
     let body_height = inner.height.saturating_sub(reserve);
-    'sections: for (index, section) in text::HELP_SECTIONS.iter().enumerate() {
-        let blank = u16::from(index > 0);
-        let lines: u16 = section
-            .lines
-            .iter()
-            .map(|line| widgets::wrapped_height(line, inner.width))
-            .sum();
-        let needed = blank.saturating_add(1).saturating_add(lines);
-        if rows.used().saturating_add(needed) > body_height {
-            break 'sections;
+    // Reserve the last column for the overlay's own scrollbar.
+    let text_width = inner.width.saturating_sub(1);
+    let body = Rect::new(inner.x, inner.y, text_width, body_height);
+
+    let mut display: Vec<(bool, String)> = Vec::new();
+    for line in help_lines() {
+        for text in widgets::wrap_words(&line.text, text_width) {
+            display.push((line.heading, text));
         }
-        rows.skip(blank);
-        widgets::render_section(buf, rows.line(), section.title);
-        for line in section.lines {
-            let height = widgets::wrapped_height(line, inner.width);
-            widgets::render_body(buf, rows.take(height), line, widgets::muted_style());
+    }
+    let total = u16::try_from(display.len()).unwrap_or(u16::MAX);
+    let scroll = app
+        .help_scroll()
+        .min(usize::from(total.saturating_sub(body_height)));
+    let offset = u16::try_from(scroll).unwrap_or(u16::MAX);
+    app.set_help_layout(usize::from(total), body_height);
+
+    for (visible_row, (heading, text)) in display
+        .iter()
+        .skip(usize::from(offset))
+        .take(usize::from(body_height))
+        .enumerate()
+    {
+        if text.is_empty() {
+            continue;
+        }
+        let y = body
+            .y
+            .saturating_add(u16::try_from(visible_row).unwrap_or(u16::MAX));
+        let style = if *heading {
+            widgets::section_style()
+        } else {
+            widgets::muted_style()
+        };
+        buf.set_string(body.x, y, widgets::fit(text, text_width), style);
+    }
+
+    if body_height > 0 && inner.width > 1 {
+        if let Some(bar) = VerticalBar::new(
+            body_height,
+            usize::from(body_height),
+            usize::from(total),
+            scroll,
+        ) {
+            let bar_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, body_height);
+            bar.paint(
+                bar_area,
+                buf,
+                widgets::selected_style(),
+                widgets::dim_style(),
+            );
         }
     }
 
@@ -78,3 +118,35 @@ pub fn render(buf: &mut Buffer, area: Rect, hits: &mut HitMap) {
         }
     }
 }
+
+struct HelpLine {
+    heading: bool,
+    text: String,
+}
+
+fn help_lines() -> Vec<HelpLine> {
+    let mut lines = Vec::new();
+    for (index, section) in text::HELP_SECTIONS.iter().enumerate() {
+        if index > 0 {
+            lines.push(HelpLine {
+                heading: false,
+                text: String::new(),
+            });
+        }
+        lines.push(HelpLine {
+            heading: true,
+            text: section.title.to_owned(),
+        });
+        for line in section.lines {
+            lines.push(HelpLine {
+                heading: false,
+                text: (*line).to_owned(),
+            });
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+#[path = "help_test.rs"]
+mod tests;

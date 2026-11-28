@@ -126,13 +126,17 @@ pub fn render_agent(
     }
     if !state.ever_loaded() {
         if state.loading() {
-            widgets::render_loading(
-                buf,
-                rows.line(),
-                app.spinner_frame(),
-                text::LOADING_AGENT_METRICS,
-                widgets::dim_style(),
-            );
+            if app.is_paused() {
+                render_wrapped(buf, rows, text::POLLING_PAUSED, widgets::warning_style());
+            } else {
+                widgets::render_loading(
+                    buf,
+                    rows.line(),
+                    app.spinner_frame(),
+                    text::LOADING_AGENT_METRICS,
+                    widgets::dim_style(),
+                );
+            }
         } else if state.error().is_none() {
             render_agent_empty(buf, rows);
         }

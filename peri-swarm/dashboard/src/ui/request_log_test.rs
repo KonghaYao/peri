@@ -148,3 +148,65 @@ fn narrow_layout_keeps_the_route_and_marks_missing_values() {
     assert!(text.contains(text::DASH));
     assert!(text.contains(text::PAGE_NEXT));
 }
+
+#[test]
+fn the_session_column_stays_visible_and_identifying_at_narrow_widths() {
+    let (mut app, _dir) = app_with_observability();
+    app.apply(Intent::SelectPage(Page::RequestLog));
+    let (generation, window, page) = match app.metrics_due(std::time::Instant::now()).as_slice() {
+        [Effect::LoadRequestLog {
+            generation,
+            window,
+            page,
+            ..
+        }] => (*generation, *window, *page),
+        _ => panic!("expected request-log request"),
+    };
+    app.handle_worker(WorkerEvent::RequestLogLoaded {
+        epoch: app.epoch(),
+        generation,
+        window,
+        page,
+        result: ObservabilityOutcome::Ready(RequestLogPage {
+            rows: vec![
+                RequestLogRow {
+                    timestamp_us: Some(1_700_000_000_000_000),
+                    method: Some("GET".to_owned()),
+                    route: Some("/v1/agents/sessions/lt-20261128-003321/turns".to_owned()),
+                    status: Some(200),
+                    duration_ms: Some(12),
+                    session_id: Some("lt-20261128-003321".to_owned()),
+                },
+                RequestLogRow {
+                    timestamp_us: Some(1_700_000_001_000_000),
+                    method: Some("POST".to_owned()),
+                    route: Some("/v1/agents/sessions/lt-20261128-003322/turns".to_owned()),
+                    status: Some(201),
+                    duration_ms: Some(30),
+                    session_id: Some("lt-20261128-003322".to_owned()),
+                },
+            ],
+            page,
+            has_next: false,
+            window_start_us: 0,
+            window_end_us: 1,
+        }),
+    });
+
+    for (width, height) in [(120, 40), (80, 24)] {
+        let (terminal, _) = draw(&mut app, width, height);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains(text::REQUEST_COL_SESSION),
+            "session header missing at {width}x{height}: {text}"
+        );
+        assert!(
+            text.contains("03321"),
+            "first session tail at {width}: {text}"
+        );
+        assert!(
+            text.contains("03322"),
+            "second session tail at {width}: {text}"
+        );
+    }
+}
