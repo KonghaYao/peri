@@ -92,7 +92,7 @@ fn navigation_lists_all_thirteen_pages_in_three_groups() {
         .iter()
         .filter(|page| page.group() == SidebarGroup::Platform)
         .count();
-    assert_eq!((monitor, resources, platform), (5, 5, 3));
+    assert_eq!((monitor, resources, platform), (6, 4, 3));
 
     assert!(Page::SessionLog.is_implemented());
     assert!(Page::Settings.is_implemented());
@@ -103,6 +103,9 @@ fn navigation_lists_all_thirteen_pages_in_three_groups() {
     }
     assert_eq!(page_row_index(Page::CoreMetrics), 1);
     assert_eq!(page_row_index(Page::SessionLog), 4);
+    assert_eq!(page_row_index(Page::Query), 6);
+    assert_eq!(page_row_index(Page::Artifacts), 9);
+    assert_eq!(page_row_index(Page::Mcp), 11);
     assert_eq!(page_row_index(Page::Settings), 15);
 }
 

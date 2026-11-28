@@ -38,18 +38,18 @@ pub enum Page {
     SessionLog,
     /// Request log.
     RequestLog,
+    /// Ad-hoc read-only query.
+    Query,
     /// Agents.
     Agents,
-    /// Environment templates.
-    EnvironmentTemplates,
-    /// Skills.
-    Skills,
-    /// Files.
-    Files,
+    /// Artifacts.
+    Artifacts,
     /// Vaults.
     Vaults,
-    /// Projects and keys.
-    ProjectsAndKeys,
+    /// MCP servers.
+    Mcp,
+    /// Automations.
+    Automations,
     /// Nodes.
     Nodes,
     /// Settings.
@@ -64,12 +64,12 @@ impl Page {
         Page::SandboxMetrics,
         Page::SessionLog,
         Page::RequestLog,
+        Page::Query,
         Page::Agents,
-        Page::EnvironmentTemplates,
-        Page::Skills,
-        Page::Files,
+        Page::Artifacts,
         Page::Vaults,
-        Page::ProjectsAndKeys,
+        Page::Mcp,
+        Page::Automations,
         Page::Nodes,
         Page::Settings,
     ];
@@ -82,13 +82,10 @@ impl Page {
             | Page::AgentMetrics
             | Page::SandboxMetrics
             | Page::SessionLog
-            | Page::RequestLog => SidebarGroup::Monitor,
-            Page::Agents
-            | Page::EnvironmentTemplates
-            | Page::Skills
-            | Page::Files
-            | Page::Vaults => SidebarGroup::Resources,
-            Page::ProjectsAndKeys | Page::Nodes | Page::Settings => SidebarGroup::Platform,
+            | Page::RequestLog
+            | Page::Query => SidebarGroup::Monitor,
+            Page::Agents | Page::Artifacts | Page::Vaults | Page::Mcp => SidebarGroup::Resources,
+            Page::Automations | Page::Nodes | Page::Settings => SidebarGroup::Platform,
         }
     }
 
@@ -158,28 +155,28 @@ pub const NAV_ENTRIES: [NavItem; 13] = [
         page: Page::RequestLog,
     },
     NavItem {
+        group: SidebarGroup::Monitor,
+        page: Page::Query,
+    },
+    NavItem {
         group: SidebarGroup::Resources,
         page: Page::Agents,
     },
     NavItem {
         group: SidebarGroup::Resources,
-        page: Page::EnvironmentTemplates,
-    },
-    NavItem {
-        group: SidebarGroup::Resources,
-        page: Page::Skills,
-    },
-    NavItem {
-        group: SidebarGroup::Resources,
-        page: Page::Files,
+        page: Page::Artifacts,
     },
     NavItem {
         group: SidebarGroup::Resources,
         page: Page::Vaults,
     },
     NavItem {
+        group: SidebarGroup::Resources,
+        page: Page::Mcp,
+    },
+    NavItem {
         group: SidebarGroup::Platform,
-        page: Page::ProjectsAndKeys,
+        page: Page::Automations,
     },
     NavItem {
         group: SidebarGroup::Platform,

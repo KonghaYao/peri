@@ -57,17 +57,17 @@ flowchart LR
 
 | 分组 | 页面 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| Monitor | Core metrics | 空 | 本构建不做网关指标聚合 |
-| Monitor | Agent metrics | 空 | 仅逐会话提供 model/instructions/usage |
-| Monitor | Sandbox metrics | 空 | 仅逐会话报告 sandbox 类型/id |
+| Monitor | Core metrics | 空 | 本构建未实现指标聚合 |
+| Monitor | Agent metrics | 空 | 本构建未实现；网关只逐会话提供 model/instructions/usage |
+| Monitor | Sandbox metrics | 空 | 没有资源级指标；网关只报告会话上的 sandbox 类型/id |
 | Monitor | Session log | 已实现 | 默认页；列表按最近活跃排序、过滤、搜索、增量加载、详情 |
-| Monitor | Request log | 空 | 网关不暴露服务器请求日志 |
+| Monitor | Request log | 空 | 本构建未实现；网关不暴露服务器请求日志 |
+| Monitor | Query | 空 | 本构建未实现只读 SQL 查询 |
 | Resources | Agents | 空 | 不把 agent 作为独立资源管理 |
-| Resources | Environment templates | 空 | 创建时可请求环境；无模板管理 |
-| Resources | Skills | 空 | 网关 API 未暴露 |
-| Resources | Files | 空 | 网关 API 未暴露 |
+| Resources | Artifacts | 空 | 本构建未实现；网关无 artifact 端点 |
 | Resources | Vaults | 空 | 网关 API 未暴露 |
-| Platform | Projects and keys | 空 | 凭据只在 Settings 编辑 |
+| Resources | MCP | 空 | 本构建未实现；网关无 MCP 管理端点 |
+| Platform | Automations | 空 | 本构建未实现；网关无自动化端点 |
 | Platform | Nodes | 空 | 单网关；不做多节点聚合 |
 | Platform | Settings | 已实现 | 连接事实与本地操作 |
 | Bottom | Show getting started | 覆盖层 | 凭据、打开会话、发送/审批、退出、鼠标键盘 |

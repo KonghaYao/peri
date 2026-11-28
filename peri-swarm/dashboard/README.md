@@ -52,14 +52,14 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
 
 ## 页面状态
 
-侧栏共 13 项（Monitor 5 / Resources 5 / Platform 3），全部可见、可点击；没有 Overview。
+侧栏共 13 项（Monitor 6 / Resources 4 / Platform 3），全部可见、可点击；没有 Overview。
 
 | 分组 | 页面 | 状态 |
 | --- | --- | --- |
-| Monitor | Core metrics / Agent metrics / Sandbox metrics / Request log | 空页，说明网关能力边界 |
+| Monitor | Core metrics / Agent metrics / Sandbox metrics / Request log / Query | 空页，说明能力边界或“本构建未实现” |
 | Monitor | Session log | 已实现（默认页） |
-| Resources | Agents / Environment templates / Skills / Files / Vaults | 空页，说明网关能力边界 |
-| Platform | Projects and keys / Nodes | 空页，说明网关能力边界 |
+| Resources | Agents / Artifacts / Vaults / MCP | 空页，说明能力边界或“本构建未实现” |
+| Platform | Automations / Nodes | 空页，说明能力边界或“本构建未实现” |
 | Platform | Settings | 已实现 |
 
 已实现功能：
@@ -84,8 +84,9 @@ Peri Swarm 网关的终端管理客户端。crate 与二进制名均为 `peri-sw
   排序，时间完全相同时保留网关返回顺序；页脚标注
   `Newest activity first · N loaded`。搜索和计数仍只覆盖已加载集合。
 - 单网关、单凭据；没有多 profile、Overview、指标聚合或跨节点视图。
-- Request log 无数据来源（网关不提供服务器请求日志）；Agents、Environment templates、
-  Skills、Files、Vaults、Projects and keys、Nodes 均未实现。
+- 网关不提供服务器请求日志；Core metrics、Agent metrics、Sandbox metrics、Request log、
+  Query、Agents、Artifacts、Vaults、MCP、Automations、Nodes 在本构建中均为空页，文案说明
+  为什么为空。
 - 编辑不发送 `instructions`：网关更新端点只接受 `agent.model`、`metadata`、
   `prompt_cache_options`（`deny_unknown_fields`），表单中 instructions 只读。创建表单也不
   发送首条消息。

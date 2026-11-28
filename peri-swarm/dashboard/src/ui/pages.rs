@@ -73,8 +73,20 @@ pub fn render(
                 None
             }
             Page::SessionLog => session_log::render(buf, &mut rows, app, hits),
-            page => {
-                empty::render(page, buf, &mut rows);
+            // Placeholder pages are reachable but have no data source yet; each
+            // renders an honest empty state until a later stage implements it.
+            Page::CoreMetrics
+            | Page::AgentMetrics
+            | Page::SandboxMetrics
+            | Page::RequestLog
+            | Page::Query
+            | Page::Agents
+            | Page::Artifacts
+            | Page::Vaults
+            | Page::Mcp
+            | Page::Automations
+            | Page::Nodes => {
+                empty::render(app.page(), buf, &mut rows);
                 None
             }
         },

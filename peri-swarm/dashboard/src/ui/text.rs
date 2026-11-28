@@ -97,12 +97,12 @@ pub fn page_label(page: Page) -> &'static str {
         Page::SandboxMetrics => "Sandbox metrics",
         Page::SessionLog => "Session log",
         Page::RequestLog => "Request log",
+        Page::Query => "Query",
         Page::Agents => "Agents",
-        Page::EnvironmentTemplates => "Environment templates",
-        Page::Skills => "Skills",
-        Page::Files => "Files",
+        Page::Artifacts => "Artifacts",
         Page::Vaults => "Vaults",
-        Page::ProjectsAndKeys => "Projects and keys",
+        Page::Mcp => "MCP",
+        Page::Automations => "Automations",
         Page::Nodes => "Nodes",
         Page::Settings => "Settings",
     }
@@ -478,36 +478,36 @@ pub fn empty_page(page: Page) -> EmptyPageText {
             supported: "Agent model, instructions, and per-turn usage are available per session.",
         },
         Page::SandboxMetrics => EmptyPageText {
-            reason: "Sandbox resource metrics are not collected by this build.",
-            supported: "The gateway reports the sandbox type and id attached to a session.",
+            reason: "This build collects no resource-level sandbox metrics.",
+            supported: "The gateway reports only the sandbox type and id attached to a session; it exposes no CPU, memory, or sandbox resource usage.",
         },
         Page::RequestLog => EmptyPageText {
             reason: "The gateway does not expose a server request log.",
             supported: "Session item history is available per session. Use Session log to find a session.",
         },
+        Page::Query => EmptyPageText {
+            reason: "The query page is not implemented in this build.",
+            supported: "This dashboard calls no ad-hoc query API. Session data remains available in Session log.",
+        },
         Page::Agents => EmptyPageText {
             reason: "This build does not manage agents as a standalone resource.",
             supported: "Agent model and instructions are configured per session and shown in session detail.",
         },
-        Page::EnvironmentTemplates => EmptyPageText {
-            reason: "This build does not manage environment templates.",
-            supported: "Sessions can request an environment (none or openai_hosted) when created; the allocated environment is reported per session.",
-        },
-        Page::Skills => EmptyPageText {
-            reason: "Skills are not exposed by the gateway API used here.",
-            supported: "Session instructions and metadata remain available in session detail.",
-        },
-        Page::Files => EmptyPageText {
-            reason: "File browsing is not exposed by the gateway API used here.",
-            supported: "A session's working directory (cwd) is reported in session detail.",
+        Page::Artifacts => EmptyPageText {
+            reason: "Artifacts are not implemented in this build.",
+            supported: "The gateway exposes no artifact store or artifact endpoints.",
         },
         Page::Vaults => EmptyPageText {
             reason: "The gateway used here exposes no vault endpoints.",
             supported: "Vault ids reported on a session are shown in session detail when present.",
         },
-        Page::ProjectsAndKeys => EmptyPageText {
-            reason: "Project and key management is not exposed by the gateway API used here.",
-            supported: "Credentials for this dashboard are edited in Settings.",
+        Page::Mcp => EmptyPageText {
+            reason: "MCP server management is not implemented in this build.",
+            supported: "The gateway exposes no MCP server inventory or configuration endpoints.",
+        },
+        Page::Automations => EmptyPageText {
+            reason: "Automations are not implemented in this build.",
+            supported: "The gateway exposes no automation or schedule endpoints.",
         },
         Page::Nodes => EmptyPageText {
             reason: "Multi-node aggregation is not available in this build.",
