@@ -636,7 +636,9 @@ impl AcpChild {
         // them only adds transport traffic (design §6.1 mapping table).
         caps.agent_activity = false;
         caps.system_reminder = false;
-        caps.token_stats = false;
+        // Token counts only travel on `usage_update._meta`; the gateway
+        // persists them per turn, so the capability must be requested.
+        caps.token_stats = true;
         let response = self
             .client
             .send_request(

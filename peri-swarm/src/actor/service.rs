@@ -39,12 +39,12 @@ use super::runtime::{
     SessionStoreDeployment, SubagentReader, WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
-    new_root_session_id, turn_id_for_item, ActorKey, ApprovalDecision, Disposition,
+    new_root_session_id, turn_id_for_item, ActorKey, AgentMetrics, ApprovalDecision, Disposition,
     EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputOutcome, InputState, InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec,
-    OfficialSubagent, OfficialTurn, SandboxView, SessionPage, SessionState, SessionView,
-    SessionsWindow, StreamEvent, SubagentPage, SubagentRecord, SubagentsWindow, SwarmError,
-    TurnPage, TurnView, TurnsWindow,
+    MetricsWindow, OfficialSubagent, OfficialTurn, SandboxView, SessionPage, SessionState,
+    SessionView, SessionsWindow, StreamEvent, SubagentPage, SubagentRecord, SubagentsWindow,
+    SwarmError, TurnPage, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::official_items::item_page;
@@ -751,7 +751,10 @@ impl AcpSwarmService {
         let turn = runtime.and_then(|runtime| runtime.turn.borrow().clone());
         let sandbox = self.sandbox_view(&row).await?;
         let required_actions = self.live_required_actions(logical_id);
-        Ok(self.session_view(&row, turn, sandbox, required_actions))
+        let view = self.session_view(&row, turn, sandbox, required_actions);
+        // `sessions.retrieve` reports the persisted turn aggregate; `list` does
+        // not pay one turn scan per row and keeps `usage: null`.
+        crate::service::usage::with_session_usage(self.store.as_ref(), view).await
     }
 
     /// Current pending approvals of the live runtime (empty when not live).
@@ -1929,6 +1932,12 @@ impl SwarmService for AcpSwarmService {
             view.required_actions = required_actions;
         }
         Ok(page)
+    }
+
+    async fn agent_metrics(&self, window: MetricsWindow) -> Result<AgentMetrics, SwarmError> {
+        // Cross-session by construction: the report is read from the store,
+        // which every live actor writes its turns into.
+        crate::service::usage::agent_metrics(self.store.as_ref(), &window).await
     }
 
     async fn update_session(

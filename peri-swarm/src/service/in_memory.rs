@@ -16,13 +16,13 @@ use super::{
 use crate::config::SwarmConfig;
 use crate::domain::official::{unix_from_rfc3339, unix_now};
 use crate::domain::{
-    new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
-    ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
-    InputSubmission, ItemKind, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
-    OfficialEvent, OfficialMessageItem, OfficialSession, OfficialSubagent, OfficialTurn,
-    SessionPage, SessionState, SessionStatus, SessionView, SessionsWindow, StreamEvent,
-    SubagentPage, SubagentsWindow, SwarmError, TurnEvent, TurnPage, TurnStatus, TurnView,
-    TurnsWindow,
+    new_root_session_id, turn_id_for_item, ActorKey, AgentMetrics, Disposition, EnvironmentKind,
+    EnvironmentRef, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome,
+    InputState, InputSubmission, ItemKind, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
+    MetricsWindow, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialSubagent,
+    OfficialTurn, SessionPage, SessionState, SessionStatus, SessionView, SessionsWindow,
+    StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnEvent, TurnPage, TurnStatus,
+    TurnView, TurnsWindow,
 };
 use crate::store::{
     store_failure, InputPut, StoreError, SwarmInputRow, SwarmItemRow, SwarmSessionPatch,
@@ -257,7 +257,10 @@ impl InMemorySwarmService {
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
         let row = self.require_session(logical_id).await?;
-        self.session_view(&row).await
+        let view = self.session_view(&row).await?;
+        // Same retrieve rule as the ACP service: the aggregate is attached on
+        // `sessions.retrieve`, while `list` keeps `usage: null`.
+        super::usage::with_session_usage(self.store.as_ref(), view).await
     }
 
     fn resolve_model(&self, requested: Option<&str>) -> Result<Option<String>, SwarmError> {
@@ -1082,6 +1085,12 @@ impl SwarmService for InMemorySwarmService {
 
     async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
         super::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn agent_metrics(&self, window: MetricsWindow) -> Result<AgentMetrics, SwarmError> {
+        // The aggregate reads the same store the turns are persisted into, so
+        // the fake service reports exactly what a real actor would.
+        super::usage::agent_metrics(self.store.as_ref(), &window).await
     }
 
     async fn update_session(

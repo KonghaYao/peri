@@ -5,19 +5,25 @@
 //! `409 input_conflict`. Turns are upserted so the terminal write replaces the
 //! status, times, error and usage while keeping the opening `created_at`.
 
+use serde_json::Value;
+
 use super::budget::{unexpected_row_count, unexplained, within_budget};
 use super::codec::{
-    bind_binding, bind_input, bind_turn, decode_binding, decode_input, decode_turn, encode,
+    bind_binding, bind_input, bind_turn, bind_turn_usage, decode_binding, decode_input,
+    decode_turn, decode_turn_usage, encode,
 };
 use super::sql::{
-    CLOSE_OPEN_TURNS_SQL, HAS_OPEN_TURN_SQL, INSERT_INPUT_SQL, SELECT_BINDING_SQL,
-    SELECT_INPUT_SQL, SELECT_TURNS_ASC_AFTER_SQL, SELECT_TURNS_ASC_SQL,
-    SELECT_TURNS_DESC_AFTER_SQL, SELECT_TURNS_DESC_SQL, SELECT_TURN_SQL, UPSERT_BINDING_SQL,
+    CLOSE_OPEN_TURNS_SQL, HAS_OPEN_TURN_SQL, INSERT_INPUT_SQL, RECORD_TURN_USAGE_SQL,
+    SELECT_BINDING_SQL, SELECT_INPUT_SQL, SELECT_SESSION_USAGE_TURNS_SQL,
+    SELECT_TURNS_ASC_AFTER_SQL, SELECT_TURNS_ASC_SQL, SELECT_TURNS_DESC_AFTER_SQL,
+    SELECT_TURNS_DESC_SQL, SELECT_TURN_SQL, SELECT_TURN_USAGE_WINDOW_SQL, UPSERT_BINDING_SQL,
     UPSERT_TURN_SQL,
 };
 use super::SwarmStateStore;
 use crate::domain::{ItemOrder, TurnStatus, TurnsWindow};
-use crate::store::{InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmTurnRow};
+use crate::store::{
+    InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmTurnRow, SwarmTurnUsageRow,
+};
 
 impl SwarmStateStore {
     pub(super) async fn put_input(&self, row: SwarmInputRow) -> Result<InputPut, StoreError> {
@@ -108,6 +114,36 @@ impl SwarmStateStore {
         }
     }
 
+    pub(super) async fn record_turn_usage(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+        created_at: i64,
+        started_at: Option<i64>,
+        usage: &Value,
+    ) -> Result<(), StoreError> {
+        let affected = within_budget(
+            "record_turn_usage",
+            bind_turn_usage(
+                sqlx::query(RECORD_TURN_USAGE_SQL),
+                logical_id,
+                turn_id,
+                created_at,
+                started_at,
+                usage,
+            )?
+            .execute(self.pool()),
+        )
+        .await?
+        .rows_affected();
+        // Zero rows means the turn is already terminal and kept its own usage;
+        // that is the documented no-op, not a lost write.
+        match affected {
+            0 | 1 => Ok(()),
+            other => Err(unexplained("record_turn_usage", other)),
+        }
+    }
+
     pub(super) async fn get_turn(
         &self,
         logical_id: &str,
@@ -187,6 +223,40 @@ impl SwarmStateStore {
             }
         };
         rows.iter().map(decode_turn).collect()
+    }
+
+    pub(super) async fn session_usage_turns(
+        &self,
+        logical_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        let rows = within_budget(
+            "session_usage_turns",
+            sqlx::query(SELECT_SESSION_USAGE_TURNS_SQL)
+                .bind(logical_id.to_owned())
+                .bind(i64::from(limit))
+                .fetch_all(self.pool()),
+        )
+        .await?;
+        rows.iter().map(decode_turn_usage).collect()
+    }
+
+    pub(super) async fn turn_usage_window(
+        &self,
+        start_at: i64,
+        end_at: i64,
+        limit: u32,
+    ) -> Result<Vec<SwarmTurnUsageRow>, StoreError> {
+        let rows = within_budget(
+            "turn_usage_window",
+            sqlx::query(SELECT_TURN_USAGE_WINDOW_SQL)
+                .bind(start_at)
+                .bind(end_at)
+                .bind(i64::from(limit))
+                .fetch_all(self.pool()),
+        )
+        .await?;
+        rows.iter().map(decode_turn_usage).collect()
     }
 
     pub(super) async fn close_open_turns(

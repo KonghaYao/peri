@@ -15,7 +15,7 @@ use sqlx::{Postgres, Row};
 
 use super::super::{
     StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionPatch, SwarmSessionRow,
-    SwarmSessionUpdate, SwarmTurnRow,
+    SwarmSessionUpdate, SwarmTurnRow, SwarmTurnUsageRow,
 };
 use super::budget::unreadable;
 use crate::domain::{
@@ -243,6 +243,19 @@ pub(super) fn decode_turn(row: &PgRow) -> Result<SwarmTurnRow, StoreError> {
     })
 }
 
+/// Column list: `SELECT_SESSION_USAGE_TURNS_SQL` /
+/// `SELECT_TURN_USAGE_WINDOW_SQL`.
+pub(super) fn decode_turn_usage(row: &PgRow) -> Result<SwarmTurnUsageRow, StoreError> {
+    Ok(SwarmTurnUsageRow {
+        logical_id: text(row, "logical_id")?,
+        turn_id: text(row, "turn_id")?,
+        created_at: int(row, "created_at")?,
+        usage: optional_json(row, "usage_json")?,
+        model: optional_text(row, "model")?,
+        last_active_at: text(row, "last_activity_at")?,
+    })
+}
+
 // ── parameter binding ───────────────────────────────────────────────────────
 //
 // Each binder follows the column order of the matching statement in
@@ -353,6 +366,22 @@ pub(super) fn bind_turn<'q>(
         .bind(error)
         .bind(usage)
         .bind(row.subagent_id.clone()))
+}
+
+pub(super) fn bind_turn_usage<'q>(
+    query: Query<'q, Postgres, PgArguments>,
+    logical_id: &str,
+    turn_id: &str,
+    created_at: i64,
+    started_at: Option<i64>,
+    usage: &Value,
+) -> Result<Query<'q, Postgres, PgArguments>, StoreError> {
+    Ok(query
+        .bind(logical_id.to_owned())
+        .bind(turn_id.to_owned())
+        .bind(created_at)
+        .bind(started_at)
+        .bind(encode(usage, "turn usage")?))
 }
 
 /// Bind the five values [`super::sql::PATCH_SESSION_SQL`] consumes after the id.

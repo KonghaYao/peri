@@ -73,6 +73,9 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/agents/sessions",
             get(handlers::list_sessions).post(handlers::create_session),
         )
+        // Cross-session token report for the Agent metrics page; registered in
+        // the auth-guarded router like every other data route.
+        .route("/v1/agents/metrics", get(handlers::get_agent_metrics))
         .route(
             "/v1/agents/sessions/{logical_id}",
             get(handlers::get_session)

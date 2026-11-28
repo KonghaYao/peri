@@ -26,9 +26,10 @@ use crate::actor::swarm::{
     RespondRequiredAction, Submit, Subscribe, SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
 };
 use crate::domain::{
-    new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
-    ItemsWindow, LogicalId, OfficialSubagent, OfficialTurn, SessionPage, SessionView,
-    SessionsWindow, StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnPage, TurnsWindow,
+    new_root_session_id, ActorKey, AgentMetrics, Cursor, EventCursor, InputOutcome,
+    InputSubmission, ItemPage, ItemsWindow, LogicalId, MetricsWindow, OfficialSubagent,
+    OfficialTurn, SessionPage, SessionView, SessionsWindow, StreamEvent, SubagentPage,
+    SubagentsWindow, SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameParser;
 use crate::service::{
@@ -304,6 +305,12 @@ impl SwarmService for RivetSwarmService {
         // `sessions.list` is cross-session: no actor owns the result set, so
         // the gateway reads the same store the actors write.
         crate::service::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn agent_metrics(&self, window: MetricsWindow) -> Result<AgentMetrics, SwarmError> {
+        // No actor owns a cross-session report: the gateway reads the store the
+        // actors persist their turns into.
+        crate::service::usage::agent_metrics(self.store.as_ref(), &window).await
     }
 
     async fn update_session(

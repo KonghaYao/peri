@@ -7,6 +7,7 @@
 mod in_memory;
 pub(crate) mod official_items;
 pub(crate) mod subagents;
+pub(crate) mod usage;
 
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
@@ -23,11 +24,11 @@ use tokio::sync::broadcast;
 pub use crate::actor::reader::ApprovalReceipt;
 
 use crate::domain::{
-    EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
-    McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialSubagent,
-    OfficialTurn, PromptCacheOptions, SessionPage, SessionState, SessionStatus, SessionView,
-    SessionsWindow, StreamEvent, SubagentPage, SubagentsWindow, SwarmError, TurnPage, TurnStatus,
-    TurnsWindow,
+    AgentMetrics, EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage,
+    ItemsWindow, LogicalId, McpToolSpec, MetricsWindow, OfficialEvent, OfficialMessageItem,
+    OfficialSession, OfficialSubagent, OfficialTurn, PromptCacheOptions, SessionPage, SessionState,
+    SessionStatus, SessionView, SessionsWindow, StreamEvent, SubagentPage, SubagentsWindow,
+    SwarmError, TurnPage, TurnStatus, TurnsWindow,
 };
 use crate::store::{store_failure, SwarmSessionRow, SwarmStore};
 
@@ -1448,6 +1449,11 @@ pub trait SwarmService: Send + Sync {
         logical_id: &LogicalId,
         subagent_id: &str,
     ) -> Result<OfficialSubagent, SwarmError>;
+
+    /// `GET /v1/agents/metrics`: per-session token totals for one bounded
+    /// window. The aggregate comes from persisted turn usage, so it survives
+    /// restarts and never counts a replayed `usage_update` twice.
+    async fn agent_metrics(&self, window: MetricsWindow) -> Result<AgentMetrics, SwarmError>;
 
     /// Durably accept one input: idempotency resolution, receipt write, and the
     /// user item. The returned [`AcceptedInput::pending_turn`] is the execution

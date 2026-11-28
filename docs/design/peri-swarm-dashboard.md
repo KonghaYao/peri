@@ -58,7 +58,7 @@ flowchart LR
 | 分组 | 页面 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | Monitor | Core metrics | 空 | 本构建未实现指标聚合 |
-| Monitor | Agent metrics | 空 | 本构建未实现；网关只逐会话提供 model/instructions/usage |
+| Monitor | Agent metrics | 空 | 本构建未实现；数据源是网关 `GET /v1/agents/metrics` 的按会话 token 聚合 |
 | Monitor | Sandbox metrics | 空 | 没有资源级指标；网关只报告会话上的 sandbox 类型/id |
 | Monitor | Session log | 已实现 | 默认页；列表按最近活跃排序、过滤、搜索、增量加载、详情 |
 | Monitor | Request log | 空 | 本构建未实现；网关不暴露服务器请求日志 |
@@ -137,6 +137,7 @@ flowchart LR
 | 列表 | `GET /v1/agents/sessions?limit=N&order=desc` |
 | 详情 | `GET /v1/agents/sessions/{id}` |
 | Turns | `GET /v1/agents/sessions/{id}/turns?limit=50&order=desc[&after=]` |
+| Agent metrics | `GET /v1/agents/metrics?start_time=<us>&end_time=<us>&limit=N` |
 | Items | `GET /v1/agents/sessions/{id}/items?limit=50&order=desc[&after=]` |
 | 创建 | `POST /v1/agents/sessions` |
 | 更新 | `POST /v1/agents/sessions/{id}` |
@@ -155,6 +156,11 @@ flowchart LR
 `required_actions`、`metadata`、`environment`、`sandbox`、`vault_ids`、`usage`、`error`
 等），`has_more` / `hasMore`、`nextCursor` / `next_cursor` 均接受。错误信封为
 `{"error":{"code","message","details"}}`。
+
+`/v1/agents/metrics` 的时间窗是 Unix 微秒，默认最近 24 小时、上限 31 天。`usage` 口径
+与网关一致：`input_tokens` 已扣除 cache 读/写，`total_tokens` 为四项之和，`turns`/`calls`
+只统计带观测的 turn/调用；没有任何 usage 事实的会话不出现在 `sessions` 中，页面显示空态
+而不是 0。`totals` 覆盖整窗，`truncated: true` 表示扫描达到上限、只覆盖最新行。
 
 列表响应可能按 `logical_id desc` 排序，但 `logicalId` 是调用方任意字符串，不代表时间
 顺序。Dashboard 在 `SessionLogState::apply_page` 保存响应前做稳定降序排序：主键

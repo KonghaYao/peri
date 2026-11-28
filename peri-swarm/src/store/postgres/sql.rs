@@ -136,8 +136,18 @@ pub(super) const UPSERT_TURN_SQL: &str = "INSERT INTO swarm_turns
         started_at = excluded.started_at,
         completed_at = excluded.completed_at,
         error_json = excluded.error_json,
-        usage_json = excluded.usage_json,
+        usage_json = COALESCE(excluded.usage_json, swarm_turns.usage_json),
         subagent_id = excluded.subagent_id";
+
+/// Usage-only turn write. An observation touches `usage_json` and nothing
+/// else: a late `usage_update` must neither revive a terminal row nor replace
+/// the usage the terminal write recorded. A missing row is created open so a
+/// usage fact that arrives before the opening write is not lost.
+pub(super) const RECORD_TURN_USAGE_SQL: &str = "INSERT INTO swarm_turns
+    (logical_id, turn_id, status, created_at, started_at, usage_json)
+    VALUES ($1, $2, 'in_progress', $3, $4, $5)
+    ON CONFLICT (logical_id, turn_id) DO UPDATE SET usage_json = excluded.usage_json
+    WHERE swarm_turns.status IN ('queued', 'in_progress', 'waiting')";
 
 pub(super) const SELECT_TURN_SQL: &str =
     "SELECT logical_id, turn_id, status, created_at, started_at,
@@ -167,6 +177,26 @@ pub(super) const SELECT_TURNS_DESC_AFTER_SQL: &str =
     FROM swarm_turns WHERE logical_id = $1 AND
     (created_at < $2 OR (created_at = $2 AND turn_id < $3))
     ORDER BY created_at DESC, turn_id DESC LIMIT $4";
+
+/// Session usage aggregate: every turn plus the session's configured model and
+/// last activity in one read.
+pub(super) const SELECT_SESSION_USAGE_TURNS_SQL: &str =
+    "SELECT t.logical_id, t.turn_id, t.created_at, t.usage_json,
+    s.model, s.last_activity_at
+    FROM swarm_turns t
+    JOIN swarm_sessions s ON s.logical_id = t.logical_id
+    WHERE t.logical_id = $1
+    ORDER BY t.created_at DESC, t.turn_id DESC LIMIT $2";
+
+/// Agent-metrics window: cross-session turn rows in `[start_at, end_at]`
+/// (Unix seconds), newest first.
+pub(super) const SELECT_TURN_USAGE_WINDOW_SQL: &str =
+    "SELECT t.logical_id, t.turn_id, t.created_at, t.usage_json,
+    s.model, s.last_activity_at
+    FROM swarm_turns t
+    JOIN swarm_sessions s ON s.logical_id = t.logical_id
+    WHERE t.created_at >= $1 AND t.created_at <= $2
+    ORDER BY t.created_at DESC, t.turn_id DESC LIMIT $3";
 
 pub(super) const CLOSE_OPEN_TURNS_SQL: &str = "UPDATE swarm_turns
     SET status = $2, completed_at = $3, error_json = $4

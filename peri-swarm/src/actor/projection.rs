@@ -11,7 +11,7 @@
 
 use serde_json::{json, Value};
 
-use crate::domain::{ItemKind, ItemSource};
+use crate::domain::{ItemKind, ItemSource, TokenSample, UsageSample};
 
 pub const SESSION_UPDATE: &str = "session/update";
 pub const AGENT_EVENT: &str = "peri/agent_event";
@@ -40,6 +40,8 @@ pub enum Projected {
     QueueChanged {
         generation: String,
     },
+    /// One host `usage_update`, normalized for the turn accumulator.
+    Usage(UsageSample),
     TurnCompleted {
         request_id: Option<String>,
         stop_reason: String,
@@ -161,11 +163,16 @@ fn project_session_update(params: &Value) -> Vec<Projected> {
                 payload,
             })]
         }
+        // Token usage is accumulated into the open turn instead of becoming a
+        // transcript item. Replayed updates were already filtered above, so a
+        // reconnect cannot double-count a turn.
+        "usage_update" => usage_sample(update)
+            .map(|sample| vec![Projected::Usage(sample)])
+            .unwrap_or_default(),
         // The gateway persists the user message at acceptance, so the host's
-        // `user_message_chunk` echo would duplicate it. Command/config/usage
-        // updates are not transcript items (`design §6.1` mapping table).
+        // `user_message_chunk` echo would duplicate it. Command/config updates
+        // are not transcript items (`design §6.1` mapping table).
         "user_message_chunk"
-        | "usage_update"
         | "plan"
         | "available_commands_update"
         | "current_mode_update"
@@ -173,6 +180,57 @@ fn project_session_update(params: &Value) -> Vec<Projected> {
         | "session_info_update" => Vec::new(),
         _ => Vec::new(),
     }
+}
+
+/// Normalize one `usage_update`.
+///
+/// The standard fields are `used`/`size` (context occupancy); the token
+/// breakdown only travels when the `token_stats` capability was negotiated
+/// (`peri-acp/src/event/mapper.rs`). `inputTokens` is the provider's whole
+/// prompt, so the cache buckets are removed from it before it becomes the
+/// gateway's `input_tokens` — the same rule the TUI print path uses.
+///
+/// A malformed update with neither context nor tokens produces no event; the
+/// gateway never fabricates counters.
+fn usage_sample(update: &Value) -> Option<UsageSample> {
+    let meta = update.get("_meta");
+    let tokens = meta.and_then(token_sample);
+    let sample = UsageSample {
+        context_used: update.get("used").and_then(Value::as_u64),
+        context_size: update.get("size").and_then(Value::as_u64),
+        tokens,
+        stop_reason: meta
+            .and_then(|meta| meta.get("stopReason"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    (sample.context_used.is_some() || sample.tokens.is_some()).then_some(sample)
+}
+
+fn token_sample(meta: &Value) -> Option<TokenSample> {
+    let input = meta.get("inputTokens").and_then(Value::as_u64)?;
+    let output = meta.get("outputTokens").and_then(Value::as_u64)?;
+    let cache_read = meta
+        .get("cacheReadTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation = meta
+        .get("cacheCreationTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Some(TokenSample {
+        input_tokens: input
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_creation),
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+        model: meta.get("model").and_then(Value::as_str).map(str::to_owned),
+        request_id: meta
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn project_agent_event(params: &Value) -> Vec<Projected> {
@@ -393,6 +451,123 @@ mod tests {
             }),
         );
         assert!(projected.is_empty());
+    }
+
+    #[test]
+    fn usage_update_normalizes_cache_out_of_input_tokens() {
+        let projected = project(
+            SESSION_UPDATE,
+            &update(json!({
+                "sessionUpdate": "usage_update",
+                "used": 950,
+                "size": 200_000,
+                "_meta": {
+                    "inputTokens": 100,
+                    "outputTokens": 7,
+                    "cacheReadTokens": 60,
+                    "cacheCreationTokens": 10,
+                    "requestId": "req-usage-1",
+                    "model": "claude-test",
+                    "stopReason": "tool_use",
+                },
+            })),
+        );
+        let [Projected::Usage(sample)] = projected.as_slice() else {
+            panic!("usage_update must project to Projected::Usage: {projected:?}");
+        };
+        assert_eq!(sample.context_used, Some(950));
+        assert_eq!(sample.context_size, Some(200_000));
+        let tokens = sample.tokens.as_ref().expect("token meta");
+        assert_eq!(
+            tokens.input_tokens, 30,
+            "inputTokens contains the cache buckets"
+        );
+        assert_eq!(tokens.output_tokens, 7);
+        assert_eq!(tokens.cache_read_tokens, 60);
+        assert_eq!(tokens.cache_creation_tokens, 10);
+        assert_eq!(tokens.total(), 107);
+        assert_eq!(tokens.model.as_deref(), Some("claude-test"));
+        assert_eq!(tokens.request_id.as_deref(), Some("req-usage-1"));
+        assert_eq!(sample.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn usage_update_without_meta_keeps_only_context_occupancy() {
+        let projected = project(
+            SESSION_UPDATE,
+            &update(json!({
+                "sessionUpdate": "usage_update",
+                "used": 1200,
+                "size": 200_000,
+            })),
+        );
+        let [Projected::Usage(sample)] = projected.as_slice() else {
+            panic!("usage_update must project to Projected::Usage: {projected:?}");
+        };
+        assert_eq!(sample.context_used, Some(1200));
+        assert_eq!(sample.context_size, Some(200_000));
+        assert!(
+            sample.tokens.is_none(),
+            "no token counters may be invented without `_meta`"
+        );
+    }
+
+    #[test]
+    fn usage_update_saturates_a_small_input_against_the_cache_buckets() {
+        let projected = project(
+            SESSION_UPDATE,
+            &update(json!({
+                "sessionUpdate": "usage_update",
+                "used": 10,
+                "size": 100,
+                "_meta": {
+                    "inputTokens": 5,
+                    "outputTokens": 1,
+                    "cacheReadTokens": 4,
+                    "cacheCreationTokens": 4,
+                },
+            })),
+        );
+        let [Projected::Usage(sample)] = projected.as_slice() else {
+            panic!("usage_update must project to Projected::Usage: {projected:?}");
+        };
+        assert_eq!(sample.tokens.as_ref().expect("token meta").input_tokens, 0);
+    }
+
+    #[test]
+    fn replayed_usage_update_is_ignored() {
+        // `session/load` replays usage updates; counting them again would
+        // double the turn's tokens after a reconnect.
+        let projected = project(
+            SESSION_UPDATE,
+            &json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 100,
+                    "size": 200_000,
+                    "_meta": { "periReplay": true, "inputTokens": 10, "outputTokens": 1 },
+                },
+            }),
+        );
+        assert!(projected.is_empty());
+    }
+
+    #[test]
+    fn usage_update_without_any_fact_is_dropped() {
+        assert!(project(
+            SESSION_UPDATE,
+            &update(json!({ "sessionUpdate": "usage_update" }))
+        )
+        .is_empty());
+        assert!(project(
+            SESSION_UPDATE,
+            &update(json!({
+                "sessionUpdate": "usage_update",
+                "_meta": { "model": "claude-test" },
+            }))
+        )
+        .is_empty());
     }
 
     #[test]

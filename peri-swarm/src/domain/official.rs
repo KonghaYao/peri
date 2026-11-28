@@ -280,6 +280,16 @@ impl OfficialTurn {
             });
         self
     }
+
+    /// Attach the turn's accumulated usage (`Turn.usage`).
+    ///
+    /// The live terminal frames read the same value, so a streamed
+    /// `turn.completed`/`turn.failed` and a later `turns.retrieve` agree.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<Value>) -> Self {
+        self.usage = usage;
+        self
+    }
 }
 
 /// Query window for `GET /v1/agents/sessions/{id}/turns` (`TurnListParams`).
@@ -892,8 +902,10 @@ impl OfficialEvent {
             event_id: turn_completed_event_id(turn_id),
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
+            // One source of truth: the event-level usage is the turn's own
+            // value, so the live frame and `turns.retrieve` cannot disagree.
+            usage: turn.usage.clone(),
             turn,
-            usage: None,
         }
     }
 
@@ -903,8 +915,8 @@ impl OfficialEvent {
             event_id: turn_failed_event_id(turn_id),
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
+            usage: turn.usage.clone(),
             turn,
-            usage: None,
         }
     }
 

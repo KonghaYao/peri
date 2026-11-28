@@ -2159,7 +2159,13 @@ async fn turns_update_and_delete_round_trip_through_the_actor_service() {
     assert_eq!(turn.status, "completed", "{turns:?}");
     assert!(turn.started_at.is_some());
     assert!(turn.completed_at.is_some());
-    assert_eq!(turn.usage, None);
+    // The stub host reports one `usage_update`; `token_stats` is negotiated, so
+    // the turn carries its normalized, cumulative usage.
+    let usage = turn.usage.as_ref().expect("turn usage");
+    assert_eq!(usage["model"], json!("stub-model"));
+    assert_eq!(usage["calls"], json!(1));
+    assert_eq!(usage["context_size"], json!(200_000));
+    assert_eq!(usage["total_tokens"], json!(0));
     assert_eq!(turn.subagent_id, None);
 
     let updated = service
