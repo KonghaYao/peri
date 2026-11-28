@@ -104,7 +104,7 @@ pub use safety::{UrlKind, classify_url, sanitize_for_terminal};
 /// 图片扫描结果（只读 API 的返回类型；字段语义见 `scan` 模块文档）。
 pub use scan::ImageInfo;
 pub(crate) use table::buffer_to_lines;
-pub use table::table_data_to_lines;
+pub use table::{table_data_to_lines, table_data_to_lines_with_theme};
 pub use types::{
     GenUiSegment, ImageSegment, ImageSource, MarkdownSegment, MermaidSegment, TableData,
 };

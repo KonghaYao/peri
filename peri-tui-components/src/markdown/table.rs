@@ -8,7 +8,9 @@ use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::types::TableData;
-use ratatui_kit::components::TableTheme;
+use peri_theme::bridge::ThemeDefinitionExt;
+use peri_theme::theme::ThemeDefinition;
+use ratatui_kit::components::{ComponentTheme, TableTheme};
 
 // ── 列宽计算 ────────────────────────────────────────────────────────
 
@@ -788,4 +790,17 @@ pub fn table_data_to_lines(
     let mut buf = Buffer::empty(area);
     render_table_to_buffer(&mut buf, area, &rows, &wa, theme.border_style, 1);
     buffer_to_lines(&buf, area)
+}
+
+/// 用 [`ThemeDefinition`] 的主题色渲染 Markdown 表格。
+///
+/// 组件 crate 已同时依赖 `ratatui-kit` 与 `peri-theme`；这里把主题桥接成
+/// `TableTheme`，调用方不需要新增依赖。
+pub fn table_data_to_lines_with_theme(
+    data: &TableData,
+    max_width: usize,
+    theme: &ThemeDefinition,
+) -> Vec<Line<'static>> {
+    let table_theme = TableTheme::from_palette(&theme.to_palette());
+    table_data_to_lines(data, &table_theme, max_width)
 }

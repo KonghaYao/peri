@@ -20,6 +20,7 @@ terminal text safety (`markdown::safety`) and pure value image sampling
 | `list::ListViewport` | measured content rows, row metrics, item count, selection | visible range and matching hit layout |
 | `completion::CompletionPopup` | pre-styled label/detail rows, selected index, inline height, title, empty text, styles | selected marker, visible window (`ListViewport::window`) and the matching `hit_layout()`; `hit()` returns the full-list index |
 | `list_nav` | key events and selection | navigation intent and bounds |
+| `pagination` | area, page state (`page`, `page_count`, `has_more`), previous/next labels, theme | one-row control layout (previous, page numbers with ellipsis gaps, next) with a label-exact rect per control and a compact fallback on narrow rows |
 | `overlay::OverlayFrame` | title line, border/title styles, area | top/bottom borders, centred title, `inner()` region and `hit()` (inside/border/outside); never clears |
 | `spinner::Spinner` | frame set, external frame index, icon style, pre-formatted text line | frame selection (`frame % len`) and `icon + space + text` composition |
 | `shimmer::shimmer_spans` | text, external phase in milliseconds, base/highlight colors, truecolor and reduced-motion flags | per-character cosine band styling (`2s` sweep); no clock, terminal caps or theme atoms |

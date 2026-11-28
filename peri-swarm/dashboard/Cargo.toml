@@ -1,0 +1,31 @@
+[package]
+name = "peri-swarm-dashboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Terminal dashboard for the Peri Swarm gateway"
+
+[lib]
+name = "peri_swarm_dashboard"
+path = "src/lib.rs"
+
+[[bin]]
+name = "peri-swarm-dashboard"
+path = "src/main.rs"
+
+[dependencies]
+peri-tui-components = { path = "../../peri-tui-components" }
+peri-theme = { path = "../../peri-theme" }
+ratatui = "0.30.2"
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tempfile.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+url.workspace = true
