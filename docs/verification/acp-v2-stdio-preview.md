@@ -91,6 +91,49 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
   被已提交 attach 取代的迟到失败不删除 slot、失败 takeover 保持 `Attaching` 并恢复
   owner 的 replay 状态、cursorless 等待中的 `session/cancel` 仍到达宿主。
 
+## 复审收口（S4 之后的第二轮 CodeRabbit 复审）
+
+本轮修复没有新增 wire 方法或 schema 字段，只在既有错误面、准入与回放合并语义上收口；
+进程内回归 `./scripts/cargo-rmcp-patched.sh test -p peri-acp --lib` 全绿。
+
+- **只读历史的 v1 准入门**：v1 连接的 `session/load` 若带分页 cursor 或 `history`
+  窗口，不再走单会话 setup 门，也不记录 setup 绑定；已绑定 A 的连接可以读 B 的历史，
+  读到成功也不会把 B 记成当前会话。初始 `session/load` 与畸形分页仍按 setup 准入。
+  回归 `host::stdio::v2::state::tests::{read_only_history_loads_do_not_take_the_v1_setup_gate,
+  an_initial_load_still_counts_as_a_v1_setup}` 与
+  `boundary_tests::a_v1_history_page_for_another_session_does_not_bind_it`。
+- **cleanup-incomplete 的 v1 绑定**：v1 setup 失败但宿主保留 reservation 时
+  （`data.reason = "session_cleanup_incomplete"`），连接仍绑定该会话直到显式 close；
+  v1 错误响应形状不变。回归
+  `boundary_tests::a_v1_setup_that_cannot_drain_a_close_stays_bound_until_that_close`。
+- **`initialize` 版本校验**：字段存在但不是 `0..=65535` 的 JSON 整数
+  （`-1`、`1.5`、`"2"`、`65536`）一律 `-32602`，不改变连接状态，随后仍可成功协商
+  v2。回归 `boundary_tests::an_unusable_protocol_version_never_binds_the_connection_to_v1`。
+- **`session/delete` 持久删除**：无本地 slot 的 delete 也转发宿主，宿主成功回复
+  `{}`；失败（如 `-32002`）原样透出且不动 slot。回归
+  `host::stdio::v2::lifecycle::tests::*`（无 slot 转发、拒绝保留 slot、成功 teardown、
+  缺 `sessionId` 的 `-32602`）。
+- **cleanup-incomplete 的 v2 setup 错误面**：setup 失败若是 cleanup-incomplete
+  （宿主 `data.reason`，或 `Session close incomplete` 前缀），客户端收到 `-32603` +
+  `data.reason/sessionId`，且适配器保留 `Attaching` slot 让 `session/close` 继续转发；
+  该会话不可 prompt。普通 setup 失败仍移除 slot。回归
+  `host::stdio::v2::errors_tests::{a_cleanup_incomplete_setup_keeps_a_close_retry_slot,
+  a_prefix_only_cleanup_incomplete_setup_names_the_resume_target,
+  a_cleanup_incomplete_setup_mapping_is_internal_and_keeps_the_host_data}`。
+- **`-32002` 的 `data.sessionId`**：preview-only handler（prompt 的内部 input 端、
+  resume 的配置快照）现在带请求里的会话 id；prompt 的错误结算原样返回该 error。
+  回归 `host::stdio::v2::errors_tests::preview_only_handlers_name_the_session_they_could_not_serve`。
+- **回放 hold 的合并语义**：`session_info_update` 是 pinned v2 的补丁，hold/flush 不再
+  按 kind 合并；`available_commands_update` / `config_option_update` /
+  `current_mode_update` 仍只保留最新整表。回归
+  `host::stdio::v2::replay::tests::session_info_patches_are_all_kept_in_arrival_order`。
+- **handback 水位**：任何成功的 setup（含非 owning 的迟到成功）都推进
+  `attached_setup`，失败 handback 不会复活被这次 attach 取代的更早 attempt（不再发
+  `replay_complete`/flush）。回归
+  `host::stdio::v2::replay::tests::a_stale_success_never_hands_the_slot_back_to_an_older_attempt`。
+- **wire 矩阵断言窗口**：S2 的「重试不得回显 `user_message`」断言移到冲突请求与新会话
+  `idle` 都被消费之后，`before` 仍作为窗口起点；此前在 ACK 处停止会漏掉随后补发的回显。
+
 ## 复审收口（`7a544cf29` 的 CodeRabbit 复审）
 
 - **A（并发探针的 ACK 顺序）**：已修复。矩阵只以首个 `idle` 判定 turn 结束；prompt
@@ -147,7 +190,9 @@ python3 scripts/verification/acp_v2_stdio.py target/debug/peri \
 - preview-only 内部方法（`_peri/stdio-v2/*`）对 v1 连接一律 `-32601`，即使
   `PERI_ACP_V2_PREVIEW=1` 已开启。
 - 首次 v2 `initialize` 缺 `info` 是 `-32602`（pinned v2 `InitializeRequest` 的
-  required 字段）；版本号低于 2（含 0）仍走 v1 协商，行为未改。
+  required 字段）；`protocolVersion` 存在但不是 `0..=65535` 的 JSON 整数
+  （负数、小数、字符串、超上限）同样是 `-32602`，且不改变连接状态；版本号低于 2
+  （含 0）仍走 v1 协商，行为未改。
 - 同一进程的第二个连接 attach 同一 live 会话时，不会收到第一个连接的 committed-delivery
   事件；其同 key 重试会等待 `close`/`cancel` 而不是立即确认（不会重复插入）。这是 S2
   留下的边界。

@@ -1,10 +1,29 @@
-use super::{Attach, Foreground, Slot};
+use peri_acp_types::history_page::{HistoryCursor, HistoryCursorEnvelope};
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::thread::ThreadId;
+use serde_json::json;
+
+use super::{Attach, Connection, Foreground, Slot, V1Admission};
 
 /// A slot with the identity `Connection::insert_slot` would give it.
 fn new_slot(attach: Attach) -> Slot {
     let mut slot = Slot::new(attach);
     slot.incarnation = 1;
     slot
+}
+
+/// A cursor the host's `classify` accepts as a history page position.
+fn cursor_for(thread: &str) -> String {
+    HistoryCursorEnvelope::new(
+        0,
+        format!("{thread}-snapshot"),
+        HistoryCursor::new(
+            ThreadId::from(thread.to_string()),
+            MessageId::new(),
+            format!("{thread}-head"),
+        ),
+    )
+    .encode()
 }
 
 fn running() -> Slot {
@@ -97,4 +116,59 @@ fn attach_hold_is_bounded_and_flushes_in_order() {
     assert_eq!(held.len(), MAX_HELD_UPDATES);
     assert_eq!(held[0]["index"], 0);
     assert!(slot.flush_held().is_empty());
+}
+
+#[test]
+fn read_only_history_loads_do_not_take_the_v1_setup_gate() {
+    let mut connection = Connection::default();
+    connection.commit_v1_setup("A");
+
+    // The host answers these from storage before reserving or binding a
+    // session, so a v1 connection bound to A may still browse B's history.
+    let page = json!({"sessionId": "B", "cursor": cursor_for("B")});
+    assert!(matches!(
+        connection.admit_v1_setup("session/load", &page),
+        V1Admission::Pass
+    ));
+    let window = json!({
+        "sessionId": "B",
+        "history": {"kind": "open", "direction": "around"}
+    });
+    assert!(matches!(
+        connection.admit_v1_setup("session/load", &window),
+        V1Admission::Pass
+    ));
+
+    // The binding is untouched: another setup is still refused.
+    assert!(matches!(
+        connection.admit_v1_setup("session/new", &json!({"cwd": "/workspace"})),
+        V1Admission::Refused(_)
+    ));
+}
+
+#[test]
+fn an_initial_load_still_counts_as_a_v1_setup() {
+    let mut connection = Connection::default();
+
+    // No cursor and no history: the load assembles the session, so it takes the
+    // gate and is recorded to bind on success.
+    let load = json!({"sessionId": "B"});
+    assert!(matches!(
+        connection.admit_v1_setup("session/load", &load),
+        V1Admission::Tracked(_)
+    ));
+    // While that setup is in flight nothing else may start.
+    assert!(matches!(
+        connection.admit_v1_setup("session/new", &json!({"cwd": "/workspace"})),
+        V1Admission::Refused(_)
+    ));
+
+    // A malformed page is not a read-only read: it goes to the host, which
+    // answers with its own error shape.
+    let mut connection = Connection::default();
+    let malformed = json!({"sessionId": "B", "cursor": "not-a-cursor"});
+    assert!(matches!(
+        connection.admit_v1_setup("session/load", &malformed),
+        V1Admission::Tracked(_)
+    ));
 }

@@ -33,6 +33,13 @@ later withdrawal or the shared close fails.
   historical one-session-per-connection gate for ACP v1, the TUI and in-process
   transports; only a transport that declares
   `AcpTransport::allows_concurrent_sessions` (the v2 adapter) skips it.
+- A v1 connection reproduces that gate at the adapter. A read-only
+  `session/load` is **not** a setup: a page cursor or a `history` window is
+  classified by the host before it reserves anything, answered from storage and
+  never attached, so it passes without taking the gate and without binding the
+  connection to the paged session. `session/new`, `session/fork`,
+  `session/resume` and an initial `session/load` keep the setup admission; a
+  malformed history request reaches the host and gets its own error shape.
 - Each slot owns a turn epoch and the foreground state machine
   `Idle → Running → RequiresAction → Running → Idle`. Turn start increments the
   epoch; the first outstanding permission/elicitation of a `Running` session
@@ -71,22 +78,32 @@ later withdrawal or the shared close fails.
   before its reply), including the stop reason (`cancelled`, `error`, …). A
   client that receives the `session_busy` refusal therefore still learns that the
   turn ended.
+- A setup refused because the session's previous close has not finished is the
+  exception to "a failed setup drops its slot": the host keeps that session
+  reserved until an explicit close drains it, so the adapter keeps an
+  `Attaching` slot for it. `session/close` therefore still reaches the host and
+  can retry the cleanup, while the slot is not `Attached` and no prompt can
+  address it. A normal setup failure still removes the slot it created.
 - `session/cancel` is accepted while a turn is running through a pending
   cursorless resume (`Attaching`, no replay); only an idle slot whose only
   activity is an attaching setup drops it.
-- `session/delete` is advertised and implemented: it settles this connection's
-  parked prompts, deletes the session, and drops the slot.
+- `session/delete` is advertised and implemented as a durable delete: it always
+  reaches the host, even for a session this connection never attached (the
+  pinned `session/list` → `session/delete` → `session/list` flow), and answers
+  the pinned empty payload. Only a successful reply settles this connection's
+  parked prompts and drops its slot; the host's error for a session it cannot
+  delete (for example `-32002`) is passed through and leaves the slot alone.
 
 ## Method surface
 
 | method | behavior |
 | --- | --- |
-| `initialize` | `protocolVersion` ≥ 2 plus `info`; repeats are allowed only before the first other request. Declarations commit with a successful host reply. |
+| `initialize` | `protocolVersion` ≥ 2 plus `info`; a present version that is not a JSON integer in `0..=65535` is `-32602` before any negotiation and leaves the connection unbound. Repeats are allowed only before the first other request. Declarations commit with a successful host reply. |
 | `session/new` | Creates a session; always carries `configOptions` in the v2 shape. |
 | `session/resume` | Attaches an existing session; `replayFrom` is optional. A cursorless resume of an already attached session only refreshes the state snapshot and metadata. |
 | `session/list` | Keyset pagination (below). `auth/*`, `session/fork`, `providers/*`, `mcp/message`, unknown methods are never forwarded. |
 | `session/close` | Closes this connection's slot; closing an unknown session is a success. |
-| `session/delete` | Advertised via `session.delete`; settles and removes this connection's slot. |
+| `session/delete` | Advertised via `session.delete`; always forwarded to the host (durable delete, slot or not), settles this connection's parked prompts and removes its slot only on success. |
 | `session/prompt` | Admission, durable idempotency key, committed-delivery settlement, cancellation. `resource_link` content is passed as a text reference and is **deliberately never fetched**; `audio`/`resource` are `-32602`. |
 | `session/set_config_option` | Validated against the option list last reported for the session (today `mode`, `model`, `thinking_effort`, built by `peri-acp/src/session/state_builders.rs`); the adapter defines no stable config-id list of its own. Unknown id/value is `-32602` and leaves the configuration untouched. |
 | `session/cancel` | Turn-level cancel: withdraws queued prompts, stops the host turn, publishes `idle cancelled`. |
@@ -135,6 +152,13 @@ later withdrawal or the shared close fails.
   tracks chunk identities so a replayed message is replaced rather than appended
   twice. Everything else arriving while replay is streaming is live and is
   parked in a per-session queue; live chunks never reset a message.
+- Parked live metadata is not merged blindly. `available_commands_update`,
+  `config_option_update` and `current_mode_update` replace their whole table, so
+  only the newest broadcast of each kind is kept (the host may repeat a table
+  once per attach phase). `session_info_update` is a **patch** in the pinned v2
+  schema — omitted fields keep their value — so every patch is kept and flushed
+  in arrival order; merging them would drop the title or timestamp a later patch
+  does not repeat.
 - Order for one `session/resume` with a cursor: last replayed update →
   `replay_complete` (exactly once, including an empty replay) → current state
   snapshot (`idle`/`running`/`requires_action`) → response → parked live updates.
@@ -186,9 +210,18 @@ that forwards it is the close-incomplete settlement of `session/close` (and the
 shared close/delete gate behind it); any other close/delete failure is `-32603`. Every other host `-32010` is mapped in
 `errors.rs::host_failure`: a transient setup refusal (`Session is executing`,
 `Session is closing`) becomes `-32020` + `data.reason = "session_busy"` when the
-session id is known; a setup whose client-supplied cwd/location cannot be used is
+session id is known; a setup refused because the session's close has not
+finished (`data.reason = "session_cleanup_incomplete"`, or the restore
+dispatch's `Session close incomplete: resume the close before loading this
+session`) becomes `-32603` with `data.reason = "session_cleanup_incomplete"` and
+`data.sessionId`; a setup whose client-supplied cwd/location cannot be used is
 `-32602` (Invalid params, host message kept); list storage failures and prompt
 workspace errors are `-32603` (Internal error, host message kept).
+
+`-32002` always names the session it is about in `data.sessionId`, including the
+preview-only handlers behind `session/prompt`'s internal input endpoint and the
+resume configuration fetch: the request named that session, so a client may drop
+its local state.
 
 `-32020` is **not** an execution-failure report: a failed execution ends the
 turn with `state_update.error.code = -32603` and `stopReason = "error"`.
@@ -197,13 +230,14 @@ turn with `state_update.error.code = -32603` and `stopReason = "error"`.
 | condition | code | data |
 | --- | --- | --- |
 | method not advertised or unknown (`auth/*`, `session/fork`, `providers/*`, `mcp/message`, unknown names) | `-32601` | — |
-| invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, malformed list cursor, non-integer list limit, repeated `initialize` below v2, v2 `initialize` without `info` | `-32602` | — |
-| session-scoped request naming a session this connection has not attached | `-32002` | `{ "sessionId": … }` |
+| invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, malformed list cursor, non-integer list limit, repeated `initialize` below v2, v2 `initialize` without `info`, a present `protocolVersion` that is not a JSON integer in `0..=65535` | `-32602` | — |
+| session-scoped request naming a session this connection has not attached, or a preview-only handler whose session is no longer active on the host | `-32002` | `{ "sessionId": … }` |
 | `terminal/cancel`, `tool_call/cancel` (per-object cancel is never advertised) | `-32602` | — |
 | prompt withdrawn before insertion, close/delete settlement, retry of a key whose submission was withdrawn in this session generation | `-32800` | — |
 | the same key/identity with different content (in flight, or already inserted in the transcript) | `-32602` | — |
 | capacity/backpressure | `-32020` | `{ "reason": "prompt_capacity" \| …, "sessionId": … }` |
 | v2 setup refused because the session's turn is executing or the session is closing (host `-32010`) | `-32020` | `{ "reason": "session_busy", "sessionId": … }` |
+| v2 setup refused because the session's previous close has not finished (host `-32010`, `reason = session_cleanup_incomplete` or the `Session close incomplete` prefix) | `-32603` | `{ "reason": "session_cleanup_incomplete", "sessionId": … }`; the slot stays `Attaching` so `session/close` can retry |
 | v2 setup whose client-supplied cwd/location cannot be used (host `-32010`) | `-32602` | host message kept |
 | `session/list` storage failure, prompt workspace/resource failure (host `-32010`) | `-32603` | host message kept |
 | execution failure reported in the state snapshot | `-32603` | `state_update.error = { code: -32603, message: … }`, `stopReason = "error"` |

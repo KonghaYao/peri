@@ -23,7 +23,9 @@ use super::PromptLocks;
 use super::SharedSessions;
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 
-pub(super) use server_loop::ServerLoop;
+pub(in crate::host) use server_loop::{
+    cleanup_incomplete_error_session_id, cleanup_incomplete_session_id, ServerLoop,
+};
 
 #[path = "server_loop/server_loop.rs"]
 #[expect(

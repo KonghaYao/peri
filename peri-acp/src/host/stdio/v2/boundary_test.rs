@@ -3,11 +3,29 @@
 
 use serde_json::json;
 
+use peri_acp_types::history_page::{HistoryCursor, HistoryCursorEnvelope};
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::thread::ThreadId;
+
 use super::harness::{
     begin_turn, config_options, expect_error, expect_state, permission, Harness, CWD,
 };
 use crate::transport::types::{AcpError, RequestId};
 use crate::transport::AcpTransport;
+
+/// A cursor the host's `classify` accepts as a history page position.
+fn cursor_for(thread: &str) -> String {
+    HistoryCursorEnvelope::new(
+        0,
+        format!("{thread}-snapshot"),
+        HistoryCursor::new(
+            ThreadId::from(thread.to_string()),
+            MessageId::new(),
+            format!("{thread}-head"),
+        ),
+    )
+    .encode()
+}
 
 #[tokio::test]
 async fn v1_connections_keep_the_hosts_one_session_gate() {
@@ -128,6 +146,146 @@ async fn a_v1_setup_reservation_clears_on_failure() {
     let (answered, result) = harness.expect_out().await.response();
     assert_eq!(answered, retry);
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn a_v1_history_page_for_another_session_does_not_bind_it() {
+    let mut harness = Harness::start();
+    harness.negotiate_v1().await;
+    harness.open("A").await;
+
+    // A read-only page for B is not a setup: it reaches the host instead of the
+    // wrapper's session-switch gate.
+    let page = RequestId::Number(940);
+    harness
+        .request(
+            page.clone(),
+            "session/load",
+            json!({"sessionId": "B", "cursor": cursor_for("B")}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/load");
+    harness
+        .respond(forwarded.id, Ok(json!({"sessionId": "B", "items": []})))
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, page);
+    assert!(result.is_ok());
+
+    // The successful read did not bind B: the connection still holds A, so a
+    // new setup is refused.
+    let second = RequestId::Number(941);
+    harness
+        .request(second.clone(), "session/new", json!({"cwd": CWD}))
+        .await;
+    let error = expect_error(&harness, second, -32010).await;
+    assert_eq!(
+        error.data.expect("switch reason")["reason"],
+        "session_switch_requires_close"
+    );
+}
+
+#[tokio::test]
+async fn a_v1_setup_that_cannot_drain_a_close_stays_bound_until_that_close() {
+    let mut harness = Harness::start();
+    harness.negotiate_v1().await;
+
+    let resume = RequestId::Number(930);
+    harness
+        .request(
+            resume.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    harness
+        .respond(
+            forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session A cleanup incomplete: manager=busy, environment_drained=false",
+            )
+            .with_data(json!({
+                "reason": "session_cleanup_incomplete",
+                "sessionId": "A",
+            }))),
+        )
+        .await;
+    // The v1 error response keeps its host shape.
+    let error = expect_error(&harness, resume, -32010).await;
+    assert_eq!(
+        error.data.expect("cleanup data")["reason"],
+        "session_cleanup_incomplete"
+    );
+
+    // The host retained A's reservation until an explicit close drains it, so
+    // this connection may not set up B yet.
+    let other = RequestId::Number(931);
+    harness
+        .request(other.clone(), "session/new", json!({"cwd": CWD}))
+        .await;
+    let error = expect_error(&harness, other, -32010).await;
+    assert_eq!(
+        error.data.expect("switch reason")["reason"],
+        "session_switch_requires_close"
+    );
+
+    // The explicit close releases the binding.
+    let close = RequestId::Number(932);
+    harness
+        .request(close.clone(), "session/close", json!({"sessionId": "A"}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/close");
+    harness.respond(forwarded.id, Ok(json!({}))).await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, close);
+    assert!(result.is_ok());
+
+    let fresh = RequestId::Number(933);
+    harness
+        .request(fresh.clone(), "session/new", json!({"cwd": CWD}))
+        .await;
+    let forwarded = harness.expect_forwarded().await;
+    assert_eq!(forwarded.method, "session/new");
+    harness
+        .respond(forwarded.id, Ok(json!({"sessionId": "C"})))
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, fresh);
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn an_unusable_protocol_version_never_binds_the_connection_to_v1() {
+    let mut harness = Harness::start();
+    // Each of these is a present `protocolVersion` that the pinned uint16 type
+    // rejects. Treating it as absent would fall through to the v1 negotiation
+    // and make the v2 attempt impossible.
+    for (offset, version) in [json!(-1), json!(1.5), json!("2"), json!(65536)]
+        .into_iter()
+        .enumerate()
+    {
+        let id = RequestId::Number(950 + offset as i64);
+        harness
+            .request(
+                id.clone(),
+                "initialize",
+                json!({"protocolVersion": version, "info": {"name": "probe", "version": "1"}}),
+            )
+            .await;
+        let error = expect_error(&harness, id, -32602).await;
+        assert_eq!(error.message, "Invalid protocolVersion", "{version}");
+    }
+    // No version above or below the pinned range reached the host, and the
+    // connection state is untouched.
+    harness.expect_quiet().await;
+
+    // The same connection still negotiates v2. (`protocolVersion: 1` keeps the
+    // v1 path; `negotiate_v1` covers it, and a plain `2` is what follows.)
+    harness.negotiate().await;
 }
 
 #[tokio::test]

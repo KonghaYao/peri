@@ -30,7 +30,7 @@ impl ServerLoop<'_> {
             let state = sessions
                 .get(session_id)
                 .filter(|state| !state.closing && state.close_in_flight == 0)
-                .ok_or_else(|| errors::session_unavailable("Session not active"))?;
+                .ok_or_else(|| errors::session_unavailable(session_id, "Session not active"))?;
             state.environment.clone()
         };
         let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(self.cfg);

@@ -700,6 +700,87 @@ async fn a_failed_cursorless_takeover_restores_the_owners_replay_state() {
 }
 
 #[tokio::test]
+async fn a_stale_success_never_hands_the_slot_back_to_an_older_attempt() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+
+    // Three resumes of a session this connection never attached. The first two
+    // replay; the third takes the slot over.
+    let old = RequestId::Number(4950);
+    harness
+        .request(
+            old.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let old_forwarded = harness.expect_forwarded().await;
+    let middle = RequestId::Number(4951);
+    harness
+        .request(
+            middle.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD, "replayFrom": replay_start()}),
+        )
+        .await;
+    let middle_forwarded = harness.expect_forwarded().await;
+    let owner = RequestId::Number(4952);
+    harness
+        .request(
+            owner.clone(),
+            "session/resume",
+            json!({"sessionId": "A", "cwd": CWD}),
+        )
+        .await;
+    let owner_forwarded = harness.expect_forwarded().await;
+    assert_eq!(owner_forwarded.method, "session/resume");
+
+    // A stale success is still a completed attach. It must raise the watermark:
+    // the handback below may only pick a pending attempt newer than the last
+    // attach that actually completed.
+    harness
+        .respond(middle_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, middle);
+    assert!(result.is_ok());
+    harness.expect_quiet().await;
+
+    // The takeover fails. `old` is older than that attach, so it is not handed
+    // back.
+    harness
+        .respond(
+            owner_forwarded.id,
+            Err(AcpError::new(
+                -32010,
+                "Session is executing; retry after the current turn",
+            )),
+        )
+        .await;
+    expect_error(&harness, owner, -32020).await;
+    harness.expect_quiet().await;
+
+    // `old` completing now must not resurrect itself as the owner: no
+    // `replay_complete`, no flush, and the live session keeps serving.
+    harness
+        .respond(old_forwarded.id, Ok(json!({"sessionId": "A"})))
+        .await;
+    expect_state(&harness, "A", "idle").await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, old);
+    assert!(result.is_ok());
+    harness
+        .send_update(
+            "A",
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1"}),
+        )
+        .await;
+    assert_eq!(harness.expect_out().await.update()["toolCallId"], "t1");
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
 async fn a_cancel_while_a_cursorless_resume_is_pending_still_reaches_the_turn() {
     let mut harness = Harness::start();
     harness.negotiate().await;
@@ -783,4 +864,42 @@ fn a_replayed_broadcast_keeps_only_the_newest_metadata_snapshot_per_kind() {
         ]
     );
     assert_eq!(flushed[1]["availableCommands"][0]["name"], "fresh");
+}
+
+#[test]
+fn session_info_patches_are_all_kept_in_arrival_order() {
+    // The pinned v2 `session_info_update` is a patch: omitted fields keep their
+    // value. Parked during a replay it must therefore never be merged by kind,
+    // or the title and the timestamp below would overwrite each other.
+    let mut deferred = super::Deferred::default();
+    deferred.begin();
+    deferred.hold(json!({"sessionUpdate": "session_info_update", "title": "First"}));
+    deferred.hold(json!({"sessionUpdate": "available_commands_update",
+                         "availableCommands": [{"name": "stale"}]}));
+    deferred.hold(json!({"sessionUpdate": "session_info_update",
+                         "updatedAt": "2026-01-02T03:04:05Z"}));
+    deferred.hold(json!({"sessionUpdate": "available_commands_update",
+                         "availableCommands": [{"name": "fresh"}]}));
+    let flushed = deferred.finish();
+    assert_eq!(
+        flushed
+            .iter()
+            .map(|update| update["sessionUpdate"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!("session_info_update"),
+            json!("session_info_update"),
+            json!("available_commands_update"),
+        ],
+        "both patches survive, in arrival order; the stale whole table is dropped \
+         and the fresh one keeps its own arrival position"
+    );
+    assert_eq!(flushed[0]["title"], "First");
+    assert!(flushed[0].get("updatedAt").is_none());
+    assert_eq!(flushed[1]["updatedAt"], "2026-01-02T03:04:05Z");
+    assert!(flushed[1].get("title").is_none());
+    assert_eq!(
+        flushed[2]["availableCommands"][0]["name"], "fresh",
+        "replace-whole tables still keep only the newest"
+    );
 }

@@ -12,7 +12,10 @@
 //! `-32010` is the host's overloaded conflict code. The only v2 outbound path
 //! allowed to keep it is the close-incomplete settlement of `session/close`
 //! (and the shared close/delete gate behind it); every other host `-32010` is
-//! normalized by [`host_failure`].
+//! normalized by [`host_failure`]. A setup refused because the session's
+//! previous close has not finished is `-32603` with
+//! `data.reason = "session_cleanup_incomplete"`: the request was valid and only
+//! the explicit close can drain the session.
 
 use serde_json::{json, Value};
 
@@ -64,19 +67,23 @@ pub(crate) fn internal(message: impl Into<String>) -> AcpError {
 }
 
 /// A preview-only handler answered for a session that is no longer active on the
-/// host. Unlike [`session_not_found`] this carries no `sessionId`: the adapter
-/// already checked its own slot, so the id is not the client's mistake.
-pub(crate) fn session_unavailable(message: impl Into<String>) -> AcpError {
-    AcpError::new(SESSION_NOT_FOUND, message)
+/// host. The request named this session, so the reply is the pinned
+/// [`session_not_found`] shape: `-32002` carries the id and clients can drop the
+/// local state they still hold for it.
+pub(crate) fn session_unavailable(session_id: &str, message: impl Into<String>) -> AcpError {
+    session_not_found_with(session_id, message)
 }
 
 /// `-32002` carries the offending session id so clients can drop local state.
 pub(super) fn session_not_found(session_id: &str) -> AcpError {
-    AcpError::new(
-        SESSION_NOT_FOUND,
+    session_not_found_with(
+        session_id,
         "Session not found or not active on this connection",
     )
-    .with_data(json!({ "sessionId": session_id }))
+}
+
+fn session_not_found_with(session_id: &str, message: impl Into<String>) -> AcpError {
+    AcpError::new(SESSION_NOT_FOUND, message).with_data(json!({ "sessionId": session_id }))
 }
 
 pub(super) fn cancelled() -> AcpError {
@@ -170,6 +177,40 @@ pub(super) enum HostContext<'a> {
     Close,
 }
 
+/// Whether a host `-32010` reports a session whose close has not finished.
+///
+/// The host's cold restore answers `data.reason = "session_cleanup_incomplete"`
+/// together with the session id it keeps reserved; the restore dispatch's
+/// "resume the close before loading this session" refusal only carries the
+/// message prefix. Both mean the same thing to a client and neither is a
+/// parameter it can correct.
+pub(super) fn cleanup_incomplete(error: &AcpError) -> bool {
+    error.code == SESSION_SWITCH
+        && (error.message.starts_with(HOST_CLOSE_INCOMPLETE)
+            || crate::host::server_loop::cleanup_incomplete_error_session_id(error).is_some())
+}
+
+/// The session id a cleanup-incomplete failure names, if the host supplied one.
+pub(super) fn cleanup_incomplete_session_id(error: &AcpError) -> Option<&str> {
+    crate::host::server_loop::cleanup_incomplete_error_session_id(error)
+}
+
+/// A cleanup-incomplete setup failure: internal, with the host's `data` kept and
+/// the stable `reason`/`sessionId` filled in.
+fn cleanup_incomplete_internal(error: AcpError, fallback_session: Option<&str>) -> AcpError {
+    let mut data = match error.data {
+        Some(Value::Object(object)) => object,
+        _ => serde_json::Map::new(),
+    };
+    data.entry("reason".to_owned())
+        .or_insert_with(|| json!("session_cleanup_incomplete"));
+    if let Some(session_id) = fallback_session {
+        data.entry("sessionId".to_owned())
+            .or_insert_with(|| json!(session_id));
+    }
+    AcpError::new(INTERNAL, error.message).with_data(Value::Object(data))
+}
+
 /// Map a host-passthrough error that a v2 client would misread.
 ///
 /// `-32000` means Authentication required in the pinned schema; Peri's v1 paths
@@ -183,6 +224,9 @@ pub(super) enum HostContext<'a> {
 /// - the host's transient per-session refusals ("Session is executing",
 ///   "Session is closing") become `session_busy` (`-32020` + `reason`) when the
 ///   caller can name the session;
+/// - a setup refused because the session's close has not finished is internal
+///   (`-32603`) with `reason`/`sessionId` kept: the client's request was valid
+///   and the only way forward is the explicit close that drains the session;
 /// - a setup whose client-supplied location cannot be used is Invalid params
 ///   (`-32602`) with the host's message intact;
 /// - host resource/internal failures (list storage, prompt workspace checks,
@@ -204,6 +248,9 @@ pub(super) fn host_failure(error: AcpError, context: HostContext<'_>) -> AcpErro
             };
         }
         return match context {
+            HostContext::Setup { session_id } if cleanup_incomplete(&error) => {
+                cleanup_incomplete_internal(error, session_id)
+            }
             HostContext::Setup { .. } => invalid_params(error.message),
             HostContext::Close if error.message.starts_with(HOST_CLOSE_INCOMPLETE) => error,
             HostContext::Close | HostContext::SessionList | HostContext::Prompt => {

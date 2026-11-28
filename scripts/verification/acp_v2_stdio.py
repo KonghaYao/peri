@@ -510,9 +510,6 @@ def lifecycle(binary, root, schema):
         before = len(retry.frames)
         again = retry.call("session/prompt", prompt(sid, text, key), "PromptResponse")
         assert again["messageId"] == durable_message, again
-        assert not any(f.get("method") == "session/update"
-                       and f["params"]["update"].get("messageId") == durable_message
-                       for f in retry.frames[before:]), "a retry must not replay the user message"
         conflict = retry.response(retry.request("session/prompt", prompt(sid, text + " edited", key)))
         assert conflict["error"]["code"] == -32602, conflict
         fresh = retry.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
@@ -522,6 +519,13 @@ def lifecycle(binary, root, schema):
                     and f["params"]["sessionId"] == fresh
                     and f["params"]["update"].get("sessionUpdate") == "state_update"
                     and f["params"]["update"].get("state") == "idle")
+        # The replay-echo window stays open until every following reply and the
+        # new session's `idle` are consumed: a retry ACK can arrive before a host
+        # `user_message` echo of the same delivery, and stopping at the ACK would
+        # leave that echo unobserved.
+        assert not any(f.get("method") == "session/update"
+                       and f["params"]["update"].get("messageId") == durable_message
+                       for f in retry.frames[before:]), "a retry must not replay the user message"
         retry.close()
 
         counted = Peer(binary, root, 2, schema)

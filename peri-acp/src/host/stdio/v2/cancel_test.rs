@@ -105,14 +105,4 @@ async fn delete_settles_parked_prompts_and_drops_the_slot() {
         .await;
     let error = expect_error(&harness, RequestId::Number(3001), -32002).await;
     assert_eq!(error.data.expect("sessionId data")["sessionId"], "A");
-
-    // Delete of a session this connection never attached is -32002.
-    harness
-        .request(
-            RequestId::Number(3002),
-            "session/delete",
-            json!({"sessionId": "A"}),
-        )
-        .await;
-    expect_error(&harness, RequestId::Number(3002), -32002).await;
 }

@@ -54,6 +54,23 @@ fn handed_off(reply: &Value) -> bool {
     reply.get("state").and_then(Value::as_str) == Some(HANDED_OFF)
 }
 
+/// The requested `protocolVersion`, if the request carries the field.
+///
+/// The pinned v2 type is a JSON integer in `0..=65535`. A present value outside
+/// that shape is refused before any negotiation or connection mutation:
+/// silently treating `-1`, `1.5` or `"2"` as "absent" would fall through to the
+/// v1 path, bind the connection to ACP v1 and make the intended v2 negotiation
+/// impossible. A missing field keeps the historical v1 path.
+fn requested_protocol_version(params: &Value) -> Result<Option<u64>, AcpError> {
+    let Some(raw) = params.get("protocolVersion") else {
+        return Ok(None);
+    };
+    raw.as_u64()
+        .filter(|version| *version <= 65535)
+        .map(Some)
+        .ok_or_else(errors::invalid_protocol_version)
+}
+
 pub(super) struct V2Stdio {
     inner: Arc<dyn AcpTransport>,
     permissions: Arc<SharedPermissionMode>,
@@ -249,7 +266,13 @@ impl V2Stdio {
         id: RequestId,
         params: Value,
     ) -> Option<IncomingMessage> {
-        let requested = params.get("protocolVersion").and_then(Value::as_u64);
+        let requested = match requested_protocol_version(&params) {
+            Ok(version) => version,
+            Err(error) => {
+                let _ = self.inner.send_response(id, Err(error)).await;
+                return None;
+            }
+        };
         let repeat = wire.is_two();
         if repeat && wire.initialized {
             let _ = self
@@ -281,13 +304,6 @@ impl V2Stdio {
             && requested.is_some_and(|version| version >= 2)
             && params.get("info").is_some();
         if negotiable {
-            if requested.is_some_and(|version| version > 65535) {
-                let _ = self
-                    .inner
-                    .send_response(id, Err(errors::invalid_protocol_version()))
-                    .await;
-                return None;
-            }
             match params::initialize_params(&params) {
                 Ok(translated) => {
                     wire.replies.insert(
@@ -879,7 +895,19 @@ impl AcpTransport for V2Stdio {
                             None => wire.fail_v1_setup(),
                         }
                     }
-                    Err(_) => wire.fail_v1_setup(),
+                    // A failed setup normally binds nothing. The exception is the
+                    // host's cleanup-incomplete failure: the host keeps that
+                    // session reserved until an explicit close drains it (see
+                    // `host::server_loop::cleanup_incomplete_session_id`), so the
+                    // historical v1 rule binds the connection to A as well —
+                    // otherwise a client could set up B before A is drained. The
+                    // v1 error response itself stays untouched.
+                    Err(_) => {
+                        match crate::host::server_loop::cleanup_incomplete_session_id(&result) {
+                            Some(sid) => wire.commit_v1_setup(sid),
+                            None => wire.fail_v1_setup(),
+                        }
+                    }
                 }
                 result
             }

@@ -8,8 +8,19 @@ use super::{
     RequestId, ResponseDiagnostics, SharedSessions, Value,
 };
 
-pub(super) fn cleanup_incomplete_session_id(result: &Result<Value, AcpError>) -> Option<&str> {
-    let error = result.as_ref().err()?;
+pub(in crate::host) fn cleanup_incomplete_session_id(
+    result: &Result<Value, AcpError>,
+) -> Option<&str> {
+    result
+        .as_ref()
+        .err()
+        .and_then(cleanup_incomplete_error_session_id)
+}
+
+/// `-32010` 的 cleanup-incomplete 分类：host 在冷恢复回滚排不空会话时保留
+/// reservation，并把 `data.reason = "session_cleanup_incomplete"` 与 `data.sessionId`
+/// 一起带回。返回被保留的会话 id；这是该 reason 的唯一判定处。
+pub(in crate::host) fn cleanup_incomplete_error_session_id(error: &AcpError) -> Option<&str> {
     if error.code != -32010 {
         return None;
     }

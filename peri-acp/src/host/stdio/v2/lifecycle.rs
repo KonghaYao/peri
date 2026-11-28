@@ -124,7 +124,14 @@ pub(super) fn close_session(connection: &mut Connection, id: RequestId, params: 
     }
 }
 
-/// `session/delete`: settle this connection's prompts, delete, drop the slot.
+/// `session/delete`: forward to the host, settle this connection's prompts and
+/// drop its slot.
+///
+/// A delete is a durable operation on a session that need not be attached to
+/// this connection at all (the pinned `session/list` → `session/delete` →
+/// `session/list` flow), so every delete reaches the host even without a local
+/// slot. Only a successful reply tears a slot down; the host's own error for a
+/// session it cannot delete is passed through unchanged.
 pub(super) fn delete_session(connection: &mut Connection, id: RequestId, params: &Value) -> Routed {
     let Some(session_id) = params
         .get("sessionId")
@@ -133,12 +140,9 @@ pub(super) fn delete_session(connection: &mut Connection, id: RequestId, params:
     else {
         return Routed::Answered(Err(errors::invalid_params("Missing sessionId")));
     };
-    if !connection.slots.contains_key(&session_id) {
-        return Routed::Answered(Err(errors::session_not_found(&session_id)));
-    }
     connection
         .replies
-        .insert(id.clone(), Reply::Delete(session_id.clone()));
+        .insert(id.clone(), Reply::Delete(session_id));
     Routed::Forward {
         id,
         method: "session/delete".into(),
@@ -214,3 +218,7 @@ pub(super) fn lifecycle_result(method: &str, mut result: Value) -> Value {
     }
     result
 }
+
+#[cfg(test)]
+#[path = "lifecycle_test.rs"]
+mod tests;

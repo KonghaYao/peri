@@ -41,22 +41,25 @@ impl Deferred {
         self.holding
     }
 
-    /// Park one live update, dropping redundant state snapshots and (past the
-    /// bound) the newest arrivals. A state snapshot is returned to the caller
+    /// Park one live update, dropping redundant whole-table snapshots and (past
+    /// the bound) the newest arrivals. A state snapshot is returned to the caller
     /// instead of parked: it is a snapshot, not an event, and the caller keeps
     /// only the newest one for a later authoritative publication.
     ///
-    /// Session metadata is also a replace-whole snapshot. The host may
-    /// broadcast the same table more than once while a load is in flight (one
-    /// per attach phase); parking each broadcast would flush the same table
-    /// twice, so only the newest per kind is kept.
+    /// `available_commands_update`, `config_option_update` and
+    /// `current_mode_update` replace the whole table, so only the newest per kind
+    /// is kept: the host may broadcast the same table more than once while a
+    /// load is in flight, and parking each broadcast would flush it twice.
+    /// `session_info_update` is a **patch** in the pinned v2 schema (omitted
+    /// fields keep their value), so every patch is parked in arrival order —
+    /// merging them by kind would drop the title or timestamp one of them carries.
     pub(super) fn hold(&mut self, update: Value) -> Option<Value> {
         if is_state_update(&update) {
             return Some(update);
         }
-        if let Some(kind) = metadata_snapshot(&update) {
+        if let Some(kind) = whole_snapshot_kind(&update) {
             self.updates
-                .retain(|parked| metadata_snapshot(parked) != Some(kind));
+                .retain(|parked| whole_snapshot_kind(parked) != Some(kind));
         }
         if self.updates.len() >= MAX_DEFERRED_UPDATES {
             tracing::warn!(
@@ -81,13 +84,13 @@ fn is_state_update(update: &Value) -> bool {
 }
 
 /// The kind of a replace-whole session metadata snapshot, if the update is one.
-fn metadata_snapshot(update: &Value) -> Option<&str> {
+///
+/// `session_info_update` is deliberately absent: the pinned v2 schema defines it
+/// as a patch, so two of them are not interchangeable.
+fn whole_snapshot_kind(update: &Value) -> Option<&str> {
     match update.get("sessionUpdate").and_then(Value::as_str) {
         kind @ Some(
-            "available_commands_update"
-            | "config_option_update"
-            | "current_mode_update"
-            | "session_info_update",
+            "available_commands_update" | "config_option_update" | "current_mode_update",
         ) => kind,
         _ => None,
     }
@@ -155,6 +158,11 @@ pub(super) fn hold_live(slot: &mut Slot, update: Value) {
 /// and only then the live updates parked during the replay (or the metadata
 /// parked while attaching). A stale success answers its own client without
 /// ending the takeover's replay or draining what belongs to it.
+///
+/// A failure unwinds the slot the attempt created, except when the host reports
+/// `session_cleanup_incomplete`: that session stays reserved until an explicit
+/// close drains it, so the slot survives as `Attaching` and the close still
+/// reaches the host.
 #[allow(clippy::too_many_arguments)] // the setup reply is one protocol step; each fact is explicit
 pub(super) async fn settle_setup(
     stdio: &V2Stdio,
@@ -201,9 +209,14 @@ pub(super) async fn settle_setup(
                 // success records that an attach completed, but must not lift
                 // the takeover's `Attaching`: live metadata for the still
                 // pending owner would otherwise bypass the hold.
+                //
+                // Every completed attach raises the watermark, owning or not: a
+                // later failure may only hand the slot back to a pending attempt
+                // newer than the last attach that actually completed, and a stale
+                // success is such an attach too.
+                slot.attached_setup = slot.attached_setup.max(owner);
                 if owned {
                     slot.attach = Attach::Attached;
-                    slot.attached_setup = owner;
                 }
                 slot.attached = true;
                 let foreground = slot.foreground;
@@ -251,7 +264,20 @@ pub(super) async fn settle_setup(
                 }
             }
         }
-        Err(_) => {
+        Err(error) => {
+            // The host refused this setup because an earlier close of the session
+            // has not finished. It keeps the session reserved until an explicit
+            // close drains it, so the slot must survive — as `Attaching`, never
+            // `Attached` — or the follow-up `session/close` could not reach the
+            // host. The host names that session; a prefix-only refusal falls back
+            // to the resume target.
+            let retained = if errors::cleanup_incomplete(error) {
+                errors::cleanup_incomplete_session_id(error)
+                    .or(session.as_deref())
+                    .map(str::to_owned)
+            } else {
+                None
+            };
             if let Some(sid) = session.as_deref() {
                 // A newer attach may already own the slot; only the
                 // attempt that still owns it may unwind it, and a
@@ -308,15 +334,24 @@ pub(super) async fn settle_setup(
                                     slot.attach = Attach::Attached;
                                 }
                             }
-                            // No attach ever completed and no setup is
-                            // left to complete one: the failed attempts
-                            // created this slot, so drop it.
                             if !attached {
+                                // No attach ever completed and no setup is
+                                // left to complete one: the failed attempts
+                                // created this slot, so drop it. A retained
+                                // cleanup session is re-inserted below.
                                 wire.slots.remove(sid);
                             }
                         }
                     }
                 }
+            }
+            // The host keeps a cleanup-incomplete session reserved until an
+            // explicit close drains it, so it needs a slot for `session/close`
+            // to reach the host again. `Attaching` keeps it out of
+            // `Connection::slot`, so no prompt can address a session whose close
+            // is still pending. The host's id wins over the request's target.
+            if let Some(retained) = retained.as_deref() {
+                wire.insert_slot(retained, Attach::Attaching);
             }
         }
     }

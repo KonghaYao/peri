@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use crate::host::history_page::{self, SessionLoadMode};
 use crate::transport::types::{AcpError, RequestId};
 
 use super::capabilities::ClientCapabilities;
@@ -75,9 +76,9 @@ pub(super) struct Slot {
     /// Identity of the newest setup that bound this slot. A failed setup only
     /// undoes the slot when it still owns it.
     pub setup: u64,
-    /// Setup that last completed an attach. A failed takeover cannot hand the
-    /// slot back to a pending attempt older than this one: a newer attach
-    /// already superseded it.
+    /// The newest setup that completed an attach, owning or stale. A failed
+    /// takeover cannot hand the slot back to a pending attempt older than this
+    /// one: an attach already superseded it.
     pub attached_setup: u64,
     /// Turn identity. Bumped on start, end, cancel and teardown so a stale
     /// blocking-request completion cannot publish a state for a newer turn.
@@ -419,7 +420,19 @@ impl Connection {
     /// Mirrors `host::connection_context`: a setup is refused while another one
     /// is in flight; a connection that holds a session may only re-attach that
     /// same session; close releases it. v2 connections never reach this.
+    ///
+    /// A read-only `session/load` (a page cursor or a `history` window) is not a
+    /// setup: the host classifies `session/load` before it reserves or binds
+    /// anything, answers those from storage, and never attaches a session. Such
+    /// a request therefore passes untouched — otherwise a v1 connection bound to
+    /// A could not page B's history, and a successful page would bind the
+    /// connection to B. Capability truth stays with the host, which re-runs the
+    /// same classifier with the connection's real declarations; a malformed
+    /// request reaches it and gets the host's own error shape.
     pub(super) fn admit_v1_setup(&mut self, method: &str, params: &Value) -> V1Admission {
+        if method == "session/load" && read_only_history(params) {
+            return V1Admission::Pass;
+        }
         let restore = match method {
             "session/new" | "session/fork" => None,
             "session/load" | "session/resume" => Some(
@@ -495,6 +508,18 @@ impl Connection {
             .flat_map(|slot| slot.prompts.acknowledge(input_id))
             .collect()
     }
+}
+
+/// Whether a `session/load` request is a read-only history read.
+///
+/// Runs the host's only classifier with both capabilities assumed: the wrapper
+/// decides "is this a setup at all", not whether this connection may page. The
+/// host re-classifies with the negotiated capabilities and owns that answer.
+fn read_only_history(params: &Value) -> bool {
+    matches!(
+        history_page::classify(params, true, true),
+        Ok(SessionLoadMode::HistoryPage(_) | SessionLoadMode::HistoryWindow { .. })
+    )
 }
 
 #[cfg(test)]
