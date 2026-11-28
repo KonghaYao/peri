@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use peri_acp_types::session_resources::SessionResources;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
@@ -313,6 +314,9 @@ struct StreamHub {
 pub struct AcpSwarmService {
     store: Arc<dyn SwarmStore>,
     config: ActorServiceConfig,
+    /// Deployment-owned session-store handle shared by every child. `None`
+    /// keeps the per-child open path.
+    session_resources: Option<Arc<dyn SessionResources>>,
     sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     channels: Mutex<HashMap<String, StreamHub>>,
     /// Accepted cancels whose target turn still holds the slot, keyed by
@@ -339,6 +343,10 @@ impl std::fmt::Debug for AcpSwarmService {
         formatter
             .debug_struct("AcpSwarmService")
             .field("config", &self.config)
+            .field(
+                "shared_session_resources",
+                &self.session_resources.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -346,6 +354,16 @@ impl std::fmt::Debug for AcpSwarmService {
 impl AcpSwarmService {
     #[must_use]
     pub fn new(store: Arc<dyn SwarmStore>, config: ActorServiceConfig) -> Self {
+        Self::new_with_session_resources(store, config, None)
+    }
+
+    /// Serve every child from one deployment-owned session-store handle.
+    #[must_use]
+    pub fn new_with_session_resources(
+        store: Arc<dyn SwarmStore>,
+        config: ActorServiceConfig,
+        session_resources: Option<Arc<dyn SessionResources>>,
+    ) -> Self {
         let subagent_reader = SubagentReader::new(
             configured_session_store(&config),
             config.machine_id,
@@ -354,6 +372,7 @@ impl AcpSwarmService {
         Self {
             store,
             config,
+            session_resources,
             sessions: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
             accepted_cancels: Mutex::new(HashMap::new()),
@@ -395,8 +414,10 @@ impl AcpSwarmService {
         configured_session_store(&self.config)
     }
 
-    /// Prefer the live host's already-open facade; a cold actor lazily opens the
-    /// configured store read-only. Both paths read the same persisted tree.
+    /// Prefer the live host's already-open facade, then the deployment handle
+    /// installed at bootstrap. Only a deployment without either (standalone or
+    /// local) lazily opens the configured store read-only. All paths read the
+    /// same persisted tree.
     async fn subagent_records(
         &self,
         logical_id: &LogicalId,
@@ -409,6 +430,12 @@ impl AcpSwarmService {
             .and_then(|runtime| runtime.child.session_resources());
         if let Some(resources) = live {
             return records_from(resources.as_ref(), root_session_id).await;
+        }
+        // The gateway installs one deployment-wide facade. Reusing it keeps the
+        // per-actor read path inside that pool instead of minting one read-only
+        // pool per cold actor.
+        if let Some(shared) = self.session_resources.as_ref() {
+            return records_from(shared.as_ref(), root_session_id).await;
         }
         self.subagent_reader.records(root_session_id).await
     }
@@ -435,6 +462,36 @@ impl AcpSwarmService {
             return Ok(());
         }
         Err(SwarmError::upstream_unavailable("session_not_live"))
+    }
+
+    /// Build the child configuration for both the create and the reattach path.
+    ///
+    /// Keeping one constructor is what makes the shared session-store handle
+    /// reach both paths; a second literal could silently fall back to opening a
+    /// per-child store.
+    fn child_config(
+        &self,
+        cwd: PathBuf,
+        model: Option<String>,
+        instructions: Option<String>,
+        mcp_tools: Vec<McpToolSpec>,
+        workspace: Option<SandboxMcpBinding>,
+        root_session_id: String,
+    ) -> ChildConfig {
+        let session_store = self.session_store();
+        ChildConfig {
+            cwd,
+            session_store,
+            machine_id: self.config.machine_id,
+            workspace_root: self.config.workspace_root.clone(),
+            settings_json: self.config.settings_json.clone(),
+            model,
+            instructions,
+            mcp_tools,
+            workspace,
+            root_session_id,
+            session_resources: self.session_resources.as_ref().map(Arc::clone),
+        }
     }
 
     /// Attach the persisted identity on an explicit interaction. A lost
@@ -469,19 +526,14 @@ impl AcpSwarmService {
             )
             .with_approval_declarations(&row.mcp_tools),
         );
-        let session_store = self.session_store();
-        let config = ChildConfig {
-            cwd: PathBuf::from(&row.cwd),
-            session_store,
-            machine_id: self.config.machine_id,
-            workspace_root: self.config.workspace_root.clone(),
-            settings_json: self.config.settings_json.clone(),
+        let config = self.child_config(
+            PathBuf::from(&row.cwd),
             model,
-            instructions: row.instructions.clone(),
-            mcp_tools: row.mcp_tools.clone(),
+            row.instructions.clone(),
+            row.mcp_tools.clone(),
             workspace,
-            root_session_id: row.root_session_id.clone(),
-        };
+            row.root_session_id.clone(),
+        );
         let child = if interrupted {
             AcpChild::attach_interrupted(config, log.clone()).await
         } else {
@@ -1449,32 +1501,25 @@ impl AcpSwarmService {
             )
             .with_approval_declarations(request.mcp_tools),
         );
-        let session_store = self.session_store();
         let root_session_id = request.root_session_id;
-        let child = AcpChild::spawn(
-            ChildConfig {
-                cwd: request.cwd.to_path_buf(),
-                session_store,
-                machine_id: self.config.machine_id,
-                workspace_root: self.config.workspace_root.clone(),
-                settings_json: self.config.settings_json.clone(),
-                model: request.model,
-                instructions: request.instructions,
-                mcp_tools: request.mcp_tools.to_vec(),
-                workspace: request.workspace.cloned(),
-                root_session_id: root_session_id.clone(),
-            },
-            Arc::clone(&log),
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                logical_id = request.logical_id.as_str(),
-                error = %error,
-                "swarm ACP host assembly failed"
-            );
-            child_error(error)
-        })?;
+        let config = self.child_config(
+            request.cwd.to_path_buf(),
+            request.model,
+            request.instructions,
+            request.mcp_tools.to_vec(),
+            request.workspace.cloned(),
+            root_session_id.clone(),
+        );
+        let child = AcpChild::spawn(config, Arc::clone(&log))
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    logical_id = request.logical_id.as_str(),
+                    error = %error,
+                    "swarm ACP host assembly failed"
+                );
+                child_error(error)
+            })?;
         if child.session_id() != root_session_id {
             let shutdown = child.shutdown().await;
             tracing::warn!(

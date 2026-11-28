@@ -172,6 +172,7 @@ async fn unreachable_session_store_fails_without_creating_a_local_store() {
             mcp_tools: Vec::new(),
             workspace: None,
             root_session_id: uuid::Uuid::now_v7().to_string(),
+            session_resources: None,
         },
         log,
     )

@@ -13,6 +13,7 @@ pub(super) use peri_acp_types::session_store::SessionStoreDeployment;
 
 pub(super) use crate::sessions::{
     AccessIntent, CredentialError, LocatorError, ResolvedLocator, SessionStoreOpenRequest,
+    SessionStorePoolPolicy,
 };
 
 /// 外部系统资源门面
@@ -65,6 +66,24 @@ impl Resources {
         deployment: &SessionStoreDeployment,
         environment: crate::sessions::RemoteWorkspaceEnvironment,
     ) -> Result<Self> {
+        Self::open_deployment_in_remote_environment_with_pool(
+            deployment,
+            environment,
+            SessionStorePoolPolicy::default(),
+        )
+        .await
+    }
+
+    /// Same as [`Resources::open_deployment_in_remote_environment`] with an
+    /// explicit pool capacity.
+    ///
+    /// Deployments that share one facade across many concurrent sessions set
+    /// the cap here; everything else keeps the default single-facade capacity.
+    pub async fn open_deployment_in_remote_environment_with_pool(
+        deployment: &SessionStoreDeployment,
+        environment: crate::sessions::RemoteWorkspaceEnvironment,
+        pool_policy: SessionStorePoolPolicy,
+    ) -> Result<Self> {
         let request = SessionStoreOpenRequest::from_deployment(deployment)?;
         let ResolvedLocator::Remote(endpoint) = request.resolve_locator()? else {
             anyhow::bail!("remote workspace environment requires a remote session store");
@@ -75,6 +94,7 @@ impl Resources {
             &credential,
             request.access(),
             environment,
+            pool_policy,
         )
         .await
         .map(Self::from_facade)

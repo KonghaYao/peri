@@ -2,18 +2,27 @@
 //!
 //! The remote branch needs a live PostgreSQL server (verified in S6b2); these
 //! tests only pin the refusal to degrade: a half-configured remote identity must
-//! not fall back to the local SQLite file.
+//! not fall back to the local SQLite file, and an injected deployment handle is
+//! used as-is without opening anything.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use peri_acp_types::session_resources::SessionResources;
+use peri_resources::Resources;
 use uuid::Uuid;
 
-use super::{open_session_resources, ChildConfig, ChildError, SessionStoreDeployment};
+use super::{resolve_session_resources, ChildConfig, ChildError, SessionStoreDeployment};
 
-fn config(machine_id: Option<Uuid>, workspace_root: Option<PathBuf>) -> ChildConfig {
+fn config(
+    machine_id: Option<Uuid>,
+    workspace_root: Option<PathBuf>,
+    session_store: SessionStoreDeployment,
+    session_resources: Option<Arc<dyn SessionResources>>,
+) -> ChildConfig {
     ChildConfig {
         cwd: PathBuf::from("/tmp/peri-swarm-runtime-test"),
-        session_store: SessionStoreDeployment::default_local(),
+        session_store,
         machine_id,
         workspace_root,
         settings_json: None,
@@ -22,13 +31,39 @@ fn config(machine_id: Option<Uuid>, workspace_root: Option<PathBuf>) -> ChildCon
         mcp_tools: Vec::new(),
         workspace: None,
         root_session_id: "0192f0c4-0000-7000-8000-000000000002".to_owned(),
+        session_resources,
     }
 }
 
-async fn expect_partial_identity_error(machine_id: Option<Uuid>, workspace_root: Option<PathBuf>) {
-    let error = open_session_resources(&config(machine_id, workspace_root))
+fn blocking_local_store(directory: &std::path::Path) -> SessionStoreDeployment {
+    // The parent is a regular file, so opening `<file>/…` fails on every
+    // platform if the resolver ignored the injected handle.
+    let blocker = directory.join("not-a-directory");
+    std::fs::write(&blocker, b"blocker").expect("write the blocking file");
+    SessionStoreDeployment::local_path(blocker.join("peri-swarm-injected.db"))
+}
+
+async fn shared_local_resources(path: PathBuf) -> Arc<dyn SessionResources> {
+    Resources::open_deployment(&SessionStoreDeployment::local_path(path))
         .await
-        .expect_err("a partial remote identity must not open any store");
+        .expect("open the shared local store")
+        .into_parts()
+        .0
+}
+
+async fn expect_partial_identity_error(
+    machine_id: Option<Uuid>,
+    workspace_root: Option<PathBuf>,
+    session_resources: Option<Arc<dyn SessionResources>>,
+) {
+    let error = resolve_session_resources(&config(
+        machine_id,
+        workspace_root,
+        SessionStoreDeployment::default_local(),
+        session_resources,
+    ))
+    .await
+    .expect_err("a partial remote identity must not open any store");
     match error {
         ChildError::Local(message) => {
             assert!(message.contains("machine_id"), "{message}");
@@ -41,12 +76,69 @@ async fn expect_partial_identity_error(machine_id: Option<Uuid>, workspace_root:
 
 #[tokio::test]
 async fn machine_id_without_workspace_root_is_an_explicit_error() {
-    expect_partial_identity_error(Some(Uuid::now_v7()), None).await;
+    expect_partial_identity_error(Some(Uuid::now_v7()), None, None).await;
 }
 
 #[tokio::test]
 async fn workspace_root_without_machine_id_is_an_explicit_error() {
-    expect_partial_identity_error(None, Some(PathBuf::from("/tmp/root"))).await;
+    expect_partial_identity_error(None, Some(PathBuf::from("/tmp/root")), None).await;
+}
+
+#[tokio::test]
+async fn a_half_configured_identity_still_fails_closed_with_an_injected_handle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let shared = shared_local_resources(tmp.path().join("shared.db")).await;
+    expect_partial_identity_error(Some(Uuid::now_v7()), None, Some(shared.clone())).await;
+    expect_partial_identity_error(None, Some(PathBuf::from("/tmp/root")), Some(shared)).await;
+}
+
+#[tokio::test]
+async fn an_injected_handle_is_used_without_opening_a_store_and_has_no_close_right() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let shared = shared_local_resources(tmp.path().join("shared.db")).await;
+    let resolved = resolve_session_resources(&config(
+        None,
+        None,
+        blocking_local_store(tmp.path()),
+        Some(Arc::clone(&shared)),
+    ))
+    .await
+    .expect("the injected handle is used as-is");
+    assert!(
+        Arc::ptr_eq(&resolved.resources, &shared),
+        "the child must receive the deployment's exact facade"
+    );
+    assert!(
+        resolved.shutdown.is_none(),
+        "a child never owns the shared store's close right"
+    );
+}
+
+#[tokio::test]
+async fn local_mode_without_injection_still_opens_one_store_per_child() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let first = resolve_session_resources(&config(
+        None,
+        None,
+        SessionStoreDeployment::local_path(tmp.path().join("first.db")),
+        None,
+    ))
+    .await
+    .expect("open the first local store");
+    let second = resolve_session_resources(&config(
+        None,
+        None,
+        SessionStoreDeployment::local_path(tmp.path().join("second.db")),
+        None,
+    ))
+    .await
+    .expect("open the second local store");
+    assert!(
+        !Arc::ptr_eq(&first.resources, &second.resources),
+        "without injection each child still opens its own store"
+    );
+    assert!(first.shutdown.is_some());
+    assert!(second.shutdown.is_some());
 }
 
 // ── S8a2: `session/new.mcpServers` wire shape ───────────────────────────────

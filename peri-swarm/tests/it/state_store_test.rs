@@ -182,6 +182,7 @@ async fn postgres_carries_peri_session_history_mq_and_separate_swarm_state() {
             mcp_tools: Vec::new(),
             workspace: None,
             root_session_id: root_session_id.clone(),
+            session_resources: None,
         },
         Arc::clone(&log),
     )

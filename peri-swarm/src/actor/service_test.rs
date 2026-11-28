@@ -1585,3 +1585,86 @@ async fn an_open_turn_without_a_slot_asks_the_caller_to_retry_instead_of_cancel(
         .unwrap()
         .is_some());
 }
+
+// ── deployment-owned session store ──────────────────────────────────────────
+
+/// Both child shapes (create/`spawn_runtime` and reattach/`ensure_live`) go
+/// through [`AcpSwarmService::child_config`]; neither may drop the shared
+/// deployment handle and silently reopen a per-child store.
+#[tokio::test]
+async fn child_config_propagates_the_shared_handle_to_both_child_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = peri_resources::Resources::open_with(Some(dir.path().join("shared.db")))
+        .await
+        .expect("open the shared local store")
+        .into_parts()
+        .0;
+    let service = AcpSwarmService::new_with_session_resources(
+        Arc::new(MemorySwarmStore::new()) as Arc<dyn SwarmStore>,
+        ActorServiceConfig::default(),
+        Some(Arc::clone(&shared)),
+    );
+
+    // `spawn_runtime` shape: reserved root id, no persisted model/instructions.
+    let created = service.child_config(
+        std::path::PathBuf::from("/tmp/create"),
+        None,
+        None,
+        Vec::new(),
+        None,
+        "0192f0c5-0000-7000-8000-000000000010".to_owned(),
+    );
+    // `ensure_live` shape: values read back from the persisted row.
+    let reattached = service.child_config(
+        std::path::PathBuf::from("/tmp/reattach"),
+        Some("deployment-model".to_owned()),
+        Some("persisted instructions".to_owned()),
+        vec![tool("server-a", json!("always"))],
+        None,
+        "0192f0c5-0000-7000-8000-000000000011".to_owned(),
+    );
+
+    for config in [created, reattached] {
+        let propagated = config
+            .session_resources
+            .expect("the shared handle reaches every child");
+        assert!(
+            Arc::ptr_eq(&propagated, &shared),
+            "the child must clone the deployment facade, not open its own"
+        );
+    }
+}
+
+/// A cold actor's subagent read must stay inside the deployment-wide facade.
+/// The configured store path is deliberately unopenable, so falling back to the
+/// per-actor read-only reader would surface `502 upstream_unavailable`.
+#[tokio::test]
+async fn subagent_reads_use_the_shared_facade_instead_of_opening_per_actor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = peri_resources::Resources::open_with(Some(dir.path().join("shared.db")))
+        .await
+        .expect("open the shared local store")
+        .into_parts()
+        .0;
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"blocker").expect("write the blocking file");
+    let config = ActorServiceConfig {
+        session_store: Some(
+            peri_acp_types::session_store::SessionStoreDeployment::local_path(
+                blocker.join("unreachable.db"),
+            ),
+        ),
+        ..ActorServiceConfig::default()
+    };
+    let service = AcpSwarmService::new_with_session_resources(
+        Arc::new(MemorySwarmStore::new()) as Arc<dyn SwarmStore>,
+        config,
+        Some(Arc::clone(&shared)),
+    );
+
+    let records = service
+        .subagent_records(&logical_id(), "0192f0c5-0000-7000-8000-0000000000ff")
+        .await
+        .expect("the shared facade answers without opening the configured store");
+    assert!(records.is_empty(), "the empty shared store has no children");
+}

@@ -11,6 +11,7 @@ use super::super::credentials::SessionStoreCredential;
 use super::super::endpoint::RemoteEndpoint;
 use super::super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
 use super::super::mutation::StoreAccess;
+use super::super::pool_policy::SessionStorePoolPolicy;
 use super::super::sql::StatementSpec;
 use super::connection_lifecycle::ConnectionSlot;
 
@@ -34,12 +35,31 @@ impl RemoteSessionData {
         access: StoreAccess,
         supplied_machine_id: Option<String>,
     ) -> SessionResourceResult<(Self, StoreInitialization)> {
+        Self::open_with_machine_and_policy(
+            endpoint,
+            credential,
+            access,
+            supplied_machine_id,
+            SessionStorePoolPolicy::default(),
+        )
+        .await
+    }
+
+    /// Same open, with the deployment's pool capacity.
+    pub(in crate::sessions::remote) async fn open_with_machine_and_policy(
+        endpoint: &RemoteEndpoint,
+        credential: &SessionStoreCredential,
+        access: StoreAccess,
+        supplied_machine_id: Option<String>,
+        pool_policy: SessionStorePoolPolicy,
+    ) -> SessionResourceResult<(Self, StoreInitialization)> {
         let gate = Arc::new(ConnectionGate::default());
         let factory: Arc<dyn ConnectionFactory> = Arc::new(RemoteConnectionFactory::new(
             endpoint.clone(),
             credential.duplicate(),
             access,
             Arc::clone(&gate),
+            pool_policy,
         ));
         let store = factory.connect().await?;
         let (store_id, initialization) = super::session_open::open_schema(&store, access).await?;

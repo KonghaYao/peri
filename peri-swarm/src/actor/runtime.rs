@@ -24,7 +24,7 @@ mod history;
 mod session_open;
 mod subagents;
 
-use session_open::open_session_resources;
+use session_open::resolve_session_resources;
 pub(crate) use subagents::{records_from, SubagentReader};
 
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ use peri_acp::transport::mpsc::{mpsc_transport_pair, MpscClientTransport};
 use peri_acp::transport::types::{AcpError, IncomingMessage};
 use peri_acp::transport::AcpTransport;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
-use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 pub use peri_acp_types::session_store::SessionStoreDeployment;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
@@ -70,7 +70,7 @@ pub const WORKSPACE_MCP_SERVER_NAME: &str = "workspace";
 const META_SWARM_SANDBOX: &str = "peri.swarmSandbox";
 
 /// Everything one child needs that the service already validated.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChildConfig {
     /// Canonical absolute working directory; also the host `startup_cwd`.
     pub cwd: PathBuf,
@@ -98,6 +98,34 @@ pub struct ChildConfig {
     pub workspace: Option<SandboxMcpBinding>,
     /// Reserved root session id (UUIDv7) handed to `session/new`.
     pub root_session_id: String,
+    /// Deployment-owned session-store business handle.
+    ///
+    /// `Some` means every child of this deployment shares one facade and pool;
+    /// the handle is used as-is and the child holds **no** close right. `None`
+    /// keeps the per-child open path (local SQLite in this deployment).
+    pub session_resources: Option<Arc<dyn SessionResources>>,
+}
+
+impl std::fmt::Debug for ChildConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildConfig")
+            .field("cwd", &self.cwd)
+            .field("session_store", &self.session_store)
+            .field("machine_id", &self.machine_id)
+            .field("workspace_root", &self.workspace_root)
+            .field("settings_json", &self.settings_json)
+            .field("model", &self.model)
+            .field("instructions", &self.instructions)
+            .field("mcp_tools", &self.mcp_tools)
+            .field("workspace", &self.workspace)
+            .field("root_session_id", &self.root_session_id)
+            .field(
+                "shared_session_resources",
+                &self.session_resources.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// One failure surface for child construction and RPC calls.
@@ -415,11 +443,12 @@ impl AcpChild {
             _ => provider,
         };
 
-        let resources = open_session_resources(&config).await?;
+        let resolved = resolve_session_resources(&config).await?;
+        let session_resources = resolved.resources;
+        let session_store_shutdown = resolved.shutdown;
         // Keep one clone before the host takes ownership: the actor needs the
         // same facade to read child-thread metadata (`sessions.subagents`).
-        let child_session_resources = Some(resources.session_resources());
-        let (session_resources, session_store_shutdown) = resources.into_parts();
+        let child_session_resources = Some(Arc::clone(&session_resources));
         if entry == SessionEntry::Interrupted {
             // Ordinary prompts also set working before calling the model. A
             // dead synchronous attempt has no owner to settle it. This store
@@ -438,9 +467,13 @@ impl AcpChild {
             }
             .await;
             if let Err(error) = settlement {
-                use peri_acp_types::session_resources::SessionStoreShutdownPort;
-                if let Err(close_error) = session_store_shutdown.shutdown().await {
-                    tracing::warn!(%close_error, "failed closing interrupted session resources");
+                if let Some(shutdown) = session_store_shutdown.as_ref() {
+                    if let Err(close_error) = shutdown.shutdown().await {
+                        tracing::warn!(
+                            %close_error,
+                            "failed closing interrupted session resources"
+                        );
+                    }
                 }
                 return Err(error);
             }
@@ -460,7 +493,11 @@ impl AcpChild {
                 permission_mode,
                 session_resources,
                 workspace_id: None,
-                session_store_shutdown: Some(Box::new(session_store_shutdown)),
+                // HARD CONTRACT: an injected shared handle carries no close
+                // right. Passing `Some` here would let the first child that
+                // exits close the process-wide pool for every other session.
+                session_store_shutdown: session_store_shutdown
+                    .map(|shutdown| Box::new(shutdown) as Box<dyn SessionStoreShutdownPort>),
                 cwd: cwd.clone(),
                 // `design §0.4-5`: bare would only take over `workspace`, which
                 // blocks the future remote workspace injection. The host is

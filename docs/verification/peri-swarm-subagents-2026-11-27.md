@@ -16,6 +16,8 @@
   `closed_at` 仅在终态时取 `updated_at`；`status = active|closed`。
 - 活会话复用 `AcpChild` 已打开的 `SessionResources`；冷会话由
   `SubagentReader` 懒打开只读 store（本机只读 seam 不建目录/库/迁移）。
+  （后续 #620：Swarm 网关安装部署级 facade 后，冷 actor 读取优先复用该 facade；
+  无共享句柄的独立/本地部署仍走上述惰性只读路径。）
 - 未新增数据库 schema、列或 store 表结构；repository 中 workflow 与
   Task/Agent 子会话都是同一种 child thread，因此没有 origin/kind 列。
 
@@ -109,6 +111,7 @@ F-SWARM-012 的可见行按 100 字符上限压缩为
 - 未用真实 `openai@7.60.0` SDK 探针调用 `subagents.list/retrieve`。
 - `subagents/{id}/items`、`subagents/{id}/turns*` 按范围仍 404。
 - 未做进程级 `SessionResources` 单例注入；每次冷读由 actor 懒打开并缓存。
+  （后续 #620 在 Swarm 网关补上了部署级 facade 复用；无共享句柄的独立部署仍按此行为。）
 - `instructions` 恒 `null`：网关没有把子 agent 的开启任务持久化为官方内容。
 - `parent_thread_id` 缺失（不应出现在树中）时按直接子会话投影为 `root`。
 
