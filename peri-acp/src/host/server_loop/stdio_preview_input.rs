@@ -191,6 +191,16 @@ impl ServerLoop<'_> {
                 input_ids: vec![input_id.to_owned()],
             })
             .await;
+        let schedule_delivery = || {
+            crate::host::user_input::schedule_mailbox(
+                sid,
+                self.sessions,
+                self.prompt_locks,
+                self.cfg,
+                self.transport,
+                self.cont_tx,
+            )
+        };
         if let Err(error) = dispatched {
             // The store could not confirm whether the input was handed off.
             // Withdrawal decides the race: a confirmed withdrawal means
@@ -198,36 +208,22 @@ impl ServerLoop<'_> {
             // cannot duplicate it. Otherwise the input may still be received;
             // the adapter gets no ACK for it, so delivery must be scheduled
             // before acknowledging or an idle session never runs it.
-            match resolve_dispatch_failure(withdraw(input_id.to_owned()).await, || {
-                crate::host::user_input::schedule_mailbox(
-                    sid,
-                    self.sessions,
-                    self.prompt_locks,
-                    self.cfg,
-                    self.transport,
-                    self.cont_tx,
-                )
-            }) {
-                DispatchFailureReply::Failed => return Err(dispatch_error(error)),
-                DispatchFailureReply::Scheduled => return Ok(input_reply(input_id, QUEUED)),
+            match resolve_dispatch_failure(withdraw(input_id.to_owned()).await, schedule_delivery) {
+                DispatchFailureReply::Failed => Err(dispatch_error(error)),
+                DispatchFailureReply::Scheduled => Ok(input_reply(input_id, QUEUED)),
             }
-        } else if enqueued_state(&dispatched.expect("checked above"), input_id)
-            == UserInputState::Withdrawn
-        {
-            // A withdrawal of this very input committed between the enqueue and
-            // the dispatch: no delivery can follow, so it cannot stay queued.
-            return Err(withdrawn());
+        } else {
+            // A dispatch receipt can still report a state that changed between
+            // the enqueue and the dispatch: the input may have been delivered
+            // (its `user_message` and canonical row already exist) or withdrawn.
+            // Neither may stay queued — one would wait for a delivery event that
+            // already fired, and the other can never deliver.
+            dispatched_reply(
+                &dispatched.expect("checked above"),
+                input_id,
+                schedule_delivery,
+            )
         }
-
-        crate::host::user_input::schedule_mailbox(
-            sid,
-            self.sessions,
-            self.prompt_locks,
-            self.cfg,
-            self.transport,
-            self.cont_tx,
-        );
-        Ok(input_reply(input_id, QUEUED))
     }
 }
 
@@ -243,6 +239,33 @@ fn enqueued_state(receipt: &UserInputQueueReceipt, input_id: &str) -> UserInputS
         .iter()
         .find(|item| item.input_id == input_id)
         .map_or(UserInputState::Unknown, |item| item.state)
+}
+
+/// Answers a dispatch the mailbox accepted.
+///
+/// The state can still move between the enqueue and the dispatch, so the
+/// receipt — not the enqueue result — decides what is owed:
+///
+/// - `Delivered`: the message is already in the transcript. The adapter is told
+///   so at once; waiting would hang on a delivery event that already fired, and
+///   `schedule` must not run for an input that has nothing left to deliver.
+/// - `Withdrawn`: a withdrawal of this very input committed, so no delivery can
+///   follow and the id is retired for this session generation.
+/// - anything else: the input is still pending; `schedule` starts delivery and
+///   the adapter waits for the committed-delivery event.
+fn dispatched_reply(
+    receipt: &UserInputQueueReceipt,
+    input_id: &str,
+    schedule: impl FnOnce(),
+) -> Result<Value, AcpError> {
+    match enqueued_state(receipt, input_id) {
+        UserInputState::Delivered => Ok(input_reply(input_id, DELIVERED)),
+        UserInputState::Withdrawn => Err(withdrawn()),
+        _ => {
+            schedule();
+            Ok(input_reply(input_id, QUEUED))
+        }
+    }
 }
 
 /// The internal `_peri/stdio-v2/input` reply shape the v2 adapter reads.
