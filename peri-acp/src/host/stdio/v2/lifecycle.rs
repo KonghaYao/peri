@@ -191,9 +191,6 @@ pub(super) fn prompt(connection: &mut Connection, id: RequestId, params: &Value)
             }
         }
         Ok(super::prompts::Admission::Pending) => Routed::Parked,
-        Ok(super::prompts::Admission::Accepted(input)) => {
-            Routed::Answered(Ok(json!({"messageId": input})))
-        }
         Err(error) => Routed::Answered(Err(error)),
     }
 }

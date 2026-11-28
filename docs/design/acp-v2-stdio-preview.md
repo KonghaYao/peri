@@ -1,7 +1,7 @@
 # ACP v2 stdio Preview
 
-状态：现行（S1 已落地多会话连接、显式协商与错误码映射；幂等持久化、配置面与
-replay 语义仍是后续阶段）
+状态：现行（S1 已落地多会话连接、显式协商与错误码映射；S2 已落地幂等键的持久去重；
+配置面与 replay 语义仍是后续阶段）
 
 ## Scope
 
@@ -69,7 +69,8 @@ original `data.reason` (or `server_error`).
 | invalid params: unsupported content block, empty prompt, key not 1..=255 characters, missing/relative `cwd`, unadvertised `additionalDirectories`/`systemPrompt`, unsupported replay/list cursor, repeated `initialize` below v2 | `-32602` | — |
 | session-scoped request naming a session this connection has not attached | `-32002` | `{ "sessionId": … }` |
 | `terminal/cancel`, `tool_call/cancel` (per-object cancel is never advertised) | `-32602` | — |
-| prompt withdrawn before insertion, close/delete settlement | `-32800` | — |
+| prompt withdrawn before insertion, close/delete settlement, retry of a key whose submission was withdrawn in this session generation | `-32800` | — |
+| the same key/identity with different content (`in flight`, or already inserted in the transcript) | `-32602` | — |
 | capacity/backpressure, replay against a running turn | `-32020` | `{ "reason": "prompt_capacity" \| "session_busy" \| …, "sessionId": … }` |
 | host-passthrough close/cleanup failure | `-32010` | passthrough |
 
@@ -107,17 +108,36 @@ original `data.reason` (or `server_error`).
 - Session new, list, resume with no cursor or `{ "type": "start" }`, close,
   delete, prompt, and cancellation. Optional or unknown replay/list cursor
   types are rejected.
-- Connection-local prompt keys. Repeat the same text/key to get the same
-  acknowledgement without a second insertion. Keys are not persisted with the
-  inserted message: a new connection or a process restart does not deduplicate
-  a retry, which is outside this preview's scope. An unanswered prompt must not
-  be automatically resent across restarts unless the caller has reconciled
-  whether it was committed. Receipts and pending waiters are per session, so the
-  capacity bound applies to the session that hit it.
-- A prompt request is settled by committed delivery, a confirmed withdrawal, or
-  close. If a queued turn fails before insertion, the host's done event names
-  its run ticket rather than the affected input, so the adapter leaves pending
-  prompt requests untouched instead of guessing which one failed.
+- Message identity is the de-duplication mechanism, so a key survives a restart.
+  A keyed submission's message id is `UUIDv5(namespace, "sessionId\u{1f}key")`
+  with a frozen namespace constant; an unkeyed submission still uses `UUIDv7`.
+  That id is the `thread_mq.id` and the transcript `messages.message_id`, so the
+  durable store's existing "same id already inserted" fact answers the retry —
+  no receipt table, no schema change, no key column. Keys are therefore scoped to
+  one session (`sessionId` is part of the hash input) and their recognition
+  period is the message's retention period: deleting the message (session
+  delete, rewind, compaction) forgets the key.
+- A retry is answered from the store, not from connection state. The internal
+  input endpoint replies `{ "messageId": id, "state": "queued" | "delivered" }`:
+  `queued` waits for the committed-delivery event as before; `delivered` means
+  the message is already in the transcript, so the adapter acknowledges the
+  original id at once and does not echo a second `user_message` (the client is
+  retrying a submission whose message is in its history), and the host skips the
+  dispatch for it. A same-key request that is still in flight joins the first
+  submission; different content under one key is `-32602` (in flight: the
+  adapter's signature; after insertion: the stored payload compared with
+  `mq_rows::same_payload` in both store backends).
+- A key retired by a confirmed withdrawal cannot be re-inserted in the same
+  session generation (the mailbox keeps the id terminal); such a retry is
+  answered with the insertion-time cancellation error `-32800` instead of
+  parking. After the process restarts the id is free again and the retry is a
+  new submission, which matches "a retry with a forgotten key is a new
+  submission".
+- Prompt requests are settled by committed delivery, an already-inserted retry,
+  a confirmed withdrawal, or close. If a queued turn fails before insertion, the
+  host's done event names its run ticket rather than the affected input, so the
+  adapter leaves pending prompt requests untouched instead of guessing which one
+  failed.
 - Tool-call updates, permission requests, elicitation, text and image prompts.
   The negotiated v2 connection uses Peri’s default approval policy; v1 keeps
   its existing stdio policy.

@@ -466,6 +466,141 @@ async fn elicitation_is_gated_on_the_client_form_capability() {
 }
 
 #[tokio::test]
+async fn a_keyed_retry_of_an_inserted_prompt_reuses_the_persisted_identity() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    // First submission: the derived id travels to the host as the input id.
+    let (request, forwarded) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    let input = forwarded.params["inputId"]
+        .as_str()
+        .expect("input id")
+        .to_owned();
+    assert_eq!(
+        uuid::Uuid::parse_str(&input)
+            .expect("input id is a uuid")
+            .get_version_num(),
+        5,
+        "keyed submissions derive their identity"
+    );
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "queued"})),
+        )
+        .await;
+    harness
+        .deliver(
+            "A",
+            &super::harness::Submission {
+                request: request.clone(),
+                input: input.clone(),
+            },
+        )
+        .await;
+    expect_state(&harness, "A", "running").await;
+    let echoed = harness.expect_out().await.update();
+    assert_eq!(echoed["sessionUpdate"], "user_message");
+    assert_eq!(echoed["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, request);
+    assert_eq!(result.expect("first prompt")["messageId"], input.as_str());
+    harness.send_done("A", "end_turn").await;
+    expect_state(&harness, "A", "idle").await;
+
+    // Retry: the same key derives the same id, so the host can only report the
+    // existing message. The retry is acknowledged immediately, without a second
+    // `user_message` echo and without waiting for a delivery that cannot come.
+    let (retry, forwarded) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    assert_eq!(
+        forwarded.params["inputId"],
+        input.as_str(),
+        "a keyed retry must address the same persistent identity"
+    );
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "delivered"})),
+        )
+        .await;
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, retry);
+    assert_eq!(result.expect("retry")["messageId"], input.as_str());
+    harness.expect_quiet().await;
+}
+
+#[tokio::test]
+async fn a_keyed_retry_joins_the_submission_still_in_flight() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+
+    let (first, forwarded) = harness
+        .send_prompt_with("A", "one submission", Some("key"))
+        .await;
+    let input = forwarded.params["inputId"]
+        .as_str()
+        .expect("input id")
+        .to_owned();
+    // The retry is parked on the first submission: nothing reaches the host.
+    let second = harness
+        .request_prompt("A", "one submission", Some("key"))
+        .await;
+    harness.expect_quiet().await;
+
+    harness
+        .respond(
+            forwarded.id,
+            Ok(json!({"messageId": input, "state": "queued"})),
+        )
+        .await;
+    harness
+        .deliver(
+            "A",
+            &super::harness::Submission {
+                request: first.clone(),
+                input: input.clone(),
+            },
+        )
+        .await;
+
+    expect_state(&harness, "A", "running").await;
+    let echoed = harness.expect_out().await.update();
+    assert_eq!(echoed["sessionUpdate"], "user_message");
+    assert_eq!(echoed["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, first);
+    assert_eq!(result.expect("first")["messageId"], input.as_str());
+    let (answered, result) = harness.expect_out().await.response();
+    assert_eq!(answered, second);
+    assert_eq!(result.expect("join")["messageId"], input.as_str());
+}
+
+#[tokio::test]
+async fn keyed_retries_in_different_sessions_are_independent() {
+    let mut harness = Harness::start();
+    harness.negotiate().await;
+    harness.open("A").await;
+    harness.open("B").await;
+
+    let (_, left) = harness
+        .send_prompt_with("A", "same input", Some("key"))
+        .await;
+    let (_, right) = harness
+        .send_prompt_with("B", "same input", Some("key"))
+        .await;
+    assert_ne!(
+        left.params["inputId"], right.params["inputId"],
+        "keys are scoped to one session"
+    );
+}
+
+#[tokio::test]
 async fn cancel_request_withdraws_a_parked_prompt_and_ignores_everything_else() {
     let mut harness = Harness::start();
     harness.negotiate().await;

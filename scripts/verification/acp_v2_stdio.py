@@ -300,6 +300,67 @@ def lifecycle(binary, root, schema):
         reopened.close()
         print("PASS v2 reopen same DB/root; replay and state ordering; fresh turn; both cancellation scopes; durable withdrawal; idempotent close")
 
+        # S2: a key's message identity is durable. Same DB, same cwd, new process:
+        # the retry returns the original messageId, inserts nothing, and replay
+        # shows the message exactly once; different content under the key is
+        # `-32602` rather than a silent dedup. Keys are scoped to the session.
+        durable = Peer(binary, root, 2, schema)
+        peers.append(durable)
+        durable.sid = sid
+        durable.call("session/resume", {"sessionId": sid, "cwd": str(root)},
+                     "ResumeSessionResponse")
+        key = "s2-" + "k" * 200
+        text = "Durable idempotent submission."
+        start = len(durable.frames)
+        receipt = durable.call("session/prompt", prompt(sid, text, key), "PromptResponse")
+        durable_message = receipt["messageId"]
+        durable.idle(start)
+        durable.close()
+
+        retry = Peer(binary, root, 2, schema)
+        peers.append(retry)
+        retry.sid = sid
+        retry.call("session/resume", {"sessionId": sid, "cwd": str(root)},
+                   "ResumeSessionResponse")
+        before = len(retry.frames)
+        again = retry.call("session/prompt", prompt(sid, text, key), "PromptResponse")
+        assert again["messageId"] == durable_message, again
+        assert not any(f.get("method") == "session/update"
+                       and f["params"]["update"].get("messageId") == durable_message
+                       for f in retry.frames[before:]), "a retry must not replay the user message"
+        conflict = retry.response(retry.request("session/prompt", prompt(sid, text + " edited", key)))
+        assert conflict["error"]["code"] == -32602, conflict
+        fresh = retry.call("session/new", {"cwd": str(root)}, "NewSessionResponse")["sessionId"]
+        other = retry.call("session/prompt", prompt(fresh, text, key), "PromptResponse")
+        assert other["messageId"] != durable_message, "keys are scoped to one session"
+        retry.until(lambda f: f.get("method") == "session/update"
+                    and f["params"]["sessionId"] == fresh
+                    and f["params"]["update"].get("sessionUpdate") == "state_update"
+                    and f["params"]["update"].get("state") == "idle")
+        retry.close()
+
+        counted = Peer(binary, root, 2, schema)
+        peers.append(counted)
+        counted.sid = sid
+        replay_at = len(counted.frames)
+        resume = counted.request("session/resume", {"sessionId": sid, "cwd": str(root),
+                                                   "replayFrom": {"type": "start"}})
+        response = counted.response(resume, "ResumeSessionResponse")
+        assert "result" in response, response
+        replayed = [f["params"]["update"] for f in counted.frames[replay_at:counted.frames.index(response)]
+                    if f.get("method") == "session/update"]
+        # A replayed message is one `user_message` boundary plus its chunk; the
+        # boundary count is the number of inserted messages.
+        seen = sum(u.get("sessionUpdate") == "user_message"
+                   and u.get("messageId") == durable_message for u in replayed)
+        assert seen == 1, "the retried submission must be replayed exactly once, got " \
+            f"{seen}: " + json.dumps([(u.get("sessionUpdate"), u.get("messageId"))
+                                      for u in replayed])[:2000]
+        counted.call("session/close", {"sessionId": sid}, "CloseSessionResponse")
+        counted.close()
+        print("PASS v2 idempotency key survives a restart; same key retried once, "
+              "different content -32602, keys scoped to the session")
+
         # Explicit bypass must be overridden by the negotiated v2 connection;
         # otherwise this probe would see the tool auto-approved and fail.
         approval = Peer(binary, root, 2, schema, permission="bypass")

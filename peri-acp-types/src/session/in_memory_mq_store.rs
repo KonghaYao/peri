@@ -28,6 +28,7 @@ use super::mq::MqReceiveSelection;
 use super::mq::MqReceiveStatus;
 use super::mq::MqWatermark;
 use super::mq::ThreadMqStore;
+use super::MessageKind;
 use super::MessageSource;
 use super::PluginSelection;
 use crate::messages::MessageId;
@@ -106,6 +107,18 @@ impl ThreadMqStore for InMemoryMqStore {
             if history.thread_id != *thread_id {
                 return Err(conflict(
                     "message id already belongs to another thread's history",
+                ));
+            }
+            // 与 Receive 的 `AlreadyPresent`/`Conflict` 同一判定：同 ID 只有正文一致
+            // 才是同一次提交的重试。本后端两侧文本都由同一序列化派生，直接比较即可。
+            // 只有用户 prompt 的稳定身份（ACP v2 幂等键）要求正文一致；其它来源沿用
+            // 「已移交即忽略」的既有语义。
+            if input.kind == MessageKind::Prompt
+                && input.source == MessageSource::UserInput
+                && history.payload_json != payload_json
+            {
+                return Err(conflict(
+                    "a different message already uses this id in the thread history",
                 ));
             }
             return Ok(MqEnqueueOutcome {

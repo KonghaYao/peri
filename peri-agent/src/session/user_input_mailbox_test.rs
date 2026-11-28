@@ -29,6 +29,9 @@ mod terminal_tests;
 #[path = "user_input_mailbox_control_test.rs"]
 mod control_tests;
 
+#[path = "user_input_mailbox_idempotency_test.rs"]
+mod idempotency_tests;
+
 fn make_mailbox() -> (Arc<UserInputMailbox>, Arc<SessionInbox>) {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
     (

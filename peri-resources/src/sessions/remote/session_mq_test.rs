@@ -557,6 +557,17 @@ async fn remote_reaccepting_handed_off_message_keeps_idle() {
         fixture.data.load_meta(&thread).await.unwrap().work_state,
         WorkState::Idle
     );
+
+    // 稳定 ID（ACP v2 幂等键派生）下，同 ID 不同正文不是重试而是冲突。
+    let changed = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "edited after hand off"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(changed.kind(), SessionResourceErrorKind::Conflict { .. }),
+        "同 ID 已移交的正文必须一致: {changed:?}"
+    );
 }
 
 /// 收尾收敛：待处理的 `EnsureProcessing` 阻止写 `idle`；`stopped` 不被解除。

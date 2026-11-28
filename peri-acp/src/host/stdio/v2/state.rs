@@ -244,6 +244,14 @@ impl Connection {
             .flat_map(|slot| slot.prompts.reject(input_id))
             .collect()
     }
+
+    /// Acknowledge every parked prompt waiter of an already-inserted message.
+    pub(super) fn acknowledge_prompt(&mut self, input_id: &str) -> Vec<RequestId> {
+        self.slots
+            .values_mut()
+            .flat_map(|slot| slot.prompts.acknowledge(input_id))
+            .collect()
+    }
 }
 
 #[cfg(test)]

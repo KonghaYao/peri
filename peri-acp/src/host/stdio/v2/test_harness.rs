@@ -26,6 +26,14 @@ const WAIT: Duration = Duration::from_secs(2);
 /// How long a "nothing must happen" assertion observes.
 const QUIET: Duration = Duration::from_millis(80);
 
+/// Absolute `cwd` for setup requests. A non-absolute path is rejected with
+/// `-32602` before the adapter forwards anything, so this must be a platform
+/// absolute path, not a POSIX-only literal.
+#[cfg(windows)]
+pub(super) const CWD: &str = r"C:\workspace";
+#[cfg(not(windows))]
+pub(super) const CWD: &str = "/workspace";
+
 #[derive(Debug)]
 pub(super) enum Out {
     Notification {
@@ -328,7 +336,7 @@ impl Harness {
     /// Create a session as the client would: `session/new` + accepted reply.
     pub(super) async fn open(&mut self, sid: &str) {
         let id = self.id();
-        self.request(id.clone(), "session/new", json!({"cwd": "/workspace"}))
+        self.request(id.clone(), "session/new", json!({"cwd": CWD}))
             .await;
         let forwarded = self.expect_forwarded().await;
         assert_eq!(forwarded.method, "session/new");
@@ -342,36 +350,62 @@ impl Harness {
         assert_eq!(result.expect("new result")["sessionId"], sid);
     }
 
-    /// Submit a prompt that the host has already queued (internal input Ok).
-    /// Submit a prompt the host queued successfully (internal input replied Ok).
+    /// Submit a prompt the host queued successfully (internal input replied
+    /// `queued`).
     ///
     /// The client's prompt request stays open until committed delivery.
     pub(super) async fn enqueue_prompt(&mut self, sid: &str, text: &str) -> Submission {
         let (request, forwarded) = self.send_prompt(sid, text).await;
-        self.respond(forwarded.id.clone(), Ok(json!({}))).await;
-        self.expect_quiet().await;
-        Submission {
-            request,
-            input: forwarded.params["inputId"]
-                .as_str()
-                .expect("input id")
-                .to_owned(),
-        }
-    }
-
-    /// A prompt the host has not answered yet (no committed delivery).
-    pub(super) async fn send_prompt(&mut self, sid: &str, text: &str) -> (RequestId, Forwarded) {
-        let id = self.id();
-        self.request(
-            id.clone(),
-            "session/prompt",
-            json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
+        let input = forwarded.params["inputId"]
+            .as_str()
+            .expect("input id")
+            .to_owned();
+        self.respond(
+            forwarded.id.clone(),
+            Ok(json!({"messageId": input, "state": "queued"})),
         )
         .await;
+        self.expect_quiet().await;
+        Submission { request, input }
+    }
+
+    /// Submit a prompt the host reports as already inserted (a keyed retry).
+    pub(super) async fn send_prompt(&mut self, sid: &str, text: &str) -> (RequestId, Forwarded) {
+        self.send_prompt_with(sid, text, None).await
+    }
+
+    /// Submit a prompt that names an idempotency key.
+    pub(super) async fn send_prompt_with(
+        &mut self,
+        sid: &str,
+        text: &str,
+        key: Option<&str>,
+    ) -> (RequestId, Forwarded) {
+        let id = self.request_prompt(sid, text, key).await;
         let forwarded = self.expect_forwarded().await;
         assert_eq!(forwarded.method, super::INPUT);
         assert_eq!(forwarded.params["sessionId"], sid);
         (id, forwarded)
+    }
+
+    /// Send a `session/prompt` without expecting the adapter to forward it (a
+    /// keyed retry may be parked on the submission already in flight).
+    pub(super) async fn request_prompt(
+        &mut self,
+        sid: &str,
+        text: &str,
+        key: Option<&str>,
+    ) -> RequestId {
+        let id = self.id();
+        let mut params = json!({
+            "sessionId": sid,
+            "prompt": [{"type": "text", "text": text}]
+        });
+        if let Some(key) = key {
+            params["idempotencyKey"] = json!(key);
+        }
+        self.request(id.clone(), "session/prompt", params).await;
+        id
     }
 
     /// Report a committed delivery, which is what acknowledges a prompt.

@@ -74,3 +74,41 @@ isolation, stale-epoch completions, concurrent permission aggregation,
 `Attaching` hold/flush ordering, elicitation capability gating, `$/cancel_request`
 scope, and delete settlement.
 
+## S2 durable idempotency keys
+
+Base: `e355ae1dc`. Same command, isolated SQLite database, loopback model,
+macOS arm64; `--official-client` used the unmodified 3.5.0 `v2_one_shot_client`.
+The matrix and the official client both exited 0.
+
+A keyed prompt now derives its message id from `(sessionId, key)`
+(`UUIDv5` with a frozen namespace), so the durable store answers a retry and no
+connection-local receipt survives a restart. The matrix adds one PASS line that
+spans three processes on the same database and `cwd`:
+
+- process A prompts with a 203-character key and exits; process B resumes,
+  repeats the identical submission, and gets the **same** `messageId` with no
+  `user_message` update for it (the retry is acknowledged from the store);
+- the same key with edited content is `-32602`, and the same key in a second
+  session yields a different message id;
+- a third process replays from the start of history: the retried submission
+  appears exactly once as a `user_message` boundary.
+
+Adapter and mailbox behaviour behind that line is covered by unit tests:
+`cargo test -p peri-acp --lib -- host::stdio::v2` (derived-id stability and
+version, an in-flight retry joining the first submission, a retry after the
+acknowledgement reusing the identity, `delivered` acknowledgement releasing the
+waiters, keys scoped per session, `-32602` for different content while in
+flight), `cargo test -p peri-agent --lib -- user_input_mailbox` (a restarted
+mailbox over the same store reports `Delivered` for an already-handed-off id,
+`Inserted`/`Existing` stay `Queued`, and different content under that id is a
+conflict), and `cargo test -p peri-resources --lib -- session_mq` (SQLite and,
+with `PERI_TEST_POSTGRES_URL`, the remote adapter return `AlreadyHandedOff` for
+the same payload and a conflict error for a different one).
+
+Known limits of this stage: the second connection of a *live* process that
+attaches the same session does not receive the first connection's delivery
+event, so its same-key retry waits for `close`/`cancel` instead of being
+acknowledged (no duplicate message is inserted); a key retired by a confirmed
+withdrawal is answered with `-32800` until the session generation restarts;
+`session/list` pagination, replay cursors and the config surface remain out of
+scope (S3/S4).

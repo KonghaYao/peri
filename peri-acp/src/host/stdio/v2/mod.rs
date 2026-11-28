@@ -40,6 +40,14 @@ pub(in crate::host) const CLOSE: &str = "_peri/stdio-v2/close";
 /// Methods v2 never advertises per-object cancellation for.
 const OBJECT_CANCELS: [&str; 2] = ["terminal/cancel", "tool_call/cancel"];
 
+/// The internal input reply state for a submission already in the transcript.
+const HANDED_OFF: &str = "delivered";
+
+/// Whether the host reported the prompt's message as already inserted.
+fn handed_off(reply: &Value) -> bool {
+    reply.get("state").and_then(Value::as_str) == Some(HANDED_OFF)
+}
+
 pub(super) struct V2Stdio {
     inner: Arc<dyn AcpTransport>,
     permissions: Arc<SharedPermissionMode>,
@@ -572,10 +580,24 @@ impl AcpTransport for V2Stdio {
                 capabilities::initialize_response()
             }),
             Some(Reply::Input(input)) => {
-                if let Err(error) = result {
-                    for waiter in wire.reject_prompt(&input) {
-                        self.inner.send_response(waiter, Err(error.clone())).await?;
+                match result {
+                    Err(error) => {
+                        for waiter in wire.reject_prompt(&input) {
+                            self.inner.send_response(waiter, Err(error.clone())).await?;
+                        }
                     }
+                    // A keyed retry whose message is already in the transcript:
+                    // no delivery event will follow it, so the original id is
+                    // acknowledged here instead of waiting for one.
+                    Ok(reply) if handed_off(&reply) => {
+                        for waiter in wire.acknowledge_prompt(&input) {
+                            let _ = self
+                                .inner
+                                .send_response(waiter, Ok(json!({"messageId": input})))
+                                .await;
+                        }
+                    }
+                    Ok(_) => {}
                 }
                 return Ok(());
             }

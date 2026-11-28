@@ -509,10 +509,21 @@ impl RemoteSessionData {
         incoming: &RawMqRow<'_>,
     ) -> SessionResourceResult<Option<MqEnqueueOutcome>> {
         let (message, mq) = self.read_mq_facts(incoming.id).await?;
-        if let Some((owner, _content)) = message {
+        if let Some((owner, content)) = message {
             if owner != thread_id.as_str() {
                 return Err(crate::sessions::failure::conflict(
                     "message id already belongs to another thread's history",
+                ));
+            }
+            // 用户 prompt 的稳定 ID 由幂等键派生：只有正文一致才是同一次提交的重试。
+            // 其它来源沿用「已移交即忽略」的既有语义。
+            if crate::sessions::mq_rows::same_id_requires_same_content(
+                incoming.kind,
+                incoming.source,
+            ) && !crate::sessions::mq_rows::same_payload(&content, incoming.payload_json)
+            {
+                return Err(crate::sessions::failure::conflict(
+                    "a different message already uses this id in the thread history",
                 ));
             }
             return Ok(Some(MqEnqueueOutcome {

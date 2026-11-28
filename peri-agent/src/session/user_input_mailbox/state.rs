@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::MqEnqueueDisposition;
 use peri_acp_types::session::MqEntry;
 use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::UserInput;
@@ -102,6 +103,25 @@ pub(super) fn results_for(state: &MailboxState, ids: &[String]) -> Vec<UserInput
                 .unwrap_or(UserInputState::Unknown),
         })
         .collect()
+}
+
+/// 已移交历史的入队事实：该 ID 没有待发记录，也没有后续投递事件。
+///
+/// 只把本次请求的 `Unknown` 收敛为 `Delivered`；既有记录/终态身份如实保留。
+/// 调用方（如 ACP v2 适配器）据此立即应答，而不是等待永远不会到来的交付事件。
+pub(super) fn handed_off_results(
+    disposition: MqEnqueueDisposition,
+    mut results: Vec<UserInputItemResult>,
+    input_id: &str,
+) -> Vec<UserInputItemResult> {
+    if disposition == MqEnqueueDisposition::AlreadyHandedOff {
+        for result in &mut results {
+            if result.input_id == input_id && result.state == UserInputState::Unknown {
+                result.state = UserInputState::Delivered;
+            }
+        }
+    }
+    results
 }
 
 pub(super) fn is_pending(state: UserInputState) -> bool {
