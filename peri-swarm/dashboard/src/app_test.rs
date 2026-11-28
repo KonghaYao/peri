@@ -99,12 +99,14 @@ fn navigation_lists_all_thirteen_pages_in_three_groups() {
     assert!(Page::CoreMetrics.is_implemented());
     assert!(Page::AgentMetrics.is_implemented());
     assert!(Page::RequestLog.is_implemented());
+    assert!(Page::Query.is_implemented());
     for page in Page::ALL {
         if page != Page::SessionLog
             && page != Page::Settings
             && page != Page::CoreMetrics
             && page != Page::AgentMetrics
             && page != Page::RequestLog
+            && page != Page::Query
         {
             assert!(!page.is_implemented(), "{page:?}");
         }

@@ -96,9 +96,18 @@ impl App {
                 }
             }
             if self.screen == Screen::Main
-                && matches!(self.page, Page::AgentMetrics | Page::RequestLog)
+                && matches!(
+                    self.page,
+                    Page::AgentMetrics | Page::RequestLog | Page::Query
+                )
             {
                 match key.code {
+                    KeyCode::PageUp if self.page == Page::Query => {
+                        return self.apply(Intent::QueryPagePrev);
+                    }
+                    KeyCode::PageDown if self.page == Page::Query => {
+                        return self.apply(Intent::QueryPageNext);
+                    }
                     KeyCode::PageUp => return self.apply(Intent::MetricsPagePrev),
                     KeyCode::PageDown => return self.apply(Intent::MetricsPageNext),
                     _ => {}
@@ -116,6 +125,9 @@ impl App {
         if let Focus::Field(field) = self.focus {
             if let Some(target) = self.text_area_mut(field) {
                 target.insert_str(text);
+                if field == FieldId::QuerySql {
+                    self.clear_query_validation();
+                }
                 return;
             }
             if let Some(target) = self.field_mut(field) {
@@ -256,6 +268,9 @@ impl App {
             intent @ (Intent::SetMetricsWindow(_)
             | Intent::MetricsPagePrev
             | Intent::MetricsPageNext) => self.apply_metrics_intent(intent),
+            Intent::RunQuery => self.run_query(),
+            Intent::QueryPagePrev => self.query_page_prev(),
+            Intent::QueryPageNext => self.query_page_next(),
             Intent::SelectDetailTab(tab) => {
                 self.detail_tab = tab;
                 self.content_scroll = 0;
@@ -451,6 +466,12 @@ impl App {
                 Focus::Action(ActionId::RefreshSessions),
                 Focus::Content,
             ],
+            Screen::Main if self.page == Page::Query => vec![
+                Focus::Sidebar,
+                Focus::Field(FieldId::QuerySql),
+                Focus::Action(ActionId::RunQuery),
+                Focus::Content,
+            ],
             Screen::Main => vec![Focus::Sidebar, Focus::Content],
             Screen::SessionDetail => {
                 let mut cycle = vec![
@@ -544,7 +565,7 @@ impl App {
     fn metrics_page_active(&self) -> bool {
         matches!(
             self.page,
-            Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog
+            Page::CoreMetrics | Page::AgentMetrics | Page::RequestLog | Page::Query
         )
     }
 
@@ -612,9 +633,15 @@ impl App {
         // Editing the search returns to the first page of the narrower set.
         let before =
             (field == FieldId::SessionSearch).then(|| self.session_log.search.value().to_owned());
+        // A validation message describes the previous text; clear it on edits,
+        // but not when Ctrl-Enter just produced a new one.
+        let before_sql = (field == FieldId::QuerySql).then(|| self.query.sql.text.clone());
         let effects = self.handle_field_input(field, key);
         if before.is_some_and(|before| before != self.session_log.search.value()) {
             self.session_log.reset_page();
+        }
+        if before_sql.is_some_and(|before| before != self.query.sql.text) {
+            self.clear_query_validation();
         }
         effects
     }
@@ -712,6 +739,9 @@ impl App {
                 Screen::SessionCreate => self.activate_action(ActionId::CreateSubmit),
                 Screen::SessionDetail => self.activate_action(ActionId::SendMessage),
                 Screen::SessionEdit => self.activate_action(ActionId::EditSubmit),
+                Screen::Main if self.page == Page::Query => {
+                    self.activate_action(ActionId::RunQuery)
+                }
                 _ => Vec::new(),
             };
         }

@@ -14,7 +14,8 @@ use crate::ui::hit::HitMap;
 use crate::ui::widgets::Rows;
 
 use super::{
-    empty, metrics, onboarding, request_log, session_detail, session_form, session_log, settings,
+    empty, metrics, onboarding, query, request_log, session_detail, session_form, session_log,
+    settings,
 };
 
 /// Extra scratch rows above the viewport used to draw a block that starts just
@@ -79,10 +80,10 @@ pub fn render(
             Page::CoreMetrics => metrics::render_core(buf, &mut rows, app, hits),
             Page::AgentMetrics => metrics::render_agent(buf, &mut rows, app, hits),
             Page::RequestLog => request_log::render(buf, &mut rows, app, hits),
+            Page::Query => query::render(buf, &mut rows, app, hits),
             // Placeholder pages are reachable but have no data source yet; each
             // renders an honest empty state until a later stage implements it.
             Page::SandboxMetrics
-            | Page::Query
             | Page::Agents
             | Page::Artifacts
             | Page::Vaults

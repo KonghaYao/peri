@@ -217,6 +217,121 @@ fn load_core_metrics_errors_are_scrubbed() {
 }
 
 #[test]
+fn run_query_sends_the_statement_and_window() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"total":2,"columns":["_timestamp",{"name":"method"}],"hits":[{"_timestamp":10,"method":"GET"},{"_timestamp":20,"method":"POST"}]}"#,
+    )]);
+    let mut worker = WorkerHandle::spawn(Some(config_with_observability(&stub)));
+    worker.send(Command::RunQuery {
+        epoch: 3,
+        generation: 9,
+        sql: "SELECT _timestamp, method FROM \"peri_swarm_logs\"".to_owned(),
+        start_us: 1_000,
+        end_us: 2_000,
+        from: 40,
+        size: 20,
+    });
+
+    match wait_event(&mut worker, Duration::from_secs(5)).expect("event") {
+        WorkerEvent::QueryLoaded {
+            epoch,
+            generation,
+            result,
+        } => {
+            assert_eq!((epoch, generation), (3, 9));
+            match result {
+                ObservabilityOutcome::Ready(page) => {
+                    assert_eq!(page.hits.len(), 2);
+                    assert_eq!(page.total, 2);
+                    assert_eq!(page.columns, ["_timestamp", "method"]);
+                }
+                other => panic!("unexpected result: {other:?}"),
+            }
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/default/_search");
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(
+        body["query"]["sql"],
+        "SELECT _timestamp, method FROM \"peri_swarm_logs\""
+    );
+    assert_eq!(body["query"]["start_time"], 1_000);
+    assert_eq!(body["query"]["end_time"], 2_000);
+    assert_eq!(body["query"]["from"], 40);
+    assert_eq!(body["query"]["size"], 20);
+}
+
+#[test]
+fn run_query_reports_not_configured_without_a_request() {
+    let stub = Stub::start(Vec::new());
+    let config = Config::new("http://127.0.0.1:9", "synthetic-key").expect("config");
+    let mut worker = WorkerHandle::spawn(Some(config));
+    worker.send(Command::RunQuery {
+        epoch: 1,
+        generation: 2,
+        sql: "SELECT 1".to_owned(),
+        start_us: 0,
+        end_us: 1,
+        from: 0,
+        size: 20,
+    });
+
+    match wait_event(&mut worker, Duration::from_secs(5)).expect("event") {
+        WorkerEvent::QueryLoaded {
+            epoch,
+            generation,
+            result,
+        } => {
+            assert_eq!((epoch, generation), (1, 2));
+            assert!(matches!(result, ObservabilityOutcome::NotConfigured));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(stub.requests().is_empty());
+}
+
+#[test]
+fn run_query_errors_are_scrubbed() {
+    let stub = Stub::start(vec![StubResponse::json(
+        400,
+        "Bad Request",
+        r#"{"message":"parse error near s3cret; Authorization: Basic s3cret"}"#,
+    )]);
+    let mut worker = WorkerHandle::spawn(Some(config_with_observability(&stub)));
+    worker.send(Command::RunQuery {
+        epoch: 4,
+        generation: 5,
+        sql: "SELECT from".to_owned(),
+        start_us: 0,
+        end_us: 1,
+        from: 0,
+        size: 20,
+    });
+
+    match wait_event(&mut worker, Duration::from_secs(5)).expect("event") {
+        WorkerEvent::QueryLoaded { result, .. } => match result {
+            ObservabilityOutcome::Failed(error) => {
+                let rendered = format!("{error} {error:?}");
+                assert!(rendered.contains("400"), "{rendered}");
+                assert!(!rendered.contains("s3cret"), "{rendered}");
+                assert!(!rendered.contains("Authorization"), "{rendered}");
+                assert!(!rendered.contains("SELECT from"), "{rendered}");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        },
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
 fn load_agent_metrics_uses_the_gateway_and_does_not_need_openobserve() {
     let stub = Stub::start(vec![StubResponse::json(
         200,

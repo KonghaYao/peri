@@ -432,6 +432,7 @@ impl App {
             Page::CoreMetrics => self.core_metrics_due(now),
             Page::AgentMetrics => self.agent_metrics_due(now),
             Page::RequestLog => self.request_log_due(now),
+            Page::Query => self.query_config_sync(),
             _ => Vec::new(),
         }
     }
@@ -674,6 +675,7 @@ impl App {
                 self.request_log.reload_wanted = true;
                 self.request_log_due(Instant::now())
             }
+            Page::Query => self.set_query_window(window),
             _ => Vec::new(),
         }
     }
@@ -965,11 +967,12 @@ impl App {
         }
     }
 
-    /// Drop every metrics page after a connection change.
+    /// Drop every OpenObserve-backed view after a connection change.
     pub(super) fn reset_metrics_routes(&mut self) {
         self.core_metrics = CoreMetricsState::new();
         self.agent_metrics = AgentMetricsState::new();
         self.request_log = RequestLogState::new();
+        self.query = super::QueryState::new();
     }
 
     /// Apply the window intent on the active metrics page.

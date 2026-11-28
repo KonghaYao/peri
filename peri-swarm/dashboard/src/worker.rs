@@ -21,7 +21,7 @@ use crate::api::{
 };
 use crate::config::{Config, ObservabilityConfig};
 use crate::metrics::{self, CoreMetricsSnapshot, RequestLogPage, TimeWindow};
-use crate::observability::{ObservabilityError, OpenObserveClient};
+use crate::observability::{ObservabilityError, OpenObserveClient, SearchPage};
 use crate::ui::text;
 
 /// Why credentials are being validated.
@@ -166,6 +166,15 @@ pub enum WorkerEvent {
         /// OpenObserve result.
         result: ObservabilityOutcome<RequestLogPage>,
     },
+    /// One ad-hoc SQL query finished.
+    QueryLoaded {
+        /// UI epoch at request time.
+        epoch: u64,
+        /// Query generation.
+        generation: u64,
+        /// OpenObserve result.
+        result: ObservabilityOutcome<SearchPage>,
+    },
     /// One validation finished.
     ValidationFinished {
         /// UI epoch at request time.
@@ -297,6 +306,23 @@ pub enum Command {
         window: TimeWindow,
         /// Page, 0-based.
         page: usize,
+    },
+    /// Run one validated read-only SQL statement for the Query page.
+    RunQuery {
+        /// UI epoch.
+        epoch: u64,
+        /// Query generation.
+        generation: u64,
+        /// Single `SELECT` statement, already validated by the UI.
+        sql: String,
+        /// Window start, Unix microseconds.
+        start_us: u64,
+        /// Window end, Unix microseconds.
+        end_us: u64,
+        /// Row offset.
+        from: u64,
+        /// Row count.
+        size: u64,
     },
     /// Validate candidate credentials without adopting them.
     Validate {
@@ -626,6 +652,36 @@ async fn run(
                         generation,
                         window,
                         page,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Command::RunQuery {
+                epoch,
+                generation,
+                sql,
+                start_us,
+                end_us,
+                from,
+                size,
+            } => {
+                let result = match observability_client(observability.as_ref()) {
+                    Ok(Some(client)) => {
+                        match client.search(&sql, start_us, end_us, from, size).await {
+                            Ok(page) => ObservabilityOutcome::Ready(page),
+                            Err(error) => ObservabilityOutcome::Failed(error),
+                        }
+                    }
+                    Ok(None) => ObservabilityOutcome::NotConfigured,
+                    Err(error) => ObservabilityOutcome::Failed(error),
+                };
+                if events
+                    .send(WorkerEvent::QueryLoaded {
+                        epoch,
+                        generation,
                         result,
                     })
                     .is_err()

@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod mouse;
 pub mod onboarding;
 pub mod pages;
+pub mod query;
 pub mod request_log;
 pub mod screen;
 pub mod session_detail;

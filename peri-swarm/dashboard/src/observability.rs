@@ -67,8 +67,11 @@ pub type Result<T> = std::result::Result<T, ObservabilityError>;
 pub struct SearchPage {
     /// Result rows, in server order.
     pub hits: Vec<Value>,
-    /// Total rows matching the query, as reported by OpenObserve.
+    /// Row count reported for this page. OpenObserve's `total` is page-scoped:
+    /// it repeats the number of returned rows, never a global match count.
     pub total: u64,
+    /// Column names reported by the server, when present.
+    pub columns: Vec<String>,
 }
 
 /// One PromQL sample. Timestamps are Unix seconds, as returned by OpenObserve.
@@ -129,6 +132,8 @@ struct SearchResponse {
     hits: Vec<Value>,
     #[serde(default)]
     total: u64,
+    #[serde(default)]
+    columns: Vec<Value>,
 }
 
 /// OpenObserve streams response (used only as a lightweight probe).
@@ -199,6 +204,8 @@ impl OpenObserveClient {
     ///
     /// `from` and `size` paginate the result set. The server response must
     /// carry `hits` and `total`; anything else is reported as malformed.
+    /// `columns` is optional and accepts either plain strings or
+    /// `{"name": "..."}` objects.
     pub async fn search(
         &self,
         sql: &str,
@@ -238,6 +245,7 @@ impl OpenObserveClient {
         Ok(SearchPage {
             hits: parsed.hits,
             total: parsed.total,
+            columns: search_columns(&parsed.columns),
         })
     }
 
@@ -385,11 +393,11 @@ impl OpenObserveClient {
     }
 }
 
-/// Redact the value after an `Authorization:` header name.
+/// Replace an `Authorization:` header and its value with [`REDACTED`].
 ///
-/// A server error body may echo request headers. The header name is harmless;
-/// its value is not, so replace the scheme and credential tokens that follow
-/// the header name.
+/// A server error body may echo request headers. Both the header name and the
+/// credential are dropped, so a displayed error never mentions the header that
+/// carried the credential.
 fn redact_authorization_value(message: &str) -> String {
     const KEY: &str = "authorization";
     let mut result = String::with_capacity(message.len());
@@ -400,18 +408,17 @@ fn redact_authorization_value(message: &str) -> String {
             result.push_str(rest);
             break;
         };
+        result.push_str(&rest[..position]);
         let header_end = position + KEY.len();
-        result.push_str(&rest[..header_end]);
         let after = &rest[header_end..];
         let Some(colon) = after.find(':') else {
+            result.push_str(REDACTED);
             rest = after;
             continue;
         };
-        let value_start = header_end + colon + 1;
-        result.push_str(&rest[header_end..value_start]);
-        let value = &rest[value_start..];
+        result.push_str(REDACTED);
+        let value = &after[colon + 1..];
         let leading = value.len() - value.trim_start().len();
-        result.push_str(&value[..leading]);
         let token = &value[leading..];
         let first_end = token_end(token);
         if first_end > 0 {
@@ -425,7 +432,6 @@ fn redact_authorization_value(message: &str) -> String {
             } else {
                 0
             };
-            result.push_str(REDACTED);
             rest = &token[(first_end + extra).min(token.len())..];
         } else {
             rest = token;
@@ -439,6 +445,26 @@ fn token_end(token: &str) -> usize {
     token
         .find(|character: char| character.is_whitespace() || character == '"' || character == ',')
         .unwrap_or(token.len())
+}
+
+/// Extract column names from either `"name"` strings or `{"name": "..."}`
+/// objects, in server order and without duplicates.
+fn search_columns(raw: &[Value]) -> Vec<String> {
+    let mut columns: Vec<String> = Vec::new();
+    for entry in raw {
+        let name = match entry {
+            Value::String(name) => Some(name.trim()),
+            Value::Object(object) => object.get("name").and_then(Value::as_str).map(str::trim),
+            _ => None,
+        };
+        let Some(name) = name.filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        if !columns.iter().any(|column| column == name) {
+            columns.push(name.to_owned());
+        }
+    }
+    columns
 }
 
 /// Extract a short, human-readable message from an error body.

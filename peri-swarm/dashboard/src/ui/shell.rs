@@ -281,6 +281,13 @@ pub fn footer_hint(app: &App, narrow: bool) -> &'static str {
                 text::FOOTER_METRICS
             }
         }
+        crate::app::Screen::Main if app.page() == Page::Query => {
+            if narrow {
+                text::FOOTER_QUERY_NARROW
+            } else {
+                text::FOOTER_QUERY
+            }
+        }
         crate::app::Screen::Main => {
             if narrow {
                 text::FOOTER_MAIN_NARROW
@@ -322,6 +329,9 @@ pub fn scope_note(app: &App) -> String {
             app.request_log().page(),
             app.request_log().stale(),
         ),
+        crate::app::Screen::Main if app.page() == Page::Query => {
+            text::query_scope(app.query().window(), app.query().applied_page())
+        }
         crate::app::Screen::Main => text::SCOPE_EMPTY.to_owned(),
     }
 }

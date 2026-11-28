@@ -110,6 +110,11 @@ impl App {
                 page,
                 result,
             } => self.handle_request_log_loaded(epoch, generation, window, page, result),
+            WorkerEvent::QueryLoaded {
+                epoch,
+                generation,
+                result,
+            } => self.handle_query_loaded(epoch, generation, result),
             WorkerEvent::SessionsLoaded {
                 epoch,
                 generation,
@@ -227,6 +232,7 @@ impl App {
             ActionId::RefreshCoreMetrics
             | ActionId::RefreshAgentMetrics
             | ActionId::RefreshRequestLog => self.metrics_action(action),
+            ActionId::RunQuery => self.run_query(),
             ActionId::CreateSubmit => self.submit_create(),
             ActionId::AddMetadata => {
                 self.create.add_row();
@@ -523,6 +529,7 @@ impl App {
         self.config = Some(saved);
         self.core_metrics = super::CoreMetricsState::new();
         self.request_log = super::RequestLogState::new();
+        self.query = super::QueryState::new();
         self.observability = ObservabilityState::default();
         self.observability_testing = false;
         self.screen = Screen::Main;

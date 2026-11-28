@@ -9,6 +9,7 @@ pub mod config;
 pub mod metrics;
 pub mod observability;
 pub mod poll;
+pub mod query;
 pub mod text_field;
 pub mod ui;
 pub mod view_model;

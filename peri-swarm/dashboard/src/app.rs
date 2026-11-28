@@ -18,6 +18,7 @@ mod actions;
 mod detail;
 mod forms;
 mod metrics;
+mod query;
 mod routing;
 mod session_create;
 mod session_detail;
@@ -28,6 +29,7 @@ mod types;
 
 pub use forms::{CredentialsState, ObservabilityState, OnboardingState};
 pub use metrics::{AgentMetricsState, CoreMetricsState, RequestLogState};
+pub use query::QueryState;
 pub use session_create::{CreateFormState, MetadataRow};
 pub use session_detail::{
     pretty_json, ActionError, ApprovalEntry, RequiredAction, SessionDetailState, TimelineEntry,
@@ -75,6 +77,7 @@ pub struct App {
     core_metrics: CoreMetricsState,
     agent_metrics: AgentMetricsState,
     request_log: RequestLogState,
+    query: QueryState,
     create: CreateFormState,
     viewport_width: u16,
     sidebar_scroll: usize,
@@ -127,6 +130,7 @@ impl App {
             core_metrics: CoreMetricsState::new(),
             agent_metrics: AgentMetricsState::new(),
             request_log: RequestLogState::new(),
+            query: QueryState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -180,6 +184,7 @@ impl App {
             core_metrics: CoreMetricsState::new(),
             agent_metrics: AgentMetricsState::new(),
             request_log: RequestLogState::new(),
+            query: QueryState::new(),
             create: CreateFormState::default(),
             viewport_width: 0,
             sidebar_scroll: 0,
@@ -250,6 +255,7 @@ impl App {
                 !self.observability_testing
             }
             ActionId::SaveCredentials => self.validation != Some(ValidationPurpose::Credentials),
+            ActionId::RunQuery => !self.query.in_flight,
             _ => true,
         }
     }
@@ -416,6 +422,12 @@ impl App {
     #[must_use]
     pub fn request_log(&self) -> &RequestLogState {
         &self.request_log
+    }
+
+    /// Query-page state (SQL editor, window, result pages).
+    #[must_use]
+    pub fn query(&self) -> &QueryState {
+        &self.query
     }
 
     /// Whether the saved config carries an OpenObserve connection.
@@ -589,6 +601,7 @@ impl App {
             (Screen::SessionEdit, FieldId::EditPromptCache) => {
                 Some(self.edit.prompt_cache_options())
             }
+            (Screen::Main, FieldId::QuerySql) if self.page == Page::Query => Some(&self.query.sql),
             _ => None,
         }
     }
@@ -612,6 +625,9 @@ impl App {
             (Screen::SessionDetail, FieldId::DetailComposer) => Some(&mut self.detail.composer),
             (Screen::SessionEdit, FieldId::EditPromptCache) => {
                 Some(&mut self.edit.prompt_cache_options)
+            }
+            (Screen::Main, FieldId::QuerySql) if self.page == Page::Query => {
+                Some(&mut self.query.sql)
             }
             _ => None,
         }

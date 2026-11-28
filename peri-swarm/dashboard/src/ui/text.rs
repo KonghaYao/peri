@@ -6,9 +6,11 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
+use serde_json::Value;
 
 use crate::app::{ActionId, DetailTab, FieldId, HealthState, Page, SidebarGroup};
 use crate::metrics::TimeWindow;
+use crate::query::SqlError;
 use crate::view_model::{Column, StatusBucket};
 
 mod detail;
@@ -155,6 +157,7 @@ pub fn action_label(action: ActionId) -> &'static str {
         ActionId::RefreshCoreMetrics
         | ActionId::RefreshAgentMetrics
         | ActionId::RefreshRequestLog => "Refresh",
+        ActionId::RunQuery => "Run",
     }
 }
 
@@ -169,6 +172,7 @@ pub fn field_label(field: FieldId) -> &'static str {
         FieldId::ObservabilityUser => "User",
         FieldId::ObservabilityPassword => "Password",
         FieldId::SessionSearch => "Search",
+        FieldId::QuerySql => "SQL",
         FieldId::CreateLogicalId => "Logical ID (optional)",
         FieldId::CreateModel => "Model",
         FieldId::CreateCwd => "Working directory (cwd)",
@@ -865,6 +869,14 @@ pub const FOOTER_METRICS: &str =
 pub const FOOTER_METRICS_NARROW: &str =
     "menu/Tab focus · 1/2/3 window · PgUp/PgDn page · r refresh · h help · q quit · Ctrl-C quit";
 
+/// Footer hints on the Query page.
+pub const FOOTER_QUERY: &str =
+    "1/2/3 window · Ctrl-Enter run · PgUp/PgDn page · Tab focus · h help · q quit · Ctrl-C quit";
+
+/// Footer hints on the Query page when the sidebar is behind the menu.
+pub const FOOTER_QUERY_NARROW: &str =
+    "menu/Tab focus · 1/2/3 window · Ctrl-Enter run · PgUp/PgDn page · q quit · Ctrl-C quit";
+
 /// Footer hints on the create form.
 pub const FOOTER_CREATE: &str = "Tab next control · click to focus · Esc back · Ctrl-C quit";
 
@@ -1303,4 +1315,102 @@ fn clock(timestamp_us: u64) -> String {
                 .to_string()
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// Query page
+// ---------------------------------------------------------------------------
+
+/// Query page title.
+pub const QUERY_TITLE: &str = "Query";
+
+/// SQL editor label.
+pub const QUERY_SQL_LABEL: &str = "SQL";
+
+/// Empty-editor placeholder.
+pub const QUERY_SQL_PLACEHOLDER: &str = "SELECT * FROM \"peri_swarm_logs\" LIMIT 20";
+
+/// Editor hint, shown under the text area.
+pub const QUERY_HINT: &str = "Read-only SELECT · Ctrl-Enter runs the query";
+
+/// Loading label while a query is running.
+pub const QUERY_RUNNING: &str = "Running…";
+
+/// A completed query matched no rows.
+pub const QUERY_EMPTY: &str = "No rows returned.";
+
+/// Empty-result explanation.
+pub const QUERY_EMPTY_HINT: &str = "The statement completed and matched no rows in this window.";
+
+/// Longest cell value shown in the result table, before the ellipsis.
+pub const QUERY_CELL_MAX_CHARS: usize = 96;
+
+/// Scope note for the Query page.
+#[must_use]
+pub fn query_scope(window: TimeWindow, page: usize) -> String {
+    format!(
+        "Window {} · source OpenObserve logs and traces · page {} · manual run",
+        window_label(window),
+        page.saturating_add(1)
+    )
+}
+
+/// Query failure.
+#[must_use]
+pub fn query_error(detail: &str) -> String {
+    format!("Could not run the query: {detail}")
+}
+
+/// Local SQL validation message. The statement is never echoed.
+#[must_use]
+pub fn sql_error(error: SqlError) -> &'static str {
+    match error {
+        SqlError::Empty => "Enter a SELECT statement.",
+        SqlError::TooLarge => "Query is too large (limit 8 KiB).",
+        SqlError::NotSelect => "Query must be a single SELECT statement.",
+        SqlError::Semicolon => "Only a single trailing semicolon is allowed.",
+        SqlError::Nul => "Query must not contain NUL characters.",
+    }
+}
+
+/// Notice shown when the result has more columns than fit on screen.
+#[must_use]
+pub fn query_columns_truncated(shown: usize, total: usize) -> String {
+    format!("Showing {shown} of {total} columns.")
+}
+
+/// One result cell.
+///
+/// `null` and a missing key render as an em dash; nested values become compact
+/// JSON; control characters become spaces so one cell cannot break the table
+/// row; very long values are cut at [`QUERY_CELL_MAX_CHARS`] with an ellipsis.
+#[must_use]
+pub fn query_cell(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return DASH.to_owned();
+    };
+    let text = match value {
+        Value::Null => return DASH.to_owned(),
+        Value::String(text) => text.clone(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| DASH.to_owned())
+        }
+    };
+    let cleaned: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if cleaned.chars().count() <= QUERY_CELL_MAX_CHARS {
+        return cleaned;
+    }
+    let mut truncated: String = cleaned.chars().take(QUERY_CELL_MAX_CHARS).collect();
+    truncated.push('…');
+    truncated
 }

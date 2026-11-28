@@ -107,6 +107,7 @@ impl Page {
                 | Page::AgentMetrics
                 | Page::SessionLog
                 | Page::RequestLog
+                | Page::Query
                 | Page::Settings
         )
     }
@@ -260,6 +261,8 @@ pub enum FieldId {
     ObservabilityPassword,
     /// Session log search box.
     SessionSearch,
+    /// Query page: read-only SQL editor (multiline).
+    QuerySql,
     /// Create form: optional logical id.
     CreateLogicalId,
     /// Create form: model.
@@ -395,6 +398,8 @@ pub enum ActionId {
     RefreshAgentMetrics,
     /// Request log: refetch the current page.
     RefreshRequestLog,
+    /// Query page: run the statement in the editor.
+    RunQuery,
 }
 
 /// Tabs of the session detail page.
@@ -526,6 +531,12 @@ pub enum Intent {
     MetricsPagePrev,
     /// Metrics pages: show the next display page.
     MetricsPageNext,
+    /// Query page: run the statement in the editor.
+    RunQuery,
+    /// Query page: show the previous result page.
+    QueryPagePrev,
+    /// Query page: show the next result page.
+    QueryPageNext,
     /// Session detail: select a tab.
     SelectDetailTab(DetailTab),
     /// Create form: append a metadata row.
@@ -725,6 +736,23 @@ pub enum Effect {
         window: TimeWindow,
         /// Page, 0-based.
         page: usize,
+    },
+    /// Run one validated read-only SQL statement.
+    RunQuery {
+        /// UI epoch.
+        epoch: u64,
+        /// Query generation; responses from older generations are discarded.
+        generation: u64,
+        /// Single `SELECT` statement.
+        sql: String,
+        /// Window start, Unix microseconds.
+        start_us: u64,
+        /// Window end, Unix microseconds.
+        end_us: u64,
+        /// Row offset.
+        from: u64,
+        /// Row count.
+        size: u64,
     },
     /// Create a session from the validated create form.
     CreateSession {

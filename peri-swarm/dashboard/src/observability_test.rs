@@ -36,6 +36,54 @@ async fn search_sends_basic_auth_and_parses_hits() {
 }
 
 #[tokio::test]
+async fn search_parses_columns_from_strings_and_objects() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"total":1,"columns":["a",{"name":"b"},"a",{"name":""},7],"hits":[{"a":1}]}"#,
+    )]);
+    let page = client(&stub.base_url())
+        .search("SELECT 1", 0, 1, 0, 20)
+        .await
+        .expect("search");
+    assert_eq!(page.columns, ["a", "b"]);
+    assert_eq!(page.total, 1);
+    assert_eq!(page.hits.len(), 1);
+}
+
+#[tokio::test]
+async fn search_errors_drop_the_authorization_header_and_its_value() {
+    let stub = Stub::start(vec![StubResponse::json(
+        400,
+        "Bad Request",
+        r#"{"message":"Authorization: Basic YWxpY2U6czNjcmV0 rejected"}"#,
+    )]);
+    let error = client(&stub.base_url())
+        .search("SELECT * FROM logs", 0, 1, 0, 20)
+        .await
+        .expect_err("400 must fail");
+    let rendered = format!("{error} {error:?}");
+    assert!(rendered.contains("400"), "{rendered}");
+    assert!(!rendered.contains("Authorization"), "{rendered}");
+    assert!(!rendered.contains("YWxpY2U6czNjcmV0"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[tokio::test]
+async fn search_without_columns_reports_an_empty_list() {
+    let stub = Stub::start(vec![StubResponse::json(
+        200,
+        "OK",
+        r#"{"total":1,"hits":[{"a":1}]}"#,
+    )]);
+    let page = client(&stub.base_url())
+        .search("SELECT 1", 0, 1, 0, 20)
+        .await
+        .expect("search");
+    assert!(page.columns.is_empty());
+}
+
+#[tokio::test]
 async fn test_connection_uses_the_streams_endpoint() {
     let stub = Stub::start(vec![StubResponse::json(
         200,

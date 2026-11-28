@@ -275,6 +275,23 @@ fn execute(effects: Vec<Effect>, worker: &WorkerHandle) {
                 window,
                 page,
             }),
+            Effect::RunQuery {
+                epoch,
+                generation,
+                sql,
+                start_us,
+                end_us,
+                from,
+                size,
+            } => worker.send(Command::RunQuery {
+                epoch,
+                generation,
+                sql,
+                start_us,
+                end_us,
+                from,
+                size,
+            }),
             Effect::CreateSession { epoch, spec, key } => {
                 worker.send(Command::CreateSession { epoch, spec, key });
             }
