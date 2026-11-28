@@ -183,17 +183,21 @@ impl ServerLoop<'_> {
             // Withdrawal decides the race: a confirmed withdrawal means
             // nothing was inserted, so an error is safe and a same-key retry
             // cannot duplicate it. Otherwise the input may still be received;
-            // keep the request bound to the input and let delivery,
-            // cancellation, or close settle it.
-            match withdraw(input_id.to_owned()).await {
-                Ok(true) => return Err(dispatch_error(error)),
-                Ok(false) => {}
-                Err(withdrawal) => tracing::warn!(
-                    code = withdrawal.code,
-                    "ACP prompt withdrawal after an unconfirmed dispatch failed"
-                ),
+            // the adapter gets no ACK for it, so delivery must be scheduled
+            // before acknowledging or an idle session never runs it.
+            match resolve_dispatch_failure(withdraw(input_id.to_owned()).await, || {
+                crate::host::user_input::schedule_mailbox(
+                    sid,
+                    self.sessions,
+                    self.prompt_locks,
+                    self.cfg,
+                    self.transport,
+                    self.cont_tx,
+                )
+            }) {
+                DispatchFailureReply::Failed => return Err(dispatch_error(error)),
+                DispatchFailureReply::Scheduled => return Ok(json!({})),
             }
-            return Ok(json!({}));
         }
 
         crate::host::user_input::schedule_mailbox(
@@ -210,6 +214,45 @@ impl ServerLoop<'_> {
 
 fn invalid() -> AcpError {
     AcpError::new(-32602, "Invalid internal ACP Preview input")
+}
+
+/// How a failed dispatch whose handoff could not be confirmed must reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchFailureReply {
+    /// The withdrawal was confirmed: the input was never inserted, so the
+    /// request fails and a same-key retry cannot duplicate it.
+    Failed,
+    /// The input may still be inserted; delivery was scheduled and the request
+    /// reports success without adding a protocol-level error.
+    Scheduled,
+}
+
+/// Applies the delivery decision for a failed dispatch.
+///
+/// `withdraw` arbitrates the race: `Ok(true)` confirms nothing was inserted.
+/// `Ok(false)` (the input is no longer withdrawable) and `Err` (the
+/// withdrawal itself is unknown) both leave the input possibly `Dispatching`.
+/// The adapter receives no ACK for such an input, so `schedule` must run
+/// before replying, otherwise an idle session would never deliver it.
+fn resolve_dispatch_failure(
+    withdrawal: Result<bool, AcpError>,
+    schedule: impl FnOnce(),
+) -> DispatchFailureReply {
+    match withdrawal {
+        Ok(true) => DispatchFailureReply::Failed,
+        Ok(false) => {
+            schedule();
+            DispatchFailureReply::Scheduled
+        }
+        Err(withdrawal) => {
+            tracing::warn!(
+                code = withdrawal.code,
+                "ACP prompt withdrawal after an unconfirmed dispatch failed"
+            );
+            schedule();
+            DispatchFailureReply::Scheduled
+        }
+    }
 }
 
 /// Error reply for a close whose withdrawals confirmed inputs before the first
