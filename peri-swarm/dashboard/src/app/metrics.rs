@@ -26,7 +26,7 @@ use super::App;
 /// Core-metrics poll interval while the page is visible.
 pub const CORE_METRICS_INTERVAL: Duration = Duration::from_secs(15);
 /// Agent-metrics poll interval while the page is visible.
-pub const AGENT_METRICS_INTERVAL: Duration = Duration::from_secs(30);
+pub const AGENT_METRICS_INTERVAL: Duration = Duration::from_secs(15);
 /// Request-log poll interval while the page is visible.
 pub const REQUEST_LOG_INTERVAL: Duration = Duration::from_secs(15);
 
