@@ -30,7 +30,7 @@ later withdrawal or the shared close fails.
   `session/resume` never reject because another session is attached; prompts,
   updates, cancellations and closes route by `sessionId`, and within one
   connection closing or deleting one session never affects the others. There is
-  no cross-connection notification: deleting a session another connection has
+  no cross-connection notification: deleting an idle session another connection has
   attached succeeds at the host and leaves that connection's slot `Attached`; it
   learns the outcome from the host on its next request, or by closing the slot.
   The shared host keeps its
@@ -225,12 +225,15 @@ session`) becomes `-32603` with `data.reason = "session_cleanup_incomplete"` and
 `-32602` (Invalid params, host message kept); list storage failures and prompt
 workspace errors are `-32603` (Internal error, host message kept).
 
-Every `-32002` that reaches the client names the session it is about in
-`data.sessionId`, including the preview-only handler behind
-`session/prompt`'s internal input endpoint: the request named that session, so a
-client may drop its local state. A `session/resume` configuration refresh that
-fails internally is not such a response: the adapter only logs it and omits
-`configOptions` from the resume reply.
+Every `-32002` the adapter constructs names the session it is about in
+`data.sessionId`: the adapter's slot admission and the preview-only handler
+behind `session/prompt`'s internal input endpoint. The request named that
+session, so a client may drop its local state. Errors passed through from the
+host keep the host's shape; in particular an MCP-over-ACP `serverId` conflict is
+still a bare `-32002` from the v1 host path (pre-existing; not re-shaped here).
+A `session/resume` configuration refresh that fails internally is not such a
+response: the adapter only logs it and omits `configOptions` from the resume
+reply.
 
 `-32020` is **not** an execution-failure report: a failed execution ends the
 turn with `state_update.error.code = -32603` and `stopReason = "error"`.
